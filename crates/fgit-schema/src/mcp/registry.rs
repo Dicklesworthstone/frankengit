@@ -10,6 +10,7 @@ mod core;
 mod discussions;
 mod historical;
 mod indexed_search;
+mod issue_search;
 mod labels;
 mod locking;
 mod milestones;
@@ -111,6 +112,7 @@ const ADDITIONS: &[McpToolEntry] = &[
     append::ENTRY,
     milestones::CLEAR,
     locking::LOCK,
+    issue_search::ENTRY,
     milestones::SET,
     locking::UNLOCK,
     milestones::CLOSE,

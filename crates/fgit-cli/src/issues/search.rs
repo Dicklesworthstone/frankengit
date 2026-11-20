@@ -1,7 +1,8 @@
 //! Snapshot-pinned issue search using canonical issue pages, not a local index.
 use super::options::{self, Operation};
 use fgit_forge::event::issue::{
-    CompiledIssueQuery, IssueQuery, IssueState, MAX_BODY_BYTES, MAX_LABELS, MilestoneFilter,
+    AssigneeFilter, CompiledIssueQuery, IssueQuery, IssueState, MAX_BODY_BYTES, MAX_LABELS,
+    MilestoneFilter,
 };
 use fgit_forge::issue_search::{self, MAX_SCAN, SearchRequest, SourcePage};
 use fgit_node::{NodeConfig, OneNode};
@@ -12,11 +13,13 @@ const USAGE: &str =
     "usage: fg issue search <storage-root> <tenant-id> <repository-id> --trusted-local
   [--query <literal>] [--case-sensitive] [--state open|closed|all]
   [--opened-by <principal-id>] [--label <exact-label>]...
-  [--milestone <number|none>]
+  [--milestone <number|none>] [--assignee <principal-id|none>]
   [--limit <1..100>] [--max-scan <1..1000>]
   [--after <number> --expected-head <snapshot-token>] [--object-format sha1|sha256]
 
-Filters are conjunctive; every label must be present. Text searches the title OR
+Filters are conjunctive; every label must be present. --assignee none selects
+issues with no assignees; an ID matches exact assignment at the selected snapshot.
+Assignments are metadata and grant no access. Text searches the title OR
 body, not comments, with ASCII-only case folding unless --case-sensitive is set.
 There is no regex, Unicode normalization, fuzzy matching or implicit open filter.
 Defaults: 50 results, 1000 scanned issues. Result and scan limits are independent.
@@ -71,7 +74,13 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         }
         let filter = matches!(
             flag,
-            "--query" | "--state" | "--opened-by" | "--label" | "--max-scan" | "--milestone"
+            "--query"
+                | "--state"
+                | "--opened-by"
+                | "--label"
+                | "--max-scan"
+                | "--milestone"
+                | "--assignee"
         );
         if !filter
             && !matches!(
@@ -112,6 +121,18 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         .get("--opened-by")
         .map(|value| PrincipalId::from_hex(value).map_err(|_| "invalid opener principal ID"))
         .transpose()?;
+    let assignee = flags
+        .get("--assignee")
+        .map(|value| {
+            if *value == "none" {
+                Ok(AssigneeFilter::Unassigned)
+            } else {
+                PrincipalId::from_hex(value)
+                    .map(AssigneeFilter::Principal)
+                    .map_err(|_| "invalid assignee principal ID")
+            }
+        })
+        .transpose()?;
     let text = flags.get("--query").map(|value| (*value).to_owned());
     if case_sensitive && text.is_none() {
         return Err("--case-sensitive requires --query".into());
@@ -129,7 +150,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             }
         })
         .transpose()?;
-    let query = IssueQuery { state, opened_by, labels, text, case_sensitive, milestone }.compile()
+    let query = IssueQuery { state, opened_by, assignee, labels, text, case_sensitive, milestone }.compile()
         .map_err(|_| "invalid issue search query or labels (labels must be unique; text is 1..256 UTF-8 bytes without NUL)")?;
     let max_scan = flags
         .get("--max-scan")

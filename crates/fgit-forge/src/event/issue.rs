@@ -575,6 +575,13 @@ pub enum MilestoneFilter {
     Number(MilestoneNumber),
 }
 
+/// Assignment metadata at the selected issue snapshot, never an access grant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AssigneeFilter {
+    Unassigned,
+    Principal(PrincipalId),
+}
+
 /// A conjunction of filters over an authority-selected issue snapshot.
 ///
 /// Labels are an exact, sorted, duplicate-free set and ALL must be present.
@@ -586,6 +593,7 @@ pub enum MilestoneFilter {
 pub struct IssueQuery {
     pub state: Option<IssueState>,
     pub opened_by: Option<PrincipalId>,
+    pub assignee: Option<AssigneeFilter>,
     pub labels: Vec<String>,
     pub text: Option<String>,
     pub case_sensitive: bool,
@@ -668,6 +676,12 @@ impl CompiledIssueQuery {
             return Err(invalid_native("issue.comments"));
         }
         if self.query.state.is_some_and(|state| state != issue.state)
+            || self.query.assignee.is_some_and(|filter| match filter {
+                AssigneeFilter::Unassigned => !issue.assignees.is_empty(),
+                AssigneeFilter::Principal(principal) => {
+                    issue.assignees.binary_search(&principal).is_err()
+                }
+            })
             || self.query.milestone.is_some_and(|filter| match filter {
                 MilestoneFilter::Unassigned => issue.milestone.is_some(),
                 MilestoneFilter::Number(number) => issue.milestone != Some(number),
@@ -738,6 +752,7 @@ mod query_tests {
         let query = IssueQuery {
             state: Some(IssueState::Open),
             opened_by: Some(PrincipalId::from_bytes([1; 16])),
+            assignee: None,
             labels: vec!["bug".into(), "urgent".into()],
             text: Some("http".into()),
             case_sensitive: false,
@@ -772,6 +787,74 @@ mod query_tests {
                 .unwrap()
                 .matches(&snapshot())
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn assignee_query_matches_membership_and_unassigned_without_implying_authorship() {
+        let assigned = PrincipalId::from_bytes([3; 16]);
+        let mut issue = snapshot();
+        issue.assignees = vec![assigned, PrincipalId::from_bytes([4; 16])];
+        let query = IssueQuery {
+            state: Some(IssueState::Open),
+            opened_by: Some(issue.opened_by),
+            assignee: Some(AssigneeFilter::Principal(assigned)),
+            labels: vec!["bug".into()],
+            text: Some("http".into()),
+            ..Default::default()
+        };
+        assert!(query.clone().compile().unwrap().matches(&issue).unwrap());
+        for filter in [
+            AssigneeFilter::Unassigned,
+            AssigneeFilter::Principal(issue.opened_by),
+            AssigneeFilter::Principal(issue.last_actor),
+        ] {
+            assert!(
+                !IssueQuery {
+                    assignee: Some(filter),
+                    ..query.clone()
+                }
+                .compile()
+                .unwrap()
+                .matches(&issue)
+                .unwrap()
+            );
+        }
+        // The assignment predicate cannot weaken any of the existing filters.
+        for changed in [
+            IssueQuery {
+                state: Some(IssueState::Closed),
+                ..query.clone()
+            },
+            IssueQuery {
+                opened_by: Some(assigned),
+                ..query.clone()
+            },
+            IssueQuery {
+                labels: vec!["missing".into()],
+                ..query.clone()
+            },
+            IssueQuery {
+                text: Some("missing".into()),
+                ..query.clone()
+            },
+        ] {
+            assert!(!changed.compile().unwrap().matches(&issue).unwrap());
+        }
+        let any = IssueQuery::default().compile().unwrap();
+        assert!(any.matches(&issue).unwrap());
+        issue.assignees.clear();
+        assert!(any.matches(&issue).unwrap());
+        assert!(!query.clone().compile().unwrap().matches(&issue).unwrap());
+        assert!(
+            IssueQuery {
+                assignee: Some(AssigneeFilter::Unassigned),
+                ..query
+            }
+            .compile()
+            .unwrap()
+            .matches(&issue)
+            .unwrap()
         );
     }
 
@@ -882,6 +965,17 @@ mod query_tests {
             },
             IssueSnapshot {
                 labels: vec!["z".into(), "a".into()],
+                ..valid.clone()
+            },
+            IssueSnapshot {
+                assignees: vec![
+                    PrincipalId::from_bytes([4; 16]),
+                    PrincipalId::from_bytes([3; 16]),
+                ],
+                ..valid.clone()
+            },
+            IssueSnapshot {
+                assignees: vec![PrincipalId::from_bytes([3; 16]); 2],
                 ..valid.clone()
             },
             IssueSnapshot {

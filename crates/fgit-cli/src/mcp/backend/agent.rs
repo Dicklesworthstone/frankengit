@@ -54,7 +54,11 @@ impl Profile {
 /// have an additional closed argument gate before authentication and dispatch.
 pub(super) fn operation(options: &Options, name: &str) -> Option<u16> {
     match name {
-        "frankengit_issue_list" | "frankengit_issue_show" if options.issues => Some(ISSUES_READ),
+        "frankengit_issue_list" | "frankengit_issue_show" | "frankengit_issue_search"
+            if options.issues =>
+        {
+            Some(ISSUES_READ)
+        }
         "frankengit_milestone_list" | "frankengit_milestone_show" if options.issues => {
             Some(MILESTONES_READ)
         }
@@ -84,8 +88,11 @@ pub(super) fn operation(options: &Options, name: &str) -> Option<u16> {
         {
             Some(ISSUES_WRITE)
         }
-        "frankengit_pull_list" | "frankengit_pull_show" | "frankengit_pull_search"
-        | "frankengit_pull_comments" | "frankengit_pull_labels"
+        "frankengit_pull_list"
+        | "frankengit_pull_show"
+        | "frankengit_pull_search"
+        | "frankengit_pull_comments"
+        | "frankengit_pull_labels"
             if options.pulls =>
         {
             Some(PULLS_READ)

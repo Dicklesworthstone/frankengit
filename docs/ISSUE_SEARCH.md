@@ -1,6 +1,6 @@
 # Bounded native issue search
 
-`fg issue search` filters authority-selected native issue snapshots. It uses the existing retained-head issue reader, not a new database or index. The forge predicate and bounded pagination engine are shared by the local CLI and authenticated repository HTTP adapters.
+`fg issue search` filters authority-selected native issue snapshots. It uses the existing retained-head issue reader. The forge predicate and bounded pagination engine are shared by the local CLI, authenticated repository HTTP adapter, and `frankengit_issue_search` MCP tool.
 
 ```sh
 fg issue search "$STORAGE" "$TENANT" "$REPOSITORY" --trusted-local \
@@ -12,6 +12,12 @@ The local interface assumes operator-controlled storage and does not provide rem
 ## Matching and limits
 
 All supplied predicates are conjunctive. `--state` accepts `open`, `closed`, or `all` (the default). `--opened-by` matches the original principal, not the latest actor. Repeated `--label` values require every exact label and must be unique; at most 32 bounded labels are accepted. CLI input order is normalized to the issue label ordering.
+
+`--assignee <principal-id>` selects issues whose assignment set contains that
+exact principal. `--assignee none` selects issues with an empty assignment set;
+omission accepts either. Assignments are evaluated at the selected snapshot,
+independently of the original opener and latest actor. Assignment metadata
+confers no authentication, membership, or read permission.
 
 `--milestone N` selects the positive repository-local milestone number;
 `--milestone none` selects issues without a milestone. Omission imposes no
@@ -50,17 +56,19 @@ curl --request POST \
   "$REPOSITORY_URL/api/v1/issues/search"
 ```
 
-Form fields are `query`, `state`, `opened_by`, `case_sensitive` (`true` or `false`),
+Form fields are `query`, `state`, `opened_by`, `assignee` (a principal ID or `none`), `case_sensitive` (`true` or `false`),
 `milestone` (a positive number or `none`), repeated `label`, `limit`, `max_scan`,
 `after`, and `expected_head`. All non-label fields are singletons. All match,
 limit, and continuation semantics above apply. Predicate text stays in the
 request body rather than the URL; query-string parameters and GET search are not
 accepted. Mutation fields, caller-selected principals, storage paths,
 tenant/repository selectors, duplicate singleton fields, malformed percent
-encodings, invalid UTF-8 and NUL are refused. `opened_by` and `milestone` are only
+encodings, invalid UTF-8 and NUL are refused. `opened_by`, `assignee`, and `milestone` are only
 filters, never authentication or authorization inputs. JSON query echoes use
 `milestone: null`, `"none"`, or an integer; a historical missing field means no
 milestone predicate.
+The `assignee` query echo is `null`, `"none"`, or the exact principal ID string;
+a missing historical field means no assignment predicate.
 
 The adapter retains the existing body/framing ceilings, response-byte ceiling, no-store/private-authorization response handling, and runtime deadline checks. It rechecks the deadline during response rendering and assembles a complete bounded JSON body before emitting success. The existing listener remains a loopback capability profile with externally terminated TLS, repository-wide issue grants, and no new per-issue ACL or hosted-IAM claim.
 
@@ -69,6 +77,53 @@ or after an explicit `100 Continue`. Its typed read classification selects the
 read quota and leaves writer permits and mutation quotas available to writes.
 GET list/history bodies remain forbidden. Transport or quota refusal does not
 create a transaction or imply an unknown mutation outcome.
+
+## MCP adapter
+
+`frankengit_issue_search` is available with the existing issue-read launch grant.
+A sponsored agent also needs the current canonical `ISSUES_READ` credential
+scope. Issue-write and PR-read scopes do not authorize issue search, and neither
+assignment filters nor a retained snapshot can revive a revoked credential.
+The launch flags remain a separate ceiling on what the credential may call.
+
+```json
+{
+  "name": "frankengit_issue_search",
+  "arguments": {
+    "query": "timeout",
+    "state": "open",
+    "assignee": "none",
+    "labels": ["bug"],
+    "milestone": "none",
+    "limit": 5,
+    "max_scan": 100
+  }
+}
+```
+
+The tool accepts `query`, `state`, `opened_by`, `assignee`, `labels`, `milestone`,
+`case_sensitive`, `limit`, `max_scan`, `after`, `expected_head`, and optional
+`render`. It uses the same matching and scan limits above, with the existing MCP
+metadata result bound of 1..20 matches (default 5). `labels` is an array of unique
+strings whose order is normalized. Issue numbers, milestone numbers, and cursors
+are canonical decimal strings; bounded `limit`, `max_scan`, `scanned`, and `count`
+are JSON integers. `milestone: "none"` and `assignee: "none"` select unassigned
+metadata; omitting either imposes no corresponding restriction.
+
+The result's `filters` object echoes the normalized predicates, and its
+`issue_search_page` includes `snapshot_token`, `scanned`, `count`, `complete`,
+`stop_reason`, `has_more_candidates`, `next_after`, and matching `issues`. Continue
+an incomplete page with the same filters, its `next_after` as `after`, and its
+`snapshot_token` as `expected_head`. Empty partial pages still require this
+continuation. A later assignment change leaves the old snapshot's search
+unchanged, including after restarting the MCP process.
+
+Optional `render` uses the existing source-bound metadata rendering profiles
+beside unchanged canonical bodies. All issue text and filter echoes remain
+untrusted data. Principal overrides, retry keys, expected mutation versions,
+storage paths, and tenant/repository selectors are rejected. Search has no
+publication path. See [the MCP server guide](MCP_READ_ONLY_SERVER.md) for launch,
+credential, framing, and output-budget behavior.
 
 ## Verification scope
 

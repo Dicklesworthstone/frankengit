@@ -138,6 +138,11 @@ def run_case(fg, root, fmt):
     assigned_page = read(number=9)
     assert assigned_page['issue']['assignees'] == [a, b]
     assert assigned_page['issue']['last_actor'] == principal
+    search_start = read('search', fields=['--assignee', a, '--state', 'open', '--limit', '1', '--max-scan', '1'])
+    assert search_start['issues'] == [] and search_start['scanned'] == 1
+    assert search_start['complete'] is False and search_start['stop_reason'] == 'scan_limit'
+    assert search_start['next_after'] == 7 and search_start['query']['assignee'] == a
+    assert search_start['snapshot_token'] == assigned_page['snapshot_token']
     mutation('assign', 9, 3, 'assign-more-private-key', ['--assignee', b, '--assignee', c])
     removed = mutation('unassign', 9, 4, 'unassign-private-key', ['--assignee', a])
     current = read(number=9)
@@ -157,6 +162,24 @@ def run_case(fg, root, fmt):
     assert invoke([*invalid, '--assignee', 'administrator'], 2, False).stdout == b''
     assert invoke([*invalid, '--assignee', a, '--assignee', a], 2, False).stdout == b''
     assert read(number=9)['snapshot_token'] == held
+
+    # Search resumes against the original assignment set across fresh processes,
+    # even after the matching assignee was removed from the current issue.
+    search_tail = read('search', fields=['--assignee', a, '--state', 'open', '--limit', '1', '--max-scan', '1',
+                                        '--after', str(search_start['next_after']), '--expected-head', search_start['snapshot_token']])
+    assert search_tail['snapshot_token'] == search_start['snapshot_token']
+    assert [issue['number'] for issue in search_tail['issues']] == [9]
+    assert search_tail['issues'][0]['assignees'] == [a, b]
+    assert search_tail['complete'] is True and search_tail['next_after'] is None
+    absent = read('search', fields=['--assignee', a])
+    assert absent['issues'] == [] and absent['complete'] is True and absent['scanned'] == 2
+    unassigned = read('search', fields=['--assignee', 'none'])
+    assert [issue['number'] for issue in unassigned['issues']] == [7]
+    assert unassigned['query']['assignee'] == 'none'
+    matches = read('search', fields=['--assignee', b, '--opened-by', principal, '--query', 'SECOND', '--state', 'open'])
+    assert [issue['number'] for issue in matches['issues']] == [9]
+    assert matches['refs_changed'] is False and matches['transaction_created'] is False
+    assert read('list')['snapshot_token'] == held, 'assignment search must not publish'
     print(f'ISSUE_LIFECYCLE format={fmt} passed commands={calls}', flush=True)
 
 

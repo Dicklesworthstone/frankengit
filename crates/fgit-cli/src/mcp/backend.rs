@@ -382,7 +382,10 @@ impl ReadTools for NodeTools {
             || (self.options.writes.discussions && discussions::is_write(name))
             || (self.options.writes.pulls && pull_writes::is_tool(name))
             || (self.options.writes.pulls
-                && matches!(name, pull_comments::WRITE | pull_comments::APPEND | pull_labels::WRITE))
+                && matches!(
+                    name,
+                    pull_comments::WRITE | pull_comments::APPEND | pull_labels::WRITE
+                ))
             || (self.options.writes.source && source_writes::is_tool(name))
             || (self.options.writes.source && tags::is_write(name))
             || (self.options.writes.reviews && name == review_writes::NAME)
@@ -465,7 +468,11 @@ impl NodeTools {
         if self.options.artifacts && artifacts::is_tool(name) {
             return artifacts::call(self, name, args);
         }
-        if self.options.issues && matches!(name, "frankengit_issue_list" | "frankengit_issue_show")
+        if self.options.issues
+            && matches!(
+                name,
+                "frankengit_issue_list" | "frankengit_issue_show" | "frankengit_issue_search"
+            )
         {
             return issues::call(self, name, args);
         }
@@ -475,7 +482,12 @@ impl NodeTools {
         if self.options.discussions && discussions::is_read(name) {
             return discussions::read(self, name, args);
         }
-        if self.options.pulls && matches!(name, "frankengit_pull_list" | "frankengit_pull_show" | "frankengit_pull_search") {
+        if self.options.pulls
+            && matches!(
+                name,
+                "frankengit_pull_list" | "frankengit_pull_show" | "frankengit_pull_search"
+            )
+        {
             return pulls::call(self, name, args);
         }
         if self.options.pulls && self.options.artifacts && name == check_evidence::NAME {
@@ -727,7 +739,7 @@ mod tests {
     #[test]
     fn server_tool_catalog_matches_fgit_schema_registry_and_refuses_planted_drift() {
         let server_names = all_registered_tool_names();
-        assert_eq!(server_names.len(), 100);
+        assert_eq!(server_names.len(), 101);
         assert!(server_names.contains(&pull_labels::READ));
         assert!(server_names.contains(&pull_labels::WRITE));
         assert!(server_names.contains(&"frankengit_pull_search"));

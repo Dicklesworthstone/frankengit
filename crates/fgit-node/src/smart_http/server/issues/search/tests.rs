@@ -74,6 +74,10 @@ fn invalid_or_authority_widening_fields_refuse_before_search() {
         "case_sensitive=1",
         "case_sensitive=true",
         "opened_by=bad",
+        "assignee=bad",
+        "assignee=all",
+        "assignee=",
+        "assignee=none&assignee=none",
         "after=1",
         "limit=0",
         "limit=101",
@@ -121,6 +125,24 @@ fn milestone_filter_is_explicit_and_exact_without_changing_legacy_queries() {
             MilestoneNumber::try_new(u64::MAX).unwrap()
         ))
     );
+}
+
+#[test]
+fn assignee_filter_uses_exact_snapshot_metadata_and_is_not_a_request_identity() {
+    let principal = PrincipalId::from_bytes([5; 16]);
+    let body = format!("assignee={principal}&state=open&label=bug");
+    let (query, _) = parse(body.as_bytes()).unwrap();
+    assert_eq!(
+        query.query().assignee,
+        Some(AssigneeFilter::Principal(principal))
+    );
+    assert_eq!(query.query().state, Some(IssueState::Open));
+    assert_eq!(query.query().labels, ["bug"]);
+    assert_eq!(
+        parse(b"assignee=none").unwrap().0.query().assignee,
+        Some(AssigneeFilter::Unassigned)
+    );
+    assert_eq!(parse(b"").unwrap().0.query().assignee, None);
 }
 
 #[test]

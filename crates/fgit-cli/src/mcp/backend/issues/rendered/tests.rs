@@ -85,7 +85,7 @@ fn all_metadata_read_descriptors_expose_the_same_closed_render_grammar() {
             Value::Array(PROFILES.into_iter().map(text).collect())
         );
     }
-    assert_eq!(count, 5);
+    assert_eq!(count, 6);
 }
 
 #[test]

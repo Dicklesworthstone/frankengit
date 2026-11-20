@@ -50,7 +50,7 @@ usage: fg issue list <storage-root> <tenant-id> <repository-id> --trusted-local
 usage: fg issue show <storage-root> <tenant-id> <repository-id> <number> --trusted-local
   [--limit <1..100>] [--after-version <version> --expected-head <snapshot-token>] [--object-format sha1|sha256]
 usage: fg issue search <storage-root> <tenant-id> <repository-id> --trusted-local
-  [--query <literal>] [--state open|closed|all] [--opened-by <id>] [--label <text>]...
+  [--query <literal>] [--state open|closed|all] [--opened-by <id>] [--assignee <id|none>] [--label <text>]...
   See fg issue search --help for bounded scanning, matching and snapshot continuation.
 
 Edits preserve omitted fields; --body '' clears a body; --clear-labels clears labels.

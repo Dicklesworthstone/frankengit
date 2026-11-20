@@ -178,6 +178,18 @@ and uses `after_version` instead of `after`. Show includes the issue state and
 its exact action/comment history. Unknown fields, including principal, storage,
 tenant, repository, mutation actions, and retry keys, are rejected.
 
+`frankengit_issue_search` uses the same issue-read grant to filter native issue
+snapshots by literal title/body `query`, `state`, `opened_by`, `assignee`, exact
+`labels`, and `milestone`. `assignee` accepts a principal ID or `"none"` for an
+empty assignment set; it is metadata, never an access grant. The tool returns
+at most 20 matches (default 5) and examines at most `max_scan` candidates
+(1..1000, default 1000). `scanned`, `count`, `stop_reason`, and `complete` make
+empty partial results explicit. Continue by passing `next_after` as `after`
+and the original `snapshot_token` as `expected_head`, with identical filters. Current sponsored
+`ISSUES_READ` authorization is checked even when reading a retained snapshot.
+See [native issue search](ISSUE_SEARCH.md#mcp-adapter) for the full grammar and
+examples.
+
 Every result names the tenant, repository, incarnation, object format, and exact
 `snapshot_token`. All 64-bit identifiers/counters/cursors use decimal strings,
 not floating-point JSON numbers. A nonzero cursor requires the first page's

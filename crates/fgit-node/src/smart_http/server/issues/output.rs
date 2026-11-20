@@ -623,7 +623,7 @@ fn search_body(
         &format!(
             concat!(
                 "{{\"type\":\"issue_search_page\",{},\"scope\":\"repository_issues\",",
-                "\"query\":{{\"state\":{},\"opened_by\":{},\"labels\":{},\"text\":{},\"milestone\":{},",
+                "\"query\":{{\"state\":{},\"opened_by\":{},\"labels\":{},\"text\":{},\"milestone\":{},\"assignee\":{},",
                 "\"case_sensitive\":{},\"text_scope\":\"title_or_body\"}},",
                 "\"after\":{},\"limit\":{},\"max_scan\":{},\"scanned\":{},\"count\":{},",
                 "\"complete\":{},\"stop_reason\":{},\"has_more_candidates\":{},\"next_after\":{},",
@@ -639,6 +639,13 @@ fn search_body(
                 Some(fgit_forge::event::issue::MilestoneFilter::Unassigned) => quote("none"),
                 Some(fgit_forge::event::issue::MilestoneFilter::Number(number)) =>
                     number.get().to_string(),
+            },
+            match predicate.assignee {
+                None => "null".into(),
+                Some(fgit_forge::event::issue::AssigneeFilter::Unassigned) => quote("none"),
+                Some(fgit_forge::event::issue::AssigneeFilter::Principal(principal)) => {
+                    quote(&principal.to_string())
+                }
             },
             predicate.case_sensitive,
             request.after,
