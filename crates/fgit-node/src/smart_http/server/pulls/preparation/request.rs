@@ -19,6 +19,7 @@ pub struct Request<'a> {
     pub repository_route: &'a str,
     pub number: PullRequestNumber,
     pub resolution: bool,
+    pub rebase: bool,
     pub boundary: Option<&'a str>,
 }
 
@@ -53,13 +54,14 @@ impl<'a> Request<'a> {
         let Some((number, action)) = suffix.split_once('/') else {
             return Ok(None);
         };
-        if !matches!(action, "prepare" | "resolve")
+        if !matches!(action, "prepare" | "resolve" | "prepare-rebase")
             && !action.starts_with("prepare/")
             && !action.starts_with("resolve/")
+            && !action.starts_with("prepare-rebase/")
         {
             return Ok(None);
         }
-        if !matches!(action, "prepare" | "resolve")
+        if !matches!(action, "prepare" | "resolve" | "prepare-rebase")
             || repository_route.len() < 2
             || !repository_route.starts_with('/')
             || repository_route[1..].split('/').any(|part| {
@@ -106,6 +108,7 @@ impl<'a> Request<'a> {
             repository_route,
             number,
             resolution,
+            rebase: action == "prepare-rebase",
             boundary,
         }))
     }
@@ -116,7 +119,7 @@ impl<'a> Request<'a> {
         format: GitHashAlgorithm,
     ) -> Result<PreparationCommand, ApiError> {
         // A resolution can never fall back to automatic construction.
-        if self.resolution {
+        if self.resolution || self.rebase {
             return Err(ApiError::bad("resolution_choices_required"));
         }
         let (mut fields, _) = self.fields(bytes)?;
@@ -380,6 +383,7 @@ mod tests {
             repository_route: "/r.git",
             number: PullRequestNumber::FIRST,
             resolution,
+            rebase: false,
             boundary: None,
         }
     }

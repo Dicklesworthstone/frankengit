@@ -113,13 +113,31 @@ each a lowercase 32-hex-character principal ID. The set is sorted canonically;
 duplicates and the submitter are rejected. It is sealed together with the
 candidate and policy epoch. Changing the set is not an identical retry.
 
-The merge command also accepts optional `method=merge-commit` (the default) or
-`method=squash`. The method is sealed into retry identity and must match the
-actual candidate: ordered target/source parents for a merge commit, exactly one
-target parent for squash. Neither choice falls back to fast-forward. Changing
-method under the same key cannot publish a second command, even if exact Git
-bytes happen to give both requests the same candidate ID. Review commands reject
-`method`; approvals remain bound to the submitted candidate commit.
+The merge command also accepts optional `method=merge-commit` (the default),
+`method=squash`, or `method=rebase`. The method is sealed into retry identity and
+must match the actual candidate: ordered target/source parents for a merge
+commit, exactly one target parent for squash, or a complete verified linear
+series rooted at the target for rebase. No method falls back automatically.
+Changing method under the same key cannot publish a second command, even if
+exact Git bytes happen to give both requests the same candidate ID.
+
+For a rebase candidate, all review actions explicitly supply `method=rebase`.
+The server calls `admit_rebase_candidate_review_durable_in`, inspecting every
+rewritten commit and its diff before storing the existing exact-candidate vote.
+The vote's canonical bytes and original-outcome recovery semantics are unchanged.
+Ordinary merge/squash review forms continue to omit `method`; other explicit
+review-method values are rejected. Withdrawal retains the exact old subject,
+candidate and predecessor version and needs no bundle.
+
+Prepare the target-named rebase artifact with
+[`prepare-rebase`](HTTP_CANDIDATE_PREPARATION_API.md#rebase-and-merge-preparation)
+and inspect its whole series with
+[`inspect-rebase`](HTTP_CANDIDATE_INSPECTION_API.md#inspect-a-complete-rebase-series).
+Landing advances only the target and publishes the PR merge event and outbox
+obligation together. The source branch is unchanged. Current required checks,
+reviewer quorums, author exclusion and path rules remain mandatory; path rules
+cover the union of every intermediate change. Queue-required branches refuse
+this direct route. See [native PR rebase](NATIVE_PULL_REQUEST_REBASE.md).
 
 All subject coordinates and review requirements are explicit. No endpoint reads
 latest state to fill omitted values
@@ -185,7 +203,8 @@ lookup when only the old decision is needed.
 Review results have `type: "candidate_review_publication"`; merge results use
 `type: "reviewed_merge_publication"`. They carry the authenticated actor, exact
 subject/candidate, review predecessor or named-reviewer set, stable transaction
-ID and authenticated terminal decision. Merge receipts include explicit `method`.
+ID and authenticated terminal decision. Merge receipts include explicit `method`;
+explicit rebase review receipts also include `method: "rebase"`.
 HTTP 200 means committed; HTTP 409 with
 `outcome: "refused"` is a canonical refusal, not a transport retry instruction.
 External delivery is not claimed: `delivery_acknowledged` remains null.

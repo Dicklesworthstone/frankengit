@@ -167,7 +167,7 @@ impl<'a> Request<'a> {
                         | "candidate_commit"
                 );
                 let review = matches!(self.operation, Operation::Review(_))
-                    && matches!(name.as_str(), "expected_version" | "reason");
+                    && matches!(name.as_str(), "expected_version" | "reason" | "method");
                 let merge = matches!(self.operation, Operation::Merge) && name == "method";
                 if !common && !review && !merge {
                     return Err(ApiError::bad("unknown_or_inapplicable_field"));
@@ -205,6 +205,11 @@ impl<'a> Request<'a> {
             .map_err(|_| ApiError::bad("invalid_candidate_subject"))?;
         match self.operation {
             Operation::Review(decision) => {
+                let rebase = match fields.remove("method").as_deref() {
+                    None => false,
+                    Some("rebase") => true,
+                    Some(_) => return Err(ApiError::bad("unsupported_review_method")),
+                };
                 let version = parse_decimal(&take(&mut fields, "expected_version")?)?;
                 let expected_version = if version == 0 {
                     ExpectedVersion::NewStream
@@ -228,12 +233,17 @@ impl<'a> Request<'a> {
                 command
                     .proposed_event(principal, format)
                     .map_err(|_| ApiError::bad("invalid_review_command"))?;
-                Ok(Command::Review(command))
+                Ok(if rebase {
+                    Command::RebaseReview(command)
+                } else {
+                    Command::Review(command)
+                })
             }
             Operation::Merge => {
                 let method = match fields.remove("method").as_deref() {
                     None | Some("merge-commit") => NativeMergeMethod::MergeCommit,
                     Some("squash") => NativeMergeMethod::Squash,
+                    Some("rebase") => NativeMergeMethod::Rebase,
                     Some(_) => return Err(ApiError::bad("unsupported_merge_method")),
                 };
                 if reviewers.contains(&principal) {
@@ -255,6 +265,7 @@ impl<'a> Request<'a> {
 
 pub(super) enum Command {
     Review(CandidateReviewCommand),
+    RebaseReview(CandidateReviewCommand),
     Merge {
         subject: ReviewSubject,
         candidate: CandidateBinding,
@@ -405,6 +416,7 @@ mod tests {
                 for (method, expected) in [
                     ("merge-commit", NativeMergeMethod::MergeCommit),
                     ("squash", NativeMergeMethod::Squash),
+                    ("rebase", NativeMergeMethod::Rebase),
                 ] {
                     let command = body.clone()
                         + &format!("&method={method}&required_reviewer={}", "44".repeat(16));
@@ -616,6 +628,7 @@ mod tests {
         for (name, expected_method) in [
             ("merge-commit", NativeMergeMethod::MergeCommit),
             ("squash", NativeMergeMethod::Squash),
+            ("rebase", NativeMergeMethod::Rebase),
         ] {
             let bytes = body.clone() + &format!("&method={name}");
             let Command::Merge {
@@ -634,7 +647,7 @@ mod tests {
             assert_eq!(candidate, expected_candidate);
             assert_eq!(required.reviewers(), &[PrincipalId::from_bytes([0x44; 16])]);
         }
-        for method in ["", "Squash", "fast-forward-only", "rebase", "merge-commit+"] {
+        for method in ["", "Squash", "fast-forward-only", "Rebase", "merge-commit+"] {
             let bytes = body.clone() + &format!("&method={method}");
             assert_eq!(
                 request(Operation::Merge)
@@ -655,6 +668,44 @@ mod tests {
                     .code,
                 "duplicate_field"
             );
+        }
+    }
+
+    #[test]
+    fn rebase_reviews_route_to_whole_series_validation_for_all_decisions() {
+        let actor = PrincipalId::from_bytes([3; 16]);
+        for decision in [
+            ReviewDecision::Approve,
+            ReviewDecision::RequestChanges,
+            ReviewDecision::Withdraw,
+        ] {
+            let body = fields() + "&expected_version=1&reason=Review+every+commit&method=rebase";
+            let Command::RebaseReview(command) = request(Operation::Review(decision))
+                .command(body.as_bytes(), GitHashAlgorithm::Sha1, actor)
+                .unwrap()
+            else {
+                panic!("dedicated rebase review required");
+            };
+            assert_eq!(command.review.decision, decision);
+            assert_eq!(
+                command.review.expected_version,
+                ExpectedVersion::Exactly(AggregateVersion::FIRST)
+            );
+            assert_eq!(
+                command.review.subject.pull_request,
+                PullRequestNumber::FIRST
+            );
+            for invalid in [
+                body.clone() + "&method=rebase",
+                body.replace("method=rebase", "method=Rebase"),
+                body.replace("method=rebase", "method=automatic"),
+            ] {
+                assert!(
+                    request(Operation::Review(decision))
+                        .command(invalid.as_bytes(), GitHashAlgorithm::Sha1, actor)
+                        .is_err()
+                );
+            }
         }
     }
 

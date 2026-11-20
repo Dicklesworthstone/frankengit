@@ -15,6 +15,7 @@ pub struct Request<'a> {
     pub repository_route: &'a str,
     pub number: PullRequestNumber,
     pub boundary: &'a str,
+    pub rebase: bool,
 }
 impl<'a> Request<'a> {
     pub(crate) fn parse(head: &Envelope<'a>) -> Result<Option<Self>, ApiError> {
@@ -28,10 +29,13 @@ impl<'a> Request<'a> {
         let Some((number, action)) = suffix.split_once('/') else {
             return Ok(None);
         };
-        if action != "inspect" && !action.starts_with("inspect/") {
+        if !matches!(action, "inspect" | "inspect-rebase")
+            && !action.starts_with("inspect/")
+            && !action.starts_with("inspect-rebase/")
+        {
             return Ok(None);
         }
-        if action != "inspect"
+        if !matches!(action, "inspect" | "inspect-rebase")
             || repository_route.len() < 2
             || !repository_route.starts_with('/')
             || repository_route[1..].split('/').any(|part| {
@@ -67,6 +71,7 @@ impl<'a> Request<'a> {
             repository_route,
             number,
             boundary,
+            rebase: action == "inspect-rebase",
         }))
     }
 
@@ -166,6 +171,7 @@ mod tests {
             repository_route: "/r.git",
             number: PullRequestNumber::FIRST,
             boundary: "x",
+            rebase: false,
         };
         for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
             let valid = form(format);
@@ -193,6 +199,7 @@ mod tests {
             repository_route: "/r.git",
             number: PullRequestNumber::FIRST,
             boundary: "x",
+            rebase: false,
         };
         for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
             let text = form(format);
@@ -241,6 +248,7 @@ mod tests {
             repository_route: "/r.git",
             number: PullRequestNumber::FIRST,
             boundary: "x",
+            rebase: false,
         };
         for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
             let valid = form(format);
@@ -290,6 +298,44 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn rebase_inspection_keeps_explicit_series_route_and_full_comparison_contract() {
+        let wire = "POST /r.git/api/v1/pulls/1/inspect-rebase HTTP/1.1\r\nHost: local\r\nContent-Type: multipart/form-data; boundary=x\r\nContent-Length: 1\r\n\r\n";
+        let envelope = head::parse(wire.as_bytes(), HttpLimits::default())
+            .unwrap()
+            .unwrap();
+        let request = Request::parse(&envelope).unwrap().unwrap();
+        assert!(request.rebase);
+        let valid = form(GitHashAlgorithm::Sha1);
+        assert!(
+            request
+                .command(valid.as_bytes(), GitHashAlgorithm::Sha1)
+                .is_ok()
+        );
+        for suffix in [
+            "&path=public",
+            "&mode=merge-base",
+            "&method=squash",
+            "&max_changes=1",
+        ] {
+            assert!(
+                request
+                    .command((valid.clone() + suffix).as_bytes(), GitHashAlgorithm::Sha1)
+                    .is_err()
+            );
+        }
+        for invalid in [
+            wire.replace("inspect-rebase", "inspect-rebase/approve"),
+            wire.replace("POST", "GET"),
+            wire.replace("inspect-rebase", "inspect-rebase?path=public"),
+        ] {
+            let envelope = head::parse(invalid.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            assert!(Request::parse(&envelope).is_err());
+        }
+    }
+
     #[test]
     fn inspection_requires_a_complete_binary_upload_not_a_get_or_vote() {
         for (method, suffix, media, framing) in [

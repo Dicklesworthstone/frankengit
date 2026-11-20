@@ -120,17 +120,17 @@ impl Reply {
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(super) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
-fn checkpoint(live: &mut impl FnMut() -> bool) -> Result<(), ApiError> {
+pub(super) fn checkpoint(live: &mut impl FnMut() -> bool) -> Result<(), ApiError> {
     if live() {
         Ok(())
     } else {
         Err(ApiError::from_status(Status::Timeout, false))
     }
 }
-fn append(out: &mut String, part: &str) -> Result<(), ApiError> {
+pub(super) fn append(out: &mut String, part: &str) -> Result<(), ApiError> {
     if out
         .len()
         .checked_add(part.len())
@@ -143,7 +143,7 @@ fn append(out: &mut String, part: &str) -> Result<(), ApiError> {
     out.push_str(part);
     Ok(())
 }
-fn entry(value: Option<&MergeEntry>) -> String {
+pub(super) fn entry(value: Option<&MergeEntry>) -> String {
     value.map_or_else(
         || "null".to_owned(),
         |value| {
@@ -155,7 +155,7 @@ fn entry(value: Option<&MergeEntry>) -> String {
         },
     )
 }
-const fn kind(value: ConflictKind) -> &'static str {
+pub(super) const fn kind(value: ConflictKind) -> &'static str {
     match value {
         ConflictKind::Content => "content",
         ConflictKind::Binary => "binary",

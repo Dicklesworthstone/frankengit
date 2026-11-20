@@ -182,6 +182,19 @@ pub(super) fn execute(
         super::super::require_ref_writes(authenticated, [&subject.target_ref])?;
     }
     let (tx, terminal) = match &command {
+        Command::RebaseReview(command) => drive_request_while(
+            node,
+            &context,
+            node.admit_rebase_candidate_review_durable_in(
+                &context,
+                session,
+                command,
+                upload.bundle,
+                Default::default(),
+            ),
+            &mut live,
+        )
+        .map_err(admission_error)?,
         Command::Review(command) => drive_request_while(
             node,
             &context,

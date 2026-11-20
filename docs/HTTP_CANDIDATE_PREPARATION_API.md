@@ -1,5 +1,51 @@
 # Prepare a reviewable native PR candidate over HTTP
 
+## Rebase-and-merge preparation
+
+`POST {REPO_URL}/api/v1/pulls/{number}/prepare-rebase` prepares an exact
+open PR's linear source suffix onto its target. It uses the same `read` plus
+`pulls-read` credential requirements, `--allow-pulls` service switch, bounded
+form intake and read-only multipart artifact framing described below. Do not
+send an `Idempotency-Key`: preparation creates no transaction or vote.
+
+The URL-encoded form requires `object_format`, `pull_request_version`,
+`policy_epoch`, `source_ref` or `source_ref_hex`, `target_ref` or
+`target_ref_hex`, `source_tip`, `target_tip`, `profile=path-v1`, `upstream`,
+`committer`, `timestamp`, and `empty=stop|drop|keep`. The upstream is an explicit
+common ancestor and the original suffix must be nonempty. Original authors,
+messages and encoding are preserved; `author`, `message`, alternate merge
+methods and conflict-resolution fields are not accepted on this route.
+
+The response metadata has `type: "pull_request_rebase_preparation"`,
+`method: "rebase"`, the complete exact `subject`, `merge_base` equal to
+`upstream`, `committer`, `timestamp`, `empty_policy`, `source_head` and
+`snapshot_token`. The ordered `steps` contain `original`, `rewritten`, `tree`
+and `kind` (`replayed`, `preserved_empty` or `dropped_empty`). A dropped step's
+rewritten ID remains the previous retained tip. These construction coordinates
+do not authorize publication.
+
+A clean response includes `state: "clean"`, `candidate_commit`, `root_tree`,
+bundle byte length and SHA-256, and the actual binary bundle. The artifact names
+the target branch and requires only its old target tip. A conflict or newly
+empty step under `stop` returns HTTP 409 with `state: "conflicted"` or
+`"became_empty"`, `stopped_commit`, exact conflict paths when present, and the
+provisional completed steps. It returns no bundle or candidate. An entirely
+dropped series refuses. Preparation never moves either branch or stages
+candidate objects.
+
+Both original and rewritten series are bounded to 256 single-parent commits;
+the existing native object, tree, byte, output and request budgets also apply.
+There is no conflict-resolution or alternate-method fallback on this PR route.
+Use [`inspect-rebase`](HTTP_CANDIDATE_INSPECTION_API.md#inspect-a-complete-rebase-series)
+to inspect every actual rewritten commit, then submit `method=rebase` through
+the existing [review and merge endpoints](HTTP_REVIEW_MERGE_API.md).
+See [native PR rebase](NATIVE_PULL_REQUEST_REBASE.md) for ancestry, retry and
+path-review rules. Real TCP regressions live in
+`crates/fgit-node/tests/native_pull_rebase_http.rs`; test presence alone is not
+an executed acceptance result.
+
+## Merge-commit and squash preparation
+
 `POST {REPO_URL}/api/v1/pulls/{number}/prepare` constructs a native merge-commit
 or squash candidate for an existing open same-repository PR. It completes the
 remote preparation -> candidate review -> reviewed merge workflow without

@@ -11,6 +11,9 @@ use fgit_forge::review::{
 };
 use fgit_types::GitOid;
 
+mod rebase;
+pub(super) use rebase::build as build_rebase;
+
 pub(super) const MAX_REPLY_BYTES: usize = 32 * 1024 * 1024;
 
 struct Json<'a, C> {
