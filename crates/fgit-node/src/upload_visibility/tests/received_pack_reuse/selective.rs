@@ -601,7 +601,10 @@ fn omitting_an_internal_base_without_thin_negotiation_encodes_only_the_dependent
         let payload = materialize(&fixture.node, &head, &selection);
         assert!(payload.receipt().received().is_none());
         assert!(payload.receipt().writer().is_none());
-        let receipt = payload.receipt().hybrid().expect("metadata reuse with a native blob");
+        let receipt = payload
+            .receipt()
+            .hybrid()
+            .expect("metadata reuse with a native blob");
         assert_eq!(receipt.reused().object_count(), 2);
         assert_eq!(receipt.reused().external_base_count(), 0);
         assert_eq!(receipt.written().object_count, 1);
@@ -618,8 +621,11 @@ fn omitting_an_internal_base_without_thin_negotiation_encodes_only_the_dependent
 #[test]
 fn absent_or_wrong_kind_held_base_proofs_cannot_bless_cached_internal_deltas() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-        let fixture = fixture(format, ExtraObject::Unreachable);
         for wrong_kind in [false, true] {
+            // A previous native fallback can now retain a self-contained
+            // blob, so each invalid-proof case needs the original delta-only
+            // representation to expose an incorrectly accepted held base.
+            let fixture = fixture(format, ExtraObject::Unreachable);
             let (head, mut selection) = prepare_thin(&fixture);
             selection.held_bases.clear();
             if wrong_kind {
@@ -630,7 +636,10 @@ fn absent_or_wrong_kind_held_base_proofs_cannot_bless_cached_internal_deltas() {
             let payload = materialize(&fixture.node, &head, &selection);
             assert!(payload.receipt().received().is_none());
             assert!(payload.receipt().writer().is_none());
-            let receipt = payload.receipt().hybrid().expect("invalid held proof never blesses the delta");
+            let receipt = payload
+                .receipt()
+                .hybrid()
+                .expect("invalid held proof never blesses the delta");
             assert_eq!(receipt.reused().object_count(), 2);
             assert_eq!(receipt.reused().external_base_count(), 0);
             assert_eq!(receipt.written().object_count, 1);

@@ -1021,11 +1021,11 @@ impl MaterializedAdmission {
 /// A bounded Git pack derived from one authority-selected object closure.
 ///
 /// The payload is consumable only after the `fgit-pack` writer finished its
-/// temporary artifact and checksum, a native-verified received pack matched
+/// temporary artifact and checksum, an independently verified retained pack matched
 /// the complete current authorized selection, or both paths were joined into
 /// one verified hybrid pack. Its evidence retains both the exact
 /// authority head basis and the RCR/genesis source that selected the objects.
-/// Written packs live in private scratch custody (frankengit-8xyq); received
+/// Written packs live in private scratch custody (frankengit-8xyq); retained
 /// packs share bounded immutable cache custody. Each session reads bounded
 /// chunks through its own cursor.
 #[derive(Debug)]
@@ -1037,13 +1037,14 @@ pub struct AuthoritySelectedPackPayload {
 }
 
 /// Provenance of the exact bytes served for an authorized object selection.
-/// Received packs preserve verified sender compressed data; they do not claim
-/// the deterministic writer's ordering, compression profile, or work receipts.
+/// Reused packs preserve independently verified compressed data from receive,
+/// import, or native output. The stable `Received` variant describes retained
+/// representation evidence, not sender provenance or new encoder work.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PackMaterializationReceipt {
     /// A new artifact produced by the frozen native pack writer.
     Written(PackWriteReceipt),
-    /// A fully native-verified sender pack, exact disjoint composition, or
+    /// An independently verified retained pack, exact disjoint composition, or
     /// selective entry representation identified by its explicit profile.
     Received(ReceivedPackReceipt),
     /// Verified retained entries plus newly written objects, joined under one
@@ -7744,7 +7745,8 @@ pub struct NodeConfig {
     /// independently reopened children. This cache never selects objects or
     /// grants disclosure; each request authenticates its own selected closure.
     pack_computation_cache: Arc<PackComputationCache>,
-    /// Verified ingress representations. A hit never selects or authorizes
+    /// Independently verified retained representations from ingress or native
+    /// output. A hit never selects or authorizes
     /// objects. Optional disk custody must pass native and canonical integrity
     /// verification before it can enter a new service's live cache.
     received_pack_cache: Arc<received_pack::ReceivedPackCache>,
@@ -10528,13 +10530,8 @@ impl OneNode {
             return Err(PackWriteError::from(PackError::DeadlineExceeded).into());
         }
         self.rearm_session_pack_materialization_context(pack_context, deadline, expanded_bytes)?;
-        let mut held_bases = self.received_pack_held_base_proof(
-            disclosure,
-            &keys,
-            &held,
-            write_profile.thin,
-            live,
-        )?;
+        let mut held_bases =
+            self.received_pack_held_base_proof(disclosure, &keys, &held, write_profile.thin, live)?;
         // A complete live hit already proves every selected representation.
         // Pin it before probing optional durable custody: another service may
         // have persisted equivalent encodings that would otherwise reread and
@@ -10732,7 +10729,18 @@ impl OneNode {
                 live,
             );
             match native {
-                Ok((pack, receipt)) => {
+                Ok((mut pack, receipt)) => {
+                    self.retain_generated_pack(
+                        materialized,
+                        &mut pack,
+                        &receipt,
+                        received_pack::GeneratedPackSelection {
+                            keys: partial.missing_keys(),
+                            thin_bases: &[],
+                            limits: partial.native_limits(),
+                        },
+                        live,
+                    )?;
                     let (pack, receipt) =
                         partial.finish(pack, receipt, self.storage_root(), live)?;
                     return Ok(AuthoritySelectedPackPayload {
@@ -10941,8 +10949,19 @@ impl OneNode {
         limits: &PackLimits,
         is_live: &mut impl FnMut() -> bool,
     ) -> Result<AuthoritySelectedPackPayload, NodePackMaterializationRefusal> {
-        let (pack, receipt) =
+        let (mut pack, receipt) =
             self.stream_pack_entries(source, keys, thin_bases, write_profile, limits, is_live)?;
+        self.retain_generated_pack(
+            materialized,
+            &mut pack,
+            &receipt,
+            received_pack::GeneratedPackSelection {
+                keys,
+                thin_bases,
+                limits,
+            },
+            is_live,
+        )?;
         Ok(AuthoritySelectedPackPayload {
             basis: materialized.basis().clone(),
             closure: materialized.selected_closure().clone(),

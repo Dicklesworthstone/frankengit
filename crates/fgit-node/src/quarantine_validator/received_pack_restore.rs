@@ -7,7 +7,9 @@ use super::{
     ResolutionBudget, StoreRefusal, checkpoint, copy_bytes, crypto_object_kind, map_pack_error,
 };
 use crate::fabric_object_kind;
-use crate::received_pack::{PendingReceivedPack, VerifiedReceivedObject};
+use crate::received_pack::{
+    PendingReceivedPack, StreamedCaptureReservation, VerifiedReceivedObject,
+};
 use fgit_crypto::git_payload_commitment;
 use fgit_types::CANONICAL_CODEC_VERSION;
 
@@ -34,6 +36,47 @@ impl ProductionQuarantineValidator<'_> {
         resolution_budget: &mut ResolutionBudget,
         deadline: &mut impl Deadline,
     ) -> Result<Option<PendingReceivedPack>, RefusalCode> {
+        self.restore_received_pack_bounded(
+            pack,
+            hints,
+            authorized,
+            resolution_budget,
+            deadline,
+            None,
+        )
+    }
+
+    /// Native output uses the same independent reconstruction and canonical
+    /// payload checks as disk custody. Transfer its pre-allocation reservation
+    /// rather than temporarily charging or admitting the raw bytes twice.
+    pub(crate) fn restore_captured_pack(
+        &self,
+        pack: &QuarantinedPack,
+        hints: &[VerifiedReceivedObject],
+        authorized: &BTreeSet<GitOid>,
+        resolution_budget: &mut ResolutionBudget,
+        deadline: &mut impl Deadline,
+        reservation: StreamedCaptureReservation,
+    ) -> Result<Option<PendingReceivedPack>, RefusalCode> {
+        self.restore_received_pack_bounded(
+            pack,
+            hints,
+            authorized,
+            resolution_budget,
+            deadline,
+            Some(reservation),
+        )
+    }
+
+    fn restore_received_pack_bounded(
+        &self,
+        pack: &QuarantinedPack,
+        hints: &[VerifiedReceivedObject],
+        authorized: &BTreeSet<GitOid>,
+        resolution_budget: &mut ResolutionBudget,
+        deadline: &mut impl Deadline,
+        reservation: Option<StreamedCaptureReservation>,
+    ) -> Result<Option<PendingReceivedPack>, RefusalCode> {
         checkpoint(deadline)?;
         let result = self.restore_received_pack_checked(
             pack,
@@ -41,6 +84,7 @@ impl ProductionQuarantineValidator<'_> {
             authorized,
             resolution_budget,
             deadline,
+            reservation,
         );
         // An expiry discovered after failed I/O still outranks cache damage.
         checkpoint(deadline)?;
@@ -60,6 +104,7 @@ impl ProductionQuarantineValidator<'_> {
         authorized: &BTreeSet<GitOid>,
         resolution_budget: &mut ResolutionBudget,
         deadline: &mut impl Deadline,
+        reservation: Option<StreamedCaptureReservation>,
     ) -> Result<Option<PendingReceivedPack>, RefusalCode> {
         if hints.is_empty()
             || hints.len() != pack.entries().len()
@@ -171,16 +216,25 @@ impl ProductionQuarantineValidator<'_> {
         // Only now do the originally untrusted hints describe independently
         // verified immutable native objects. This rebuilds spans, dependencies,
         // receipts and binding digests from the checked pack, never from disk.
-        self.node
-            .received_pack_cache()
-            .prepare_verified(
+        let cache = self.node.received_pack_cache();
+        match reservation {
+            Some(reservation) => cache.prepare_streamed_verified(
                 pack,
                 hints.iter().copied(),
                 &ids_at_offset,
                 &self.pack_limits,
                 deadline,
-            )
-            .map_err(map_pack_error)
+                reservation,
+            ),
+            None => cache.prepare_verified(
+                pack,
+                hints.iter().copied(),
+                &ids_at_offset,
+                &self.pack_limits,
+                deadline,
+            ),
+        }
+        .map_err(map_pack_error)
     }
 
     fn restored_pack_bases(

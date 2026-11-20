@@ -13,7 +13,11 @@ type NativeObjects = BTreeMap<GitOid, (ObjectType, Vec<u8>)>;
 fn native_change(fixture: &ReceivedFixture, edit_tree: bool) -> (GitOid, NativeObjects) {
     let node = &fixture.node;
     let parent = node.read_git_object(fixture.tip).unwrap();
-    let first = parent.payload().split(|byte| *byte == b'\n').next().unwrap();
+    let first = parent
+        .payload()
+        .split(|byte| *byte == b'\n')
+        .next()
+        .unwrap();
     let tree = GitOid::from_hex(
         node.object_format,
         std::str::from_utf8(first.strip_prefix(b"tree ").unwrap()).unwrap(),
@@ -141,15 +145,17 @@ fn expected_objects(fixture: &ReceivedFixture, added: NativeObjects) -> NativeOb
 #[test]
 fn native_child_clone_reuses_old_entries_with_every_old_fabric_body_unavailable() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-        let fixture = received_fixture(format, ExtraObject::None);
-        let (tip, added) = native_change(&fixture, false);
-        assert_eq!(
-            added.len(),
-            1,
-            "one native commit must expose the all-or-nothing cliff"
-        );
-        let expected = expected_objects(&fixture, added);
         for ofs_delta in [true, false] {
+            // Each capability case starts before its first native capture;
+            // a later request can now reuse the generated child too.
+            let fixture = received_fixture(format, ExtraObject::None);
+            let (tip, added) = native_change(&fixture, false);
+            assert_eq!(
+                added.len(),
+                1,
+                "one native commit must expose the all-or-nothing cliff"
+            );
+            let expected = expected_objects(&fixture, added);
             let (head, selection) = prepare(&fixture.node, tip, ofs_delta, |_| {}).unwrap();
             let old_files =
                 ParkedObjects::new(&fixture.node, fixture.public_objects.iter().copied());
@@ -211,8 +217,8 @@ fn native_child_clone_reuses_old_entries_with_every_old_fabric_body_unavailable(
                 &expected.keys().copied().collect::<BTreeSet<_>>()
             );
             clone.shutdown().unwrap();
+            fixture.node.shutdown().unwrap();
         }
-        fixture.node.shutdown().unwrap();
     }
 }
 
@@ -224,8 +230,7 @@ fn native_source_edit_joins_three_new_objects_without_revealing_unselected_sende
         assert_eq!(added.len(), 3);
         let expected = expected_objects(&fixture, added);
         let (head, selection) = prepare(&fixture.node, tip, false, |_| {}).unwrap();
-        let old_files =
-            ParkedObjects::new(&fixture.node, fixture.public_objects.iter().copied());
+        let old_files = ParkedObjects::new(&fixture.node, fixture.public_objects.iter().copied());
         let payload = materialize(&fixture.node, &head, &selection);
         let receipt = payload
             .receipt()
@@ -297,12 +302,7 @@ fn an_oversized_stored_hybrid_retries_the_full_compressed_writer_with_the_origin
         let (head, mut selection) = prepare(&fixture.node, tip, true, |_| {}).unwrap();
         let retained_bytes = {
             let payload = materialize(&fixture.node, &head, &selection);
-            payload
-                .receipt()
-                .hybrid()
-                .unwrap()
-                .reused()
-                .output_bytes()
+            payload.receipt().hybrid().unwrap().reused().output_bytes()
         };
         // This ceiling holds the retained entries plus one header/trailer, but
         // cannot also fit the new commit. Recompressing the highly compressible
@@ -311,10 +311,7 @@ fn an_oversized_stored_hybrid_retries_the_full_compressed_writer_with_the_origin
         selection.limits.max_input_bytes = retained_bytes;
         let payload = materialize(&fixture.node, &head, &selection);
         assert!(payload.receipt().hybrid().is_none());
-        let written = payload
-            .receipt()
-            .writer()
-            .expect("bounded native fallback");
+        let written = payload.receipt().writer().expect("bounded native fallback");
         assert!(written.output_bytes <= retained_bytes);
         assert_eq!(written.object_count as usize, selection.keys.len());
         let output = payload.into_bytes().unwrap();
