@@ -1116,8 +1116,20 @@ struct PreparedUploadPack {
     /// including parents omitted from an otherwise self-contained source pack.
     /// This private proof shares `basis` and never copies the whole have graph.
     held_bases: Vec<(GitOid, ObjectType)>,
+    /// A complete live representation pins its verified bytes through response
+    /// materialization, avoiding redundant cold restoration after a warm hit.
+    reused: Option<PreparedReceivedPack>,
     limits: PackLimits,
     write_profile: PackWriteProfile,
+}
+
+/// The envelope and client-held proof under which the pinned representation
+/// was selected. A changed envelope/proof must pass ordinary reuse checks.
+#[derive(Debug)]
+struct PreparedReceivedPack {
+    payload: received_pack::ReceivedPackPayload,
+    limits: PackLimits,
+    held_bases: Vec<(GitOid, ObjectType)>,
 }
 
 impl AuthoritySelectedPackPayload {
@@ -10516,18 +10528,78 @@ impl OneNode {
             return Err(PackWriteError::from(PackError::DeadlineExceeded).into());
         }
         self.rearm_session_pack_materialization_context(pack_context, deadline, expanded_bytes)?;
-        // Cold custody must be revalidated before the held-base proof is
-        // frozen; otherwise a restarted service could never reuse thin entries.
-        self.restore_received_pack_custody(materialized, &keys, &held, &limits, live)?;
+        let mut held_bases = self.received_pack_held_base_proof(
+            disclosure,
+            &keys,
+            &held,
+            write_profile.thin,
+            live,
+        )?;
+        // A complete live hit already proves every selected representation.
+        // Pin it before probing optional durable custody: another service may
+        // have persisted equivalent encodings that would otherwise reread and
+        // revalidate every body against this request's deadline.
+        let reused = self.received_pack_cache().try_reuse_with_held(
+            &keys,
+            &limits,
+            request.options.ofs_delta(),
+            &held_bases,
+            live,
+        )?;
+        let reused = reused.and_then(|payload| {
+            let mut proof = Vec::new();
+            proof.try_reserve_exact(held_bases.len()).ok()?;
+            proof.extend_from_slice(&held_bases);
+            Some(PreparedReceivedPack {
+                payload,
+                limits: limits.clone(),
+                held_bases: proof,
+            })
+        });
+        if reused.is_none() {
+            self.restore_received_pack_custody(materialized, &keys, &held, &limits, live)?;
+            // Restored thin entries may add delta parents. Rebuild this same
+            // disclosure's held-kind proof before freezing the cold selection.
+            held_bases = self.received_pack_held_base_proof(
+                disclosure,
+                &keys,
+                &held,
+                write_profile.thin,
+                live,
+            )?;
+        }
+        if !live() {
+            return Err(PackWriteError::from(PackError::DeadlineExceeded).into());
+        }
+        Ok(PreparedUploadPack {
+            basis: materialized.basis().clone(),
+            request: request.clone(),
+            keys,
+            held,
+            held_bases,
+            reused,
+            limits,
+            write_profile,
+        })
+    }
+
+    fn received_pack_held_base_proof(
+        &self,
+        disclosure: &upload_visibility::VisibleUploadPack,
+        keys: &[PackOrderKey],
+        held: &BTreeSet<GitOid>,
+        thin: bool,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<(GitOid, ObjectType)>, NodePackMaterializationRefusal> {
         let mut held_bases = Vec::new();
-        if write_profile.thin && !keys.is_empty() {
+        if thin && !keys.is_empty() {
             // Only parents of retained selected entries need a held-kind proof.
             // A selective response may omit an original internal parent too.
             // Avoid indexing the entire client history again. A cache change
             // can only miss this optional proof, never enlarge the have closure.
             let candidates = self
                 .received_pack_cache()
-                .held_base_candidates(&keys, &held, live)?;
+                .held_base_candidates(keys, held, live)?;
             if held_bases.try_reserve_exact(candidates.len()).is_ok() {
                 for id in candidates {
                     if !live() {
@@ -10542,15 +10614,7 @@ impl OneNode {
         if !live() {
             return Err(PackWriteError::from(PackError::DeadlineExceeded).into());
         }
-        Ok(PreparedUploadPack {
-            basis: materialized.basis().clone(),
-            request: request.clone(),
-            keys,
-            held,
-            held_bases,
-            limits,
-            write_profile,
-        })
+        Ok(held_bases)
     }
 
     /// Materializes precisely the preflighted selection. No second graph walk
@@ -10580,7 +10644,20 @@ impl OneNode {
         // External REF bases additionally need this same private held-kind
         // proof and the existing thin/full-history negotiation gate.
         // Local exports retain their frozen writer profile.
-        let reused = if prepared.write_profile.thin {
+        let reused = if let Some(pack) = &prepared.reused
+            && pack.limits == prepared.limits
+            && pack.held_bases == prepared.held_bases
+            && (prepared.write_profile.thin || pack.payload.receipt().external_base_count() == 0)
+            && (prepared.request.options.ofs_delta()
+                || pack.payload.receipt().ofs_delta_count() == 0)
+        {
+            pack.payload.fresh_reader(live)?
+        } else {
+            None
+        };
+        let reused = if reused.is_some() {
+            reused
+        } else if prepared.write_profile.thin {
             self.received_pack_cache().try_reuse_with_held(
                 &prepared.keys,
                 &prepared.limits,

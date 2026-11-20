@@ -2,6 +2,8 @@
 //! Every reopened node uses a NEW configuration, not a shared in-memory cache.
 use super::*;
 
+mod warm;
+
 const CACHE_BYTES: usize = 2 * 1024 * 1024;
 
 fn reopen(scratch: &Scratch, format: GitHashAlgorithm, cache_bytes: usize) -> OneNode {

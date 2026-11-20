@@ -41,7 +41,7 @@ struct Choice {
 
 // A native pack header needs at most ten bytes; a SHA-256 REF base needs32.
 // Compressed data remains borrowed from the accounted sender allocation.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct Piece {
     source: usize,
     local: usize,

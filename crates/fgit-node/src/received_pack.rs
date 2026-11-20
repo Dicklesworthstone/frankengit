@@ -689,6 +689,46 @@ impl ReceivedPackPayload {
         &self.receipt
     }
 
+    /// Pins the same immutable representation with an independent fresh cursor.
+    /// Descriptor allocation failure is an optional cache miss; cancellation
+    /// remains authoritative even though no canonical body needs to be read.
+    pub(crate) fn fresh_reader(
+        &self,
+        deadline: &mut impl Deadline,
+    ) -> Result<Option<Self>, PackError> {
+        check(deadline)?;
+        let mut entries = Vec::new();
+        if entries.try_reserve_exact(self.entries.len()).is_err() {
+            return Ok(None);
+        }
+        for entry in &self.entries {
+            check(deadline)?;
+            entries.push(Arc::clone(entry));
+        }
+        let selected = if let Some(pieces) = &self.selected {
+            let mut selected = Vec::new();
+            if selected.try_reserve_exact(pieces.len()).is_err() {
+                return Ok(None);
+            }
+            for piece in pieces {
+                check(deadline)?;
+                selected.push(*piece);
+            }
+            Some(selected)
+        } else {
+            None
+        };
+        check(deadline)?;
+        Ok(Some(Self {
+            entries,
+            receipt: self.receipt.clone(),
+            header: self.header,
+            selected,
+            part: 0,
+            offset: 0,
+        }))
+    }
+
     fn part_bytes(&self, part: usize) -> Option<&[u8]> {
         let Some(header) = &self.header else {
             return (part == 0).then(|| self.entries[0].bytes.bytes());
