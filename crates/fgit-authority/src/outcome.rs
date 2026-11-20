@@ -52,6 +52,7 @@ use fgit_types::numeric::DecisionSequence;
 use fgit_types::refs::RefName;
 use fgit_types::vocabulary::{DecisionOutcome, RefusalCode};
 use std::collections::BTreeMap;
+use std::sync::{Arc, OnceLock};
 
 use crate::async_contract::{AsyncAuthorityStore, DuplicateAbsenceWitness};
 use crate::contract::AuthorityStore;
@@ -73,6 +74,8 @@ pub use cumulative::{
 };
 mod plural;
 pub use plural::{resolve_outcomes, resolve_outcomes_async};
+mod prepared_index;
+use prepared_index::PreparedOutcomeIndex;
 
 /// Namespace prefix of a per-identity outcome accelerator slot.
 pub const OUTCOME_KEY_PREFIX: &[u8] = b"fg/outcome/v1/";
@@ -1920,12 +1923,10 @@ where
         // `scan_for_existing_decisions` and fails closed for the same reason:
         // with no head there is nothing to conditionally replace, and genesis
         // publishes through `initialize_repository` rather than a CAS.
-        return Ok(CumulativeOutcomes {
-            observed: AuthorityVersionToken::from_opaque_bytes(
-                [0_u8; crate::tokens::VERSION_TOKEN_BYTES],
-            ),
-            entries: Vec::new(),
-        });
+        return Ok(CumulativeOutcomes::from_collected(
+            AuthorityVersionToken::from_opaque_bytes([0_u8; crate::tokens::VERSION_TOKEN_BYTES]),
+            Vec::new(),
+        ));
     };
     let observed = receipt.token();
     let mut head: RepositoryAuthorityHeadBody = head_body_of(&receipt)?;
@@ -1949,10 +1950,7 @@ where
         head = previous;
     }
 
-    Ok(CumulativeOutcomes {
-        observed,
-        entries: collected,
-    })
+    Ok(CumulativeOutcomes::from_collected(observed, collected))
 }
 
 /// The asynchronous twin of [`collect_cumulative_outcomes`].
@@ -1984,12 +1982,10 @@ where
     let HeadRead::Present(receipt) = store.read_head(cx, head_key).await? else {
         // No head: empty, bound to the zero token so `fold_against` refuses.
         // See the sync twin.
-        return Ok(CumulativeOutcomes {
-            observed: AuthorityVersionToken::from_opaque_bytes(
-                [0_u8; crate::tokens::VERSION_TOKEN_BYTES],
-            ),
-            entries: Vec::new(),
-        });
+        return Ok(CumulativeOutcomes::from_collected(
+            AuthorityVersionToken::from_opaque_bytes([0_u8; crate::tokens::VERSION_TOKEN_BYTES]),
+            Vec::new(),
+        ));
     };
     collect_cumulative_outcomes_at_receipt_async(store, cx, &receipt).await
 }
@@ -2046,10 +2042,7 @@ where
         head = previous;
     }
 
-    Ok(CumulativeOutcomes {
-        observed,
-        entries: collected,
-    })
+    Ok(CumulativeOutcomes::from_collected(observed, collected))
 }
 
 /// Collect a cumulative outcome-index leaf set from an authenticated retained
@@ -2077,12 +2070,10 @@ where
     S: AuthorityStore + ?Sized,
 {
     let HeadRead::Present(receipt) = store.read_head(head_key)? else {
-        return Ok(CumulativeOutcomes {
-            observed: AuthorityVersionToken::from_opaque_bytes(
-                [0_u8; crate::tokens::VERSION_TOKEN_BYTES],
-            ),
-            entries: Vec::new(),
-        });
+        return Ok(CumulativeOutcomes::from_collected(
+            AuthorityVersionToken::from_opaque_bytes([0_u8; crate::tokens::VERSION_TOKEN_BYTES]),
+            Vec::new(),
+        ));
     };
     let observed = receipt.token();
     let mut head: RepositoryAuthorityHeadBody = head_body_of(&receipt)?;
@@ -2133,10 +2124,7 @@ where
         head = read_authority_head_body(store, batch.predecessor_head_id)?;
     }
 
-    Ok(CumulativeOutcomes {
-        observed,
-        entries: collected,
-    })
+    Ok(CumulativeOutcomes::from_collected(observed, collected))
 }
 
 /// Asynchronous twin of [`collect_cumulative_outcomes_from_checkpoint`].
@@ -2152,12 +2140,10 @@ where
     S: AsyncAuthorityStore + ?Sized,
 {
     let HeadRead::Present(receipt) = store.read_head(cx, head_key).await? else {
-        return Ok(CumulativeOutcomes {
-            observed: AuthorityVersionToken::from_opaque_bytes(
-                [0_u8; crate::tokens::VERSION_TOKEN_BYTES],
-            ),
-            entries: Vec::new(),
-        });
+        return Ok(CumulativeOutcomes::from_collected(
+            AuthorityVersionToken::from_opaque_bytes([0_u8; crate::tokens::VERSION_TOKEN_BYTES]),
+            Vec::new(),
+        ));
     };
     collect_cumulative_outcomes_from_checkpoint_at_receipt_async(
         store,
@@ -2261,10 +2247,7 @@ where
         head = read_authority_head_body_async(store, cx, batch.predecessor_head_id).await?;
     }
 
-    Ok(CumulativeOutcomes {
-        observed,
-        entries: collected,
-    })
+    Ok(CumulativeOutcomes::from_collected(observed, collected))
 }
 
 /// A cumulative leaf set, inseparable from the head it was collected against.
@@ -2334,13 +2317,36 @@ where
 /// let _token = AuthorityVersionToken::from_opaque_bytes([0; 16]);
 /// fn _accepts(_set: &CumulativeOutcomes) {}
 /// ```
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct CumulativeOutcomes {
     observed: AuthorityVersionToken,
     entries: Vec<(TxId, TerminalOutcome)>,
+    // Disposable computations over precisely `entries`, never an independently
+    // supplied root or witness. Clones share the immutable prepared data; an
+    // authenticated extension installs a new index only on the extended set.
+    prepared: OnceLock<Result<Arc<PreparedOutcomeIndex>, OutcomeFailure>>,
 }
 
+impl PartialEq for CumulativeOutcomes {
+    fn eq(&self, other: &Self) -> bool {
+        self.observed == other.observed && self.entries == other.entries
+    }
+}
+
+impl Eq for CumulativeOutcomes {}
+
 impl CumulativeOutcomes {
+    fn from_collected(
+        observed: AuthorityVersionToken,
+        entries: Vec<(TxId, TerminalOutcome)>,
+    ) -> Self {
+        Self {
+            observed,
+            entries,
+            prepared: OnceLock::new(),
+        }
+    }
+
     /// The head token this set was collected against.
     #[must_use]
     pub const fn observed(&self) -> AuthorityVersionToken {
@@ -2366,6 +2372,13 @@ impl CumulativeOutcomes {
     /// in any prior batch reachable from the collected head is found here.
     #[must_use]
     pub fn decision_for(&self, tx_id: TxId) -> Option<TerminalOutcome> {
+        if let Some(Ok(index)) = self.prepared.get() {
+            return index.decision_for(&self.entries, tx_id);
+        }
+        // A one-off read should not hash and sort the entire history. Reuse
+        // the index after a root check or fold has already prepared it; cold
+        // reads keep their original cost and first-occurrence behavior for a
+        // malformed duplicate history. Publication still refuses that history.
         self.entries
             .iter()
             .find(|(candidate, _)| *candidate == tx_id)
@@ -2418,7 +2431,11 @@ impl CumulativeOutcomes {
                 expected,
             });
         }
-        fold_outcome_index(&self.entries, stamped)
+        if stamped.is_empty() {
+            self.prepared_root()
+        } else {
+            Ok(self.prepare_extension(stamped)?.root())
+        }
     }
 }
 
