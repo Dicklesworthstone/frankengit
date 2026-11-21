@@ -312,6 +312,7 @@ impl VisibleUploadPack {
             return partial_clone::apply_selection_with_sparse(
                 &self.objects,
                 &self.facts,
+                self.repository.advertised_refs(),
                 ids,
                 request,
                 limits,
@@ -331,6 +332,7 @@ impl VisibleUploadPack {
         partial_clone::apply_selection_with_sparse(
             &self.objects,
             &self.facts,
+            self.repository.advertised_refs(),
             &mut selected,
             &filtered,
             limits,

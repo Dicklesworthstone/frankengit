@@ -4,8 +4,9 @@ use super::{
     BTreeMap, BTreeSet, GitOid, NodePackMaterializationRefusal, ObjectType, PackError, PackLimits,
     PackRequest, PackWriteError, RefusalCode, disclosure_refusal,
 };
-use fgit_wire::ObjectFilter;
+use fgit_wire::{AdvertisedRef, ObjectFilter};
 mod sparse;
+mod sparse_names;
 
 pub(super) type PatternLoader<'a> =
     dyn FnMut(GitOid, usize) -> Result<(ObjectType, Vec<u8>), NodePackMaterializationRefusal> + 'a;
@@ -21,7 +22,7 @@ pub fn unserved_filter_name(filter: &ObjectFilter) -> Option<&'static str> {
     let mut pending = vec![filter];
     while let Some(filter) = pending.pop() {
         match filter {
-            ObjectFilter::SparseObjectName(_) => {
+            ObjectFilter::SparseObjectName(name) if !sparse_names::supported(name) => {
                 return Some("sparse:oid");
             }
             ObjectFilter::SparsePath(_) => return Some("sparse:path"),
@@ -31,7 +32,8 @@ pub fn unserved_filter_name(filter: &ObjectFilter) -> Option<&'static str> {
             | ObjectFilter::BlobLimit(_)
             | ObjectFilter::TreeDepth(_)
             | ObjectFilter::ObjectType(_)
-            | ObjectFilter::SparseObject(_) => {}
+            | ObjectFilter::SparseObject(_)
+            | ObjectFilter::SparseObjectName(_) => {}
         }
     }
     None
@@ -82,6 +84,9 @@ struct Predicate {
 impl Predicate {
     fn compile(
         filter: Option<&ObjectFilter>,
+        objects: &BTreeMap<GitOid, FilterObject>,
+        facts: &BTreeMap<GitOid, super::WalkFacts>,
+        refs: &[AdvertisedRef],
         work: &mut Work<'_, impl FnMut() -> bool>,
     ) -> Result<Self, NodePackMaterializationRefusal> {
         let mut result = Self::default();
@@ -123,7 +128,17 @@ impl Predicate {
                     )?;
                     result.sparse.insert(*id);
                 }
-                ObjectFilter::SparseObjectName(_) | ObjectFilter::SparsePath(_) => {
+                ObjectFilter::SparseObjectName(name) => {
+                    let id = sparse_names::resolve(name, objects, facts, refs, work)?;
+                    work.count(
+                        result
+                            .sparse
+                            .len()
+                            .saturating_add(usize::from(!result.sparse.contains(&id))),
+                    )?;
+                    result.sparse.insert(id);
+                }
+                ObjectFilter::SparsePath(_) => {
                     return Err(NodePackMaterializationRefusal::UnsupportedFetch(
                         "sparse filters",
                     ));
@@ -192,6 +207,7 @@ pub(super) fn apply_selection(
     apply_selection_with_sparse(
         objects,
         &BTreeMap::new(),
+        &[],
         ids,
         request,
         limits,
@@ -210,6 +226,7 @@ pub(super) fn apply_selection(
 pub(super) fn apply_selection_with_sparse(
     objects: &BTreeMap<GitOid, FilterObject>,
     facts: &BTreeMap<GitOid, super::WalkFacts>,
+    refs: &[AdvertisedRef],
     ids: &mut Vec<GitOid>,
     request: &PackRequest,
     limits: &PackLimits,
@@ -232,7 +249,7 @@ pub(super) fn apply_selection_with_sparse(
             "shallow history",
         ));
     }
-    let predicate = Predicate::compile(request.filter.as_ref(), &mut work)?;
+    let predicate = Predicate::compile(request.filter.as_ref(), objects, facts, refs, &mut work)?;
     work.count(ids.len())?;
     work.count(request.wants.len())?;
     let mut selected = BTreeSet::new();

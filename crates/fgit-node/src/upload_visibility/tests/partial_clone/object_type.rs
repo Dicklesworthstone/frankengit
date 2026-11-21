@@ -116,6 +116,7 @@ fn object_type_filters_intersect_sparse_size_and_depth_without_losing_lazy_roots
             engine::apply_selection_with_sparse(
                 &graph.objects,
                 &graph.facts,
+                &[],
                 &mut ids,
                 &request(vec![commit], vec![], Some(filter)),
                 &PackLimits::default(),

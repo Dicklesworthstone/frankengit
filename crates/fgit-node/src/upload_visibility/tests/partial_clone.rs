@@ -5,6 +5,7 @@ use fgit_wire::ObjectFilter;
 mod blob_limits;
 mod object_type;
 mod sparse;
+mod sparse_names;
 mod streaming_blobs;
 
 fn request(wants: Vec<GitOid>, haves: Vec<GitOid>, filter: Option<ObjectFilter>) -> PackRequest {
@@ -249,10 +250,10 @@ fn unsupported_controls_fail_instead_of_silently_returning_an_unfiltered_pack() 
     let graph = graph(&source, &[blob]);
     for filter in [
         ObjectFilter::SparsePath(b"secret".to_vec()),
-        ObjectFilter::SparseObjectName(b"main:.sparse".to_vec()),
+        ObjectFilter::SparseObjectName(b"main~1:.sparse".to_vec()),
         ObjectFilter::Combine(vec![
             ObjectFilter::BlobNone,
-            ObjectFilter::SparseObjectName(b"main:.sparse".to_vec()),
+            ObjectFilter::SparseObjectName(b"main~1:.sparse".to_vec()),
         ]),
     ] {
         let mut ids = vec![blob];
@@ -591,6 +592,9 @@ fn unserved_filter_names_follow_upstream_and_served_filters_have_none() {
         ObjectFilter::ObjectType(ObjectType::Blob),
         ObjectFilter::ObjectType(ObjectType::Tag),
         ObjectFilter::SparseObject(blob),
+        ObjectFilter::SparseObjectName(b"main:.sparse".to_vec()),
+        ObjectFilter::SparseObjectName(b"HEAD:.sparse".to_vec()),
+        ObjectFilter::SparseObjectName(b"refs/tags/release:config/sparse".to_vec()),
         ObjectFilter::Combine(vec![
             ObjectFilter::BlobLimit(1),
             ObjectFilter::Combine(vec![ObjectFilter::TreeDepth(2), ObjectFilter::BlobNone]),
@@ -600,7 +604,7 @@ fn unserved_filter_names_follow_upstream_and_served_filters_have_none() {
     }
     for (refused, name) in [
         (
-            ObjectFilter::SparseObjectName(b"main:.sparse".to_vec()),
+            ObjectFilter::SparseObjectName(b"main~1:.sparse".to_vec()),
             "sparse:oid",
         ),
         (ObjectFilter::SparsePath(b"secret".to_vec()), "sparse:path"),
@@ -609,7 +613,7 @@ fn unserved_filter_names_follow_upstream_and_served_filters_have_none() {
                 ObjectFilter::BlobNone,
                 ObjectFilter::Combine(vec![
                     ObjectFilter::TreeDepth(1),
-                    ObjectFilter::SparseObjectName(b"HEAD:.sparse".to_vec()),
+                    ObjectFilter::SparseObjectName(b"HEAD~1:.sparse".to_vec()),
                 ]),
             ]),
             "sparse:oid",
