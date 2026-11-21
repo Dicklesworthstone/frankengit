@@ -46,6 +46,23 @@ Base status values used below are `required-v1`, `planned`, `experimental-v1`, `
 | Archive generation | required-v1 subset | Pure-Rust tar/zip generation, path safety, deterministic ordering, resource bounds |
 | Diff/merge | required-v1 core | Pure-Rust Myers/patience/histogram-style diff profiles and deterministic merge; oracle corpus for observable behavior |
 
+## Exact-name fetches with protocol v2
+
+Authenticated upload-pack views advertise `fetch=... ref-in-want` over raw
+Git, SSH's shared Git command path and smart HTTP. A request may name visible
+refs with `want-ref`, alongside ordinary OID wants. Resolution and pack
+selection use the same immutable request snapshot; earlier `ls-refs` output
+is not treated as the current tip. The response includes the exact requested
+name/OID pairs before its pack section. Hidden, deleted and nonexistent names
+receive the same validated-name Git error, with no pack construction.
+
+The [ref-in-want profile](GIT_REF_IN_WANT.md) defines aliases, unpeeled tags,
+raw-byte names, duplicate refusal, shared selector/output limits and
+cancellation. The wire suite covers both hash formats and the shared HTTP
+adapter; native tests cover persisted visibility, restart and actual pack
+construction. This capability does not expand the historical stock-client
+campaign totals below or imply a completed cross-transport qualification.
+
 ## Executed stock-client rows: partial clone, notes, gitlinks, atomic push, push options
 
 Current implementation supports `sparse:oid=<exact visible blob OID>` through

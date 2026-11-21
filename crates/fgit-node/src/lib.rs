@@ -332,6 +332,7 @@ pub struct AdmissionUploadPackRepository {
     tag_peels: BTreeMap<GitOid, GitOid>,
     shallow_proof: Option<upload_visibility::shallow::ShallowProof>,
     object_info_proof: Option<upload_visibility::object_info::ObjectInfoProof>,
+    ref_in_want_deadline: Option<GitDaemonSessionDeadline>,
 }
 
 impl AdmissionUploadPackRepository {
@@ -418,6 +419,7 @@ impl AdmissionUploadPackRepository {
             tag_peels: BTreeMap::new(),
             shallow_proof: None,
             object_info_proof: None,
+            ref_in_want_deadline: None,
         })
     }
 
@@ -431,6 +433,7 @@ impl AdmissionUploadPackRepository {
         self.closure_objects = objects;
         self.shallow_proof = None;
         self.object_info_proof = None;
+        self.ref_in_want_deadline = None;
         self
     }
 
@@ -477,6 +480,17 @@ impl UploadPackRepository for AdmissionUploadPackRepository {
 
     fn is_common(&self, oid: AnyGitOid) -> bool {
         self.contains_want(oid)
+    }
+
+    fn supports_ref_in_want(&self) -> bool {
+        self.ref_in_want_deadline.is_some()
+    }
+
+    fn ref_in_want_checkpoint(&self) -> Result<(), WireError> {
+        match &self.ref_in_want_deadline {
+            Some(deadline) if !deadline.expired() => Ok(()),
+            _ => Err(WireError::PackSourceRefused),
+        }
     }
 
     fn supports_object_info(&self) -> bool {
@@ -6960,12 +6974,7 @@ where
         // Upstream advertises `unborn`: without it a v2 client never asks for
         // an empty repository's HEAD, and its clone falls back to its own default.
         Packet::Data(b"ls-refs=unborn\n".to_vec()),
-        Packet::Data(match (supports_filter, repository.supports_shallow()) {
-            (true, true) => b"fetch=shallow filter\n".to_vec(),
-            (true, false) => b"fetch=filter\n".to_vec(),
-            (false, true) => b"fetch=shallow\n".to_vec(),
-            (false, false) => b"fetch\n".to_vec(),
-        }),
+        Packet::Data(v2_fetch_capability(repository, supports_filter)),
         Packet::Data(format!("object-format={object_format}\n").into_bytes()),
         Packet::Flush,
     ];
@@ -7456,17 +7465,41 @@ fn unserved_filter_error(filter: &str) -> Vec<u8> {
     format!("ERR filter '{filter}' not supported\n").into_bytes()
 }
 
+/// The fetch features supplied by this exact repository view, shared by raw
+/// Git, SSH and smart HTTP. Parser support alone never advertises ref lookup.
+fn v2_fetch_capability(repository: &impl UploadPackRepository, supports_filter: bool) -> Vec<u8> {
+    let mut line = b"fetch".to_vec();
+    for (enabled, feature) in [
+        (repository.supports_shallow(), b"shallow".as_slice()),
+        (supports_filter, b"filter".as_slice()),
+        (repository.supports_ref_in_want(), b"ref-in-want".as_slice()),
+    ] {
+        if enabled {
+            line.push(if line.len() == 5 { b'=' } else { b' ' });
+            line.extend_from_slice(feature);
+        }
+    }
+    line.push(b'\n');
+    line
+}
+
 /// The client-safe upload-pack refusal shared by git://, SSH and smart HTTP.
 ///
-/// The only reflected value is the fixed-width object ID parsed from this
-/// client's want. Hidden, deleted and never-seen objects have the same answer;
-/// neither the stored object kind nor physical existence enters the message.
+/// Reflected values are the fixed-width object ID or validated exact ref name
+/// from this client's want. Hidden, deleted and never-seen targets have the
+/// same answer; neither stored object kind nor existence enters the message.
 /// Other wire failures keep their existing transport behavior rather than
 /// reflecting arbitrary parser input or internal diagnostics.
 fn upload_want_error(error: &WireError) -> Option<Vec<u8>> {
     match error {
         WireError::WantNotAdvertised { oid } | WireError::WantNotReachable { oid } => {
             Some(format!("ERR upload-pack: not our ref {oid}\n").into_bytes())
+        }
+        WireError::UnknownWantedRef { name } if RefName::try_new_one_level(name).is_ok() => {
+            let mut line = b"ERR unknown ref ".to_vec();
+            line.extend_from_slice(name);
+            line.push(b'\n');
+            Some(line)
         }
         _ => None,
     }

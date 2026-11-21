@@ -5,6 +5,7 @@ mod incremental_walk;
 mod object_info;
 mod projection_cache;
 mod received_pack_reuse;
+mod ref_in_want;
 mod selection_preflight;
 mod shallow_transport;
 use std::io::{Read, Write};

@@ -511,6 +511,7 @@ impl OneNode {
             self.selected_pack_limits.clone(),
             deadline.clone(),
         ));
+        repository.ref_in_want_deadline = Some(deadline.clone());
         Ok(VisibleUploadPack {
             basis: materialized.basis().clone(),
             closure,
