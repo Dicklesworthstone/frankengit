@@ -1,6 +1,7 @@
 # Native source publication through MCP
 
-`--allow-source-writes` enables ten narrow, operator-sponsored source mutations:
+`--allow-source-writes` selects source mutations. The trusted-local profile
+enables ten narrow, operator-sponsored operations:
 `frankengit_branch_create`, `frankengit_branch_update`,
 `frankengit_branch_delete`, `frankengit_branch_rename`,
 `frankengit_branch_transaction`, `frankengit_source_publish`,
@@ -22,6 +23,55 @@ All writes require the exact launch-bound principal and repository incarnation.
 The operator explicitly sponsors the stdio client with repository-wide source
 write authority. This is NOT remote authentication or a path-scoped Intent Run
 broker. Do not forward the channel to an untrusted remote principal.
+
+## Sponsored agent publication
+
+A sponsored launch may also select `--allow-source-writes`. Its closed inventory
+contains only `frankengit_source_publish`, with an exact existing branch, base
+and single-parent candidate. The canonical credential must independently grant
+`source-publish` and carry its bounded ref and changed-path scope. The launch
+flag cannot supply or widen that authority. See
+[scoped source publication](AGENT_SCOPED_SOURCE_PUBLICATION.md) for the native
+grant and admission contract.
+
+```sh
+fg-mcp "$STORAGE" "$TENANT" "$REPOSITORY" \
+  --agent-token-file "$PRIVATE_TOKEN_FILE" --expected-incarnation "$INCARNATION" \
+  --allow-source-writes --allow-source --allow-outcomes
+```
+
+The three launch ceilings in this example remain independent. Publication needs
+only `--allow-source-writes` and the scoped `source-publish` credential. Add
+`--allow-source` with `source-candidates` to prepare and inspect an uploaded
+candidate; ordinary source reads need their own canonical grants. Add
+`--allow-outcomes` with `outcomes-read` for own-principal durable recovery.
+Existing metadata, source-read and candidate grants gain no publication power.
+A sponsored launch cannot supply `--principal`; identity and sponsorship come
+from its current canonical credential.
+
+The agent schema requires `expected_base` and does not advertise `initial`.
+Any presence of that field, including `false` or `null`, refuses before
+credential lookup. Initial history, branch creation/update/deletion/rename,
+multi-branch transactions, tags and `frankengit_source_publish_rebase` remain
+outside the sponsored profile. Candidate output is untrusted handoff data and
+never authorizes any of these operations.
+
+The adapter retains the original authenticated request, key and deadline while
+the native publisher verifies the complete candidate and current ref/path
+scope, then applies ordinary branch protections at the deciding authority
+basis. It does not substitute a trusted-local principal or grant Git receive.
+All changed paths, including removals, are subject to the native scope check.
+A refused canonical decision leaves refs unchanged and is returned as a
+terminal mutation refusal; an unknown outcome retains the original retry key.
+
+The source-publication receipt keeps the existing schema below. Its
+`principal_id` identifies the authenticated agent, but it does not synthesize
+an agent/sponsor witness from the current bearer. Query
+`frankengit_transaction_outcome` with the same key and independent outcome
+permission to retrieve the original canonical `principal_provenance`. That
+historical sponsorship remains the original credential's evidence after
+rotation, revocation and reopen. A successful same-key replay is a historical
+decision, not a fresh scope, ref-state or replacement-bundle attestation.
 
 ## Branch lifecycle
 

@@ -110,7 +110,7 @@ pub(super) fn revoke(node: &OneNode, id: AgentCredentialId, retry: &str) {
         AgentCredentialCommand {
             id,
             expected_version: ExpectedVersion::Exactly(fgit_forge::AggregateVersion::FIRST),
-            action: AgentCredentialAction::Revoke(original.grant),
+            action: AgentCredentialAction::revocation(original.grant, original.source_scope),
         },
         retry,
     );

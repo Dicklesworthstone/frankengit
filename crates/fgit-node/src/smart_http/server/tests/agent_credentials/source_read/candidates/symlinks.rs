@@ -115,12 +115,13 @@ fn sponsored_http_symlink_candidates_preserve_target_bytes_and_require_explicit_
             );
         }
         binary_status(
-            &exchange_upload(
+            &exchange_upload_with_key(
                 &fixture.selected,
                 &credential.bearer,
                 "apply",
                 &inspection(fixture.commit, candidate),
                 &bundle,
+                Some("symlink-candidate-cannot-publish"),
             ),
             403,
         );

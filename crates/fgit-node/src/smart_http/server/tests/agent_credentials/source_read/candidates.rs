@@ -4,6 +4,7 @@ use crate::smart_http::server::source;
 use fgit_identity::agent::SOURCE_CANDIDATES;
 use fgit_wire::smart_http::{BodyFraming, HttpLimits, HttpVersion, head};
 
+mod publication;
 mod symlinks;
 
 const RESPONSE_LIMIT: usize = 1024 * 1024;
@@ -106,6 +107,21 @@ fn raw_head(profile: &Profile, token: &str, action: &str, length: usize) -> Stri
     )
 }
 
+fn raw_head_with_key(
+    profile: &Profile,
+    token: &str,
+    action: &str,
+    length: usize,
+    key: Option<&str>,
+) -> String {
+    let mut head = raw_head(profile, token, action, length);
+    if let Some(key) = key {
+        head.truncate(head.len() - 2);
+        head.push_str(&format!("Idempotency-Key: {key}\r\n\r\n"));
+    }
+    head
+}
+
 fn exchange_upload(
     profile: &Profile,
     token: &str,
@@ -113,8 +129,19 @@ fn exchange_upload(
     command: &str,
     payload: &[u8],
 ) -> Vec<u8> {
+    exchange_upload_with_key(profile, token, action, command, payload, None)
+}
+
+fn exchange_upload_with_key(
+    profile: &Profile,
+    token: &str,
+    action: &str,
+    command: &str,
+    payload: &[u8],
+    key: Option<&str>,
+) -> Vec<u8> {
     let bytes = upload(action, command, payload);
-    let mut wire = raw_head(profile, token, action, bytes.len()).into_bytes();
+    let mut wire = raw_head_with_key(profile, token, action, bytes.len(), key).into_bytes();
     wire.extend_from_slice(&bytes);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let mut peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
@@ -317,12 +344,13 @@ fn sponsored_candidates_prepare_inspect_and_preserve_authority_in_both_formats()
             }
         }
         binary_status(
-            &exchange_upload(
+            &exchange_upload_with_key(
                 &fixture.selected,
                 &credential.bearer,
                 "apply",
                 &inspection(fixture.commit, candidate),
                 &bundle,
+                Some("candidate-cannot-publish"),
             ),
             403,
         );

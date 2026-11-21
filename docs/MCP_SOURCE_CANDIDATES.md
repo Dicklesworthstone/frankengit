@@ -29,10 +29,15 @@ scoped request cannot acquire a trusted-owner context. Revocation applies on the
 next call, including after restarting the MCP process.
 
 Returned `publication_arguments` are unsigned data for an independently
-authorized publisher. No source-publication, approval or merge tool is exposed
-to the sponsored profile. The work creates no durable agent execution run,
-process, network access or secret capability. The existing MCP artifact bounds
-below apply equally to both profiles.
+authorized publisher. A sponsored client may separately obtain the canonical
+`source-publish` grant with its bounded ref/path scope and the
+`--allow-source-writes` launch ceiling, then submit those arguments and an
+original retry key to `frankengit_source_publish`. See
+[MCP source publication](MCP_SOURCE_WRITES.md#sponsored-agent-publication).
+Candidate permission alone still grants no publication, approval or merge.
+The work creates no durable agent execution run, process, network access or
+secret capability. The existing MCP artifact bounds below apply equally to
+both profiles.
 
 ## Prepare a patch without publication
 

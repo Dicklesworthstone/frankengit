@@ -75,7 +75,10 @@ fn parse(args: &Object, format: GitHashAlgorithm) -> Result<Input, ToolError> {
 }
 
 pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
-    if !backend.options.writes.source {
+    if !backend.options.writes.source
+        || backend.options.agent_token_file.is_some()
+        || backend.agent.is_some()
+    {
         return Err(ToolError::invalid("tool_not_granted"));
     }
     let key = common::key(args)?;

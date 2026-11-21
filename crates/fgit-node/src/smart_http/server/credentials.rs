@@ -86,6 +86,7 @@ enum Scope {
     SourceRead,
     SourceHistoryRead,
     SourceCandidates,
+    SourcePublish,
     DefaultBranchWrite,
     SourceVerifiedRead,
     PullsDiffRead,
@@ -155,7 +156,8 @@ impl Grant {
         use fgit_identity::agent::{
             DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, MILESTONES_READ,
             MILESTONES_WRITE, OUTCOMES_READ, PULLS_DIFF_READ, PULLS_READ, PULLS_WRITE,
-            SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_READ, SOURCE_VERIFIED_READ,
+            SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ,
+            SOURCE_VERIFIED_READ,
         };
         let mut scopes = Scopes::default();
         let scope = match request.operation {
@@ -173,6 +175,7 @@ impl Grant {
             SOURCE_READ => Scope::SourceRead,
             SOURCE_HISTORY_READ => Scope::SourceHistoryRead,
             SOURCE_CANDIDATES => Scope::SourceCandidates,
+            SOURCE_PUBLISH => Scope::SourcePublish,
             SOURCE_VERIFIED_READ => Scope::SourceVerifiedRead,
             PULLS_DIFF_READ => Scope::PullsDiffRead,
             _ => unreachable!("node authenticated a closed operation"),
@@ -218,6 +221,11 @@ impl Grant {
     /// sponsored scope. They confer neither current-source APIs nor publication.
     pub const fn permits_source_candidates(&self) -> bool {
         self.scopes.contains(Scope::Read) || self.scopes.contains(Scope::SourceCandidates)
+    }
+    /// A sponsored publisher may only enter the exact candidate Apply route.
+    /// This does not confer receive-pack or other source writes.
+    pub const fn permits_source_publication(&self) -> bool {
+        self.scopes.contains(Scope::Receive) || self.scopes.contains(Scope::SourcePublish)
     }
     pub const fn permits_issues(&self, mutation: bool) -> bool {
         if mutation {
@@ -715,6 +723,46 @@ fn parse(bytes: &[u8], binding: Binding) -> Result<Vec<Entry>, CredentialFailure
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_publish_permission_never_grants_git_or_other_source_operations() {
+        let principal = PrincipalId::from_bytes([7; 16]);
+        let mut value = grant(principal, "receive").unwrap();
+        assert!(value.permits_source_publication());
+        value.scopes = Scopes(Scope::SourcePublish.mask());
+        assert!(value.permits_source_publication());
+        assert!(!value.permits(Service::UploadPack));
+        assert!(!value.permits(Service::ReceivePack));
+        assert!(!value.permits_source_read());
+        assert!(!value.permits_source_history_read());
+        assert!(!value.permits_source_verified_read());
+        assert!(!value.permits_source_candidates());
+        assert!(!value.permits_pull_diff_read());
+        assert!(!value.permits_reviewed_merge());
+        assert!(!value.permits_queue_landing());
+        assert!(!value.permits_outcomes());
+        for mutation in [false, true] {
+            assert!(!value.permits_issues(mutation));
+            assert!(!value.permits_pulls(mutation));
+            assert!(!value.permits_reviews(mutation));
+            assert!(!value.permits_protection(mutation));
+            assert!(!value.permits_queues(mutation));
+            assert!(!value.permits_discussions(mutation));
+        }
+        for scope in [
+            Scope::Read,
+            Scope::SourceRead,
+            Scope::SourceHistoryRead,
+            Scope::SourceCandidates,
+            Scope::SourceVerifiedRead,
+            Scope::PullsDiffRead,
+        ] {
+            value.scopes = Scopes(scope.mask());
+            assert!(!value.permits_source_publication());
+        }
+        // A file grant cannot synthesize canonical sponsorship and path scope.
+        assert!(Scope::parse("source-publish").is_err());
+    }
 
     #[test]
     fn source_read_permission_does_not_grant_git_or_metadata_services() {

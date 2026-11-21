@@ -1,6 +1,7 @@
 //! Repository source reads, ref lifecycle and exact candidate operations.
-//! Read grants never imply publication. Branch/tag mutation and bundle
-//! application require receive scope and the explicit Git-write switch.
+//! Read grants never imply publication. Branch/tag mutations require receive
+//! scope. Exact candidate Apply also accepts a live scoped sponsored proof;
+//! every source publication retains the explicit Git-write switch.
 
 mod archive;
 mod artifact;
@@ -138,14 +139,15 @@ impl<'a> Request<'a> {
             RequestKind::Initial(request) => request.is_mutation(),
         }
     }
-    /// Closed source-understanding profiles for sponsored credentials. Several
+    /// Closed source profiles for sponsored credentials. Several
     /// other nonmutating routes prepare candidate objects or disclose historical
     /// bundles; classifying every read as source access would widen this grant.
     /// The current-commit reader belongs to the same ref-selected source surface
     /// as tree/blob; it cannot traverse parents or select an arbitrary object.
     pub(super) fn agent_operation(&self) -> Option<u16> {
         use fgit_identity::agent::{
-            SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_READ, SOURCE_VERIFIED_READ,
+            SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ,
+            SOURCE_VERIFIED_READ,
         };
         match &self.0 {
             RequestKind::Read(_)
@@ -158,7 +160,11 @@ impl<'a> Request<'a> {
             RequestKind::History(_) | RequestKind::Historical(_) | RequestKind::Review(_) => {
                 Some(SOURCE_HISTORY_READ)
             }
-            RequestKind::Change(request) => (!request.is_mutation()).then_some(SOURCE_CANDIDATES),
+            RequestKind::Change(request) => Some(if request.is_mutation() {
+                SOURCE_PUBLISH
+            } else {
+                SOURCE_CANDIDATES
+            }),
             RequestKind::VerifiedBlob(_) => Some(SOURCE_VERIFIED_READ),
             RequestKind::Initial(_)
             | RequestKind::Replay(_)
@@ -180,6 +186,16 @@ impl<'a> Request<'a> {
     pub(super) fn candidate_upload_maximum(&self) -> Option<u64> {
         match &self.0 {
             RequestKind::Change(request) if !request.is_mutation() => {
+                Some(request.kind().maximum() as u64)
+            }
+            _ => None,
+        }
+    }
+    /// Only Apply enters scoped source publication. Initial commits, ref
+    /// administration, replay, rebase and raw Git intake remain separate.
+    pub(super) fn publication_upload_maximum(&self) -> Option<u64> {
+        match &self.0 {
+            RequestKind::Change(request) if request.is_mutation() => {
                 Some(request.kind().maximum() as u64)
             }
             _ => None,
@@ -285,7 +301,9 @@ pub(super) fn authenticate(
     if request.route().as_bytes() != profile.route {
         return Err(ApiError::not_found());
     }
-    let permitted = if request.is_mutation() {
+    let permitted = if request.publication_upload_maximum().is_some() {
+        profile.allow_receive() && grant.permits_source_publication()
+    } else if request.is_mutation() {
         profile.allow_receive() && grant.permits(Service::ReceivePack)
     } else if request.requires_history_read() {
         grant.permits_source_history_read()
@@ -323,6 +341,7 @@ pub(super) fn authenticate(
                     fgit_identity::agent::SOURCE_READ
                         | fgit_identity::agent::SOURCE_HISTORY_READ
                         | fgit_identity::agent::SOURCE_CANDIDATES
+                        | fgit_identity::agent::SOURCE_PUBLISH
                         | fgit_identity::agent::SOURCE_VERIFIED_READ
                 )
             ) {
@@ -559,6 +578,7 @@ pub(super) fn execute(
                 reader,
                 http,
                 maximum_response,
+                admission_deadline,
             );
         }
         RequestKind::Read(request) => request,

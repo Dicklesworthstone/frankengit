@@ -15,6 +15,7 @@ mod pull_diff;
 mod pull_labels;
 mod pull_reopen;
 mod source;
+mod source_publication;
 mod support;
 mod verified_blob;
 
@@ -36,7 +37,7 @@ fn sponsored_profile_lists_only_exact_tools_even_with_operator_flags_planted() {
     options.writes.merges = true;
     options.principal = Some(SPONSOR);
     let tools = super::super::tools_for_options(&options);
-    assert_eq!(tools.len(), 64);
+    assert_eq!(tools.len(), 65);
     assert!(
         tools
             .iter()
@@ -45,6 +46,15 @@ fn sponsored_profile_lists_only_exact_tools_even_with_operator_flags_planted() {
     for tool in &tools {
         assert!(operation(&options, tool.name).is_some());
     }
+    assert_eq!(
+        operation(&options, "frankengit_source_publish"),
+        Some(SOURCE_PUBLISH)
+    );
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool.name == "frankengit_source_publish")
+    );
     assert!(NodeTools::open(options.clone()).is_err());
     let mut backend = NodeTools::open(fixture.options.clone()).unwrap();
     backend.options = options;
@@ -52,7 +62,6 @@ fn sponsored_profile_lists_only_exact_tools_even_with_operator_flags_planted() {
         "frankengit_notifications",
         "frankengit_pull_checks",
         "frankengit_pull_reviews",
-        "frankengit_source_publish",
         "frankengit_branch_transaction",
         "frankengit_branch_create",
         "frankengit_protection_show",

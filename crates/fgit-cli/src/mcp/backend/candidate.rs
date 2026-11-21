@@ -57,7 +57,7 @@ pub(super) fn tool() -> Tool {
 pub(super) fn agent_tool() -> Tool {
     Tool {
         name: NAME,
-        description: "Prepare a regular-file exact patch against a visible current branch (prepare_patch, exact-tree-v1), explicitly select exact-tree-binary-v1 for edited binary renames or exact-symlink-v1 for inert Git symlink bytes, or inspect an uploaded single-parent candidate (inspect). Requires the independent canonical source-candidates scope and the source launch ceiling. Work retains the original agent request, deadline and bounded transport reservation. Link targets are never followed. Read-only: no object import, checkout, shell, approval or publication. Returned publication arguments are unsigned handoff data; this agent profile has no source-publication tool.",
+        description: "Prepare a regular-file exact patch against a visible current branch (prepare_patch, exact-tree-v1), explicitly select exact-tree-binary-v1 for edited binary renames or exact-symlink-v1 for inert Git symlink bytes, or inspect an uploaded single-parent candidate (inspect). Requires the independent canonical source-candidates scope and the source launch ceiling. Work retains the original agent request, deadline and bounded transport reservation. Link targets are never followed. Read-only: no object import, checkout, shell, approval or publication. Returned publication arguments are unsigned handoff data; publication separately requires the canonical source-publish grant, its ref/path scope and the source-write launch ceiling.",
         schema: object([
             ("type", text("object")),
             (

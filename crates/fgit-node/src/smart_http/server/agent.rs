@@ -8,7 +8,7 @@ use crate::{GitDaemonSessionDeadline, GitDaemonSessionTimeout, GitDaemonSessionW
 use fgit_authority::IdempotencyKey;
 use fgit_identity::agent::{
     DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_WRITE, MILESTONES_WRITE, OUTCOMES_READ,
-    PULLS_WRITE, SOURCE_CANDIDATES,
+    PULLS_WRITE, SOURCE_CANDIDATES, SOURCE_PUBLISH,
 };
 use fgit_wire::smart_http::head::Envelope;
 use std::time::Duration;
@@ -34,7 +34,7 @@ fn operation(envelope: &Envelope<'_>) -> Result<u16, Status> {
             .agent_operation()
             .ok_or(Status::Forbidden);
     }
-    // Only single metadata-transaction recovery. Receive/session recovery and
+    // Only exact-principal single-transaction recovery. Receive/session recovery and
     // Git, review, workflow, merge and administration routes stay closed.
     if envelope.method == "POST" && envelope.target.ends_with("/api/v1/outcomes") {
         return Ok(OUTCOMES_READ);
@@ -61,8 +61,9 @@ pub(super) fn authenticate(
         return Err(Status::Unauthorized);
     }
     let operation = operation(envelope)?;
-    let mutation =
-        operation & (ISSUES_WRITE | PULLS_WRITE | DISCUSSIONS_WRITE | MILESTONES_WRITE) != 0;
+    let mutation = operation
+        & (ISSUES_WRITE | PULLS_WRITE | DISCUSSIONS_WRITE | MILESTONES_WRITE | SOURCE_PUBLISH)
+        != 0;
     let retry = retry_key(raw_head).map_err(|_| Status::BadRequest)?;
     let key = if mutation || operation == OUTCOMES_READ {
         retry.ok_or(Status::BadRequest)?
@@ -72,15 +73,18 @@ pub(super) fn authenticate(
     let key = IdempotencyKey::new(key.to_vec()).map_err(|_| Status::BadRequest)?;
     let mut selected = profile.clone();
     // These are the actual parser/response envelopes reserved by IntentRun.
-    let maximum_body = if operation == SOURCE_CANDIDATES {
-        source::Request::parse(envelope)
-            .map_err(|error| error.status)?
-            .candidate_upload_maximum()
-            .ok_or(Status::Forbidden)?
+    let maximum_body = if operation == SOURCE_CANDIDATES || operation == SOURCE_PUBLISH {
+        let request = source::Request::parse(envelope).map_err(|error| error.status)?;
+        if operation == SOURCE_PUBLISH {
+            request.publication_upload_maximum()
+        } else {
+            request.candidate_upload_maximum()
+        }
+        .ok_or(Status::Forbidden)?
     } else {
         issues::MAX_FORM_BYTES as u64
     };
-    // Candidate uploads may exceed the metadata form ceiling, but the whole
+    // Source uploads may exceed the metadata form ceiling, but the whole
     // wire request (headers and chunk framing included) still fits the original
     // finite sponsored reservation and the operator's configured HTTP limits.
     let maximum_wire = MAX_REQUEST_BYTES
@@ -286,11 +290,11 @@ mod tests {
     }
 
     #[test]
-    fn sponsored_candidates_admit_only_explicit_multipart_prepare_and_inspect() {
+    fn sponsored_source_changes_select_only_their_exact_multipart_operation() {
         for (action, expected) in [
             ("prepare", Some(SOURCE_CANDIDATES)),
             ("inspect", Some(SOURCE_CANDIDATES)),
-            ("apply", None),
+            ("apply", Some(SOURCE_PUBLISH)),
             ("initial", None),
             ("rebase/prepare", None),
             ("rebase/inspect", None),

@@ -167,11 +167,10 @@ impl Options {
                 || self.artifacts
                 || self.artifact_root.is_some()
                 || self.writes.notifications
-                || self.writes.source
                 || self.writes.reviews
                 || self.writes.merges
             {
-                return Err("agent MCP permits only independent current-source, agent-context, issue, discussion, pull metadata and outcome grants".into());
+                return Err("agent MCP permits only independent current-source, scoped source-publication, agent-context, issue, discussion, pull metadata and outcome grants".into());
             }
             return Ok(());
         }

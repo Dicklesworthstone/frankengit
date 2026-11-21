@@ -26,7 +26,7 @@ header and token hashes. Scopes are independent:
 | Operation | Required grant | Deployment switches |
 |---|---|---|
 | Source browse/search, patch preparation, candidate inspection | `read` | `--allow-source` |
-| Apply an exact source candidate | `receive` | `--allow-source` AND `--allow-receive` |
+| Apply an exact source candidate | Operator `receive`, or scoped sponsored `source-publish` | `--allow-source` AND `--allow-receive` |
 | Recover the original transaction outcome | `outcomes-read` | `--allow-outcomes` |
 
 Canonical [sponsored agent credentials](SPONSORED_AGENT_CREDENTIALS.md) may prepare
@@ -36,9 +36,25 @@ uses the same multipart command, exact expected commit, patch profiles and
 response artifacts documented below. Candidate work retains the original
 bounded request and produces no staged objects or transaction. Its total wire
 input and output each remain within 64 MiB, including framing and the operator's
-possibly smaller limits. Sponsored candidates cannot use `apply`, ref writes,
-PR source publication, review or merge; publication requires a separately
-authorized caller through the existing admission path.
+possibly smaller limits. Candidate permission grants no publication authority.
+
+A separately issued `source-publish` agent grant may apply a supplied
+single-parent candidate to its exact allowed existing branch. Its immutable
+publication scope must authorize every native changed path, including deleted
+paths and both sides of renames; a path prefix ends at a repository path
+component boundary. It uses the same multipart form, original Idempotency-Key,
+quarantine and atomic admission as an operator publication. Both
+`--allow-source` and `--allow-receive` remain required. The original credential
+request owns the actual input/output reservation, deadline, agent identity and
+key throughout parsing and native publication. A session receipt alone cannot
+authorize this operation, and a new phase cannot renew its deadline.
+
+This scoped grant does not authorize initial commits, raw Git receive, ref
+creation or deletion, replay, rebase, PR publication, review, merge, or source
+disclosure. Preparation and inspection still require `source-candidates`.
+Current canonical publication scope and branch protection are checked at the
+exact admission basis. See [scoped source publication](AGENT_SCOPED_SOURCE_PUBLICATION.md)
+for issuance and the native proof boundary.
 
 A read token cannot publish. A receive-only token can publish an independently
 supplied bundle but cannot use source inspection or preparation to read code.
@@ -185,8 +201,10 @@ POST {REPO_URL}/api/v1/source/apply
 Idempotency-Key: <client-selected-original-key>
 ```
 
-Use the same four candidate fields and multipart bundle, now under a
-receive-scoped credential and the independent receive deployment switch:
+Use the same four candidate fields and multipart bundle under an operator
+receive-scoped credential or a sponsored source-publish credential with an
+explicit immutable ref/path scope. Both source and receive deployment switches
+are required:
 
 ```sh
 curl --fail-with-body --header @/secure/source-writer.headers \
@@ -196,8 +214,10 @@ curl --fail-with-body --header @/secure/source-writer.headers \
   "$REPO_URL/api/v1/source/apply"
 ```
 
-This calls OneNode::apply_workspace_bundle_durable_in. New work enters production
-quarantine, verifies the single-parent candidate, and uses existing sealed,
+Operator publication uses the native workspace publisher. Sponsored publication
+uses OneNode::apply_agent_workspace_bundle_in with the original live request
+proof, including its original retry key. New work enters production quarantine,
+verifies the single-parent candidate, and uses existing sealed,
 atomic single-ref admission with the original expected-old assertion and native
 push policy. The adapter never substitutes the latest branch tip. Concurrent
 edits based on the same old commit cannot both replace that ref successfully.
@@ -217,6 +237,11 @@ recovered terminal receipt authenticates the sealed ref operation, NOT the
 integrity or provenance of a newly substituted transport encoding. Use inspect
 for independent byte verification and outcome lookup for recovery alone.
 
+Before native publication entry, a missing/mismatched live proof or original key
+is refused. A complete multipart body exceeding the original sponsored input
+reservation returns HTTP 413. Expired request custody cannot be renewed by
+creating a new parsing or publication phase.
+
 After native publication entry, infrastructure/cancellation failure remains
 outcome_unknown rather than proof of rollback. Staged candidate objects on a
 failed or refused attempt are not canonical ref publication. Once a final HTTP
@@ -235,7 +260,12 @@ curl --fail-with-body --request POST --header @/secure/recovery.headers \
 ```
 
 The original principal may receive a rotated outcomes-read-only credential
-after its receive permission is revoked. Lookup does not resubmit the operation.
+after its receive or scoped source-publication permission is revoked. Lookup
+does not resubmit the operation. The source_publication receipt keeps its
+existing schema; this canonical lookup returns the recorded original
+agent/sponsor/credential witness as principal_provenance. Credential rotation,
+a narrower replacement grant or a retry must not replace that witness with
+the current request's identity evidence.
 Another principal using the same textual key remains in its own namespace.
 Missing or undecided evidence does not certify rollback. See
 [HTTP_OUTCOME_API.md](HTTP_OUTCOME_API.md).
@@ -262,6 +292,7 @@ Focused checks:
 
 ```sh
 cargo test -p fgit-node --lib smart_http::server::source
+cargo test -p fgit-node --lib smart_http::server::tests::agent_credentials::source_read::candidates
 cargo test -p fgit-node --lib smart_http::server::pulls::collaboration::source_upload
 cargo test -p fgit-node --test source_change_http --test source_http \
   --test outcome_http --test smart_http_server
@@ -270,6 +301,10 @@ cargo test -p fgit-node --test source_change_http --test source_http \
 The new tests exercise real TCP handlers, imported native objects, embedded
 authority, restart, competing edits, exact retries, lost-response recovery,
 permission separation, malformed input and preservation of untouched bytes.
-Test presence is not evidence that these tests ran at this revision. Remote
+Sponsored publication cases additionally cover both Git hash domains, exact
+ref/path ceilings, both service switches, original key/proof/reservation custody,
+request expiry, large real bundles, credential rotation and immutable canonical
+provenance on terminal recovery. Test presence is not evidence that these tests
+ran at this revision. Remote
 workspace sessions, initial repository creation, direct binary editing, richer
 patch formats, browser UI, and production acceptance are not completed here.

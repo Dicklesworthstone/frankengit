@@ -243,8 +243,25 @@ fn candidate_scope_is_independent_of_old_masks_reads_writes_and_publication() {
             "{name}"
         );
     }
+    let mut publication = prepared.object().unwrap()["publication_arguments"]
+        .object()
+        .unwrap()
+        .clone();
+    publication.insert("idempotency_key".into(), text("candidate-cannot-publish"));
+    assert!(
+        backend
+            .tools()
+            .iter()
+            .any(|tool| tool.name == "frankengit_source_publish")
+    );
+    assert_eq!(
+        backend
+            .call("frankengit_source_publish", &publication)
+            .unwrap_err()
+            .code,
+        "agent_operation_not_granted"
+    );
     for name in [
-        "frankengit_source_publish",
         "frankengit_branch_transaction",
         "frankengit_pull_review",
         "frankengit_pull_merge",

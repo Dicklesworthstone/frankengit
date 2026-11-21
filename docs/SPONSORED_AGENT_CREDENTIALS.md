@@ -4,8 +4,9 @@ This profile gives an agent its own repository-scoped principal and records its
 human or service sponsor in canonical admission evidence. It supports the native
 HTTP current-source browsing and context, separately granted source history and
 reference comparison, separately granted complete blob proofs and exact pull-request
-code comparisons, separately granted ephemeral source candidates, issue, pull-request metadata and
-conversation, standalone discussion, independently granted milestone planning,
+code comparisons, separately granted ephemeral source candidates and scoped
+single-parent source publication, issue and pull-request metadata and conversation,
+standalone discussion, independently granted milestone planning,
 and single-transaction outcome endpoints,
 plus the explicit MCP source and metadata profile. Each request creates a real bounded
 `IntentRun`; the bearer alone is not an execution or publication capability.
@@ -94,6 +95,7 @@ observation schema. This grants no agent source-import capability.
 | `source-read` | Bounded current source, reference listing, tag inspection, search, context and agent-context reads |
 | `source-history-read` | Bounded visible-ref commit history, blame, historical trees/files and reference diffs |
 | `source-candidates` | HTTP exact-patch preparation and single-parent bundle inspection; MCP regular-file `prepare_patch`, explicit `exact-tree-binary-v1` edited binary renames, `exact-symlink-v1` inert symlink edits, and single-parent `inspect`, against an explicit current branch |
+| `source-publish` | Apply one reviewed single-parent source bundle to an existing branch within an explicitly issued native ref/path ceiling |
 | `milestones-read` | Native milestone listing, exact lifecycle history and same-snapshot open/closed issue counts |
 | `milestones-write` | Open, edit, close and reopen native milestones at explicit versions |
 | `source-verified-read` | Complete visible-ref blob proofs at an independently supplied authority head, including original tree witnesses |
@@ -119,7 +121,7 @@ ordinary token's broader `read` scope as agent permission. Source selection and
 disclosure retain the existing canonical hidden-ref and visibility checks.
 
 Git upload-pack/receive-pack, general bundle export/import,
-candidate application, initial-commit/replay/rebase preparation,
+initial-commit/replay/rebase preparation,
 reviews, checks, merges, queue operations, notifications, policy
 administration, workflow and artifact access, process execution, secrets and
 external effects are outside this profile. MCP offers the closed sponsored
@@ -294,9 +296,10 @@ sponsored output ceiling including framing. Limits can only narrow; a new phase
 cannot refresh the request lifetime. Preparation and inspection reject transaction
 keys and leave canonical authority unchanged, including on refusals.
 
-`apply`, ref mutation, PR source publication, review, checks, merge and queue
-landing remain unavailable. A sponsor or independently authorized operator must
-review and publish the returned artifact through ordinary admission. MCP exposes
+Candidate authority alone cannot apply a bundle. Publishing a reviewed
+single-parent artifact requires the separate `source-publish` grant and explicit
+publication launch ceilings described below. General ref mutation, PR source
+publication, review, checks, merge and queue landing remain unavailable. MCP exposes
 the same request-borrowed capability through `frankengit_source_candidate`, with
 regular-file `prepare_patch` (`exact-tree-v1`), explicit
 `exact-tree-binary-v1` edited binary renames, explicit `exact-symlink-v1` Git
@@ -325,6 +328,76 @@ transport framing and output remain independently accounted. See
 [MCP source candidates](MCP_SOURCE_CANDIDATES.md) for exact fields and handoff.
 These capabilities do not create a durable agent run or grant process, network,
 secret or external-integration access.
+
+### Independently grant scoped source publication
+
+A sponsored agent can publish one reviewed single-parent candidate to an
+existing branch through the native, HTTP and MCP source publishers. Issuance
+requires the independent `source-publish` operation and an explicit immutable ceiling
+for both target refs and actual changed paths. The ordinary policy and branch
+protection checks still decide the transition.
+
+For example, grant existing branches beneath `refs/heads/agent/` and changes
+beneath `src`. The ref selector is the hex encoding of that slash-terminated
+namespace; the path is the hex encoding of native path bytes:
+
+```sh
+fg agent-credential issue ./repository TENANT_ID REPOSITORY_ID \
+  --trusted-local --incarnation INCARNATION_ID \
+  --principal SPONSOR_ID --agent AGENT_ID --sponsor-kind human \
+  --token-file ./agent.token --issued-at ISSUED_UNIX_SECONDS \
+  --expires-at EXPIRES_UNIX_SECONDS \
+  --operations source-publish,outcomes-read \
+  --source-ref-scope prefix:726566732f68656164732f6167656e742f \
+  --source-path-hex 737263 \
+  --idempotency-key issue-scoped-publisher-1
+```
+
+Ref selectors may instead use `exact:<lowercase-native-ref-hex>`, or a finite
+comma-separated set of exact and prefix selectors. Repeat `--source-path-hex`
+for additional native path prefixes. A prefix `src` permits `src` and `src/*`,
+while `src-other` remains outside it. The single empty argument
+`--source-path-hex ''` explicitly selects the whole tree. The sponsor must
+issue a new credential to change any immutable ceiling.
+
+| Entry point | Required host ceiling | Request |
+| --- | --- | --- |
+| HTTP `POST /api/v1/source/apply` | `--allow-source` and `--allow-receive` | Existing multipart command and bundle, exact ref/base/candidate, original `Idempotency-Key` |
+| MCP `frankengit_source_publish` | `--allow-source-writes` | Exact reference, `expected_base`, `expected_candidate`, bounded `bundle_hex_chunks` and original `idempotency_key` |
+| Native `OneNode::apply_agent_workspace_bundle_in` | Verified borrowed `SourcePublicationRequest` | The same exact single-parent update under its original request context |
+
+This grant does not require `source-read` or `source-candidates` when the
+agent already holds a reviewed bundle. Those operations remain independently
+granted. HTTP retains its bounded multipart and whole-request reservation;
+MCP retains at most 24 KiB of decoded bundle bytes in three chunks. Each
+transport checks the complete request and response envelopes.
+
+The native publisher validates quarantined Git objects, the candidate's one
+parent, and the full old-tree/new-tree delta. Scope checks cover additions,
+deletions, mode changes, both sides of renames, directory replacement and
+gitlinks. Client path summaries and commit author fields cannot authorize the
+change. At each candidate authority-head basis, admission reloads the current
+canonical grant, checks revocation and exact ref/path scope, and applies normal
+repository protection using the real agent and sponsor facts. A stale
+expected base remains a canonical admission condition.
+
+The original credential witness, retry key, input reservation, context and
+monotonic deadline survive the publication phases. Expiry cancels and drains the
+same pending operation; it does not discard an in-flight result or prove that
+a transaction failed. An identical terminal retry preserves the original
+decision and authentication witness. A newly authorized credential for the same
+agent can recover that result after rotation. Publication receipts retain their
+existing schema; the independent HTTP or MCP outcome lookup exposes canonical
+`principal_provenance` and `provenance_error`, including the original agent,
+sponsor, credential and run witness. Missing optional evidence preserves an
+already known terminal outcome. Changed semantics under the same key fail closed.
+
+The first publication profile requires an existing branch and a single-parent
+candidate. Initial history, branch creation/deletion, raw Git receive, multi-commit
+rebase publication, review and merge remain outside this grant. Sponsored MCP
+discovery omits the `initial` argument, and dispatch rejects unsupported
+publication shapes before credential lookup. Preparing a candidate or presenting
+a public principal receipt cannot construct native publication authority.
 
 ## Use the credential with MCP
 
@@ -399,6 +472,7 @@ fg mcp ./repository TENANT_ID REPOSITORY_ID \
 | `--allow-source` | `source-read` | `frankengit_source_tree`, `frankengit_source_blob`, `frankengit_source_search`, `frankengit_source_search_batch`, `frankengit_source_search_index`, `frankengit_source_symbols`, `frankengit_ref_list`, `frankengit_source_initial`, `frankengit_source_context` |
 | `--allow-source` | `source-history-read` | `frankengit_source_log`, `frankengit_source_blame`, `frankengit_source_historical_tree`, `frankengit_source_historical_blob`, `frankengit_source_compare` |
 | `--allow-source` | `source-candidates` | `frankengit_source_candidate`, limited to regular-file `prepare_patch` (including explicit `exact-tree-binary-v1`) and single-parent `inspect` |
+| `--allow-source-writes` | `source-publish` | `frankengit_source_publish`, restricted to an existing branch and a single-parent candidate |
 | `--allow-agent-context` | `source-read` | `frankengit_agent_context` |
 | `--allow-source` | `source-verified-read` | `frankengit_source_verified_blob` |
 | `--allow-source` and `--allow-pulls` | `pulls-diff-read` | `frankengit_pull_diff` |
@@ -521,7 +595,9 @@ permits only `ReadCanonicalObject`. A `source-read` request permits exactly
 read native source and its authenticated search generations.
 Those read requests grant no write, process or publication class. A
 `source-candidates` request permits `ReadCanonicalObject`, `TreeFsWorkspace` and
-`CreateCandidateObject`, with no publication, process or review class.
+`CreateCandidateObject`, with no publication, process or review class. A
+`source-publish` request permits `PublishRefTransaction` for the closed native
+publisher; its explicit ref/path ceiling is revalidated at each deciding basis.
 Every request lasts at most
 300 seconds and never past the grant's expiry. The response writer measures
 emitted bytes; source work and metadata publication retain the original
@@ -599,6 +675,21 @@ execution remain separate work. The request-run commitment is provenance, not a
 durable execution journal.
 
 ## Validation status and focused commands
+
+The discovered `scripts/e2e/suites/agent/source_publication.sh` campaign drives a
+prebuilt `FG_BIN` through real credential issuance, HTTP publication, MCP replay
+and publication, and rotated-credential recovery. Run it with:
+
+```sh
+FG_BIN=/absolute/path/to/fg bash scripts/e2e/suites/agent/source_publication.sh
+```
+
+Scoped source-publication regressions exercise native admission, real HTTP and
+persisted MCP in both Git hash formats. They cover scoped success, path/ref and
+operation refusal, current revocation, original-key recovery and retained
+sponsor evidence, plus original-context cancellation and expiry. These are test
+definitions; execution at the candidate revision is required before claiming a
+passing native gate.
 
 The independent proof/PR-diff scopes add codec and CLI parsing checks and real
 persisted MCP and HTTP cases. Proof tests independently decode and verify native

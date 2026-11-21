@@ -128,15 +128,17 @@ fn sponsored_binary_refactor_retains_authenticated_request_and_inspectable_hando
         // publisher or let the new profile disclose ordinary source reads.
         backend.options.writes.source = true;
         backend.options.principal = Some(SPONSOR);
+        let mut publication = result["publication_arguments"].object().unwrap().clone();
+        publication.insert(
+            "idempotency_key".into(),
+            text("binary-candidate-cannot-publish"),
+        );
         assert_eq!(
             backend
-                .call(
-                    "frankengit_source_publish",
-                    result["publication_arguments"].object().unwrap()
-                )
+                .call("frankengit_source_publish", &publication)
                 .unwrap_err()
                 .code,
-            "tool_not_granted"
+            "agent_operation_not_granted"
         );
         assert_eq!(
             backend

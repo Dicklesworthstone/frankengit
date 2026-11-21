@@ -274,8 +274,12 @@ pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
         tools.push(pull_labels::write_tool());
     }
     if options.writes.source {
-        tools.extend(source_writes::tools());
-        tools.extend(tags::write_tools());
+        if options.agent_token_file.is_some() {
+            tools.push(source_writes::agent_tool());
+        } else {
+            tools.extend(source_writes::tools());
+            tools.extend(tags::write_tools());
+        }
     }
     if options.writes.reviews {
         tools.extend(review_writes::tools());
