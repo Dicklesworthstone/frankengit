@@ -54,15 +54,20 @@ impl<'a> Request<'a> {
         let Some((number, action)) = suffix.split_once('/') else {
             return Ok(None);
         };
-        if !matches!(action, "prepare" | "resolve" | "prepare-rebase")
-            && !action.starts_with("prepare/")
+        if !matches!(
+            action,
+            "prepare" | "resolve" | "prepare-rebase" | "resolve-rebase"
+        ) && !action.starts_with("prepare/")
             && !action.starts_with("resolve/")
             && !action.starts_with("prepare-rebase/")
+            && !action.starts_with("resolve-rebase/")
         {
             return Ok(None);
         }
-        if !matches!(action, "prepare" | "resolve" | "prepare-rebase")
-            || repository_route.len() < 2
+        if !matches!(
+            action,
+            "prepare" | "resolve" | "prepare-rebase" | "resolve-rebase"
+        ) || repository_route.len() < 2
             || !repository_route.starts_with('/')
             || repository_route[1..].split('/').any(|part| {
                 part.is_empty()
@@ -83,7 +88,7 @@ impl<'a> Request<'a> {
         if head.git_protocol.is_some() {
             return Err(ApiError::bad("git_protocol_not_applicable"));
         }
-        let resolution = action == "resolve";
+        let resolution = matches!(action, "resolve" | "resolve-rebase");
         let content = head.content_type.ok_or_else(ApiError::media)?;
         let boundary = if content.eq_ignore_ascii_case("application/x-www-form-urlencoded")
             || content.eq_ignore_ascii_case("application/x-www-form-urlencoded; charset=utf-8")
@@ -108,7 +113,7 @@ impl<'a> Request<'a> {
             repository_route,
             number,
             resolution,
-            rebase: action == "prepare-rebase",
+            rebase: matches!(action, "prepare-rebase" | "resolve-rebase"),
             boundary,
         }))
     }
@@ -149,7 +154,7 @@ impl<'a> Request<'a> {
         mut files: FileParts<'_>,
         format: GitHashAlgorithm,
     ) -> Result<ResolutionCommand, ApiError> {
-        if !self.resolution {
+        if !self.resolution || self.rebase {
             return Err(ApiError::bad("not_a_resolution_request"));
         }
         let (mut fields, descriptors) = self.fields(bytes)?;

@@ -12,6 +12,7 @@ mod indexed;
 mod initial;
 mod output;
 mod rebase;
+pub(super) use rebase::{append_rebase_resolution_receipts, decode_rebase_resolution_recipes};
 mod refs;
 mod regex;
 mod replay;

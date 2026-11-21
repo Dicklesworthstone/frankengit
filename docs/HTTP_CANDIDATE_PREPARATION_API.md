@@ -36,6 +36,9 @@ candidate objects.
 Both original and rewritten series are bounded to 256 single-parent commits;
 the existing native object, tree, byte, output and request budgets also apply.
 There is no conflict-resolution or alternate-method fallback on this PR route.
+Explicit original-commit recipes use the separate
+[`resolve-rebase`](HTTP_PULL_REBASE_RESOLUTION_API.md) route, pinned to the
+stopped preparation's authority head and exact PR subject.
 Use [`inspect-rebase`](HTTP_CANDIDATE_INSPECTION_API.md#inspect-a-complete-rebase-series)
 to inspect every actual rewritten commit, then submit `method=rebase` through
 the existing [review and merge endpoints](HTTP_REVIEW_MERGE_API.md).

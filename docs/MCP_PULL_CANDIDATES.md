@@ -87,13 +87,23 @@ both carry `method: "rebase"`; `inspection_arguments` selects
 a retry key or reviewer identity. Conflicts or a newly empty change under
 `empty: "stop"` return the exact stopped commit with `complete: false` and no
 partial bundle, review arguments, or publication arguments. This PR profile
-does not accept automatic conflict-resolution recipes or merge commits.
+does not accept merge commits. To resolve a stopped series explicitly, use
+`resolve_pull_rebase` with the same exact inputs, the stopped response's
+`snapshot_token` as required `expected_head`, and original-commit-bound
+`resolutions`. The [resolution guide](MCP_PULL_RESOLUTION.md#rebase-conflict-resolution)
+specifies the bounded choices and per-step receipts. Preparation never guesses
+a resolution or changes the selected empty policy.
 
 `max_commits` (256), `max_edges` (16,384), `max_tree_entries` (100,000), and
 `max_preparation_bytes` (256 KiB default, 1 MiB maximum) narrow the preparation
 envelope. The 24 KiB complete bundle envelope remains unchanged. The full
 rebase tool result is bounded to 1 MiB. Preparation never stages objects or
 creates a transaction, including on interruption or resource refusal.
+Resolution uses the same envelope. All paths and replacement bytes across all
+recipes additionally share one 24 KiB allowance, with at most 64 total paths.
+Both preparation and resolution return separate `inspect_pull_rebase` arguments;
+neither claims inspection or approval has occurred. Sponsored agent credentials
+cannot invoke either PR rebase operation.
 
 ## Separate inspection, review and publication
 

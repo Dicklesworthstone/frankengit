@@ -19,6 +19,177 @@ fn preparation(f: &Fixture) -> Object {
     args
 }
 
+fn resolution(f: &Fixture, choice: Value) -> Object {
+    let mut args = preparation(f);
+    args.insert("operation".into(), text(REBASE_RESOLVE));
+    args.insert(
+        "resolutions".into(),
+        Value::Array(vec![object([
+            ("original", text(raw_oid(f.subject.source_tip))),
+            ("paths", Value::Array(vec![choice])),
+        ])]),
+    );
+    args
+}
+
+#[test]
+fn conflicted_pr_rebase_resolves_at_the_original_snapshot_then_inspects_reviews_and_merges() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut f = Fixture::new(format, true);
+        let before = f.head();
+        let stopped = f.protocol_call(NAME, preparation(&f));
+        let stopped = content(&stopped);
+        assert_eq!(stopped["state"].text(), Some("conflicted"));
+        assert_eq!(stopped["candidate_arguments"], Value::Null);
+        assert_eq!(
+            stopped["stopped_commit"].text(),
+            Some(raw_oid(f.subject.source_tip).as_str())
+        );
+
+        let ours = resolution(
+            &f,
+            object([("path_hex", text(hex(b"README"))), ("choice", text("ours"))]),
+        );
+        let empty = f.protocol_call(NAME, ours);
+        let empty = content(&empty);
+        assert_eq!(empty["state"].text(), Some("became_empty"));
+        assert_eq!(empty["resolution_consumed_commits"].text(), Some("1"));
+        for field in [
+            "candidate_arguments",
+            "inspection_arguments",
+            "publication_arguments",
+        ] {
+            assert_eq!(empty[field], Value::Null);
+        }
+        let args = resolution(
+            &f,
+            object([
+                ("path_hex", text(hex(b"README"))),
+                ("choice", text("file")),
+                ("mode", text("100644")),
+                (
+                    "bytes_hex_chunks",
+                    Value::Array(vec![text(hex(b"resolved by the reviewer\n"))]),
+                ),
+            ]),
+        );
+        let mut stale = args.clone();
+        stale.insert("expected_head".into(), text(head_token(f.genesis)));
+        assert!(f.call(NAME, &stale).is_err());
+        let mut extra = args.clone();
+        let Value::Array(recipes) = extra.get_mut("resolutions").unwrap() else {
+            panic!()
+        };
+        let Value::Object(recipe) = &mut recipes[0] else {
+            panic!()
+        };
+        recipe.insert("original".into(), text(raw_oid(f.base)));
+        assert!(f.call(NAME, &extra).is_err());
+
+        let response = f.protocol_call(NAME, args.clone());
+        let prepared = content(&response);
+        assert_eq!(prepared["operation"].text(), Some(REBASE_RESOLVE));
+        assert_eq!(prepared["state"].text(), Some("clean"));
+        assert_eq!(
+            prepared["resolution_profile"].text(),
+            Some("original-commit-path-v1")
+        );
+        assert_eq!(prepared["resolution_input_commits"].text(), Some("1"));
+        assert_eq!(prepared["resolution_consumed_commits"].text(), Some("1"));
+        assert_eq!(prepared["objects_staged"], Value::Bool(false));
+        assert_eq!(prepared["inspection_performed"], Value::Bool(false));
+        assert_eq!(prepared["publication_authorized"], Value::Bool(false));
+        let Value::Array(decisions) = &prepared["resolutions"] else {
+            panic!()
+        };
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(
+            decisions[0].object().unwrap()["original"].text(),
+            Some(raw_oid(f.subject.source_tip).as_str())
+        );
+        let candidate_arguments = prepared["candidate_arguments"].object().unwrap().clone();
+        let (_, candidate) = reviews::subject(&candidate_arguments, format).unwrap();
+        assert_eq!(candidate.merge_base, f.base);
+        assert!(f.backend().node.read_git_object(candidate.commit).is_err());
+        let inspection = prepared["inspection_arguments"].object().unwrap().clone();
+        let inspected = f.protocol_call(NAME, inspection);
+        let inspected = content(&inspected);
+        assert_eq!(inspected["complete"], Value::Bool(true));
+        assert_eq!(
+            inspected["candidate_arguments"],
+            prepared["candidate_arguments"]
+        );
+        assert_eq!(f.call(NAME, &args).unwrap().object().unwrap(), prepared);
+        assert_eq!(f.head(), before);
+        f.reopen(f.options());
+        assert_eq!(f.call(NAME, &args).unwrap().object().unwrap(), prepared);
+        assert_eq!(f.head(), before);
+
+        for (source, pulls) in [(true, false), (false, true)] {
+            let mut options = f.options();
+            options.source = source;
+            options.pulls = pulls;
+            f.reopen(options);
+            let hostile = fields([("operation", text(REBASE_RESOLVE))]);
+            assert_eq!(f.call(NAME, &hostile).unwrap_err().code, "tool_not_granted");
+            assert_eq!(f.head(), before);
+        }
+        let mut reviewer = f.options();
+        reviewer.source = false;
+        reviewer.pulls = false;
+        reviewer.writes.reviews = true;
+        reviewer.principal = Some(actor(2));
+        f.reopen(reviewer);
+        let mut approval = candidate_arguments;
+        approval.extend([
+            ("idempotency_key".into(), text("approve-resolved-pr-rebase")),
+            ("review_version".into(), text("0")),
+            ("decision".into(), text("approve")),
+        ]);
+        let approved = f.protocol_call(reviews::NAME, approval);
+        assert_eq!(content(&approved)["outcome"].text(), Some("committed"));
+        let mut merger = f.options();
+        merger.writes = Default::default();
+        merger.writes.merges = true;
+        merger.principal = Some(actor(3));
+        f.reopen(merger.clone());
+        let mut publication = prepared["publication_arguments"].object().unwrap().clone();
+        publication.extend([
+            ("idempotency_key".into(), text("publish-resolved-pr-rebase")),
+            (
+                "required_reviewers".into(),
+                Value::Array(vec![text(actor(2).to_string())]),
+            ),
+        ]);
+        let published = f.protocol_call("frankengit_pull_merge_reviewed", publication.clone());
+        let published = content(&published);
+        assert_eq!(published["outcome"].text(), Some("committed"));
+        let selected = f
+            .backend()
+            .node
+            .runtime()
+            .block_on(f.backend().node.materialize_admission())
+            .unwrap();
+        assert_eq!(
+            selected.snapshot().refs[&f.subject.source_ref],
+            f.subject.source_tip
+        );
+        assert_eq!(
+            selected.snapshot().refs[&f.subject.target_ref],
+            candidate.commit
+        );
+        f.reopen(merger);
+        publication.insert("bundle_hex_chunks".into(), Value::Array(vec![text("00")]));
+        assert_eq!(
+            f.call("frankengit_pull_merge_reviewed", &publication)
+                .unwrap()
+                .object()
+                .unwrap(),
+            published
+        );
+    }
+}
+
 #[test]
 fn rebase_series_survives_independent_review_atomic_merge_and_restart_through_real_mcp() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {

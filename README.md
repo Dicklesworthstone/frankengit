@@ -727,15 +727,21 @@ merge workflow. It replays a bounded linear source suffix onto the target,
 preserves original authors/messages, and leaves the source branch unchanged.
 The target ref, PR merge event and delivery obligation publish together. Every
 intermediate commit remains inspectable, and path-specific review rules cover
-temporary changes even when later commits restore the final tree. Conflicts,
-stale subjects, multi-parent steps and entirely dropped series refuse without
-an automatic alternate merge method.
+temporary changes even when later commits restore the final tree. Conflicts
+stop for explicit original-commit/path resolution; stale subjects, multi-parent
+steps and entirely dropped series refuse without an automatic alternate merge
+method.
 
 The same rebase workflow is available through the authenticated HTTP PR API and
 the browser's **Rebase and merge** selection. Remote reviewers inspect every
 rewritten commit and its changes, including edits removed by later commits.
 Candidate receipts can be shared and reinspected; review and merge remain
 explicit commands with the original retry key retained across lost responses.
+The browser, HTTP, CLI and MCP clients can resolve successive conflicts while
+retaining every earlier recipe and the original authority snapshot. Choices
+include the original parent, accumulated rebased parent, original commit,
+deletion, or exact replacement file bytes. The entire resolved series must pass
+inspection before the browser enables review or merge.
 The [rebase guide](docs/NATIVE_PULL_REQUEST_REBASE.md) describes the endpoints,
 required scopes and bounded browser profile.
 

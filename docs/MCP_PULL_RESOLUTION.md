@@ -5,6 +5,8 @@ explicitly sponsored local MCP profile. This connects the existing native
 PathMergeV1 conflict-resolution engine to complete candidate inspection and the
 existing separately authorized review/merge tools (FG-096 / x2mv.4.24). It does
 not create a new Git engine, source workspace, publication path or approval.
+The separate `resolve_pull_rebase` operation reconstructs an exact PR's linear
+series with original-commit-bound choices; its contract is described below.
 
 ## Exact subject and explicit choices
 
@@ -62,7 +64,7 @@ missing metadata, and unknown fields. Paths are sorted canonically; request
 ordering cannot make one resolution overwrite another. There is no implicit
 latest-tip refresh or automatic choice for a missing resolution.
 
-## One native preparation followed by mandatory inspection
+## Merge candidate preparation followed by mandatory inspection
 
 The adapter calls `OneNode::prepare_resolved_pull_request_bundle_with_style_in`
 with the selected style as its final argument. The native owner validates the
@@ -123,7 +125,73 @@ authority, so handoff arguments deliberately omit the inspection head pin while
 retaining exact PR/tip/epoch/candidate semantics. Original-key retries recover the
 existing canonical decision; they never rerun resolution at refreshed tips.
 
-## Bounds
+## Rebase conflict resolution
+
+Use `operation: "resolve_pull_rebase"` after `prepare_pull_rebase` reports a
+conflict. Supply the same exact PR subject, explicit `profile: "path-v1"`,
+`upstream`, `committer`, `timestamp`, and `empty` policy. `expected_head` is
+required and must equal the stopped preparation's `snapshot_token`. This pins
+the entire operation before reconstruction; a changed PR, source, target,
+policy epoch or authority head refuses without refreshing any coordinate.
+
+The required nonempty `resolutions` array groups choices by the original
+source commit ID, never by a rewritten ID or step number. For example, these
+are the additional fields on the complete preparation request:
+
+```json
+{
+  "operation": "resolve_pull_rebase",
+  "expected_head": "<snapshot_token from stopped preparation>",
+  "resolutions": [
+    {
+      "original": "<stopped original native commit>",
+      "paths": [
+        {
+          "path_hex": "524541444d45",
+          "choice": "file",
+          "mode": "100644",
+          "bytes_hex_chunks": ["7265736f6c7665640a"]
+        }
+      ]
+    }
+  ]
+}
+```
+
+The per-path choices retain the same exact-byte grammar: `base`, `ours`,
+`theirs`, `delete`, or `file`. During rebase, **ours** is the accumulated rebased
+tree, **theirs** is the original commit being replayed, and **base** is that
+original commit's parent. Each supplied step must cover every actual conflict
+at that step. Missing sides, unrelated commits, duplicate originals, clean
+paths, unsafe paths and overlapping choices refuse. The whole suffix is
+reconstructed on each request; there is no mutable sequencer or saved partial
+publication.
+
+A clean result uses `resolution_profile: "original-commit-path-v1"` and includes
+`resolution_input_commits`, `resolution_consumed_commits`, and `resolutions`
+receipts. Each receipt names its original commit and contains the exact
+discovered conflict sides, selected choice and resulting entry. Receipts follow
+replay order, with paths sorted by raw bytes. A successful series consumes
+every supplied recipe. A later conflict or newly empty stop returns only the
+consumed diagnostic receipts and no candidate or bundle; future recipes may
+remain unconsumed only in such a stopped result.
+
+Resolution produces the same **target-named** bundle as PR rebase preparation,
+with the target tip as its sole prerequisite. The source branch does not move.
+`inspection_performed` remains false: pass the returned `inspection_arguments`
+to `frankengit_source_candidate` for whole-series inspection, then use the
+separate review and publication handoffs. Both `candidate_arguments` and
+`publication_arguments` retain `method: "rebase"`. Resolving does not stage
+objects, create a transaction, approve a change, or grant publication.
+
+Both ordinary source-read and PR-read grants are required before parsing.
+Sponsored agent credentials remain excluded. There are at most 64 total paths
+across all recipes, and decoded paths plus replacement bytes share 24 KiB.
+The complete bundle is still limited to three 8 KiB chunks. Rebase preparation
+retains its 256-commit ceiling and other caller-narrowable bounds; the entire
+resolution response has the same 1 MiB ceiling as PR rebase preparation.
+
+## Merge resolution bounds
 
 At most 64 choices are accepted. All decoded paths plus all explicit file bytes
 share a 24 KiB allowance. A path is at most 4096 bytes; a file has at most three
@@ -158,6 +226,12 @@ checks exact parents and repeatable inspection arguments, resolves and inspects,
 verifies that an unapproved candidate cannot commit, obtains a distinct review, publishes the
 coupled PR/ref transition, retries the original key, reopens, and reads exact
 resolved and untouched sibling bytes.
+
+The PR rebase adapter adds closed recipe/head/schema and aggregate-byte tests,
+plus a persisted two-format JSON-RPC regression covering a native conflict,
+an explicitly resolved empty stop, custom-file resolution, independent series
+inspection, distinct review and merge identities, unchanged source branch,
+grant refusals, and original-key recovery after restart.
 
 Test definitions are not executed passing evidence. Run the native MCP tests
 and real-binary workflow on the pinned toolchain when validating a revision;

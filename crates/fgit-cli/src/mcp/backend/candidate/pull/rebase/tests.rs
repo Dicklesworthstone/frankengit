@@ -68,10 +68,95 @@ fn exact_pr_rebase_parser_requires_explicit_policy_and_never_accepts_publication
     }
 }
 
+fn resolution_args(format: GitHashAlgorithm) -> Object {
+    let mut input = args(format);
+    input.insert("operation".into(), text(REBASE_RESOLVE));
+    input.insert(
+        "expected_head".into(),
+        text(format!("alg:2:{}", "07".repeat(32))),
+    );
+    input.insert(
+        "resolutions".into(),
+        Value::Array(vec![object([
+            ("original", input["expected_source"].clone()),
+            (
+                "paths",
+                Value::Array(vec![object([
+                    ("path_hex", text(hex(b"README"))),
+                    ("choice", text("theirs")),
+                ])]),
+            ),
+        ])]),
+    );
+    input
+}
+
+#[test]
+fn resolution_reuses_the_bounded_original_commit_grammar_and_requires_an_exact_head() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let valid = resolution_args(format);
+        let parsed = parse(&valid, format).unwrap();
+        assert_eq!(parsed.operation(), REBASE_RESOLVE);
+        assert!(parsed.selection.expected_head.is_some());
+        let recipes = parsed.resolutions.unwrap();
+        assert_eq!(recipes.len(), 1);
+        assert_eq!(recipes[0].paths[0].path, b"README");
+        for field in ["expected_head", "resolutions"] {
+            let mut bad = valid.clone();
+            bad.remove(field);
+            assert!(parse(&bad, format).is_err());
+        }
+        let mut bad = valid.clone();
+        bad.insert("resolutions".into(), Value::Array(Vec::new()));
+        assert!(parse(&bad, format).is_err());
+        let mut bad = valid.clone();
+        bad.insert("operation".into(), text(REBASE_PREPARE));
+        assert!(parse(&bad, format).is_err());
+        let Value::Array(recipes) = &valid["resolutions"] else {
+            panic!()
+        };
+        let mut bad = valid.clone();
+        bad.insert(
+            "resolutions".into(),
+            Value::Array(vec![recipes[0].clone(), recipes[0].clone()]),
+        );
+        assert!(parse(&bad, format).is_err());
+        let mut file = recipes[0].object().unwrap().clone();
+        file.insert(
+            "paths".into(),
+            Value::Array(vec![object([
+                ("path_hex", text(hex(b"README"))),
+                ("choice", text("file")),
+                ("mode", text("100644")),
+                (
+                    "bytes_hex_chunks",
+                    Value::Array(vec![text("61".repeat(8 * 1024)); 3]),
+                ),
+            ])]),
+        );
+        let mut bad = valid.clone();
+        bad.insert(
+            "resolutions".into(),
+            Value::Array(vec![Value::Object(file)]),
+        );
+        assert_eq!(
+            parse(&bad, format).unwrap_err().code,
+            "resolution_byte_limit"
+        );
+        let schema = schema(REBASE_RESOLVE);
+        let fields = schema.object().unwrap();
+        let Value::Array(required) = &fields["required"] else {
+            panic!()
+        };
+        assert!(required.contains(&text("expected_head")));
+        assert!(required.contains(&text("resolutions")));
+    }
+}
+
 #[test]
 fn rebase_discovery_is_closed_and_output_requires_live_bounded_work() {
-    for inspecting in [false, true] {
-        let descriptor = schema(inspecting);
+    for operation in [REBASE_PREPARE, REBASE_RESOLVE, REBASE_INSPECT] {
+        let descriptor = schema(operation);
         let fields = descriptor.object().unwrap();
         assert_eq!(fields["additionalProperties"], Value::Bool(false));
         let properties = fields["properties"].object().unwrap();

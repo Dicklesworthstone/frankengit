@@ -5,7 +5,7 @@ use fgit_forge::preparation::resolution::{ConflictResolution, ResolutionChoice, 
 use fgit_types::{GitHashAlgorithm, GitOid};
 use std::io::Read;
 
-pub(super) fn parse(
+pub(crate) fn parse(
     arguments: &[(&str, &str)],
     format: GitHashAlgorithm,
     limits: PreparationLimits,
@@ -94,7 +94,7 @@ pub(super) fn parse(
     Ok(recipes)
 }
 
-pub(super) fn render(
+pub(crate) fn render(
     recipes: &[RebaseCommitResolution],
     resolved: &[RebaseResolvedStep],
     preparation: &RebasePreparation,

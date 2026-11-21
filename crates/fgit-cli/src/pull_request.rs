@@ -46,6 +46,8 @@ usage: fg pr fast-forward --help
   Fast-forward an existing PR with exact version/tips, without a new commit.
 usage: fg pr prepare-rebase --help
   Prepare a target-branch rebase bundle for an exact existing PR subject.
+usage: fg pr resolve-rebase --help
+  Resolve original-commit conflicts at the inspected PR snapshot without publishing.
 usage: fg pr inspect-rebase --help
   Inspect all candidate commit bodies and every rewritten step before review.
 usage: fg pr checks --help
@@ -70,10 +72,12 @@ Exit 0: committed mutation or successful read; 3: canonical command refusal;
 This is a trusted local-operator interface, not a remote authorization service.";
 
 pub fn run(arguments: &[String]) -> Result<u8, String> {
-    if arguments
-        .first()
-        .is_some_and(|argument| matches!(argument.as_str(), "prepare-rebase" | "inspect-rebase"))
-    {
+    if arguments.first().is_some_and(|argument| {
+        matches!(
+            argument.as_str(),
+            "prepare-rebase" | "resolve-rebase" | "inspect-rebase"
+        )
+    }) {
         return rebase::run(arguments, &mut std::io::stdout().lock());
     }
     if arguments

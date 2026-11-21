@@ -2,20 +2,24 @@
 //! Original metadata is retained; no client-supplied author/message or alternate
 //! merge method can silently change the selected series.
 
+mod resolution;
+
 use super::super::super::issues::{ApiError, parse_decimal, parse_form, quote, ref_fields};
+use super::super::super::source::append_rebase_resolution_receipts;
 use super::super::subject::reference;
 use super::{Request, Status, preparation_error};
 use crate::smart_http::drive_request_while;
 use crate::{NodeRequestContext, NodeWorkspaceRefusal, OneNode, PreparedPullRequestRebaseBundle};
 use fgit_crypto::sha256_digest;
 use fgit_forge::event::review::ReviewSubject;
+use fgit_forge::preparation::rebase::resolutions::{RebaseCommitResolution, RebaseResolvedStep};
 use fgit_forge::preparation::rebase::{
     EmptyCommitPolicy, RebaseCommitter, RebaseError, RebasePreparation, RebaseRequest, RebaseStep,
     RebaseStepKind, RebaseStop,
 };
 use fgit_forge::preparation::{MergeSourceError, PreparationLimits};
 use fgit_forge::{AggregateVersion, PullRequestNumber};
-use fgit_types::{GitHashAlgorithm, GitOid, PolicyEpoch};
+use fgit_types::{GitHashAlgorithm, GitOid, PolicyEpoch, RepositoryAuthorityHeadId};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug)]
@@ -24,6 +28,26 @@ struct Command {
     upstream: GitOid,
     committer: RebaseCommitter,
     empty: EmptyCommitPolicy,
+    expected_head: Option<RepositoryAuthorityHeadId>,
+}
+fn preparation_field(name: &str) -> bool {
+    matches!(
+        name,
+        "object_format"
+            | "pull_request_version"
+            | "policy_epoch"
+            | "source_ref"
+            | "source_ref_hex"
+            | "target_ref"
+            | "target_ref_hex"
+            | "source_tip"
+            | "target_tip"
+            | "profile"
+            | "upstream"
+            | "committer"
+            | "timestamp"
+            | "empty"
+    )
 }
 fn take(fields: &mut BTreeMap<String, String>, name: &str) -> Result<String, ApiError> {
     fields
@@ -52,29 +76,21 @@ impl Command {
     ) -> Result<Self, ApiError> {
         let mut fields = BTreeMap::new();
         for (name, value) in parse_form(bytes, 14)? {
-            if !matches!(
-                name.as_str(),
-                "object_format"
-                    | "pull_request_version"
-                    | "policy_epoch"
-                    | "source_ref"
-                    | "source_ref_hex"
-                    | "target_ref"
-                    | "target_ref_hex"
-                    | "source_tip"
-                    | "target_tip"
-                    | "profile"
-                    | "upstream"
-                    | "committer"
-                    | "timestamp"
-                    | "empty"
-            ) {
+            if !preparation_field(&name) {
                 return Err(ApiError::bad("unknown_rebase_preparation_field"));
             }
             if fields.insert(name, value).is_some() {
                 return Err(ApiError::bad("duplicate_field"));
             }
         }
+        Self::from_fields(number, fields, format)
+    }
+
+    fn from_fields(
+        number: PullRequestNumber,
+        mut fields: BTreeMap<String, String>,
+        format: GitHashAlgorithm,
+    ) -> Result<Self, ApiError> {
         if take(&mut fields, "object_format")? != format.as_str() {
             return Err(ApiError::bad("object_format_mismatch"));
         }
@@ -128,6 +144,7 @@ impl Command {
             upstream,
             committer,
             empty,
+            expected_head: None,
         })
     }
 }
@@ -135,28 +152,73 @@ impl Command {
 pub(super) fn execute(
     node: &OneNode,
     request: &Request<'_>,
-    bytes: &[u8],
+    bytes: Vec<u8>,
     context: &NodeRequestContext,
     maximum: usize,
     live: &mut impl FnMut() -> bool,
 ) -> Result<super::Reply, ApiError> {
-    let command = Command::parse(request.number, bytes, node.object_format)?;
-    let prepared = drive_request_while(
-        node,
-        context,
-        node.prepare_pull_request_rebase_bundle_in(
+    let (command, recipes) = if request.resolution {
+        let (command, recipes) = resolution::parse(
+            request.number,
+            &bytes,
+            request.boundary,
+            node.object_format,
+            live,
+        )?;
+        (command, Some(recipes))
+    } else {
+        (
+            Command::parse(request.number, &bytes, node.object_format)?,
+            None,
+        )
+    };
+    // Recipes now own their exact file bytes. Release ingress before replay.
+    drop(bytes);
+    let (prepared, receipts) = if let Some(recipes) = &recipes {
+        drive_request_while(
+            node,
             context,
-            &command.subject,
-            &Default::default(),
-            command.upstream,
-            &command.committer,
-            PreparationLimits::default(),
-            command.empty,
-        ),
+            node.prepare_resolved_pull_request_rebase_bundle_in(
+                context,
+                &command.subject,
+                &Default::default(),
+                command.expected_head.ok_or_else(ApiError::unavailable)?,
+                command.upstream,
+                &command.committer,
+                PreparationLimits::default(),
+                command.empty,
+                recipes,
+            ),
+            live,
+        )
+    } else {
+        drive_request_while(
+            node,
+            context,
+            node.prepare_pull_request_rebase_bundle_in(
+                context,
+                &command.subject,
+                &Default::default(),
+                command.upstream,
+                &command.committer,
+                PreparationLimits::default(),
+                command.empty,
+            ),
+            live,
+        )
+        .map(|prepared| (prepared, Vec::new()))
+    }
+    .map_err(|error| failure(&error))?;
+    build(
+        node,
+        &command,
+        prepared,
+        recipes
+            .as_deref()
+            .map(|recipes| (recipes, receipts.as_slice())),
+        maximum,
         live,
     )
-    .map_err(|error| failure(&error))?;
-    build(node, &command, prepared, maximum, live)
 }
 
 fn failure(error: &NodeWorkspaceRefusal) -> ApiError {
@@ -187,6 +249,10 @@ fn failure(error: &NodeWorkspaceRefusal) -> ApiError {
                 ApiError::new(Status::Conflict, "merge_commits_not_supported")
             }
             RebaseError::Preparation(error) => super::native_preparation_error(error),
+            RebaseError::DuplicateResolutionCommit(_) | RebaseError::ResolutionOutsideSuffix(_) => {
+                ApiError::bad("invalid_rebase_resolution_subject")
+            }
+            RebaseError::Resolution { error, .. } => super::resolution_error(error),
             _ => ApiError::unavailable(),
         };
     }
@@ -234,6 +300,7 @@ fn build(
     node: &OneNode,
     command: &Command,
     prepared: PreparedPullRequestRebaseBundle,
+    resolutions: Option<(&[RebaseCommitResolution], &[RebaseResolvedStep])>,
     maximum: usize,
     live: &mut impl FnMut() -> bool,
 ) -> Result<super::Reply, ApiError> {
@@ -254,6 +321,10 @@ fn build(
     };
     if prepared.subject != command.subject
         || prepared.source_head != artifact.source_head
+        || command
+            .expected_head
+            .is_some_and(|head| head != prepared.source_head)
+        || command.expected_head.is_some() != resolutions.is_some()
         || *request != expected
         || artifact.borrowed_objects > artifact.pack_objects
         || artifact.pack_objects > PreparationLimits::default().max_objects
@@ -300,6 +371,17 @@ fn build(
         command.committer.timestamp,
         quote(empty)
     );
+    if let Some((recipes, receipts)) = resolutions {
+        append_rebase_resolution_receipts(
+            &mut body,
+            node.object_format,
+            PreparationLimits::default(),
+            &artifact.outcome,
+            recipes,
+            receipts,
+            live,
+        )?;
+    }
     let (status, digest) = match &artifact.outcome {
         RebasePreparation::Clean(plan) => {
             if plan.steps.is_empty()
@@ -535,6 +617,96 @@ mod tests {
                     .as_bytes(),
                 b"refs/heads/\xff"
             );
+        }
+    }
+
+    #[test]
+    fn rebase_resolution_requires_its_snapshot_original_commit_and_explicit_route() {
+        use fgit_wire::smart_http::{HttpLimits, head};
+        for media in [
+            "application/x-www-form-urlencoded",
+            "multipart/form-data; boundary=recipes",
+        ] {
+            let wire = format!(
+                "POST /r.git/api/v1/pulls/1/resolve-rebase HTTP/1.1\r\nHost: local\r\nContent-Type: {media}\r\nContent-Length: 1\r\n\r\n"
+            );
+            let envelope = head::parse(wire.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            let request = Request::parse(&envelope).unwrap().unwrap();
+            assert!(request.rebase && request.resolution);
+            assert!(request.command(b"", GitHashAlgorithm::Sha1).is_err());
+            assert!(
+                request
+                    .resolved_command(b"", BTreeMap::new(), GitHashAlgorithm::Sha1)
+                    .is_err()
+            );
+            for invalid in [
+                wire.replace("POST", "GET"),
+                wire.replace("resolve-rebase ", "resolve-rebase?method=squash "),
+                wire.replace("resolve-rebase ", "resolve-rebase/prepare "),
+            ] {
+                let envelope = head::parse(invalid.as_bytes(), HttpLimits::default())
+                    .unwrap()
+                    .unwrap();
+                assert!(Request::parse(&envelope).is_err());
+            }
+        }
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let pin = format!("&expected_head=alg:1:{}", "d".repeat(64));
+            let recipe = format!(
+                "&resolution={}:ff:theirs",
+                "a".repeat(format.digest_len() * 2)
+            );
+            let valid = form(format) + &pin + &recipe;
+            let (command, recipes) = resolution::parse(
+                PullRequestNumber::FIRST,
+                valid.as_bytes(),
+                None,
+                format,
+                &mut || true,
+            )
+            .unwrap();
+            assert!(command.expected_head.is_some());
+            assert_eq!(recipes.len(), 1);
+            assert_eq!(recipes[0].original, command.subject.source_tip);
+            assert_eq!(recipes[0].paths[0].path, b"\xff");
+            for invalid in [
+                form(format) + &recipe,
+                form(format) + &pin,
+                valid.clone() + &pin,
+                valid.clone() + &recipe,
+                valid.clone() + "&method=squash",
+                valid.clone() + "&author=Imposter",
+                valid.replace(":ff:theirs", ":ff:theirs:extra"),
+                valid.replace(":ff:theirs", ":2e2e:delete"),
+            ] {
+                assert!(
+                    resolution::parse(
+                        PullRequestNumber::FIRST,
+                        invalid.as_bytes(),
+                        None,
+                        format,
+                        &mut || true,
+                    )
+                    .is_err(),
+                    "{invalid}"
+                );
+            }
+            assert_eq!(
+                resolution::parse(
+                    PullRequestNumber::FIRST,
+                    valid.as_bytes(),
+                    None,
+                    format,
+                    &mut || false,
+                )
+                .unwrap_err()
+                .code,
+                "request_timeout"
+            );
+            // Automatic preparation cannot silently consume resolution pins.
+            assert!(Command::parse(PullRequestNumber::FIRST, valid.as_bytes(), format).is_err());
         }
     }
 }

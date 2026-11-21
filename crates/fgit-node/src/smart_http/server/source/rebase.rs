@@ -5,6 +5,9 @@ mod inspection;
 mod output;
 mod request;
 mod resolution;
+pub(in crate::smart_http::server) use resolution::{
+    append_rebase_resolution_receipts, decode_rebase_resolution_recipes,
+};
 
 use super::super::{
     Status,

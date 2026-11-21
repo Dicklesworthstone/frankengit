@@ -7,6 +7,7 @@ use crate::publication_support::{parse_oid, quote, read_bundle};
 use fgit_crypto::sha256_digest;
 use fgit_forge::event::review::{CandidateBinding, ReviewSubject};
 use fgit_forge::preparation::PreparationLimits;
+use fgit_forge::preparation::rebase::resolutions::{RebaseCommitResolution, RebaseResolvedStep};
 use fgit_forge::preparation::rebase::{
     EmptyCommitPolicy, RebaseCommitter, RebasePreparation, RebaseRequest, RebaseStep,
     RebaseStepKind, RebaseStop,
@@ -32,6 +33,11 @@ usage: fg pr prepare-rebase <storage-root> <tenant-id> <repository-id> <number> 
   --policy-epoch <n> --upstream <exclusive-common-ancestor>
   --committer <name-and-email> --timestamp <unix-seconds> [--empty stop|drop|keep]
   [--max-commits <1..256>] [--max-edges <n>] [--max-output-bytes <n>]
+usage: fg pr resolve-rebase <storage-root> <tenant-id> <repository-id> <number> <new-bundle>
+  <the same exact PR, upstream, committer, profile and empty-policy arguments>
+  --expected-head <snapshot-token>
+  [--resolve <original-oid>:<path-hex>:base|ours|theirs|delete]...
+  [--resolve-file <original-oid>:<path-hex>:100644|100755:<local-file>]...
 usage: fg pr inspect-rebase <storage-root> <tenant-id> <repository-id> <number> <bundle>
   --trusted-local --expected-version <positive-pr-version>
   (--source-ref <branch> | --source-ref-hex <bytes>) --expected-source <oid>
@@ -46,6 +52,10 @@ The upstream must be a common ancestor. Original author and message bytes are
 preserved; the supplied committer/time replaces old signatures. A conflict or
 newly-empty stop creates no bundle. The output names the TARGET branch and has
 the target tip as its sole prerequisite; preparation never updates either ref.
+Resolve requires at least one original-commit-bound path choice and the exact
+head from the stopped preparation. It reconstructs the entire suffix; every
+supplied choice must resolve an actual conflict. A later stop returns consumed
+resolution receipts and no partial bundle. Replacement files are bounded.
 Inspect verifies the entire uploaded series and reports exact commit bodies,
 the old-source-to-candidate diff, and EVERY parent-to-child diff, including
 transient changes. Inspection permits no path filters and grants no approval.
@@ -72,6 +82,7 @@ enum Operation {
         committer: RebaseCommitter,
         limits: PreparationLimits,
         empty: EmptyCommitPolicy,
+        resolutions: Option<(RepositoryAuthorityHeadId, Vec<RebaseCommitResolution>)>,
     },
     Inspect {
         candidate: GitOid,
@@ -91,6 +102,7 @@ pub fn run(args: &[String], output: &mut impl Write) -> Result<u8, String> {
             committer,
             limits,
             empty,
+            resolutions,
         } => {
             require_absent(&options.path)?;
             let mut node = open(&options)?;
@@ -98,20 +110,38 @@ pub fn run(args: &[String], output: &mut impl Write) -> Result<u8, String> {
                 node.bring_into_service(HeadGeneration::FIRST)
                     .map_err(|error| error.to_string())?;
                 let request = fgit_cli::command_request_context(&node);
-                node.runtime()
-                    .block_on(node.prepare_pull_request_rebase_bundle_in(
-                        &request,
-                        &options.subject,
-                        &Default::default(),
-                        options.upstream,
-                        committer,
-                        *limits,
-                        *empty,
-                    ))
-                    .map_err(|error| error.to_string())
+                if let Some((head, recipes)) = resolutions {
+                    node.runtime()
+                        .block_on(node.prepare_resolved_pull_request_rebase_bundle_in(
+                            &request,
+                            &options.subject,
+                            &Default::default(),
+                            *head,
+                            options.upstream,
+                            committer,
+                            *limits,
+                            *empty,
+                            recipes,
+                        ))
+                        .map_err(|error| error.to_string())
+                } else {
+                    node.runtime()
+                        .block_on(node.prepare_pull_request_rebase_bundle_in(
+                            &request,
+                            &options.subject,
+                            &Default::default(),
+                            options.upstream,
+                            committer,
+                            *limits,
+                            *empty,
+                        ))
+                        .map(|prepared| (prepared, Vec::new()))
+                        .map_err(|error| error.to_string())
+                }
             })();
-            let artifact = after_close(result, node.shutdown().err().map(|e| e.to_string()))?;
-            let (receipt, code) = render_preparation(&options, &artifact)?;
+            let (artifact, resolved) =
+                after_close(result, node.shutdown().err().map(|e| e.to_string()))?;
+            let (receipt, code) = render_preparation(&options, &artifact, &resolved)?;
             if let Some(bundle) = artifact.preparation.bundle.as_deref() {
                 publish_new_bundle(&options.path, bundle)?;
             }
@@ -172,10 +202,21 @@ fn after_close<T>(result: Result<T, String>, cleanup: Option<String>) -> Result<
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
-    if args.len() < 6 || !matches!(args[0].as_str(), "prepare-rebase" | "inspect-rebase") {
+    if args.len() < 6
+        || !matches!(
+            args[0].as_str(),
+            "prepare-rebase" | "resolve-rebase" | "inspect-rebase"
+        )
+    {
         return Err(USAGE.into());
     }
-    if args.len() > 64
+    let resolving = args[0] == "resolve-rebase";
+    let argument_limit = if resolving {
+        64 + 2 * PreparationLimits::default().max_conflicts
+    } else {
+        64
+    };
+    if args.len() > argument_limit
         || args.iter().any(|arg| arg.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 128 * 1024
     {
@@ -187,8 +228,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
     {
         return Err("storage and bundle paths must be nonempty and bounded".into());
     }
-    let preparing = args[0] == "prepare-rebase";
+    let preparing = args[0] != "inspect-rebase";
     let mut flags = BTreeMap::new();
+    let mut recipes = Vec::new();
     let mut at = 6;
     while at < args.len() {
         let flag = args[at].as_str();
@@ -216,6 +258,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     | "--max-commits"
                     | "--max-edges"
             ))
+            || (resolving && matches!(flag, "--expected-head" | "--resolve" | "--resolve-file"))
             || (!preparing
                 && matches!(
                     flag,
@@ -238,7 +281,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
             at += 1;
             value.as_str()
         };
-        if flags.insert(flag, value).is_some() {
+        if matches!(flag, "--resolve" | "--resolve-file") {
+            recipes.push((flag, value));
+        } else if flags.insert(flag, value).is_some() {
             return Err(format!("duplicate {flag}"));
         }
     }
@@ -326,10 +371,29 @@ fn parse(args: &[String]) -> Result<Options, String> {
         if limits.max_commits > MAX_COMMITS {
             return Err("PR rebases accept at most 256 original commits".into());
         }
+        let resolutions = if resolving {
+            let head = parse_head(required("--expected-head")?)?;
+            if recipes.is_empty() {
+                return Err(
+                    "resolve-rebase requires at least one --resolve or --resolve-file".into(),
+                );
+            }
+            Some((
+                head,
+                crate::rebase::resolutions::parse(
+                    &recipes,
+                    subject.source_tip.algorithm(),
+                    limits,
+                )?,
+            ))
+        } else {
+            None
+        };
         Operation::Prepare {
             committer,
             limits,
             empty,
+            resolutions,
         }
     } else {
         let candidate = parse_oid(required("--candidate")?)?;
@@ -406,11 +470,13 @@ fn subject_fields(options: &Options) -> String {
 fn render_preparation(
     options: &Options,
     artifact: &PreparedPullRequestRebaseBundle,
+    resolved: &[RebaseResolvedStep],
 ) -> Result<(String, u8), String> {
     let Operation::Prepare {
         committer,
         limits,
         empty,
+        resolutions,
     } = &options.operation
     else {
         return Err("preparation response used for inspection".into());
@@ -419,6 +485,19 @@ fn render_preparation(
     if artifact.subject != options.subject || artifact.source_head != preparation.source_head {
         return Err("PR rebase subject/snapshot binding mismatch".into());
     }
+    let resolution_details = if let Some((head, recipes)) = resolutions {
+        if *head != artifact.source_head {
+            return Err("PR rebase resolution snapshot binding mismatch".into());
+        }
+        format!(
+            "\"resolution_profile\":\"original-commit-path-v1\",\"resolution_decisions\":[{}],",
+            crate::rebase::resolutions::render(recipes, resolved, &preparation.outcome)?
+        )
+    } else if resolved.is_empty() {
+        String::new()
+    } else {
+        return Err("unrequested PR rebase resolution receipt".into());
+    };
     let expected = RebaseRequest {
         source_tip: options.subject.source_tip,
         upstream: options.upstream,
@@ -536,7 +615,7 @@ fn render_preparation(
             "\"method\":\"rebase\",\"outcome\":{},{},\"snapshot_token\":{},",
             "\"committer\":{},\"timestamp\":{},\"empty_policy\":{},\"steps\":[{}],",
             "\"bundle_created\":{},\"bundle_path\":{},\"published_to_repository\":false,",
-            "\"objects_staged\":false,\"approval_granted\":false,\"node_closed\":true,{}}}"
+            "\"objects_staged\":false,\"approval_granted\":false,\"node_closed\":true,{}{}}}"
         ),
         quote(label),
         subject_fields(options),
@@ -554,6 +633,7 @@ fn render_preparation(
             .bundle
             .as_ref()
             .map_or_else(|| "null".into(), |_| quote(&options.path.to_string_lossy())),
+        resolution_details,
         details,
     );
     if receipt.len() > 4 * 1024 * 1024 {
@@ -855,6 +935,65 @@ mod tests {
         }
     }
 
+    fn resolution_args(width: usize) -> Vec<String> {
+        let mut input = args(width, true);
+        input[0] = "resolve-rebase".into();
+        input.extend([
+            "--expected-head".into(),
+            token(head()),
+            "--resolve".into(),
+            format!("{}:524541444d45:theirs", "a".repeat(width)),
+        ]);
+        input
+    }
+
+    #[test]
+    fn conflict_resolution_requires_the_original_snapshot_and_bounded_exact_recipes() {
+        for width in [40, 64] {
+            let input = resolution_args(width);
+            let parsed = parse(&input).unwrap();
+            let Operation::Prepare {
+                resolutions: Some((expected, recipes)),
+                ..
+            } = parsed.operation
+            else {
+                panic!("explicit resolution required");
+            };
+            assert_eq!(expected, head());
+            assert_eq!(recipes.len(), 1);
+            assert_eq!(recipes[0].original, parsed.subject.source_tip);
+            assert_eq!(recipes[0].paths[0].path, b"README");
+            for flag in ["--expected-head", "--resolve"] {
+                let mut bad = input.clone();
+                let at = bad.iter().position(|value| value == flag).unwrap();
+                bad.drain(at..at + 2);
+                assert!(parse(&bad).is_err(), "missing {flag}");
+            }
+            for recipe in [
+                format!("{}:524541444d45:theirs", "0".repeat(width)),
+                format!("{}:2e2e2f66696c65:theirs", "a".repeat(width)),
+                format!("{}:524541444d45:guess", "a".repeat(width)),
+                format!(
+                    "{}:524541444d45:theirs",
+                    "a".repeat(if width == 40 { 64 } else { 40 })
+                ),
+            ] {
+                let mut bad = input.clone();
+                change(&mut bad, "--resolve", recipe);
+                assert!(parse(&bad).is_err());
+            }
+            let mut duplicate = input.clone();
+            duplicate.extend(["--resolve".into(), input.last().unwrap().clone()]);
+            assert!(parse(&duplicate).is_err());
+            let mut ordinary = input;
+            ordinary[0] = "prepare-rebase".into();
+            assert!(
+                parse(&ordinary).is_err(),
+                "ordinary preparation has no implicit resolution"
+            );
+        }
+    }
+
     #[test]
     fn inspection_requires_complete_scope_and_the_exact_candidate() {
         for width in [40, 64] {
@@ -930,17 +1069,17 @@ mod tests {
                 borrowed_objects: 0,
             },
         };
-        let (receipt, code) = render_preparation(&options, &artifact).unwrap();
+        let (receipt, code) = render_preparation(&options, &artifact, &[]).unwrap();
         assert_eq!(code, 3);
         assert!(receipt.contains("\"outcome\":\"became_empty\""));
         assert!(receipt.contains("\"candidate_commit\":null"));
         assert!(receipt.contains("\"bundle_created\":false"));
         assert!(receipt.contains("\"published_to_repository\":false"));
         artifact.preparation.bundle = Some(b"partial".to_vec());
-        assert!(render_preparation(&options, &artifact).is_err());
+        assert!(render_preparation(&options, &artifact, &[]).is_err());
         artifact.preparation.bundle = None;
         artifact.subject.pull_request_version = AggregateVersion::try_new(5).unwrap();
-        assert!(render_preparation(&options, &artifact).is_err());
+        assert!(render_preparation(&options, &artifact, &[]).is_err());
     }
 
     #[test]

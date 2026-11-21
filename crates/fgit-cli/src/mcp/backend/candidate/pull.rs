@@ -20,6 +20,7 @@ pub(super) const INSPECT: &str = "inspect_pull_merge";
 pub(super) const RESOLVE: &str = "resolve_pull_merge";
 pub(super) const QUEUE_PREPARE: &str = "prepare_queue_merge";
 pub(super) const REBASE_PREPARE: &str = "prepare_pull_rebase";
+pub(super) const REBASE_RESOLVE: &str = "resolve_pull_rebase";
 pub(super) const REBASE_INSPECT: &str = "inspect_pull_rebase";
 const MAX_COMMIT_BYTES: usize = 64 * 1024;
 const SUBJECT_FIELDS: &[&str] = &[
@@ -224,8 +225,8 @@ pub(super) fn resolution_schema() -> Value {
 pub(super) fn queue_schema() -> Value {
     queue::schema()
 }
-pub(super) fn rebase_schema(inspecting: bool) -> Value {
-    rebase::schema(inspecting)
+pub(super) fn rebase_schema(operation: &str) -> Value {
+    rebase::schema(operation)
 }
 
 pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
@@ -235,7 +236,7 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
         INSPECT => inspect::call(backend, args),
         RESOLVE => resolve::call(backend, args),
         QUEUE_PREPARE => queue::call(backend, args),
-        REBASE_PREPARE | REBASE_INSPECT => rebase::call(backend, args),
+        REBASE_PREPARE | REBASE_RESOLVE | REBASE_INSPECT => rebase::call(backend, args),
         _ => Err(ToolError::invalid("unsupported_candidate_operation")),
     }
 }

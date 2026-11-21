@@ -25,8 +25,8 @@ export function rebasePreparationCommand(fields, metadata) {
   form(result); return result;
 }
 
-export async function rebasePreparationReply(response, number, command, scope, crypto) {
-  const { metadata, bundle } = preparationEnvelope(response), selected = pinned(metadata, scope);
+export async function rebasePreparationReply(response, number, command, scope, crypto, expectedHead = null) {
+  const { metadata, bundle } = preparationEnvelope(response), selected = pinned(metadata, scope, expectedHead);
   noEffects(metadata);
   if (metadata.type !== 'pull_request_rebase_preparation' || metadata.profile !== 'path-v1' || metadata.method !== 'rebase' ||
       metadata.committer !== command.committer || metadata.timestamp !== command.timestamp || metadata.empty_policy !== command.empty ||
@@ -61,7 +61,7 @@ export async function rebasePreparationReply(response, number, command, scope, c
       fields: { ...subject(command), merge_base: command.upstream, candidate_commit: previous },
       bundle: bundle.slice(), sha256: metadata.bundle.sha256 } };
   }
-  if (response.status !== 409 || bundle || metadata.bundle !== null || metadata.candidate_commit !== null ||
+  if (response.status !== 409 || bundle || metadata.bundle !== null || metadata.candidate_commit !== null || metadata.root_tree !== null ||
       metadata.steps.length >= REBASE_MAX_COMMITS) fail('Stopped rebase unexpectedly contains a publishable artifact.');
   const stopped = oid(metadata.stopped_commit, scope.format);
   if (originals.has(stopped)) fail('Stopped rebase commit was already completed.');

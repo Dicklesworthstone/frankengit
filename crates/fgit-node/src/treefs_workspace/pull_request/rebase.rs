@@ -3,6 +3,9 @@
 
 use fgit_forge::event::review::ReviewSubject;
 use fgit_forge::preparation::PreparationLimits;
+use fgit_forge::preparation::rebase::resolutions::{
+    RebaseCommitResolution, RebaseResolvedStep, validate_rebase_resolutions,
+};
 use fgit_forge::preparation::rebase::{EmptyCommitPolicy, RebaseCommitter, RebaseRequest};
 use fgit_types::{GitOid, RepositoryAuthorityHeadId};
 use fgit_wire::visibility::RefVisibility;
@@ -37,9 +40,76 @@ impl OneNode {
         visibility: &RefVisibility,
         upstream: GitOid,
         committer: &RebaseCommitter,
-        mut limits: PreparationLimits,
+        limits: PreparationLimits,
         empty_policy: EmptyCommitPolicy,
     ) -> Result<PreparedPullRequestRebaseBundle, NodeWorkspaceRefusal> {
+        self.prepare_pull_request_rebase_with_resolutions_in(
+            request,
+            subject,
+            visibility,
+            None,
+            upstream,
+            committer,
+            limits,
+            empty_policy,
+            &[],
+        )
+        .await
+        .map(|(prepared, _)| prepared)
+    }
+
+    /// Reconstruct an exact PR rebase with explicit original-commit/path
+    /// conflict recipes at the authenticated head observed during preparation.
+    /// Every retry replays the full source suffix; provisional rewritten IDs
+    /// are never accepted as recipe coordinates. A later conflict returns an
+    /// explicit stop and consumed-recipe explanations, without a partial bundle.
+    /// A clean result consumes every recipe and still requires whole-series
+    /// native inspection, review and merge admission before publication.
+    pub async fn prepare_resolved_pull_request_rebase_bundle_in(
+        &self,
+        request: &NodeRequestContext,
+        subject: &ReviewSubject,
+        visibility: &RefVisibility,
+        expected_head: RepositoryAuthorityHeadId,
+        upstream: GitOid,
+        committer: &RebaseCommitter,
+        limits: PreparationLimits,
+        empty_policy: EmptyCommitPolicy,
+        resolutions: &[RebaseCommitResolution],
+    ) -> Result<(PreparedPullRequestRebaseBundle, Vec<RebaseResolvedStep>), NodeWorkspaceRefusal>
+    {
+        if resolutions.is_empty() {
+            return Err(NodeWorkspaceRefusal::InvalidWorkspaceCandidate(
+                "PR rebase resolution requires original-commit conflict recipes",
+            ));
+        }
+        self.prepare_pull_request_rebase_with_resolutions_in(
+            request,
+            subject,
+            visibility,
+            Some(expected_head),
+            upstream,
+            committer,
+            limits,
+            empty_policy,
+            resolutions,
+        )
+        .await
+    }
+
+    async fn prepare_pull_request_rebase_with_resolutions_in(
+        &self,
+        request: &NodeRequestContext,
+        subject: &ReviewSubject,
+        visibility: &RefVisibility,
+        expected_head: Option<RepositoryAuthorityHeadId>,
+        upstream: GitOid,
+        committer: &RebaseCommitter,
+        mut limits: PreparationLimits,
+        empty_policy: EmptyCommitPolicy,
+        resolutions: &[RebaseCommitResolution],
+    ) -> Result<(PreparedPullRequestRebaseBundle, Vec<RebaseResolvedStep>), NodeWorkspaceRefusal>
+    {
         limits
             .validate()
             .map_err(NodeWorkspaceRefusal::MergePreparation)?;
@@ -54,10 +124,20 @@ impl OneNode {
         limits.max_commits = limits
             .max_commits
             .min(fgit_admission::merge::native::objects::MAX_REBASE_MERGE_COMMITS);
+        validate_rebase_resolutions(subject.source_tip.algorithm(), limits, resolutions).map_err(
+            |error| {
+                NodeWorkspaceRefusal::RebasePreparation(Box::new(
+                    crate::RebasePreparationRefusal::Preparation(Box::new(error)),
+                ))
+            },
+        )?;
         let head = self
             .validate_pull_request_preparation_in(request, subject, visibility)
             .await?;
-        let (preparation, _) = self
+        if expected_head.is_some_and(|expected| expected != head) {
+            return Err(NodeWorkspaceRefusal::StaleWorkspaceBase);
+        }
+        let (preparation, receipts) = self
             .prepare_resolved_rebase_bundle_for_reference_in(
                 request,
                 &subject.source_ref,
@@ -73,7 +153,7 @@ impl OneNode {
                 Some(head),
                 committer,
                 limits,
-                &[],
+                resolutions,
             )
             .await
             .map_err(|error| NodeWorkspaceRefusal::RebasePreparation(Box::new(error)))?;
@@ -83,10 +163,13 @@ impl OneNode {
         if !super::super::workspace_request_live(request) {
             return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
         }
-        Ok(PreparedPullRequestRebaseBundle {
-            source_head: head,
-            subject: subject.clone(),
-            preparation,
-        })
+        Ok((
+            PreparedPullRequestRebaseBundle {
+                source_head: head,
+                subject: subject.clone(),
+                preparation,
+            },
+            receipts,
+        ))
     }
 }

@@ -21,17 +21,21 @@ export class ResolutionEditor {
   }
   show(report) {
     this.clear();
+    const rebasing = report.method === 'rebase';
+    const sideLabels = rebasing
+      ? [['base', 'Original parent'], ['ours', 'Current rebased parent'], ['theirs', 'Original commit']]
+      : [['base', 'Base'], ['ours', 'Ours (target)'], ['theirs', 'Theirs (source)']];
     for (const conflict of report.conflicts) {
       const section = this.#element('fieldset');
       section.append(this.#element('legend', this.#display(conflict.path_hex)));
       section.append(this.#element('pre', `Path bytes: ${conflict.path_hex}\nKind: ${conflict.kind}`));
-      for (const [side, label] of [['base', 'Base'], ['ours', 'Ours (target)'], ['theirs', 'Theirs (source)']]) {
+      for (const [side, label] of sideLabels) {
         const entry = conflict[side];
         section.append(this.#element('p', `${label}: ${entry === null ? 'absent — not an implicit deletion' : `${entry.mode.toString(8)} ${entry.oid}`}`));
       }
       const choice = this.#control(section, 'Resolution (no default choice)', 'select');
       this.#option(choice, '', 'Choose explicitly');
-      for (const [side, label] of [['base', 'Keep base'], ['ours', 'Keep ours (target)'], ['theirs', 'Keep theirs (source)']]) this.#option(choice, side, label, conflict[side] === null);
+      for (const [side, label] of sideLabels) this.#option(choice, side, 'Keep ' + label.toLowerCase(), conflict[side] === null);
       this.#option(choice, 'delete', 'Delete this path'); this.#option(choice, 'file', 'Supply resolved regular-file content'); choice.value = '';
       const mode = this.#control(section, 'Resolved file mode', 'select');
       for (const [value, label] of [['', 'Choose explicit mode'], ['100644', '100644 — regular'], ['100755', '100755 — executable']]) this.#option(mode, value, label);

@@ -3,6 +3,7 @@ import { Transport, integer, principal, snapshot, listReply, pullSearchQuery, pu
   hex, form, subject, SUBJECT_FIELDS, oid, binding, pinned, record, pullLabels, pullLabelState, pullLabelsReply } from './pulls-core.mjs';
 import { checkedBundle, digest, makeBoundary, multipart, preparationCommand, preparationReply, inspectionReply, comparisonEntries, candidateMethod, mergeMethod, PREPARATION_LIMIT } from './pulls-candidate.mjs';
 import { rebasePreparationCommand, rebasePreparationReply, rebaseInspectionReply } from './pulls-rebase.mjs';
+import { rebaseResolutionUpload, verifyRebaseResolutions } from './pulls-rebase-resolution.mjs';
 import { resolutionUpload, verifyResolutionResult } from './pulls-resolution.mjs';
 import { checkId, checksReply } from './pulls-checks.mjs';
 import { commentsReply } from './pulls-comments.mjs';
@@ -284,7 +285,14 @@ export class PullClient {
     });
     const result = await rebasePreparationReply(response, number, command, scope, this.#transport.crypto);
     this.#check(epoch, serial);
-    if (!result.artifact) return { metadata: result.metadata, inspection: null };
+    verifyRebaseResolutions(result.metadata, [], scope.format);
+    if (!result.artifact) {
+      if (result.metadata.state === 'conflicted') this.#conflict = {
+        number, scope, method: 'rebase', command, head: pinned(result.metadata, scope).head,
+        recipes: [], report: copy(result.metadata),
+      };
+      return { metadata: result.metadata, inspection: null };
+    }
     const inspected = await this.#inspect(result.artifact, epoch, serial);
     return { metadata: result.metadata, inspection: inspected.reply };
   }
@@ -293,6 +301,26 @@ export class PullClient {
     if (!conflict || Object.keys(scope).some(key => scope[key] !== conflict.scope[key])) fail('Prepare conflicts in this repository before resolving them.');
     this.#artifact = null;
     const serial = ++this.#candidateSerial, epoch = this.#transport.epoch;
+    if (conflict.method === 'rebase') {
+      const upload = await rebaseResolutionUpload(conflict.report, conflict.command, conflict.head, conflict.recipes,
+        choices, this.#transport.crypto, () => this.#check(epoch, serial));
+      this.#check(epoch, serial);
+      const response = await this.#transport.request('pulls/' + conflict.number + '/resolve-rebase', {
+        method: 'POST', body: new Blob([upload.bytes]), contentType: upload.contentType,
+        statuses: [200, 409], binary: true, maximum: PREPARATION_LIMIT,
+      });
+      const result = await rebasePreparationReply(response, conflict.number, conflict.command, scope, this.#transport.crypto, conflict.head);
+      this.#check(epoch, serial);
+      verifyRebaseResolutions(result.metadata, upload.recipes, scope.format);
+      if (!result.artifact) {
+        this.#conflict = result.metadata.state === 'conflicted'
+          ? { ...conflict, recipes: upload.recipes, report: copy(result.metadata) } : null;
+        return { metadata: result.metadata, inspection: null };
+      }
+      const inspected = await this.#inspect(result.artifact, epoch, serial);
+      this.#check(epoch, serial); this.#conflict = null;
+      return { metadata: result.metadata, inspection: inspected.reply };
+    }
     const upload = await resolutionUpload(conflict.report, conflict.fields, conflict.metadata, choices, this.#transport.crypto, conflict.method);
     this.#check(epoch, serial);
     const response = await this.#transport.request(`pulls/${conflict.number}/resolve`, {

@@ -56,6 +56,15 @@ fn history(
     protected: bool,
     conflict: bool,
 ) -> (OneNode, History) {
+    history_with_conflicts(root, format, protected, u8::from(conflict))
+}
+
+fn history_with_conflicts(
+    root: &Scratch,
+    format: GitHashAlgorithm,
+    protected: bool,
+    conflicts: u8,
+) -> (OneNode, History) {
     let source = root.0.join("rebase-source");
     fs::create_dir_all(source.join("refs/heads")).unwrap();
     fs::write(source.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
@@ -93,7 +102,14 @@ fn history(
         )
     };
     let base = commit(tree(&[(b"keep", b"unchanged\n")]), None, "base");
-    let target_tree = if conflict {
+    let target_tree = if conflicts == 2 {
+        tree(&[
+            (b"final", b"conflicting target change\n"),
+            (b"keep", b"unchanged\n"),
+            (b"target", b"target-only\n"),
+            (b"zz-private", b"conflicting temporary file\n"),
+        ])
+    } else if conflicts == 1 {
         tree(&[
             (b"final", b"conflicting target change\n"),
             (b"keep", b"unchanged\n"),
@@ -335,7 +351,16 @@ fn candidate(reply: &BinaryReply, f: &History) -> (Candidate, String) {
     ] {
         assert!(metadata.contains(flag), "{metadata}");
     }
-    assert_eq!(metadata.matches("\"original\":").count(), 2);
+    assert_eq!(numeric(&metadata, "step_count"), 2);
+    assert_eq!(
+        metadata
+            .split_once("\"steps\":[")
+            .unwrap()
+            .1
+            .matches("\"original\":")
+            .count(),
+        2
+    );
     assert!(metadata.contains(&f.first.to_string()));
     let binding = CandidateBinding {
         merge_base: GitOid::from_hex(f.base.algorithm(), field(&metadata, "merge_base")).unwrap(),
@@ -796,6 +821,261 @@ fn a_conflict_after_a_clean_prefix_returns_no_partial_artifact_or_publication() 
             .unwrap();
         assert_eq!(state.snapshot().refs[&f.data.source_ref], f.data.source_tip);
         assert_eq!(state.snapshot().refs[&f.data.target_ref], f.data.target_tip);
+        node.shutdown().unwrap();
+    }
+}
+
+fn resolve_file_request(
+    endpoint: &Endpoint,
+    command: &str,
+    bytes: &[u8],
+    chunked: bool,
+) -> BinaryReply {
+    let mut body = b"--pr-resolution\r\nContent-Disposition: form-data; name=\"file_0\"; filename=\"../../never-open\"\r\nContent-Type: application/octet-stream\r\n\r\n".to_vec();
+    body.extend(bytes);
+    body.extend(b"\r\n--pr-resolution\r\nContent-Disposition: form-data; name=\"command\"\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n");
+    body.extend(command.as_bytes());
+    body.extend(b"\r\n--pr-resolution--\r\n");
+    let (body, framing) = if chunked {
+        let mut wire = Vec::new();
+        for chunk in body.chunks(19) {
+            wire.extend(format!("{:x}\r\n", chunk.len()).as_bytes());
+            wire.extend(chunk);
+            wire.extend(b"\r\n");
+        }
+        wire.extend(b"0\r\n\r\n");
+        (wire, "Transfer-Encoding: chunked\r\n".to_owned())
+    } else {
+        let framing = format!("Content-Length: {}\r\n", body.len());
+        (body, framing)
+    };
+    binary_exchange(
+        endpoint,
+        &request(
+            endpoint,
+            "POST",
+            "/api/v1/pulls/1/resolve-rebase",
+            'd',
+            &format!("Content-Type: multipart/form-data; boundary=pr-resolution\r\n{framing}"),
+            &body,
+        ),
+        true,
+    )
+}
+
+#[test]
+fn original_bound_http_resolutions_stop_then_complete_inspect_review_and_merge() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new();
+        let config = root.config(format);
+        let (node, f) = history_with_conflicts(&root, format, true, 2);
+        let before = generation(&node);
+        let path = root.0.join("credentials");
+        credentials(&node, &path);
+        let server = Server::start(node, &path, 11, true, true);
+        committed(&post(
+            &server.client,
+            1,
+            "open",
+            'a',
+            "open-resolved-rebase",
+            &form(&f.data, 0),
+            false,
+        ));
+        let first_stop = read_request(
+            &server.client,
+            "prepare-rebase",
+            'd',
+            &preparation(&f),
+            None,
+            false,
+        );
+        assert_eq!(first_stop.status, 409);
+        let metadata = std::str::from_utf8(&first_stop.body).unwrap();
+        assert_eq!(field(metadata, "stopped_commit"), f.first.to_string());
+        let pin = field(metadata, "snapshot_token").to_owned();
+        let first_choice = format!("&resolution={}:7a7a2d70726976617465:theirs", f.first);
+        let first_command = preparation(&f) + "&expected_head=" + &pin + &first_choice;
+        let second_stop = read_request(
+            &server.client,
+            "resolve-rebase",
+            'd',
+            &first_command,
+            None,
+            true,
+        );
+        assert_eq!(
+            second_stop.status,
+            409,
+            "{}",
+            String::from_utf8_lossy(&second_stop.body)
+        );
+        let metadata = std::str::from_utf8(&second_stop.body).unwrap();
+        assert_eq!(field(metadata, "snapshot_token"), pin);
+        assert_eq!(field(metadata, "state"), "conflicted");
+        assert_eq!(
+            field(metadata, "stopped_commit"),
+            f.data.source_tip.to_string()
+        );
+        assert_eq!(
+            field(metadata, "resolution_profile"),
+            "original-commit-path-v1"
+        );
+        assert_eq!(numeric(metadata, "resolution_input_commits"), 1);
+        assert_eq!(numeric(metadata, "resolution_consumed_commits"), 1);
+        assert_eq!(numeric(metadata, "step_count"), 1);
+        assert!(metadata.contains("\"bundle\":null"));
+        assert!(metadata.contains("\"candidate_commit\":null"));
+        let provisional = field(metadata, "rewritten").to_owned();
+        assert_eq!(
+            read_request(
+                &server.client,
+                "resolve-rebase",
+                'd',
+                &(preparation(&f) + &first_choice),
+                None,
+                false
+            )
+            .status,
+            400
+        );
+        let wrong = first_command.replace(
+            &format!("resolution={}", f.first),
+            &format!("resolution={provisional}"),
+        );
+        assert_eq!(
+            read_request(&server.client, "resolve-rebase", 'd', &wrong, None, false).status,
+            400
+        );
+        assert_eq!(
+            read_request(&server.client, "resolve", 'd', &first_command, None, false).status,
+            400
+        );
+        assert_eq!(
+            read_request(
+                &server.client,
+                "resolve-rebase",
+                'f',
+                &first_command,
+                None,
+                false
+            )
+            .status,
+            403
+        );
+        let wrong_pin = first_command.replace(&pin, &format!("alg:1:{}", "a".repeat(64)));
+        assert_eq!(
+            read_request(
+                &server.client,
+                "resolve-rebase",
+                'd',
+                &wrong_pin,
+                None,
+                false
+            )
+            .status,
+            409
+        );
+
+        let binary = b"\0resolved bytes\xff\r\n";
+        let complete_command = first_command
+            + &format!(
+                "&resolution={}:66696e616c:file:100755:file_0",
+                f.data.source_tip
+            );
+        let prepared = resolve_file_request(&server.client, &complete_command, binary, true);
+        let (candidate, metadata) = candidate(&prepared, &f);
+        assert_eq!(field(&metadata, "snapshot_token"), pin);
+        assert_eq!(numeric(&metadata, "resolution_input_commits"), 2);
+        assert_eq!(numeric(&metadata, "resolution_consumed_commits"), 2);
+        assert!(metadata.contains("\"choice\":\"file\""));
+        let blob = git_object_id(format, GitObjectKind::Blob, binary);
+        assert!(metadata.contains(&format!("\"result\":{{\"mode\":33261,\"oid\":\"{blob}\"}}")));
+        assert_eq!(
+            resolve_file_request(&server.client, &complete_command, binary, false),
+            prepared
+        );
+        let inspected = read_request(
+            &server.client,
+            "inspect-rebase",
+            'd',
+            &common(&candidate),
+            Some(&candidate.bundle),
+            false,
+        );
+        assert_eq!(
+            inspected.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&inspected.body)
+        );
+        let inspected = std::str::from_utf8(&inspected.body).unwrap();
+        assert_eq!(field(inspected, "profile"), "verified-linear-series-v1");
+        assert_eq!(numeric(inspected, "commit_count"), 2);
+        assert!(inspected.contains("7a7a2d70726976617465"));
+        assert_eq!(server.finish().accepted_sessions(), 11);
+
+        let node = reopen(&config);
+        assert_eq!(
+            generation(&node),
+            before + 1,
+            "only opening the PR published"
+        );
+        assert!(node.read_git_object(candidate.binding.commit).is_err());
+        assert!(node.read_git_object(blob).is_err());
+        let state = node
+            .runtime()
+            .block_on(node.materialize_admission())
+            .unwrap();
+        assert_eq!(state.snapshot().refs[&f.data.source_ref], f.data.source_tip);
+        assert_eq!(state.snapshot().refs[&f.data.target_ref], f.data.target_tip);
+        let outbox = state.snapshot().outbox.len();
+        let server = Server::start(node, &path, 3, true, true);
+        accepted(&send(
+            &server.client,
+            "reviews/approve",
+            'b',
+            "review-resolved-series",
+            &(review_form(&candidate, 0) + "&method=rebase"),
+            Some(&candidate.bundle),
+            true,
+        ));
+        let merge = merge_form(&candidate, &[REVIEWER]) + "&method=rebase";
+        let published = send(
+            &server.client,
+            "merge",
+            'c',
+            "land-resolved-series",
+            &merge,
+            Some(&candidate.bundle),
+            false,
+        );
+        accepted(&published);
+        assert_eq!(
+            send(
+                &server.client,
+                "merge",
+                'c',
+                "land-resolved-series",
+                &merge,
+                None,
+                false
+            ),
+            published
+        );
+        assert_eq!(server.finish().accepted_sessions(), 3);
+        let node = reopen(&config);
+        let state = node
+            .runtime()
+            .block_on(node.materialize_admission())
+            .unwrap();
+        assert_eq!(state.snapshot().refs[&f.data.source_ref], f.data.source_tip);
+        assert_eq!(
+            state.snapshot().refs[&f.data.target_ref],
+            candidate.binding.commit
+        );
+        assert_eq!(state.snapshot().outbox.len(), outbox + 2);
+        assert_eq!(node.read_git_object(blob).unwrap().payload(), binary);
         node.shutdown().unwrap();
     }
 }

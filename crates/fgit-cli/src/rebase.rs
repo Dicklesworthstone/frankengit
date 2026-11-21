@@ -1,5 +1,5 @@
 //! Native branch rebase preparation, with a separate publication boundary.
-mod resolutions;
+pub(crate) mod resolutions;
 use crate::commit_replay::{decimal, hex, parse_head, token, unhex, write_receipt};
 use crate::merge_apply::preparation::{publish_new_bundle, render_conflict, require_absent};
 use crate::publication_support::{parse_oid, quote};

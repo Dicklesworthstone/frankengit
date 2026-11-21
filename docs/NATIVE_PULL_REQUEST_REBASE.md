@@ -66,6 +66,42 @@ and merge-base comparison mode are not supported by this inspection profile.
 All comparisons share one finite review budget; truncated results do not
 become a complete inspection receipt.
 
+## Resolve original-commit conflicts
+
+`fg pr resolve-rebase` reconstructs the entire original source suffix with
+explicit conflict choices. Supply the same exact subject, `path-v1` profile,
+upstream, committer, timestamp, empty policy and bounds as preparation, plus
+`--expected-head` set to the stopped preparation's `snapshot_token`. At least
+one original-commit recipe is required:
+
+```text
+--resolve ORIGINAL_OID:PATH_HEX:base|ours|theirs|delete
+--resolve-file ORIGINAL_OID:PATH_HEX:100644|100755:LOCAL_FILE
+```
+
+Repeat these options for every conflict being resolved. `ours` is the accumulated
+rebased tree, `theirs` is the original commit being replayed, and `base` is that
+original commit's parent. Paths are exact Git bytes. A provisional rewritten ID
+or step number cannot replace the original commit ID. File choices use the
+existing bounded local-file reader; target-bundle output remains no-clobber.
+
+Resolving an early conflict can reveal a later one. A stopped result exits with
+status 3, includes the original-bound consumed `resolution_decisions`, and
+creates no partial candidate. Retain earlier choices and add the next original
+commit's choices to reconstruct again from the same snapshot. A complete result
+exits with status 0, consumes every supplied recipe and has
+`resolution_profile=original-commit-path-v1`. An unrelated authority publication
+also invalidates the pin; obtain a fresh stopped preparation instead of silently
+updating its head. The source branch and original author/message bytes remain
+unchanged throughout preparation and resolution.
+
+The native entry point is
+`OneNode::prepare_resolved_pull_request_rebase_bundle_in`. It requires a typed
+authority head and returns the ordinary prepared PR rebase bundle together with
+`Vec<RebaseResolvedStep>`. It validates the current open PR, policy and both tips
+at that head before invoking the shared source-rebase resolution engine.
+Publication still requires complete native inspection and ordinary protection.
+
 ## Review and land
 
 Use the existing exact-candidate review command with `--method rebase`:
@@ -126,21 +162,42 @@ clipping is explicit; the complete bounded inspection remains downloadable.
 Imported candidate receipts always undergo native reinspection, and an uncertain
 review or merge retains the original method, command, bundle and recovery key.
 
-HTTP uses `prepare-rebase` and `inspect-rebase` under
-`/api/v1/pulls/{number}/`. Both require Git-read and PR-read on the same token.
+HTTP uses `prepare-rebase`, `resolve-rebase` and `inspect-rebase` under
+`/api/v1/pulls/{number}/`. All require Git-read and PR-read on the same token.
 The existing review and merge endpoints require their existing write grants and
 explicit `method=rebase`; merging also enforces the target-ref write ceiling.
 The [preparation](HTTP_CANDIDATE_PREPARATION_API.md),
+[original-commit resolution](HTTP_PULL_REBASE_RESOLUTION_API.md),
 [inspection](HTTP_CANDIDATE_INSPECTION_API.md), and
 [review/merge](HTTP_REVIEW_MERGE_API.md) guides specify exact fields and receipts.
-Browser preparation supports the direct path profile; conflicts stop without a
-partial candidate or automatic change of method. The browser retains its
-16 MiB bundle and 8 MiB response limits, and uses one cumulative display budget
-across the series. This does not widen the service's loopback deployment or
-credential model.
+Browser preparation supports the direct path profile. A conflicted original
+commit opens the explicit resolution editor: **Original parent** selects base,
+**Current rebased parent** selects ours, and **Original commit** selects theirs.
+Deletion and exact regular/executable replacement files are also available.
+Later conflicts retain the earlier original-commit recipes and the same
+authority snapshot; every request reconstructs the complete suffix. A stopped
+prefix grants no review or publication controls. A complete result must pass
+separate whole-series inspection before either action becomes available.
+
+The browser limits replacement files to 1 MiB each, with 128 choices and 16 MiB
+of decoded path/file bytes across all retained recipes. It retains its 16 MiB
+bundle and 8 MiB inspection-response limits, and uses one cumulative display
+budget across the series. A newly empty stop requires an explicit new
+preparation with the intended empty policy. This does not widen the service's
+loopback deployment or credential model.
+
+[Required rebase-candidate checks](TRUSTED_REBASE_WORKFLOW.md) connect an already
+prepared series to `fg workflow run-rebase-candidate` and `fg workflow
+publish-candidate --method rebase`. Execution verifies all intermediate object
+closures; retained completed jobs can satisfy configured protected-merge checks
+for the exact PR subject and bundle without creating a CI ref.
 
 MCP clients use `frankengit_source_candidate` with
-`operation: "prepare_pull_rebase"` or `"inspect_pull_rebase"`. These require
+`operation: "prepare_pull_rebase"`, `"resolve_pull_rebase"` or
+`"inspect_pull_rebase"`. Resolution requires `expected_head` and original-bound
+`resolutions: [{original, paths: [{path_hex, choice, mode?, bytes_hex_chunks?}]}]`.
+The MCP resolution profile admits at most 64 total paths and 24 KiB of decoded
+paths plus replacement bytes. These operations require
 ordinary source-read and PR-read grants together and return separate explicit
 inspection, review and publication arguments. The existing review and merge
 tools accept `method: "rebase"` with their existing write grants; preparation

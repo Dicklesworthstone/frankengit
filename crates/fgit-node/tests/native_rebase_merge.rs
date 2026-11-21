@@ -17,9 +17,12 @@ use fgit_forge::event::pull_request::{PullRequestAction, PullRequestCommand, Pul
 use fgit_forge::event::review::{
     CandidateBinding, CandidateReviewCommand, ReviewCommand, ReviewDecision, ReviewSubject,
 };
+use fgit_forge::preparation::rebase::resolutions::RebaseCommitResolution;
 use fgit_forge::preparation::rebase::{
     EmptyCommitPolicy, PreparedRebase, RebaseCommitter, RebasePreparation, RebaseStepKind,
+    RebaseStop,
 };
+use fgit_forge::preparation::resolution::{ConflictResolution, ResolutionChoice};
 use fgit_forge::{AggregateVersion, ExpectedVersion, ForgeEventPayload, PullRequestNumber};
 use fgit_node::{
     LoopbackReceiveSession, MaterializedAdmission, NodeConfig, NodeWorkspaceRefusal, OneNode,
@@ -138,7 +141,7 @@ struct Fixture {
     data: PullRequestData,
 }
 /// 0: disjoint edits, 1: conflicting add, 2: both source edits already present,
-/// 3: a merge commit inside the requested original suffix.
+/// 3: a merge commit inside the requested original suffix, 4: two conflict steps.
 fn fixture(root: &Path, format: GitHashAlgorithm, mode: u8) -> Fixture {
     let path = root.join("source");
     fs::create_dir_all(path.join("refs/heads")).unwrap();
@@ -187,6 +190,11 @@ fn fixture(root: &Path, format: GitHashAlgorithm, mode: u8) -> Fixture {
                 (b"selected", 0o100755, target_only),
             ]),
             2 => expected_tree.clone(),
+            4 => tree(&[
+                (b"keep", 0o100644, keep),
+                (b"later", 0o100644, target_only),
+                (b"selected", 0o100755, target_only),
+            ]),
             _ => tree(&[
                 (b"keep", 0o100644, keep),
                 (b"target", 0o100644, target_only),
@@ -859,6 +867,190 @@ fn preparation_is_read_only_on_conflicts_non_linear_originals_empty_results_and_
             }
             f.node.shutdown().unwrap();
         }
+    }
+}
+
+#[test]
+fn exact_head_pr_resolutions_reconstruct_the_whole_series_without_rewriting_source() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let f = fixture(&scratch.0, format, 4);
+        let before = snapshot(&f.node);
+        let subject = subject(&f, PolicyEpoch::FIRST);
+        let first = RebaseCommitResolution {
+            original: f.first,
+            paths: vec![ConflictResolution {
+                path: b"selected".to_vec(),
+                choice: ResolutionChoice::Theirs,
+            }],
+        };
+        let resolved_bytes = b"\0exact binary resolution\xff\r\n";
+        let second = RebaseCommitResolution {
+            original: f.source,
+            paths: vec![ConflictResolution {
+                path: b"later".to_vec(),
+                choice: ResolutionChoice::File {
+                    mode: 0o100755,
+                    bytes: resolved_bytes.to_vec(),
+                },
+            }],
+        };
+        let resolve = |head, recipes: &[RebaseCommitResolution]| {
+            f.node
+                .runtime()
+                .block_on(f.node.prepare_resolved_pull_request_rebase_bundle_in(
+                    &f.node.request_context(),
+                    &subject,
+                    &RefVisibility::new(),
+                    head,
+                    f.base,
+                    &committer(),
+                    Default::default(),
+                    EmptyCommitPolicy::Stop,
+                    recipes,
+                ))
+        };
+        let (stopped, receipts) =
+            resolve(before.basis().id(), std::slice::from_ref(&first)).unwrap();
+        assert_eq!(stopped.source_head, before.basis().id());
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].original, f.first);
+        let RebasePreparation::Stopped {
+            original,
+            completed,
+            reason: RebaseStop::Conflicted(conflicts),
+            ..
+        } = stopped.preparation.outcome
+        else {
+            panic!("the second original commit must stop after resolving the first");
+        };
+        assert_eq!(original, f.source);
+        assert_eq!(completed.len(), 1);
+        assert_eq!(conflicts[0].path, b"later");
+        assert!(stopped.preparation.bundle.is_none());
+        assert_eq!(stopped.preparation.pack_objects, 0);
+        assert!(f.node.read_git_object(completed[0].rewritten).is_err());
+        assert_eq!(snapshot(&f.node).basis(), before.basis());
+
+        // Recipes cannot use provisional rewrites or resolve a clean path;
+        // malformed recipes and empty requests cannot select automatic replay.
+        let mut provisional = first.clone();
+        provisional.original = completed[0].rewritten;
+        let mut clean_path = first.clone();
+        clean_path.paths[0].path = b"keep".to_vec();
+        for invalid in [
+            Vec::new(),
+            vec![provisional],
+            vec![clean_path],
+            vec![first.clone(), first.clone()],
+        ] {
+            assert!(resolve(before.basis().id(), &invalid).is_err());
+            assert_eq!(snapshot(&f.node).basis(), before.basis());
+        }
+        let recipes = [first, second];
+        let (prepared, receipts) = resolve(before.basis().id(), &recipes).unwrap();
+        assert_eq!(prepared.subject, subject);
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(receipts[0].original, f.first);
+        assert_eq!(receipts[1].original, f.source);
+        let selected = receipts[1].paths[0].result.as_ref().unwrap();
+        assert_eq!(selected.mode, 0o100755);
+        assert_eq!(
+            selected.oid,
+            git_object_id(format, GitObjectKind::Blob, resolved_bytes)
+        );
+        let RebasePreparation::Clean(plan) = prepared.preparation.outcome else {
+            panic!("both original-bound recipes must produce a complete candidate");
+        };
+        assert_eq!(plan.steps.len(), 2);
+        for object in plan
+            .objects
+            .iter()
+            .filter(|object| object.kind == GitObjectKind::Commit)
+        {
+            let body = std::str::from_utf8(&object.body).unwrap();
+            assert!(body.contains("author Original <original@example.invalid> 5 -0330\n"));
+            assert!(body.contains("original message\n"));
+        }
+        let candidate = Candidate {
+            merge: NativeMerge {
+                source_ref: source_ref(),
+                source_tip: f.source,
+                base_tip: f.base,
+                target_ref: target_ref(),
+                target_tip_before: f.target,
+                merge_commit: plan.commit,
+            },
+            plan,
+            bundle: prepared.preparation.bundle.unwrap(),
+        };
+        let (retry, repeated_receipts) = resolve(before.basis().id(), &recipes).unwrap();
+        assert_eq!(retry.preparation.bundle.as_ref(), Some(&candidate.bundle));
+        assert_eq!(repeated_receipts, receipts);
+        assert_unplaced(&f, &candidate);
+        assert_eq!(snapshot(&f.node).basis(), before.basis());
+
+        // Even an unrelated, valid publication invalidates the resolution pin;
+        // unchanged PR coordinates cannot silently refresh the authority head.
+        let unrelated = f
+            .node
+            .runtime()
+            .block_on(f.node.admit_branch_updates_durable_in(
+                &f.node.request_context(),
+                &session(1, b"resolution-unrelated-ref"),
+                &[RefCommand {
+                    name: RefName::try_new(b"refs/heads/unrelated").unwrap(),
+                    expected_old: ExpectedOld::Absent,
+                    proposed_new: ProposedNew::Update(f.target),
+                    force: false,
+                }],
+                Default::default(),
+            ))
+            .unwrap();
+        committed(&unrelated.commands[0].terminal);
+        let current = snapshot(&f.node);
+        assert!(matches!(
+            resolve(before.basis().id(), &recipes),
+            Err(NodeWorkspaceRefusal::StaleWorkspaceBase)
+        ));
+        assert_eq!(snapshot(&f.node).basis(), current.basis());
+        let (fresh, _) = resolve(current.basis().id(), &recipes).unwrap();
+        assert_eq!(fresh.preparation.bundle.as_ref(), Some(&candidate.bundle));
+        let inspected = f
+            .node
+            .runtime()
+            .block_on(f.node.inspect_pull_request_rebase_bundle_in(
+                &f.node.request_context(),
+                &subject,
+                f.base,
+                candidate.plan.commit,
+                &candidate.bundle,
+                &RefVisibility::new(),
+                None,
+                &Default::default(),
+            ))
+            .unwrap();
+        assert_eq!(inspected.commits.len(), 2);
+        assert_eq!(inspected.commits[0].parent, f.target);
+        assert_eq!(inspected.commits[1].parent, inspected.commits[0].id);
+        committed(
+            &apply(
+                &f.node,
+                &candidate,
+                b"land-resolved-rebase",
+                AggregateVersion::FIRST,
+            )
+            .unwrap()
+            .1,
+        );
+        let after = snapshot(&f.node);
+        assert_eq!(after.snapshot().refs[&source_ref()], f.source);
+        assert_eq!(after.snapshot().refs[&target_ref()], candidate.plan.commit);
+        assert_eq!(
+            after.snapshot().outbox.len(),
+            current.snapshot().outbox.len() + 1
+        );
+        f.node.shutdown().unwrap();
     }
 }
 

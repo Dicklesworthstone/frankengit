@@ -208,6 +208,35 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   const button = (parent, label, handler) => { const el = element(doc, 'button', label); el.type = 'button';
     el.addEventListener('click', event => { event.preventDefault(); handler(); }); parent.append(el); return el; };
   const on = (id, event, handler) => nodes[id].addEventListener(event, ev => { ev.preventDefault(); handler(); });
+  function renderPreparation(result, resolved = false) {
+    nodes.candidate.replaceChildren(); resolution.clear();
+    const metadata = result.metadata, rebasing = metadata.method === 'rebase';
+    if (result.inspection) {
+      const rendered = renderInspection(doc, nodes.candidate, result.inspection);
+      status((resolved ? 'Resolved candidate constructed and inspected. No vote or publication exists.'
+        : 'Candidate prepared and inspected, without publication.') +
+        (rendered.clipped ? ' Display clipped: download the full report before reviewing.' : ''));
+      return;
+    }
+    item(doc, nodes.candidate, 'h3', 'Preparation: ' + metadata.state);
+    if (rebasing) item(doc, nodes.candidate, 'pre', 'Stopped at original commit ' + metadata.stopped_commit + '. No candidate bundle was produced.');
+    for (const conflict of metadata.conflicts) item(doc, nodes.candidate, 'pre',
+      displayBytes(conflict.path_hex) + ' · ' + conflict.kind + '\nPath bytes: ' + conflict.path_hex);
+    if (metadata.state === 'conflicted' && client.conflict) {
+      resolution.show(metadata);
+      status(rebasing
+        ? (resolved ? 'Earlier resolutions are retained. ' : '') +
+          'Choose every conflict for this original commit. The complete series will be reconstructed and inspected before review or publication becomes available.'
+        : 'Choose every conflict explicitly below. Resolution constructs and inspects a new ' +
+          (metadata.method === 'squash' ? 'squash' : 'merge') + ' candidate; it does not record approval or publish.');
+    } else if (rebasing) {
+      status(metadata.state === 'became_empty'
+        ? 'Rebase stopped at a newly empty commit. Choose stop, drop or keep explicitly and prepare again. No approval or publication was produced.'
+        : 'Rebase stopped without a publishable candidate. Reload the selection before preparing again.');
+    } else if (metadata.state === 'conflicted') {
+      status('This profile produced conflicts. Revise the source or explicitly prepare with another profile; direct-path resolution is unavailable for these conflict coordinates.');
+    } else status('Already up to date. No candidate, transaction or approval was produced.');
+  }
   function controls() {
     const busy = Boolean(operation) || client.busy, recovering = client.recoveryOnly,
       connected = client.connected && !recovering, pending = client.pending, candidate = client.candidate;
@@ -709,30 +738,12 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
       : await client.prepareAndInspect(selected.row.number, fields,
         { author: nodes.author.value, committer: nodes.committer.value, timestamp: number('timestamp'), message: nodes.message.value },
         nodes['candidate-method'].value, nodes['candidate-profile'].value); guard();
-    if (result.inspection) {
-      const rendered = renderInspection(doc, nodes.candidate, result.inspection);
-      status(`Candidate prepared and inspected, without publication.${rendered.clipped ? ' Display clipped: download the full report before reviewing.' : ''}`);
-    } else {
-      item(doc, nodes.candidate, 'h3', `Preparation: ${result.metadata.state}`);
-      if (rebasing) item(doc, nodes.candidate, 'pre', `Stopped at original commit ${result.metadata.stopped_commit}. No candidate bundle was produced.`);
-      for (const conflict of result.metadata.conflicts) item(doc, nodes.candidate, 'pre', `${displayBytes(conflict.path_hex)} · ${conflict.kind}\nPath bytes: ${conflict.path_hex}`);
-      if (result.metadata.state === 'conflicted' && client.conflict) {
-        resolution.show(result.metadata);
-        status(`Choose every conflict explicitly below. Resolution constructs and inspects a new ${result.metadata.method === 'squash' ? 'squash' : 'merge'} candidate; it does not record approval or publish.`);
-      } else if (rebasing) {
-        status(result.metadata.state === 'became_empty'
-          ? 'Rebase stopped at a newly empty commit. Choose stop, drop or keep explicitly and prepare again. No approval or publication was produced.'
-          : 'Rebase stopped at a conflict. Revise the source before preparing again; no partial series can be reviewed or published.');
-      } else if (result.metadata.state === 'conflicted') {
-        status('This profile produced conflicts. Revise the source or explicitly prepare with another profile; direct-path resolution is unavailable for these conflict coordinates.');
-      } else status('Already up to date. No candidate, transaction or approval was produced.');
-    }
+    renderPreparation(result);
   }));
   on('resolution', 'submit', () => run('candidate', async guard => {
     const choices = await resolution.collect(guard); guard();
-    const result = await client.resolveAndInspect(choices); guard(); resolution.clear();
-    const rendered = renderInspection(doc, nodes.candidate, result.inspection);
-    status(`Resolved candidate constructed and inspected. No vote or publication exists.${rendered.clipped ? ' Display clipped: download the full inspection before reviewing.' : ''}`);
+    const result = await client.resolveAndInspect(choices); guard();
+    renderPreparation(result, true);
   }));
   for (const id of ['metadata', 'prepare']) nodes[id].addEventListener('input', invalidateCandidate);
   on('candidate-method', 'change', invalidateCandidate);

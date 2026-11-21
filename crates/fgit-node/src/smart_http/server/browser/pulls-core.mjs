@@ -615,12 +615,17 @@ export class Transport {
           statuses.length !== 1 || statuses[0] !== 200) fail('PR search is a bodyless read at one snapshot.');
       integer(maximum, 'PR search response limit', 1, REPLY_LIMIT);
     }
-    if (/^pulls\/[1-9][0-9]*\/(?:prepare-rebase|inspect-rebase)(?:\?|$)/.test(path)) {
-      const preparing = path.endsWith('/prepare-rebase');
+    if (/^pulls\/[1-9][0-9]*\/(?:prepare-rebase|resolve-rebase|inspect-rebase)(?:\?|$)/.test(path)) {
+      const resolving = path.endsWith('/resolve-rebase'), preparing = !path.endsWith('/inspect-rebase');
+      const multipart = /^multipart\/form-data; boundary=[A-Za-z0-9-_.]{1,70}$/.test(contentType);
+      const formType = contentType === 'application/x-www-form-urlencoded';
       if (method !== 'POST' || body === undefined || key !== undefined || !read || path.includes('?') || headerNames.length ||
-          binary !== preparing || (preparing ? contentType !== 'application/x-www-form-urlencoded'
-            : !/^multipart\/form-data; boundary=[A-Za-z0-9-_.]{1,70}$/.test(contentType)) ||
+          binary !== preparing || (resolving ? !(formType || multipart) : preparing ? !formType : !multipart) ||
           statuses.length !== (preparing ? 2 : 1) || statuses[0] !== 200 || (preparing && statuses[1] !== 409)) fail('Invalid read-only PR rebase request.');
+      const bodyLimit = preparing && !resolving ? FORM_LIMIT : 16 * 1024 * 1024 + FORM_LIMIT + 64 * 1024;
+      if (!((typeof body === 'string' && utf8.encode(body).length <= bodyLimit) ||
+          (typeof Blob !== 'undefined' && body instanceof Blob && body.size <= bodyLimit))) fail('PR rebase input exceeds its bounded envelope.');
+      integer(maximum, 'PR rebase response limit', 1, preparing ? 18 * 1024 * 1024 + 16 * 1024 : REPLY_LIMIT);
     }
     const allowed = this.#defaultBranch
       ? /^(?:default-branch(?:\?[^#]+)?|source\/refs|outcomes)$/.test(path)
@@ -646,7 +651,7 @@ export class Transport {
       ? /^(?:source\/initial\/(?:prepare|apply)|outcomes)$/.test(path)
       : this.#source
       ? /^(?:source\/(?:tree|blob|prepare|inspect|apply)|outcomes)$/.test(path)
-      : /^(pulls(?:\/search|\/[1-9][0-9]*(?:\/(?:open|update|close|reopen|diff|checks|labels|comments(?:\/append)?|prepare|prepare-rebase|resolve|inspect|inspect-rebase|merge|fast-forward|reviews(?:\/(?:approve|request-changes|withdraw))?))?)?(?:\?[^#]*)?|outcomes)$/.test(path);
+      : /^(pulls(?:\/search|\/[1-9][0-9]*(?:\/(?:open|update|close|reopen|diff|checks|labels|comments(?:\/append)?|prepare|prepare-rebase|resolve|resolve-rebase|inspect|inspect-rebase|merge|fast-forward|reviews(?:\/(?:approve|request-changes|withdraw))?))?)?(?:\?[^#]*)?|outcomes)$/.test(path);
     if (!allowed || url.origin !== this.root.origin || !url.pathname.startsWith(`${this.root.route}/api/v1/`)) fail('Invalid API route.');
     requirePublicationEnvelope(path, method, body, key, read);
     const epoch = this.#epoch, controller = new AbortController(); this.#all.add(controller); if (read) this.#reads.add(controller);

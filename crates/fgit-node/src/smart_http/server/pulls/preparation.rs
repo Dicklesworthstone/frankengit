@@ -84,7 +84,7 @@ pub(super) fn execute(
         .min(output::MAX_REPLY_BYTES);
     let visibility = RefVisibility::new();
     if request.rebase {
-        return rebase::execute(node, request, &bytes, &context, maximum, &mut live);
+        return rebase::execute(node, request, bytes, &context, maximum, &mut live);
     }
     if request.resolution {
         let command = {

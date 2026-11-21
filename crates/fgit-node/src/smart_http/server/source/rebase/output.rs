@@ -262,9 +262,23 @@ pub(super) fn append_conflict(
     conflict: &MergeConflict,
     command: &Prepare,
 ) -> Result<(), ApiError> {
+    append_conflict_with_limits(
+        out,
+        conflict,
+        command.inputs.source_tip.algorithm(),
+        command.limits.max_path_bytes,
+    )
+}
+
+pub(super) fn append_conflict_with_limits(
+    out: &mut String,
+    conflict: &MergeConflict,
+    format: GitHashAlgorithm,
+    max_path_bytes: usize,
+) -> Result<(), ApiError> {
     let path = &conflict.path;
     if path.is_empty()
-        || path.len() > command.limits.max_path_bytes
+        || path.len() > max_path_bytes
         || path.contains(&0)
         || path
             .split(|b| *b == b'/')
@@ -281,7 +295,6 @@ pub(super) fn append_conflict(
         ConflictKind::Opaque => "opaque",
         ConflictKind::AttributesRequireDriver => "attributes_require_driver",
     };
-    let format = command.inputs.source_tip.algorithm();
     append(
         out,
         &format!(

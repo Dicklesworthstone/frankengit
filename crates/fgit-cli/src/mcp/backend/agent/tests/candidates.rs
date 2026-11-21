@@ -336,6 +336,7 @@ fn sponsored_discovery_and_dispatch_exclude_every_other_candidate_engine() {
         "inspect_pull_merge",
         "resolve_pull_merge",
         "prepare_pull_rebase",
+        "resolve_pull_rebase",
         "inspect_pull_rebase",
         "prepare_queue_merge",
         "apply",

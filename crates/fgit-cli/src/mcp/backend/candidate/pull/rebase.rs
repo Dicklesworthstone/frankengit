@@ -6,6 +6,9 @@ mod tests;
 
 use super::*;
 use fgit_crypto::{GitObjectKind, git_object_id, sha256_digest};
+use fgit_forge::preparation::rebase::resolutions::{
+    RebaseCommitResolution, RebaseResolvedStep, validate_rebase_resolutions,
+};
 use fgit_forge::preparation::rebase::{
     EmptyCommitPolicy, RebaseCommitter, RebasePreparation, RebaseRequest, RebaseStep,
     RebaseStepKind, RebaseStop,
@@ -23,11 +26,22 @@ const PREPARATION_LIMITS: &[(&str, usize, usize)] = &[
     ("max_preparation_bytes", 256 * 1024, 1024 * 1024),
 ];
 
+#[derive(Debug)]
 struct Input {
     selection: Selection,
     request: RebaseRequest,
     committer: RebaseCommitter,
     limits: PreparationLimits,
+    resolutions: Option<Vec<RebaseCommitResolution>>,
+}
+impl Input {
+    fn operation(&self) -> &'static str {
+        if self.resolutions.is_some() {
+            REBASE_RESOLVE
+        } else {
+            REBASE_PREPARE
+        }
+    }
 }
 
 fn checkpoint(live: &mut impl FnMut() -> bool) -> Result<(), ToolError> {
@@ -71,14 +85,25 @@ fn limit(
 }
 
 fn parse(args: &Object, format: GitHashAlgorithm) -> Result<Input, ToolError> {
+    let resolving = match required(args, "operation")? {
+        REBASE_PREPARE => false,
+        REBASE_RESOLVE => true,
+        _ => return Err(ToolError::invalid("unsupported_rebase_profile")),
+    };
     let mut allowed = SUBJECT_FIELDS.to_vec();
     allowed.extend(["profile", "upstream", "committer", "timestamp", "empty"]);
     allowed.extend(PREPARATION_LIMITS.iter().map(|row| row.0));
+    if resolving {
+        allowed.push("resolutions");
+    }
     require_fields(args, &allowed)?;
-    if required(args, "operation")? != REBASE_PREPARE || required(args, "profile")? != "path-v1" {
+    if required(args, "profile")? != "path-v1" {
         return Err(ToolError::invalid("unsupported_rebase_profile"));
     }
     let selection = selection(args, format)?;
+    if resolving && selection.expected_head.is_none() {
+        return Err(ToolError::invalid("resolution_snapshot_required"));
+    }
     let empty = match required(args, "empty")? {
         "stop" => EmptyCommitPolicy::Stop,
         "drop" => EmptyCommitPolicy::Drop,
@@ -123,19 +148,28 @@ fn parse(args: &Object, format: GitHashAlgorithm) -> Result<Input, ToolError> {
     {
         return Err(ToolError::invalid("nonempty_distinct_pr_rebase_required"));
     }
+    let resolutions = if resolving {
+        let recipes = super::super::rebase::resolutions::parse(args, format)?;
+        validate_rebase_resolutions(format, limits, &recipes)
+            .map_err(|_| ToolError::invalid("invalid_rebase_resolutions"))?;
+        Some(recipes)
+    } else {
+        None
+    };
     Ok(Input {
         selection,
         request,
         committer,
         limits,
+        resolutions,
     })
 }
 
-pub(super) fn schema(inspecting: bool) -> Value {
-    if inspecting {
+pub(super) fn schema(operation: &str) -> Value {
+    if operation == REBASE_INSPECT {
         return inspection::schema();
     }
-    let mut properties = subject_properties(REBASE_PREPARE);
+    let mut properties = subject_properties(operation);
     properties.insert("profile".into(), object([("const", text("path-v1"))]));
     properties.insert("upstream".into(), oid_schema());
     properties.insert("committer".into(), text_schema(1024));
@@ -161,22 +195,27 @@ pub(super) fn schema(inspecting: bool) -> Value {
             ]),
         );
     }
-    reviews::candidate_schema(
-        properties,
-        &[
-            "operation",
-            "profile",
-            "number",
-            "expected_version",
-            "expected_source",
-            "expected_target",
-            "policy_epoch",
-            "upstream",
-            "committer",
-            "timestamp",
-            "empty",
-        ],
-    )
+    let mut required = vec![
+        "operation",
+        "profile",
+        "number",
+        "expected_version",
+        "expected_source",
+        "expected_target",
+        "policy_epoch",
+        "upstream",
+        "committer",
+        "timestamp",
+        "empty",
+    ];
+    if operation == REBASE_RESOLVE {
+        properties.insert(
+            "resolutions".into(),
+            super::super::rebase::resolutions::schema(),
+        );
+        required.extend(["expected_head", "resolutions"]);
+    }
+    reviews::candidate_schema(properties, &required)
 }
 
 pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
@@ -190,40 +229,62 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
     let input = parse(args, backend.options.format)?;
     let context = backend.command_context();
     checkpoint(&mut || context.is_live())?;
-    let prepared = backend
-        .node
-        .runtime()
-        .block_on(backend.node.prepare_pull_request_rebase_bundle_in(
-            &context,
-            &input.selection.subject,
-            &Default::default(),
-            input.request.upstream,
-            &input.committer,
-            input.limits,
-            input.request.empty,
-        ))
-        .map_err(|error| {
-            if !context.is_live() {
+    let result = if let Some(recipes) = &input.resolutions {
+        backend.node.runtime().block_on(
+            backend.node.prepare_resolved_pull_request_rebase_bundle_in(
+                &context,
+                &input.selection.subject,
+                &Default::default(),
+                input
+                    .selection
+                    .expected_head
+                    .ok_or(ToolError::invalid("resolution_snapshot_required"))?,
+                input.request.upstream,
+                &input.committer,
+                input.limits,
+                input.request.empty,
+                recipes,
+            ),
+        )
+    } else {
+        backend
+            .node
+            .runtime()
+            .block_on(backend.node.prepare_pull_request_rebase_bundle_in(
+                &context,
+                &input.selection.subject,
+                &Default::default(),
+                input.request.upstream,
+                &input.committer,
+                input.limits,
+                input.request.empty,
+            ))
+            .map(|prepared| (prepared, Vec::new()))
+    };
+    let (prepared, resolved) = result.map_err(|error| {
+        if !context.is_live() {
+            return ToolError::failed("rebase_cancelled");
+        }
+        if let NodeWorkspaceRefusal::RebasePreparation(error) = &error {
+            if error.is_cancelled() {
                 return ToolError::failed("rebase_cancelled");
             }
-            if let NodeWorkspaceRefusal::RebasePreparation(error) = &error {
-                if error.is_cancelled() {
-                    return ToolError::failed("rebase_cancelled");
-                }
-                if error.is_resource_refusal() {
-                    return ToolError::failed("resource_limit");
-                }
-                if error.is_tip_moved() || error.is_snapshot_moved() {
-                    return ToolError::failed("pull_subject_moved");
-                }
+            if error.is_resource_refusal() {
+                return ToolError::failed("resource_limit");
             }
-            prepare::preparation_error(error)
-        })?;
+            if error.is_tip_moved() || error.is_snapshot_moved() {
+                return ToolError::failed("pull_subject_moved");
+            }
+        }
+        prepare::preparation_error(error)
+    })?;
     check_selection(&input.selection, &prepared.subject, prepared.source_head)?;
     if prepared.preparation.source_head != prepared.source_head {
         return Err(invalid_report());
     }
-    render(backend, &input, &prepared, &mut || context.is_live())
+    render(backend, &input, &prepared, &resolved, &mut || {
+        context.is_live()
+    })
 }
 
 fn arguments(
@@ -277,6 +338,7 @@ fn render(
     backend: &NodeTools,
     input: &Input,
     prepared: &fgit_node::PreparedPullRequestRebaseBundle,
+    resolved: &[RebaseResolvedStep],
     live: &mut impl FnMut() -> bool,
 ) -> Result<Value, ToolError> {
     checkpoint(live)?;
@@ -294,13 +356,21 @@ fn render(
         return Err(invalid_report());
     }
     let last = validate_steps(input, steps)?;
+    let resolutions = super::super::rebase::output::resolutions(
+        input.resolutions.as_deref(),
+        input.request.source_tip.algorithm(),
+        input.limits,
+        &artifact.outcome,
+        resolved,
+        live,
+    )?;
     let mut fields = backend.header(prepared.source_head);
     fields.extend(binding(backend));
     fields.extend(subject_fields(&prepared.subject));
     fields.extend([
         ("type".into(), text("pull_rebase_preparation")),
         ("schema_version".into(), json::number(1)),
-        ("operation".into(), text(REBASE_PREPARE)),
+        ("operation".into(), text(input.operation())),
         ("profile".into(), text("path-v1")),
         ("method".into(), text("rebase")),
         ("upstream".into(), text(raw_oid(request.upstream))),
@@ -340,6 +410,23 @@ fn render(
         ("inspection_tool".into(), Value::Null),
         ("review_tool".into(), Value::Null),
         ("step_count".into(), text(steps.len().to_string())),
+        (
+            "resolution_profile".into(),
+            if input.resolutions.is_some() {
+                text("original-commit-path-v1")
+            } else {
+                Value::Null
+            },
+        ),
+        (
+            "resolution_input_commits".into(),
+            text(input.resolutions.as_ref().map_or(0, Vec::len).to_string()),
+        ),
+        (
+            "resolution_consumed_commits".into(),
+            text(resolved.len().to_string()),
+        ),
+        ("resolutions".into(), resolutions),
     ]);
     let mut mappings = Vec::with_capacity(steps.len());
     for step in steps {
