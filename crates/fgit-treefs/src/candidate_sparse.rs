@@ -1,4 +1,4 @@
-//! Sparse inputs from unpublished single-parent and two-parent candidates.
+//! Sparse inputs from unpublished single-parent, merge and rebase candidates.
 //!
 //! Candidate inputs are NOT a canonical SparseManifest. The authenticated base
 //! and executed candidate have separate identities. Native sparse discovery
@@ -86,6 +86,110 @@ impl<A: GitHashAlgorithm> SparseCandidateManifest<A> {
             source,
             candidate,
             &[*base.base_commit_oid(), incoming],
+            capability,
+            now,
+            parse_limits,
+            limits,
+        )
+    }
+
+    /// Discover the final tree of an explicitly selected linear rebase series.
+    /// `commits` is the complete oldest-first rewritten chain, excluding the
+    /// independently selected canonical base and including the candidate. Every
+    /// supplied native commit is read and its single parent checked; selecting
+    /// an already present intermediate commit never truncates this proof.
+    ///
+    /// The source owner still authenticates both original branches and validates
+    /// original-source ancestry, complete intermediate object closures and pack
+    /// coverage before calling this constructor. These inputs remain read-only
+    /// and retain the canonical target's base RCR, commit and tree separately.
+    pub fn build_rebase<S: ObjectSource<A>>(
+        base: &BaseView<A>,
+        source: &S,
+        commits: &[GitOid<A>],
+        capability: &mut TreeCapability,
+        now: u64,
+        parse_limits: ParseLimits,
+        limits: SparseLimits,
+    ) -> Result<Self, CandidateManifestRefusal> {
+        let invalid = CandidateManifestRefusal::InvalidCandidate;
+        if capability.repository_id() != base.repository_id() {
+            return Err(invalid(
+                "rebase capability belongs to a different repository",
+            ));
+        }
+        if commits.is_empty() || commits.len() > 256 {
+            return Err(invalid("rebase requires one through 256 rewritten commits"));
+        }
+        let grant = capability
+            .authorize_root(now)
+            .map_err(|e| CandidateManifestRefusal::Sparse(SparseRefusal::Capability(e)))?;
+        let mut expected_parent = *base.base_commit_oid();
+        let mut final_parent = expected_parent;
+        let mut total = 0usize;
+        let mut seen = std::collections::BTreeSet::new();
+        for id in commits {
+            if *id == *base.base_commit_oid()
+                || id.digest_bytes().iter().all(|byte| *byte == 0)
+                || !seen.insert(id.digest_bytes().to_vec())
+            {
+                return Err(invalid(
+                    "rebase commits must be distinct from the target and one another",
+                ));
+            }
+            let body = base
+                .read_object(source, id, GitObjectKind::Commit, &grant)
+                .map_err(CandidateManifestRefusal::Source)?;
+            total = total
+                .checked_add(body.len())
+                .filter(|length| *length <= 16 * 1024 * 1024)
+                .ok_or_else(|| invalid("rebase commit bodies exceed the cumulative budget"))?;
+            capability
+                .charge_fetch(
+                    u64::try_from(body.len()).map_err(|_| invalid("commit length overflow"))?,
+                )
+                .map_err(|e| CandidateManifestRefusal::Sparse(SparseRefusal::Capability(e)))?;
+            let ParsedObject::Commit(commit) = parse_object_body(
+                ObjectType::Commit,
+                &body,
+                AcceptanceProfile::GitCompatibleImport,
+                &parse_limits,
+            )
+            .map_err(|_| invalid("rebase step is not a bounded native commit"))?
+            else {
+                return Err(invalid("rebase step is not a commit"));
+            };
+            if commit
+                .headers()
+                .iter()
+                .filter(|header| header.name == b"tree")
+                .count()
+                != 1
+                || commit.headers().iter().any(|header| {
+                    (header.name == b"tree" || header.name == b"parent")
+                        && !header.continuations.is_empty()
+                })
+            {
+                return Err(invalid("ambiguous rebase tree or parent headers"));
+            }
+            let mut parents = commit.parent_references();
+            let parent = parents
+                .next()
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .and_then(|text| A::parse_hex(&text.to_ascii_lowercase()).ok());
+            if parent != Some(expected_parent) || parents.next().is_some() {
+                return Err(invalid(
+                    "rebase step must have the exact preceding single parent",
+                ));
+            }
+            final_parent = expected_parent;
+            expected_parent = *id;
+        }
+        Self::build_bound(
+            base,
+            source,
+            expected_parent,
+            &[final_parent],
             capability,
             now,
             parse_limits,

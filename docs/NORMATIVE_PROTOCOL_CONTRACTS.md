@@ -1701,6 +1701,24 @@ and retained execution record before fresh bundle or current-eligibility
 checks. An undecided recovery lookup creates no new seal or observation.
 A losing CAS attempt revalidates at its new basis.
 
+An explicitly selected rebase candidate-check path MUST instead apply the
+complete-series rules in §20.1.3. The artifact names the target and has only the
+target tip as its prerequisite. Original-source history MUST NOT satisfy
+uploaded object edges or external delta bases. Both the original source suffix
+and the rewritten target-based series are nonempty single-parent chains of at
+most 256 commits; all intermediate objects and the cumulative commit-body bound
+MUST verify even when their changes disappear from the final tree. Validation
+for a check need not render a human diff and MUST NOT substitute a final-tree-only
+proof or infer a rebase profile after another validator refuses.
+
+This explicit selection changes the required native validation, not the
+candidate-check canonical encoding or identity. The exact subject, base,
+candidate commit, bundle digest and retained execution evidence remain the
+bindings. No separate merge-method attestation is inferred for a compatible
+candidate tree. Original terminal recovery still precedes fresh bundle and
+profile validation, so changing a caller's validation selection cannot turn a
+recorded refusal into success or republish a completed observation.
+
 Each protected branch may independently contain a strictly sorted unique
 `required_candidate_checks` vector. A selector contains publisher, raw 32-byte
 workflow graph commitment and exact bounded UTF-8 job name; it contains no CI

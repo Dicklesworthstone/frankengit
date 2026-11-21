@@ -151,6 +151,78 @@ impl OneNode {
         options: &ReviewOptions,
         pull_request_merge: Option<&NativeMerge>,
     ) -> Result<RebaseBundleInspection, BundleInspectionRefusal> {
+        self.validate_or_inspect_rebase_bundle_in(
+            request,
+            source_ref,
+            onto_ref,
+            artifact_ref,
+            expected_source,
+            onto,
+            candidate,
+            input,
+            visibility,
+            expected_head,
+            Some(options),
+            pull_request_merge,
+        )
+        .await?
+        .ok_or_else(|| invalid("inspection produced no requested rebase review"))
+    }
+
+    /// Check complete rebase inputs for canonical check publication without
+    /// imposing the independent human-readable diff rendering limits. The
+    /// metadata admission owner separately validates the exact current PR.
+    pub(crate) async fn validate_rebase_merge_bundle_in(
+        &self,
+        request: &NodeRequestContext,
+        merge: &NativeMerge,
+        input: &[u8],
+        visibility: &RefVisibility,
+        expected_head: Option<RepositoryAuthorityHeadId>,
+    ) -> Result<(), BundleInspectionRefusal> {
+        merge
+            .validate()
+            .map_err(|_| invalid("invalid rebase check coordinates"))?;
+        if merge.base_tip == merge.source_tip || merge.merge_commit == merge.target_tip_before {
+            return Err(invalid(
+                "rebase checks require nonempty original and rewritten series",
+            ));
+        }
+        self.validate_or_inspect_rebase_bundle_in(
+            request,
+            &merge.source_ref,
+            &merge.target_ref,
+            &merge.target_ref,
+            merge.source_tip,
+            merge.target_tip_before,
+            merge.merge_commit,
+            input,
+            visibility,
+            expected_head,
+            None,
+            Some(merge),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn validate_or_inspect_rebase_bundle_in(
+        &self,
+        request: &NodeRequestContext,
+        source_ref: &RefName,
+        onto_ref: &RefName,
+        artifact_ref: &RefName,
+        expected_source: GitOid,
+        onto: GitOid,
+        candidate: GitOid,
+        input: &[u8],
+        visibility: &RefVisibility,
+        expected_head: Option<RepositoryAuthorityHeadId>,
+        render: Option<&ReviewOptions>,
+        pull_request_merge: Option<&NativeMerge>,
+    ) -> Result<Option<RebaseBundleInspection>, BundleInspectionRefusal> {
+        let defaults = ReviewOptions::default();
+        let options = render.unwrap_or(&defaults);
         options
             .validate()
             .map_err(|error| BundleInspectionRefusal::Review(Box::new(error)))?;
@@ -310,6 +382,9 @@ impl OneNode {
                 .map_err(BundleInspectionRefusal::Source)?;
             verified.map_err(BundleInspectionRefusal::Validation)?;
         }
+        if render.is_none() {
+            return Ok(None);
+        }
         let mut pairs = Vec::new();
         pairs
             .try_reserve_exact(commits.len() + 1)
@@ -327,7 +402,7 @@ impl OneNode {
         onto_source
             .live()
             .map_err(BundleInspectionRefusal::Source)?;
-        Ok(RebaseBundleInspection {
+        Ok(Some(RebaseBundleInspection {
             repository_id: self.repository_id,
             source_head: selected.basis().id(),
             source_reference: source_ref.clone(),
@@ -346,11 +421,11 @@ impl OneNode {
                 closure_objects: closure.objects.len(),
                 transport_only_objects,
             },
-        })
+        }))
     }
 }
 
-fn inspect_chain(
+pub(super) fn inspect_chain(
     source: &InspectionSource<'_, '_>,
     candidate: GitOid,
     onto: GitOid,

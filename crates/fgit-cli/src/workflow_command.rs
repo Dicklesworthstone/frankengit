@@ -8,6 +8,7 @@ mod merge_dispatch;
 mod publish;
 mod publish_candidate;
 mod publish_run;
+mod rebase;
 mod recovery;
 mod watch;
 use super::publication_support::quote;
@@ -47,6 +48,7 @@ base. Review and trust those candidate scripts before invoking. The bundle is
 validated without object import, ref publication, or a canonical green check.
 Canonical base provenance and actual executed candidate remain separate in JSON.
 For explicit merge-commit or squash inputs: fg workflow run-merge-candidate --help.
+For a complete linear rebase candidate: fg workflow run-rebase-candidate --help.
 For all selected candidate workflows: fg workflow dispatch-merge-candidate --help.
 For event-matched directory dispatch: fg workflow dispatch --help.
 For canonical ref-change polling: fg workflow watch --help.
@@ -125,6 +127,12 @@ struct Options {
 }
 
 pub fn run(args: &[String]) -> Result<u8, String> {
+    if args
+        .first()
+        .is_some_and(|action| action == "run-rebase-candidate")
+    {
+        return rebase::run(args);
+    }
     if args
         .first()
         .is_some_and(|action| action == "publish-candidate")
@@ -482,7 +490,7 @@ fn execute(
         fgit_forge::preparation::MergeCommitStyle,
     )>,
 ) -> Result<u8, String> {
-    execute_selected(options, merge, None)
+    execute_selected(options, merge, None, None)
 }
 
 #[cfg(target_os = "linux")]
@@ -493,6 +501,7 @@ fn execute_selected(
         fgit_forge::preparation::MergeCommitStyle,
     )>,
     dispatch_event: Option<&str>,
+    rebase: Option<fgit_forge::event::NativeMerge>,
 ) -> Result<u8, String> {
     use fgit_node::{NodeConfig, OneNode};
     let artifact_config = options
@@ -543,6 +552,25 @@ fn execute_selected(
                         *style,
                         &options.workflow,
                         event,
+                        options.run_id,
+                        &options.parent,
+                        &options.inputs,
+                        options.head,
+                        Default::default(),
+                        artifact_config.as_ref(),
+                    ))
+                    .map(|report| (report.to_json(), report.succeeded(), report.run_directory))
+                    .map_err(|e| e.to_string());
+            }
+            if let Some(rebase) = &rebase {
+                let bytes = bundle.as_deref().ok_or("rebase candidate bundle missing")?;
+                return node
+                    .runtime()
+                    .block_on(node.run_trusted_rebase_workflow_in(
+                        request,
+                        rebase,
+                        bytes,
+                        &options.workflow,
                         options.run_id,
                         &options.parent,
                         &options.inputs,

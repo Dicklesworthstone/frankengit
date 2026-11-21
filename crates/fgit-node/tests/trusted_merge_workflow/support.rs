@@ -29,6 +29,12 @@ pub struct Fixture {
 }
 impl Fixture {
     pub fn new(format: GitHashAlgorithm, workflow_text: &str) -> Self {
+        Self::with_source_series(format, workflow_text, false)
+    }
+    pub fn new_rebase(format: GitHashAlgorithm, workflow_text: &str) -> Self {
+        Self::with_source_series(format, workflow_text, true)
+    }
+    fn with_source_series(format: GitHashAlgorithm, workflow_text: &str, two_steps: bool) -> Self {
         let root = loop {
             let path = std::env::temp_dir().join(format!(
                 "fg-merge-workflow-{}-{}",
@@ -73,12 +79,37 @@ impl Fixture {
             GitObjectKind::Commit,
             &commit_bytes(tree(b"target\n", b"base\n"), &[base], "target"),
         );
-        let source = loose(
+        let first = loose(
             &path,
             format,
             GitObjectKind::Commit,
-            &commit_bytes(tree(b"base\n", b"source\n"), &[base], "source"),
+            &commit_bytes(
+                tree(
+                    b"base\n",
+                    if two_steps {
+                        b"intermediate\n"
+                    } else {
+                        b"source\n"
+                    },
+                ),
+                &[base],
+                "source",
+            ),
         );
+        let source = if two_steps {
+            loose(
+                &path,
+                format,
+                GitObjectKind::Commit,
+                &commit_bytes(
+                    tree(b"base\n", b"source\n"),
+                    &[first],
+                    "second source change",
+                ),
+            )
+        } else {
+            first
+        };
         fs::write(path.join("refs/heads/main"), format!("{target}\n")).unwrap();
         fs::write(path.join("refs/heads/topic"), format!("{source}\n")).unwrap();
         let config = NodeConfig::new(root.join("node"), TENANT, REPOSITORY)

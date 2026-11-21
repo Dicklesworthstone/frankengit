@@ -196,6 +196,36 @@ pub struct TrustedWorkflowCandidate {
     pub bundle_sha256: [u8; 32],
 }
 
+/// Verified original branch coordinates and the final rewritten parent. This
+/// execution provenance is not a PR-version attestation or approval to merge.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrustedWorkflowRebase {
+    /// Original source, target, common base and final rewritten commit.
+    pub merge: fgit_forge::event::NativeMerge,
+    /// Verified immediate parent of the final rewritten commit. This may be an
+    /// unpublished intermediate commit, rather than the canonical target tip.
+    pub parent: GitOid,
+}
+impl TrustedWorkflowRebase {
+    fn to_json(&self) -> String {
+        let merge = &self.merge;
+        format!(
+            concat!(
+                "{{\"method\":\"rebase\",\"target_ref_hex\":\"{}\",\"target_tip\":\"{}\",",
+                "\"source_ref_hex\":\"{}\",\"source_tip\":\"{}\",\"merge_base\":\"{}\",",
+                "\"candidate_commit\":\"{}\",\"parents\":[\"{}\"],\"published\":false,\"approval_created\":false}}"
+            ),
+            hex(merge.target_ref.as_bytes()),
+            merge.target_tip_before,
+            hex(merge.source_ref.as_bytes()),
+            merge.source_tip,
+            merge.base_tip,
+            merge.merge_commit,
+            self.parent,
+        )
+    }
+}
+
 /// A local observation, not a forge check, approval, or signed runner evidence.
 /// Source fields identify the canonical BASE from one authenticated head.
 /// A candidate is recorded separately; executed_commit/tree identify actual input.
@@ -218,6 +248,9 @@ pub struct TrustedWorkflowRun {
     pub merge: Option<fgit_forge::event::NativeMerge>,
     /// Verified parent shape for `merge`; ignored for non-merge runs.
     pub merge_style: fgit_forge::preparation::MergeCommitStyle,
+    /// Explicit complete-series input profile, disjoint from `merge` and its
+    /// two-parent/squash style. Does not attest a PR version or grant approval.
+    pub rebase: Option<TrustedWorkflowRebase>,
     pub workflow_blob: GitOid,
     pub workflow_path: Vec<u8>,
     pub read_prefixes: Vec<Vec<u8>>,
@@ -296,6 +329,10 @@ impl TrustedWorkflowRun {
             candidate,
             candidate::merge_json(self.merge.as_ref(), self.merge_style)
         );
+        if let Some(rebase) = &self.rebase {
+            write!(identity, ",\"rebase\":{}", rebase.to_json())
+                .expect("writing to a String cannot fail");
+        }
         if let Some(tip) = self.source_tag_tip {
             write!(identity, ",\"source_tag_tip\":\"{tip}\"")
                 .expect("writing to a String cannot fail");
@@ -778,6 +815,7 @@ fn run_inputs<A: GitHashAlgorithm>(
         candidate,
         merge: inputs.merge().cloned(),
         merge_style: inputs.merge_style(),
+        rebase: inputs.rebase().cloned(),
         source_reference: reference.as_bytes().to_vec(),
         source_tag_tip: tag_tip,
         workflow_blob: native(entry.source_oid().digest_bytes())?,

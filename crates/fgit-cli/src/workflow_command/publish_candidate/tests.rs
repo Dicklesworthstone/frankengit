@@ -92,6 +92,17 @@ fn complete_candidate_selection_parses_without_touching_paths_in_both_hash_domai
             Some(RepositoryIncarnationId::from_bytes([0x44; 16]))
         );
         assert!(!options.candidate.is_fast_forward(&options.subject));
+        assert!(!options.rebase);
+
+        let mut rebase = input.clone();
+        rebase.extend(["--method".into(), "rebase".into()]);
+        let selected = parse(&rebase).unwrap();
+        assert!(selected.rebase);
+        assert_eq!(selected.subject, options.subject);
+        assert_eq!(selected.candidate, options.candidate);
+        assert_eq!(selected.bundle_sha256, options.bundle_sha256);
+        rebase.extend(["--method".into(), "rebase".into()]);
+        assert!(parse(&rebase).is_err());
 
         let mut fast_forward = input;
         replace(

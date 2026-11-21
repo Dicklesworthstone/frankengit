@@ -739,6 +739,15 @@ explicit commands with the original retry key retained across lost responses.
 The [rebase guide](docs/NATIVE_PULL_REQUEST_REBASE.md) describes the endpoints,
 required scopes and bounded browser profile.
 
+[Required checks for rebase candidates](docs/TRUSTED_REBASE_WORKFLOW.md) now
+connect that workflow to the trusted-local runner. `fg workflow
+run-rebase-candidate` executes the exact prepared series after verifying every
+intermediate commit and object closure; `fg workflow publish-candidate --method
+rebase` publishes a retained completed job for the exact PR subject and bundle.
+Protected rebase merges can require those checks without staging the candidate
+or creating a CI ref. Execution retains separate canonical-target and candidate
+provenance, and original terminal decisions remain recoverable after restart.
+
 Non-atomic receives now publish independent ref decisions in bounded groups:
 at most 64 decisions and 1 MiB of canonical decision-batch bytes share one
 exact-predecessor authority-head CAS. Every command retains its own seal,

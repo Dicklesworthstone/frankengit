@@ -81,7 +81,7 @@ pub use trusted_workflow::artifacts::{
 #[cfg(target_os = "linux")]
 pub use trusted_workflow::workflow_watch;
 #[cfg(target_os = "linux")]
-pub use trusted_workflow::{TrustedWorkflowFailure, TrustedWorkflowRun};
+pub use trusted_workflow::{TrustedWorkflowFailure, TrustedWorkflowRebase, TrustedWorkflowRun};
 
 use crate::{
     AdmissionMaterializationRefusal, AuthoritySelectedClosure, ClosureSelectionSource,
