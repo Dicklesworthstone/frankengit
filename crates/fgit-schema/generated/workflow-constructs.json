@@ -4,7 +4,7 @@
   "title": "FrankenGit workflow construct registry",
   "description": "Per-construct status for the GitHub-Actions subset. ADR-0008 D12: a measured registry, not a blanket compatibility claim. A construct marked unsupported or ambiguous is REFUSED at validation, never ignored.",
   "count_accepted": 18,
-  "count_normalized": 17,
+  "count_normalized": 18,
   "count_unsupported": 16,
   "count_ambiguous": 0,
   "constructs": [
@@ -91,6 +91,12 @@
       "status": "normalized",
       "refuses": false,
       "reason": "a literal integer from 1 through 60 only tightens the operator's absolute run budget; startup, steps and artifact capture share the job deadline, and cleanup remains mandatory"
+    },
+    {
+      "key": "step.continue-on-error",
+      "status": "normalized",
+      "refuses": false,
+      "reason": "literal true tolerates only a fully observed ordinary nonzero process exit while preserving the raw failed step; false and omission retain failure semantics, and cancellation, resource limits and containment failure never become success"
     },
     {
       "key": "step.env",

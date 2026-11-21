@@ -225,6 +225,108 @@ fn production_reports_and_each_job_round_trip_in_both_hash_domains() {
 
 const SHELL_SOURCE: &str = "name: shell observations\non: push\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: legacy\n      - shell: sh\n        run: explicit sh\n      - shell: bash\n        run: explicit bash\n  legacy:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: unchanged\n";
 
+const TOLERATED_SOURCE: &str = "name: optional check\non: push\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: optional\n        continue-on-error: true\n  legacy:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: unchanged\n  explicit:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: explicit\n        shell: sh\n";
+
+#[test]
+fn tolerated_failure_observations_recover_exactly_and_preserve_legacy_job_versions() {
+    for sha256 in [false, true] {
+        for outcome in [StepOutcome::Succeeded, StepOutcome::Failed] {
+            let (batch, receipt) = produce_source(sha256, outcome, TOLERATED_SOURCE);
+            assert!(
+                receipt
+                    .report()
+                    .to_json()
+                    .starts_with("{\"schema_version\":3,")
+            );
+            let job = receipt
+                .report()
+                .jobs
+                .iter()
+                .find(|job| job.id == "build")
+                .unwrap();
+            assert_eq!(job.outcome, JobOutcome::Succeeded);
+            assert_eq!(job.steps[0].observation.outcome, outcome);
+            assert!(job.steps[0].continue_on_error);
+            assert_eq!(
+                job.steps[0].outcome_tolerated,
+                outcome == StepOutcome::Failed
+            );
+            let decoded = decode(&receipt.frame()).unwrap();
+            assert_eq!(decoded.report(), receipt.report());
+            assert_eq!(decoded.receipt.frame(), receipt.frame());
+            for (index, fact) in batch.facts().iter().enumerate() {
+                if fact.status != CheckRunStatus::Completed {
+                    continue;
+                }
+                let bytes = receipt.job_frame(&fact.job_id).unwrap();
+                let observation =
+                    verify_trusted_job(&batch, index, &bytes, MAX_OBSERVATION_BYTES, &|| true)
+                        .unwrap();
+                let version = match fact.job_id.as_str() {
+                    "build" => 3,
+                    "explicit" => 2,
+                    _ => 1,
+                };
+                assert!(
+                    observation
+                        .report_json()
+                        .starts_with(&format!("{{\"schema_version\":{version},"))
+                );
+                assert_eq!(observation.evidence(), fact.receipt_commitment.unwrap());
+            }
+        }
+    }
+}
+
+#[test]
+fn tolerated_failure_metadata_cannot_hide_interruption_or_change_report_versions() {
+    let (_, receipt) = produce_source(false, StepOutcome::Failed, TOLERATED_SOURCE);
+    for change in 0..10 {
+        let mut changed = receipt.clone();
+        let step = &mut changed
+            .report
+            .jobs
+            .iter_mut()
+            .find(|job| job.id == "build")
+            .unwrap()
+            .steps[0];
+        match change {
+            0 => step.continue_on_error = false,
+            1 => step.outcome_tolerated = false,
+            2 => step.observation.exit_code = Some(0),
+            3 => step.observation.exit_code = None,
+            4 => step.observation.output_complete = false,
+            5 => step.observation.retain_workspace = true,
+            6 => step.observation.outcome = StepOutcome::Cancelled,
+            7 => step.observation.outcome = StepOutcome::TimedOut,
+            8 => step.observation.outcome = StepOutcome::OutputLimit,
+            _ => step.observation.outcome = StepOutcome::ContainmentFailure,
+        }
+        assert!(
+            decode(&changed.frame()).is_err(),
+            "accepted forged tolerance {change}"
+        );
+    }
+    for (old, new) in [
+        ("\"schema_version\":3", "\"schema_version\":2"),
+        ("\"schema_version\":3", "\"schema_version\":1"),
+        ("\"continue_on_error\":true,", ""),
+        ("\"outcome_tolerated\":true,", ""),
+        ("\"continue_on_error\":true", "\"continue_on_error\":1"),
+    ] {
+        let changed = change_json(&receipt, |text| text.replacen(old, new, 1));
+        assert!(decode(&changed).is_err(), "accepted {old} -> {new}");
+    }
+    let (_, succeeded) = produce_source(false, StepOutcome::Succeeded, TOLERATED_SOURCE);
+    let noncanonical = change_json(&succeeded, |text| {
+        text.replace("\"continue_on_error\":true", "\"continue_on_error\":false")
+    });
+    assert!(
+        decode(&noncanonical).is_err(),
+        "schema three requires an observed configured policy"
+    );
+}
+
 #[test]
 fn mixed_shell_observations_recover_exactly_and_keep_legacy_job_frames() {
     for sha256 in [false, true] {

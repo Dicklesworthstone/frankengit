@@ -231,7 +231,8 @@ function shellSelection(value) {
 }
 function executionReport(run, plan, totals, graph) {
   const report = object(run.execution);
-  const perStepShells = report.schema_version === 2;
+  const stepFailurePolicy = report.schema_version === 3;
+  const perStepShells = report.schema_version === 2 || stepFailurePolicy;
   const supportedShell = perStepShells ? report.shell === null && report.shell_flags === null
     : report.schema_version === 1 && shellSelection(report) === 'legacy';
   if (!supportedShell || report.profile !== 'trusted-local-foreground-v1' || report.authoritative_check !== false ||
@@ -241,7 +242,7 @@ function executionReport(run, plan, totals, graph) {
   if (report.workflow_graph !== `alg:2:${graph}`) fail('Native execution changed the selected workflow graph.');
   number(report.run_timeout_millis, 1, plan.run_timeout_ms); number(report.step_timeout_millis, 1, report.run_timeout_millis);
   number(report.stream_bytes, 1, 2 * 1024 * 1024); number(report.total_output_bytes, 2, plan.total_output_bytes);
-  const ids = new Set(); let output = 0, explicitShell = false;
+  const ids = new Set(); let output = 0, explicitShell = false, continueOnError = false;
   for (const job of report.jobs) {
     object(job); bounded(job.id, 1024, 'workflow job');
     if (ids.has(job.id) || !['succeeded', 'failed', 'skipped', 'cancelled', 'timed_out', 'output_limit', 'refused'].includes(job.outcome) ||
@@ -263,15 +264,24 @@ function executionReport(run, plan, totals, graph) {
         if (selection === null) fail('Unsupported native step shell profile.');
         explicitShell ||= selection === 'explicit';
       } else if (Object.hasOwn(step, 'shell') || Object.hasOwn(step, 'shell_flags')) {
-        fail('Per-step shell selections require native report schema two.');
+        fail('Per-step shell selections require a versioned native step report.');
+      }
+      if (stepFailurePolicy) {
+        if (typeof step.continue_on_error !== 'boolean' || typeof step.outcome_tolerated !== 'boolean') fail('Invalid native step failure policy.');
+        continueOnError ||= step.continue_on_error;
+      } else if (Object.hasOwn(step, 'continue_on_error') || Object.hasOwn(step, 'outcome_tolerated')) {
+        fail('Step failure policy requires native report schema three.');
       }
       if (++totals.steps > 512 || !['succeeded', 'failed', 'cancelled', 'timed_out', 'output_limit', 'containment_failure'].includes(step.outcome) ||
           step.workspace_retained !== false || step.outcome === 'containment_failure') fail('Native step containment remains unproved.');
       if (step.name !== null && (typeof step.name !== 'string' || Buffer.byteLength(step.name) > 4096)) fail('Invalid native step name.');
       bounded(step.script, 256, 'script commitment'); number(step.elapsed_millis, 0, Number.MAX_SAFE_INTEGER);
       if (step.exit_code !== null) number(step.exit_code, -2147483648, 2147483647);
+      const tolerated = stepFailurePolicy && step.continue_on_error && step.outcome === 'failed' &&
+        step.exit_code !== null && step.exit_code !== 0 && step.output_complete === true && step.workspace_retained === false;
+      if (stepFailurePolicy && step.outcome_tolerated !== tolerated) fail('Contradictory native tolerated failure.');
       if (typeof step.output_complete !== 'boolean' || (step.outcome === 'succeeded' && (step.exit_code !== 0 || !step.output_complete)) ||
-          (job.outcome === 'succeeded' && step.outcome !== 'succeeded')) fail('Contradictory native step success.');
+          (job.outcome === 'succeeded' && step.outcome !== 'succeeded' && !tolerated)) fail('Contradictory native step success.');
       for (const field of ['stdout_hex', 'stderr_hex']) {
         const value = step[field];
         if (typeof value !== 'string' || value.length > report.stream_bytes * 2 || !/^(?:[0-9a-f]{2})*$/.test(value)) fail('Invalid bounded native output bytes.');
@@ -281,12 +291,13 @@ function executionReport(run, plan, totals, graph) {
     }
   }
   // An all-legacy report retains its original version and exact evidence bytes.
-  if (perStepShells && !explicitShell) fail('Native shell report schema two requires an explicit step shell.');
+  if (report.schema_version === 2 && !explicitShell) fail('Native shell report schema two requires an explicit step shell.');
+  if (stepFailurePolicy && !continueOnError) fail('Native report schema three requires a configured step failure policy.');
   // WorkflowReport's legacy evidence bit still means EVERY job succeeded.
   // Since 41102c6, the node's whole-run bit also permits genuinely unexecuted
   // conditional skips. Neither encoding carries a new version: accept exactly
   // those two meanings, never normalize saved reports or recalculate old keys.
-  // The checks above already require successful steps, no failed closes and
+  // The checks above require successful or explicitly tolerated steps, no failed closes and
   // closed workspaces for both forms; interruption cannot be a successful run.
   const succeeded = report.jobs.every(job => job.outcome === 'succeeded');
   const legacy = !run.request_interrupted && succeeded;

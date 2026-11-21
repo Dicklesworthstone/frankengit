@@ -390,13 +390,25 @@ impl WorkflowPlan {
                                     }
                                     remaining -= observed.stdout.len() + observed.stderr.len();
                                     let outcome = observed.outcome;
-                                    result.steps.push(StepReport {
+                                    let mut step_report = StepReport {
                                         index: step_index,
                                         name: step.name.clone(),
                                         script: Commitment::of_bytes(step.run.as_bytes()),
                                         shell: step.context.shell(),
+                                        continue_on_error: step.continue_on_error,
+                                        outcome_tolerated: false,
                                         observation: observed,
-                                    });
+                                    };
+                                    let tolerated =
+                                        !containment_lost && step_report.can_tolerate_failure();
+                                    step_report.outcome_tolerated = tolerated;
+                                    result.steps.push(step_report);
+                                    if tolerated {
+                                        // Preserve the actual failed observation. Only this
+                                        // step's ordinary exit is optional; a previous
+                                        // required failure and all shared budgets survive.
+                                        continue;
+                                    }
                                     if outcome != StepOutcome::Succeeded {
                                         result.outcome = match outcome {
                                             StepOutcome::Cancelled => JobOutcome::Cancelled,
@@ -789,7 +801,25 @@ pub struct StepReport {
     pub script: Commitment,
     /// Exact selected native shell; `None` retains the legacy sh -eu profile.
     pub shell: Option<StepShell>,
+    /// Explicit source policy for this step, bound into the workflow graph.
+    pub continue_on_error: bool,
+    /// Whether this ordinary nonzero exit was tolerated by that policy.
+    /// The raw observation and its exit code remain unchanged.
+    pub outcome_tolerated: bool,
     pub observation: StepObservation,
+}
+impl StepReport {
+    /// Whether the exact execution evidence permits tolerating this failure.
+    /// Cancellation, resource exhaustion, incomplete output and containment
+    /// loss can never acquire success through a workflow declaration.
+    #[must_use]
+    pub fn can_tolerate_failure(&self) -> bool {
+        self.continue_on_error
+            && self.observation.outcome == StepOutcome::Failed
+            && self.observation.exit_code.is_some_and(|code| code != 0)
+            && self.observation.output_complete
+            && !self.observation.retain_workspace
+    }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JobReport {
@@ -821,6 +851,14 @@ pub struct WorkflowReport {
     pub jobs: Vec<JobReport>,
 }
 impl WorkflowReport {
+    /// Whether observed steps require explicit optional-failure evidence.
+    #[must_use]
+    pub fn has_continue_on_error(&self) -> bool {
+        self.jobs
+            .iter()
+            .any(|job| job.steps.iter().any(|step| step.continue_on_error))
+    }
+
     /// Whether observed steps require the per-step shell report grammar.
     #[must_use]
     pub fn has_step_shells(&self) -> bool {
@@ -841,12 +879,16 @@ impl WorkflowReport {
     /// forge event or an independently authorized required-check result.
     #[must_use]
     pub fn to_json(&self) -> String {
-        let per_step_shells = self.has_step_shells();
+        let optional_failures = self.has_continue_on_error();
+        let per_step_shells = self.has_step_shells() || optional_failures;
         let jobs = self.jobs.iter().map(|job| {
             let steps = job.steps.iter().map(|step| {
                 let o = &step.observation;
                 let shell = if per_step_shells { shell_fields(step.shell) } else { String::new() };
-                format!("{{\"index\":{},\"name\":{},\"script\":\"{}\"{shell},\"outcome\":\"{}\",\"exit_code\":{},\"stdout_hex\":\"{}\",\"stderr_hex\":\"{}\",\"elapsed_millis\":{},\"output_complete\":{},\"workspace_retained\":{}}}",
+                let tolerance = if optional_failures {
+                    format!(",\"continue_on_error\":{},\"outcome_tolerated\":{}", step.continue_on_error, step.outcome_tolerated)
+                } else { String::new() };
+                format!("{{\"index\":{},\"name\":{},\"script\":\"{}\"{shell}{tolerance},\"outcome\":\"{}\",\"exit_code\":{},\"stdout_hex\":\"{}\",\"stderr_hex\":\"{}\",\"elapsed_millis\":{},\"output_complete\":{},\"workspace_retained\":{}}}",
                     step.index, step.name.as_ref().map_or_else(|| "null".to_owned(), |name| quote(name)),
                     step.script, o.outcome.token(), o.exit_code.map_or_else(|| "null".to_owned(), |code| code.to_string()),
                     hex(&o.stdout), hex(&o.stderr), o.elapsed_millis, o.output_complete, o.retain_workspace)
@@ -855,7 +897,9 @@ impl WorkflowReport {
                 format!("{{\"detail\":{},\"workspace_retained\":{}}}", quote(&failure.detail), failure.retain_workspace));
             format!("{{\"id\":{},\"outcome\":\"{}\",\"steps\":[{steps}],\"failure\":{failure}}}", quote(&job.id), job.outcome.token())
         }).collect::<Vec<_>>().join(",");
-        let (version, shell) = if per_step_shells {
+        let (version, shell) = if optional_failures {
+            (3, ",\"shell\":null,\"shell_flags\":null".to_owned())
+        } else if per_step_shells {
             (2, ",\"shell\":null,\"shell_flags\":null".to_owned())
         } else {
             (1, shell_fields(None))
@@ -913,3 +957,6 @@ mod deadline_tests;
 
 #[cfg(test)]
 mod matrix_fail_fast_tests;
+
+#[cfg(test)]
+mod continue_on_error_tests;

@@ -1687,6 +1687,90 @@
       },
       "additionalProperties": false
     },
+    "frankengit_issue_search": {
+      "title": "frankengit_issue_search",
+      "description": "Search canonical issue snapshots with bounded literal and structured filters. Empty partial pages require continuation; assignment metadata confers no authority.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "Nonempty literal title OR body text; comments are excluded.",
+              "x-classification": "selector_position",
+              "maxLength": 256
+            },
+            "case_sensitive": {
+              "type": "boolean",
+              "description": "Default false folds ASCII only. True requires query.",
+              "x-classification": "selector_position"
+            },
+            "state": {
+              "type": "string",
+              "description": "all, open or closed; all by default.",
+              "x-classification": "selector_position",
+              "maxLength": 6
+            },
+            "opened_by": {
+              "type": "string",
+              "description": "Exact original opener principal ID; never a credential.",
+              "x-classification": "selector_position",
+              "maxLength": 32
+            },
+            "assignee": {
+              "type": "string",
+              "description": "Exact assigned principal ID, or none for no assignees, at the selected snapshot.",
+              "x-classification": "selector_position",
+              "maxLength": 32
+            },
+            "labels": {
+              "type": "array",
+              "description": "At most 32 unique exact labels, each at most 64 UTF-8 bytes; all must match.",
+              "x-classification": "selector_position",
+              "maxLength": 8192
+            },
+            "milestone": {
+              "type": "string",
+              "description": "Positive canonical decimal milestone number, or none for no milestone.",
+              "x-classification": "selector_position",
+              "maxLength": 20
+            },
+            "after": {
+              "type": "string",
+              "description": "Last scanned issue number; nonzero requires expected_head and unchanged filters.",
+              "x-classification": "selector_position",
+              "maxLength": 20
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Maximum matches 1..20, default 5.",
+              "x-classification": "selector_position"
+            },
+            "max_scan": {
+              "type": "integer",
+              "description": "Maximum examined issue candidates 1..1000, default 1000.",
+              "x-classification": "selector_position"
+            },
+            "expected_head": {
+              "type": "string",
+              "description": "Retained exact snapshot_token; current issue-read authorization still applies.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            },
+            "render": {
+              "type": "string",
+              "description": "Optional html_safe, plain_text, compact_machine or api_json beside unchanged canonical text.",
+              "x-classification": "selector_position",
+              "maxLength": 32
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "frankengit_issue_set_milestone": {
       "title": "frankengit_issue_set_milestone",
       "description": "Set issue membership using exact issue and milestone versions at one authority head. The milestone must exist and be open. Requires issue-write; membership grants no access.",

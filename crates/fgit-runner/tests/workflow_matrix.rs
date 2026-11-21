@@ -148,6 +148,57 @@ jobs:
 "#;
 
 #[test]
+fn real_optional_failures_preserve_exit_and_logs_without_stopping_matrix_or_dependent_jobs() {
+    let source = SOURCE.replace("      fail-fast: false\n", "").replace(
+        "    steps:\n      - run: test ! -e state",
+        "    steps:\n      - continue-on-error: true\n        run: test ! -e state",
+    );
+    let plan = WorkflowPlan::compile(&source).unwrap();
+    let mut worker = Worker::new();
+    let report = plan
+        .execute(WorkflowLimits::default(), &mut worker, &|| true)
+        .unwrap();
+    assert_eq!(
+        report
+            .jobs
+            .iter()
+            .map(|job| (job.id.as_str(), job.outcome))
+            .collect::<Vec<_>>(),
+        [
+            ("build__matrix_000", JobOutcome::Succeeded),
+            ("build__matrix_001", JobOutcome::Succeeded),
+            ("build__matrix_002", JobOutcome::Succeeded),
+            ("diagnose", JobOutcome::Skipped),
+            ("package", JobOutcome::Succeeded),
+        ],
+    );
+    assert_eq!(worker.finished, 4);
+    assert_eq!(worker.started.last().unwrap(), "package");
+    for (index, job) in report.jobs[..3].iter().enumerate() {
+        assert_eq!(job.steps.len(), 2);
+        assert!(job.steps[0].continue_on_error);
+        assert_eq!(job.steps[0].outcome_tolerated, index == 1);
+        assert_eq!(
+            job.steps[1].observation.outcome,
+            fgit_runner::workflow::StepOutcome::Succeeded
+        );
+    }
+    let actual_failure = &report.jobs[1].steps[0].observation;
+    assert_eq!(
+        actual_failure.outcome,
+        fgit_runner::workflow::StepOutcome::Failed
+    );
+    assert_eq!(actual_failure.exit_code, Some(1));
+    assert_eq!(actual_failure.stdout, b"bad");
+    assert!(actual_failure.output_complete);
+    assert!(!actual_failure.retain_workspace);
+    assert!(report.to_json().starts_with("{\"schema_version\":3,"));
+    // Whole-run completion allows skipped diagnostics; this historical summary
+    // still reports that not every individual job executed successfully.
+    assert!(!report.succeeded());
+}
+
+#[test]
 fn real_matrix_processes_isolate_workspaces_and_join_before_failure_conditions() {
     let plan = WorkflowPlan::compile(SOURCE).unwrap();
     let mut worker = Worker::new();

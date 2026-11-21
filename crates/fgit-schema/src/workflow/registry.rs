@@ -136,6 +136,11 @@ pub static CONSTRUCTS: &[Construct] = &[
         reason: "a literal integer from 1 through 60 only tightens the operator's absolute run budget; startup, steps and artifact capture share the job deadline, and cleanup remains mandatory",
     },
     Construct {
+        key: "step.continue-on-error",
+        status: ConstructStatus::Normalized,
+        reason: "literal true tolerates only a fully observed ordinary nonzero process exit while preserving the raw failed step; false and omission retain failure semantics, and cancellation, resource limits and containment failure never become success",
+    },
+    Construct {
         key: "step.env",
         status: ConstructStatus::Normalized,
         reason: "validated step values override job and workflow defaults; effective literals are sorted and graph-bound; whole-value matrix inputs are supported, but secret imports, general expressions and reserved variables refuse",

@@ -107,6 +107,32 @@ test('binary, empty and Unicode-named streams join exactly without changing save
   const unnamed = fixture({ name: null, stdout: Buffer.alloc(0) });
   assert.deepEqual(check(unnamed), { artifactPayload: 0 });
 });
+test('successful jobs retain the raw failed log streams of explicitly tolerated ordinary exits', () => {
+  const f = fixture({ outcome: 'failed' }), job = f.run.execution.jobs[0];
+  f.run.execution.schema_version = 3;
+  job.outcome = 'succeeded';
+  Object.assign(job.steps[0], { continue_on_error: true, outcome_tolerated: true });
+  f.run.artifact_logs = [receipt(job)];
+  const before = structuredClone(f);
+  assert.equal(check(f).artifactPayload, 5);
+  assert.equal(f.run.artifact_logs[0].logs[0].observed_step_outcome, 'failed');
+  assert.equal(f.run.artifact_logs[0].logs[0].exit_code, 7);
+  assert.deepEqual(f, before);
+  for (const mutate of [
+    x => { x.run.execution.schema_version = 2; },
+    x => { x.run.execution.jobs[0].steps[0].continue_on_error = false; },
+    x => { x.run.execution.jobs[0].steps[0].outcome_tolerated = false; },
+    x => { x.run.execution.jobs[0].steps[0].exit_code = null; },
+    x => { x.run.execution.jobs[0].steps[0].exit_code = 0; },
+    x => { x.run.execution.jobs[0].steps[0].output_complete = false; },
+    x => { x.run.execution.jobs[0].steps[0].workspace_retained = true; },
+    ...['cancelled', 'timed_out', 'output_limit', 'containment_failure'].map(outcome => x => { x.run.execution.jobs[0].steps[0].outcome = outcome; }),
+  ]) {
+    const changed = structuredClone(f); mutate(changed);
+    changed.run.artifact_logs = [receipt(changed.run.execution.jobs[0])];
+    assert.throws(() => check(changed), undefined, mutate.toString());
+  }
+});
 const mutations = {
   'missing log array': f => { delete f.run.artifact_logs; },
   'missing successful receipt': f => { f.run.artifact_logs = []; },

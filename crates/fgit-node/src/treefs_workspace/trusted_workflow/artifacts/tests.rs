@@ -574,6 +574,8 @@ fn log_job() -> fgit_runner::workflow::JobReport {
             name: Some("binary diagnostic".into()),
             script: fgit_runner::Commitment::of_bytes(b"printf output; exit 7"),
             shell: None,
+            continue_on_error: false,
+            outcome_tolerated: false,
             observation: StepObservation {
                 outcome: StepOutcome::Failed,
                 exit_code: Some(7),
@@ -733,6 +735,42 @@ fn incomplete_cancelled_timed_out_and_output_limited_logs_preserve_their_non_gre
         assert!(receipt.contains("\"exit_code\":null"));
         assert!(!receipt.contains("\"succeeded\""));
     }
+}
+
+#[test]
+fn optional_failure_logs_preserve_raw_exit_under_successful_job_custody() {
+    use fgit_runner::workflow::{JobOutcome, StepOutcome};
+    let fixture = LogFixture::new(64, 128);
+    let session = fixture.session();
+    let mut collector = Collector::new(&session, &fixture.run);
+    let mut job = log_job();
+    job.outcome = JobOutcome::Succeeded;
+    job.steps[0].continue_on_error = true;
+    job.steps[0].outcome_tolerated = true;
+    collector
+        .capture_logs(
+            0,
+            &job,
+            &fixture.root,
+            &fixture.directory,
+            &mut Vec::new(),
+            &|| true,
+        )
+        .unwrap();
+    let saved = &collector.logs[0];
+    assert_eq!(saved.observed_outcome, JobOutcome::Succeeded);
+    assert_eq!(saved.logs.len(), 2);
+    for log in &saved.logs {
+        assert_eq!(log.observed_outcome, StepOutcome::Failed);
+        assert_eq!(log.exit_code, Some(7));
+        assert!(log.output_complete);
+    }
+    assert_eq!(saved.logs[0].payload_sha256, digest(b"out\0\xff"));
+    assert_eq!(saved.logs[1].payload_sha256, digest(b"err\xfe"));
+    let receipt = fs::read_to_string(fixture.directory.join("job-000-logs.json")).unwrap();
+    assert!(receipt.contains("\"observed_job_outcome\":\"succeeded\""));
+    assert!(receipt.contains("\"observed_step_outcome\":\"failed\""));
+    assert!(receipt.contains("\"exit_code\":7"));
 }
 
 #[test]

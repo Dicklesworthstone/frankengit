@@ -59,6 +59,12 @@ pub(super) fn lower_command(
         ));
     }
     let step = &job.steps[0];
+    if step.continue_on_error {
+        return Err(unsupported(
+            job,
+            "step continue-on-error requires the job-scoped workflow executor",
+        ));
+    }
     if !step.context.is_default() {
         return Err(unsupported(
             job,

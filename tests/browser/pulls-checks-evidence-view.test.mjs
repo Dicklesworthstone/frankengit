@@ -7,7 +7,7 @@ import { mountPulls } from '../../crates/fgit-node/src/smart_http/server/browser
 import { CHECK_LOG_PREVIEW_BYTES } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-check-evidence.mjs';
 import { token, page, json, webcrypto, deferred } from './pulls-fixtures.mjs';
 import { checks, checkLabel } from './pulls-checks-fixtures.mjs';
-import { evidenceFixture, evidenceToken, report, step } from './pulls-checks-evidence-fixtures.mjs';
+import { evidenceFixture, evidenceToken, report, step, toleratedReport } from './pulls-checks-evidence-fixtures.mjs';
 
 const root = '../../crates/fgit-node/src/smart_http/server/browser/';
 const html = readFileSync(new URL(`${root}pulls.html`, import.meta.url), 'utf8');
@@ -83,6 +83,18 @@ test('opaque canonical evidence remains downloadable without inventing stdout or
   assert.match(h.nodes.selected.textContent, /published conclusion remains action_required/);
   assert.equal(buttons(h.nodes.selected, 'Download step').length, 0);
   click(h.nodes.selected, 'Download exact check evidence'); await settled(); assert.deepEqual(h.downloads[0].bytes, fixture.bytes);
+});
+
+test('tolerated failure stays visible beside a successful canonical check and exact log download', async () => {
+  const fixture = evidenceFixture({ report: toleratedReport(), check: { conclusion: 'success' } });
+  const h = harness(fixture); await h.open(); await h.load(); await h.connectEvidence(); await h.loadEvidence();
+  assert.match(h.nodes.selected.textContent, /published conclusion remains success/);
+  assert.match(h.nodes.selected.textContent, /failed \(tolerated\)/);
+  assert.match(h.nodes.selected.textContent, /explicitly permits this ordinary command failure/);
+  assert.match(h.nodes.selected.textContent, /Exit: 1/);
+  click(h.nodes.selected, 'Download step 1 stderr'); await settled();
+  assert.deepEqual(h.downloads[0].bytes, Buffer.from(fixture.report.jobs[0].steps[0].stderr_hex, 'hex'));
+  assert.equal(h.nodes['merge-stage'].disabled, true);
 });
 
 test('preview clipping and incomplete capture stay distinct while stream download preserves retained bytes', async () => {

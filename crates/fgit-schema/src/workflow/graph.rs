@@ -48,6 +48,9 @@ pub const SHELL_CANONICAL_VERSION: &str = "fgit-workflow/v8";
 /// Default/explicit fail-fast matrix groups bind their execution policy.
 /// Explicit fail-fast:false graphs retain their existing canonical version.
 pub const MATRIX_FAIL_FAST_CANONICAL_VERSION: &str = "fgit-workflow/v9";
+/// Explicit step-local ordinary-failure tolerance binds the execution policy.
+/// Omitted and false values retain their existing canonical graph bytes.
+pub const CONTINUE_ON_ERROR_CANONICAL_VERSION: &str = "fgit-workflow/v10";
 
 /// One accepted trigger.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -122,6 +125,9 @@ pub struct Step {
     pub run: String,
     /// Native terminal-state predicate. Default is success().
     pub condition: Condition,
+    /// Tolerate only an ordinary nonzero process exit, retaining its raw failure.
+    /// Cancellation, resource refusal and lost containment are never tolerated.
+    pub continue_on_error: bool,
     /// Literal process environment and workspace-relative directory.
     pub context: StepContext,
     /// Optional local cap, intersected with job and operator time ceilings.
@@ -190,7 +196,9 @@ impl WorkflowGraph {
             .jobs
             .iter()
             .any(|job| job.steps.iter().any(|step| !step.context.is_default()));
-        let version = if self.has_matrix_fail_fast() {
+        let version = if self.has_continue_on_error() {
+            CONTINUE_ON_ERROR_CANONICAL_VERSION
+        } else if self.has_matrix_fail_fast() {
             MATRIX_FAIL_FAST_CANONICAL_VERSION
         } else if self.has_explicit_shells() {
             SHELL_CANONICAL_VERSION
@@ -321,6 +329,12 @@ impl WorkflowGraph {
                         step.condition.token()
                     ));
                 }
+                if step.continue_on_error {
+                    lines.push(format!(
+                        "step-continue-on-error\t{}\t{index}\ttrue",
+                        escape(&job.id)
+                    ));
+                }
                 if let Some(timeout) = step.timeout_minutes {
                     lines.push(format!(
                         "step-timeout-minutes\t{}\t{index}\t{}",
@@ -354,6 +368,14 @@ impl WorkflowGraph {
         self.jobs
             .iter()
             .any(|job| job.steps.iter().any(|step| step.context.shell().is_some()))
+    }
+
+    /// Whether execution must preserve an explicitly tolerated ordinary failure.
+    #[must_use]
+    pub fn has_continue_on_error(&self) -> bool {
+        self.jobs
+            .iter()
+            .any(|job| job.steps.iter().any(|step| step.continue_on_error))
     }
 
     /// Whether an execution adapter must preserve matrix-local fail-fast.
@@ -462,6 +484,7 @@ fn lower_step(
             "working-directory",
             "shell",
             "timeout-minutes",
+            "continue-on-error",
         ],
         &[("uses", "step.uses"), ("with", "step.with")],
     )?;
@@ -489,10 +512,26 @@ fn lower_step(
         name,
         run,
         condition: condition(node.get("if"), "step.if", node.span())?,
+        continue_on_error: continue_on_error(node.get("continue-on-error"))?,
         span: node.span(),
         context: context::lower(node, environment, defaults, expanded_bytes)?,
         timeout_minutes: deadline::lower(node.get("timeout-minutes"), "step.timeout-minutes")?,
     })
+}
+
+/// Failure policy is a closed boolean, never an expression or YAML truthiness.
+fn continue_on_error(node: Option<&Node>) -> Result<bool, WorkflowRefusal> {
+    let Some(node) = node else {
+        return Ok(false);
+    };
+    match expect_scalar(node, "jobs.<id>.steps[].continue-on-error")? {
+        "false" => Ok(false),
+        "true" => Ok(true),
+        _ => Err(WorkflowRefusal::Malformed {
+            expected: "literal true or false for step.continue-on-error",
+            span: node.span(),
+        }),
+    }
 }
 
 /// Lowers one job.

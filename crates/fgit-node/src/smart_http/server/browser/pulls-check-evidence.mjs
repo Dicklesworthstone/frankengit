@@ -11,6 +11,7 @@ const REPORT_FIELDS = ['schema_version', 'profile', 'authoritative_check', 'work
   'shell', 'shell_flags', 'environment', 'step_timeout_millis', 'run_timeout_millis', 'stream_bytes', 'total_output_bytes', 'succeeded', 'jobs'];
 const STEP_FIELDS = ['index', 'name', 'script', 'outcome', 'exit_code', 'stdout_hex', 'stderr_hex', 'elapsed_millis', 'output_complete', 'workspace_retained'];
 const STEP_SHELL_FIELDS = ['index', 'name', 'script', 'shell', 'shell_flags', ...STEP_FIELDS.slice(3)];
+const STEP_POLICY_FIELDS = ['index', 'name', 'script', 'shell', 'shell_flags', 'continue_on_error', 'outcome_tolerated', ...STEP_FIELDS.slice(3)];
 const STEP_OUTCOMES = ['succeeded', 'failed', 'cancelled', 'timed_out', 'output_limit', 'containment_failure'];
 const JOB_CONCLUSIONS = { succeeded: 'success', failed: 'failure', refused: 'failure', output_limit: 'failure',
   skipped: 'action_required', cancelled: 'cancelled', timed_out: 'timed_out' };
@@ -43,7 +44,8 @@ function workflowReport(serialized, check) {
   let report;
   try { report = JSON.parse(serialized); } catch { fail('Invalid workflow report JSON.'); }
   exact(report, REPORT_FIELDS);
-  const perStepShells = report.schema_version === 2;
+  const stepFailurePolicy = report.schema_version === 3;
+  const perStepShells = report.schema_version === 2 || stepFailurePolicy;
   const supportedShell = perStepShells ? report.shell === null && report.shell_flags === null
     : report.schema_version === 1 && shellSelection(report) === 'legacy';
   if (!supportedShell || report.profile !== 'trusted-local-foreground-v1' || report.authoritative_check !== false) fail('Unsupported workflow report profile.');
@@ -65,9 +67,9 @@ function workflowReport(serialized, check) {
   if (job.failure !== null) {
     exact(job.failure, ['detail', 'workspace_retained']); reportText(job.failure.detail, 4096); boolean(job.failure.workspace_retained);
   }
-  let previous = -1, output = 0, explicitShell = false;
+  let previous = -1, output = 0, explicitShell = false, continueOnError = false;
   for (const step of job.steps) {
-    exact(step, perStepShells ? STEP_SHELL_FIELDS : STEP_FIELDS); integer(step.index, 'step index', 0, 511);
+    exact(step, stepFailurePolicy ? STEP_POLICY_FIELDS : perStepShells ? STEP_SHELL_FIELDS : STEP_FIELDS); integer(step.index, 'step index', 0, 511);
     if (perStepShells) {
       const selection = shellSelection(step);
       if (selection === null) fail('Unsupported workflow step shell profile.');
@@ -79,12 +81,20 @@ function workflowReport(serialized, check) {
     commitment(step.script);
     if (step.exit_code !== null) integer(step.exit_code, 'exit code', -2147483648, 2147483647);
     integer(step.elapsed_millis, 'elapsed time'); boolean(step.output_complete); boolean(step.workspace_retained);
+    if (stepFailurePolicy) {
+      boolean(step.continue_on_error); boolean(step.outcome_tolerated);
+      continueOnError ||= step.continue_on_error;
+      const tolerated = step.continue_on_error && step.outcome === 'failed' && step.exit_code !== null && step.exit_code !== 0 &&
+        step.output_complete && !step.workspace_retained;
+      if (step.outcome_tolerated !== tolerated) fail('Tolerated step failure has inconsistent completion facts.');
+    }
     for (const stream of ['stdout_hex', 'stderr_hex']) output += unhex(step[stream], Math.min(report.stream_bytes, CHECK_EVIDENCE_LIMIT)).length;
     if (output > report.total_output_bytes) fail('Workflow output exceeds its recorded budget.');
     if (step.outcome === 'succeeded' && (step.exit_code !== 0 || !step.output_complete || step.workspace_retained)) fail('Successful step has inconsistent completion facts.');
   }
-  if (perStepShells && !explicitShell) fail('Workflow report schema two requires an explicit step shell.');
-  if (job.outcome === 'succeeded' && (job.failure !== null || job.steps.some(step => step.outcome !== 'succeeded'))) fail('Successful job has inconsistent step facts.');
+  if (report.schema_version === 2 && !explicitShell) fail('Workflow report schema two requires an explicit step shell.');
+  if (stepFailurePolicy && !continueOnError) fail('Workflow report schema three requires a configured step failure policy.');
+  if (job.outcome === 'succeeded' && (job.failure !== null || job.steps.some(step => step.outcome !== 'succeeded' && !step.outcome_tolerated))) fail('Successful job has inconsistent step facts.');
   return report;
 }
 
@@ -205,7 +215,10 @@ export function appendCheckEvidenceAccess(doc, parent, { observed, run, current,
     if (!job.steps.length) item(entry.output, 'p', 'No step output is recorded for this job.');
     for (const step of job.steps) {
       const section = item(entry.output, 'details');
-      item(section, 'summary', `Step ${step.index + 1}${step.name === null ? '' : ` · ${step.name}`} · ${step.outcome}`);
+      item(section, 'summary', `Step ${step.index + 1}${step.name === null ? '' : ` · ${step.name}`} · ${step.outcome}${step.outcome_tolerated ? ' (tolerated)' : ''}`);
+      if (step.continue_on_error) item(section, 'p', step.outcome_tolerated
+        ? 'The workflow explicitly permits this ordinary command failure. The failed outcome and exit code remain recorded.'
+        : 'The workflow enabled continue-on-error for this step. No failure was tolerated.');
       item(section, 'pre', `Exit: ${step.exit_code ?? '(not recorded)'} · elapsed: ${step.elapsed_millis} ms\nScript: ${step.script}\nWorkspace retained: ${step.workspace_retained}`);
       item(section, 'p', step.output_complete ? 'The observation marks this step output complete.'
         : 'INCOMPLETE OUTPUT: the observation did not capture all step output. A verified download preserves only the retained bytes.');

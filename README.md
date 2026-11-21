@@ -285,6 +285,19 @@ a failed variant completes its cleanup before later unstarted variants of that
 matrix are skipped; explicit `false` continues them. Independent jobs continue,
 and cancellation or lost containment retains its existing global stop behavior.
 
+### Optional native workflow steps
+
+Trusted-local workflows can mark an individual command with literal
+`continue-on-error: true`. A complete ordinary nonzero exit then permits later
+success steps, dependent jobs and matrix siblings to run. The saved observation
+still records the failed command, original exit code and logs, plus the explicit
+policy and tolerance decision. Browser evidence labels the failure as tolerated.
+Cancellation, timeouts, output limits, incomplete capture, containment loss and
+cleanup failures remain unsuccessful. Existing workflows retain their graph and
+report formats; the new policy selects versioned graph and execution evidence.
+See [optional workflow steps](docs/NATIVE_WORKFLOW_CONTINUE_ON_ERROR.md) for
+conditions, exact recovery, checks and the unsupported job-level policy.
+
 ### Find native pull requests
 
 `fg pr search`, authenticated `GET /api/v1/pulls/search`, and the

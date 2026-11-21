@@ -5,7 +5,7 @@ import { Transport } from '../../crates/fgit-node/src/smart_http/server/browser/
 import { CheckEvidenceClient, checkEvidenceReply, CHECK_EVIDENCE_LIMIT, CHECK_EVIDENCE_REPLY_LIMIT } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-check-evidence.mjs';
 import { options, json, webcrypto, deferred, data, row } from './pulls-fixtures.mjs';
 import { observation, checkLabel } from './pulls-checks-fixtures.mjs';
-import { evidenceFixture, evidenceToken, report, step } from './pulls-checks-evidence-fixtures.mjs';
+import { evidenceFixture, evidenceToken, report, step, toleratedReport } from './pulls-checks-evidence-fixtures.mjs';
 
 const validate = (fixture, reply = fixture.reply) => checkEvidenceReply(reply, 1, fixture.selected, fixture.check, webcrypto);
 const LEGACY_SHELL = { shell: '/bin/sh', shell_flags: ['-eu', '-c'] };
@@ -85,6 +85,45 @@ test('shell schema two retains identity, budgets and success validation', async 
     const recorded = shellReport(); mutate(recorded);
     await assert.rejects(validate(evidenceFixture({ report: recorded })), undefined, mutate.toString());
   }
+});
+
+test('schema three retains an explicitly tolerated raw failure under its successful job', async () => {
+  for (const conclusion of ['success', 'action_required']) {
+    const fixture = evidenceFixture({ report: toleratedReport(), check: { conclusion } }), before = structuredClone(fixture.reply);
+    const result = await validate(fixture);
+    assert.equal(result.report.jobs[0].outcome, 'succeeded');
+    assert.equal(result.report.jobs[0].steps[0].outcome, 'failed');
+    assert.equal(result.report.jobs[0].steps[0].exit_code, 1);
+    assert.equal(result.report.jobs[0].steps[0].outcome_tolerated, true);
+    assert.equal(result.check.conclusion, conclusion);
+    assert.deepEqual(Buffer.from(result.bytes), fixture.bytes);
+    assert.deepEqual(fixture.reply, before);
+  }
+  const recorded = toleratedReport();
+  Object.assign(recorded.jobs[0].steps[0], { outcome: 'succeeded', exit_code: 0, outcome_tolerated: false });
+  assert.equal((await validate(evidenceFixture({ report: recorded, check: { conclusion: 'success' } }))).report.schema_version, 3);
+});
+
+test('schema three rejects forged tolerance, interruption and missing or downgraded policy fields', async () => {
+  const mutations = [
+    r => { r.schema_version = 2; }, r => { r.schema_version = 4; },
+    r => { r.jobs[0].steps[0].continue_on_error = false; },
+    r => { r.jobs[0].steps[0].continue_on_error = 'true'; },
+    r => { r.jobs[0].steps[0].outcome_tolerated = false; },
+    r => { delete r.jobs[0].steps[0].continue_on_error; },
+    r => { delete r.jobs[0].steps[0].outcome_tolerated; },
+    r => { r.jobs[0].steps[0].exit_code = null; }, r => { r.jobs[0].steps[0].exit_code = 0; },
+    r => { r.jobs[0].steps[0].output_complete = false; }, r => { r.jobs[0].steps[0].workspace_retained = true; },
+    r => { r.jobs[0].failure = { detail: 'failed cleanup', workspace_retained: false }; },
+    ...['succeeded', 'cancelled', 'timed_out', 'output_limit', 'containment_failure'].map(outcome => r => { r.jobs[0].steps[0].outcome = outcome; }),
+  ];
+  for (const mutate of mutations) {
+    const recorded = toleratedReport(); mutate(recorded);
+    await assert.rejects(validate(evidenceFixture({ report: recorded, check: { conclusion: 'success' } })), undefined, mutate.toString());
+  }
+  const noPolicy = toleratedReport();
+  Object.assign(noPolicy.jobs[0].steps[0], { continue_on_error: false, outcome_tolerated: false, outcome: 'succeeded', exit_code: 0 });
+  await assert.rejects(validate(evidenceFixture({ report: noPolicy, check: { conclusion: 'success' } })), /schema three/);
 });
 
 test('opaque evidence is verifiable and downloadable without inventing a log report', async () => {

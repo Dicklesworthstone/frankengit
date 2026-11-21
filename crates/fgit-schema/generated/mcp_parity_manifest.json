@@ -3,7 +3,7 @@
   "$id": "https://frankengit.invalid/schemas/mcp_parity_manifest.json",
   "title": "FrankenGit MCP to CLI and REST API parity manifest",
   "description": "Mapping of MCP tools to equivalent fg CLI commands and native REST API paths, verifying zero isolated or ambient surfaces.",
-  "total_tools": 104,
+  "total_tools": 105,
   "parity": [
     {
       "tool": "frankengit_admin_exec",
@@ -414,6 +414,16 @@
       "capability": "mutate_forge_entity",
       "cli_command": "fg issue reopen",
       "rest_api_path": "POST /repos/{id}/issues/{number}/reopen"
+    },
+    {
+      "tool": "frankengit_issue_search",
+      "version": 1,
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "read_mutation": "read_only",
+      "capability": "read_canonical_object",
+      "cli_command": "fg issue search",
+      "rest_api_path": "POST /api/v1/issues/search"
     },
     {
       "tool": "frankengit_issue_set_milestone",

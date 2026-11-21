@@ -17,9 +17,14 @@ function fields(value, expected) {
 function digest(value) {
   if (typeof value !== 'string' || !/^[0-9a-f]{64}$/.test(value)) fail('Invalid native log commitment.');
 }
-function observedOutcome(observed, job) {
-  if (!OUTCOMES.includes(observed) || (observed === 'succeeded' && job.steps.some(step =>
-      step.outcome !== 'succeeded' || step.exit_code !== 0 || step.output_complete !== true))) return false;
+function completedStep(step, schemaVersion) {
+  if (step.output_complete !== true || step.workspace_retained !== false) return false;
+  if (step.outcome === 'succeeded') return step.exit_code === 0;
+  return schemaVersion === 3 && step.continue_on_error === true && step.outcome_tolerated === true && step.outcome === 'failed' &&
+    Number.isInteger(step.exit_code) && step.exit_code >= -2147483648 && step.exit_code <= 2147483647 && step.exit_code !== 0;
+}
+function observedOutcome(observed, job, schemaVersion) {
+  if (!OUTCOMES.includes(observed) || (observed === 'succeeded' && job.steps.some(step => !completedStep(step, schemaVersion)))) return false;
   if (observed === job.outcome) return true;
   // The native receipt precedes the final custody/deadline checkpoint. A late
   // refusal or stop can downgrade it, never promote it into a green result.
@@ -43,7 +48,7 @@ export function verifyArtifactLogs(config, run, totals) {
     fields(receipt, ['job_id_hex', 'manifest_id_sha256', 'observed_job_outcome', 'logs']);
     const job = owners.get(receipt.job_id_hex);
     if (!job || job.outcome === 'skipped' || !Array.isArray(job.steps) || !job.steps.length || job.steps.length > 512 ||
-        captured.has(receipt.job_id_hex) || !observedOutcome(receipt.observed_job_outcome, job)) {
+        captured.has(receipt.job_id_hex) || !observedOutcome(receipt.observed_job_outcome, job, run.execution.schema_version)) {
       fail('Unexpected, duplicate or contradictory native job log receipt.');
     }
     digest(receipt.manifest_id_sha256);

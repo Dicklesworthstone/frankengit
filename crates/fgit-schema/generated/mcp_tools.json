@@ -3,8 +3,8 @@
   "$id": "https://frankengit.invalid/schemas/mcp_tools.json",
   "title": "FrankenGit MCP tool registry",
   "description": "Single-source registry of all FrankenGit MCP tools, resources, and prompts with capability requirements and budget boundaries.",
-  "total_count": 104,
-  "active_count": 100,
+  "total_count": 105,
+  "active_count": 101,
   "unsupported_count": 4,
   "tools": [
     {
@@ -1154,6 +1154,34 @@
       "refusal_codes": ["issue_not_found", "version_mismatch", "already_open", "idempotency_key_reused"],
       "cli_command": "fg issue reopen",
       "rest_api_path": "POST /repos/{id}/issues/{number}/reopen"
+    },
+    {
+      "name": "frankengit_issue_search",
+      "version": 1,
+      "kind": "tool",
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "description": "Search canonical issue snapshots with bounded literal and structured filters. Empty partial pages require continuation; assignment metadata confers no authority.",
+      "read_mutation": "read_only",
+      "capability": "read_canonical_object",
+      "principal": "none",
+      "idempotency": "not_applicable",
+      "authority_root": "exact_snapshot_token",
+      "budget": {
+        "max_input_bytes": 16384,
+        "max_output_bytes": 65536,
+        "max_depth": 16,
+        "max_items": 100,
+        "max_fan_out": 8,
+        "max_duration_ms": 30000
+      },
+      "pagination": "snapshot_bound_cursor",
+      "disclosure": "untrusted_content_data",
+      "receipt": "none",
+      "cancellation": "immediate_quiescent",
+      "refusal_codes": ["tool_not_granted", "invalid_issue_state", "invalid_issue_query", "invalid_opener", "invalid_assignee", "invalid_milestone_number", "invalid_issue_labels", "invalid_case_sensitive", "case_sensitive_requires_query", "invalid_search_limits", "snapshot_required", "snapshot_unavailable", "issue_search_cancelled", "issue_search_failed", "repository_read_failed"],
+      "cli_command": "fg issue search",
+      "rest_api_path": "POST /api/v1/issues/search"
     },
     {
       "name": "frankengit_issue_set_milestone",

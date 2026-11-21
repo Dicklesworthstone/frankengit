@@ -22,13 +22,18 @@ pub(super) fn report(
         position: 0,
         live,
         per_step_shells: false,
+        step_failure_policy: false,
     };
     input.literal(br#"{"schema_version":"#)?;
-    input.per_step_shells = match input.number()? {
-        1 => false,
-        2 => true,
+    match input.number()? {
+        1 => {}
+        2 => input.per_step_shells = true,
+        3 => {
+            input.per_step_shells = true;
+            input.step_failure_policy = true;
+        }
         _ => return Err(BAD),
-    };
+    }
     input.literal(br#","profile":"trusted-local-foreground-v1","authoritative_check":false,"workflow_source":"#)?;
     let source = input.root()?;
     input.literal(b",\"workflow_graph\":")?;
@@ -89,7 +94,8 @@ pub(super) fn report(
     };
     if input.position != bytes.len()
         || report.succeeded() != succeeded
-        || report.has_step_shells() != input.per_step_shells
+        || report.has_continue_on_error() != input.step_failure_policy
+        || (!input.step_failure_policy && report.has_step_shells() != input.per_step_shells)
     {
         return Err(BAD);
     }
@@ -101,6 +107,7 @@ struct Json<'a> {
     position: usize,
     live: &'a dyn Fn() -> bool,
     per_step_shells: bool,
+    step_failure_policy: bool,
 }
 impl Json<'_> {
     fn peek(&self) -> Option<u8> {
@@ -340,9 +347,9 @@ impl Json<'_> {
         self.literal(b"}")?;
         if outcome == JobOutcome::Succeeded
             && (failure.is_some()
-                || steps
-                    .iter()
-                    .any(|step| step.observation.outcome != StepOutcome::Succeeded))
+                || steps.iter().any(|step| {
+                    step.observation.outcome != StepOutcome::Succeeded && !step.outcome_tolerated
+                }))
         {
             return Err(BAD);
         }
@@ -367,6 +374,14 @@ impl Json<'_> {
             self.shell()?
         } else {
             None
+        };
+        let (continue_on_error, outcome_tolerated) = if self.step_failure_policy {
+            self.literal(b",\"continue_on_error\":")?;
+            let policy = self.boolean()?;
+            self.literal(b",\"outcome_tolerated\":")?;
+            (policy, self.boolean()?)
+        } else {
+            (false, false)
         };
         self.literal(b",\"outcome\":")?;
         let outcome = match self.text(32)?.as_str() {
@@ -396,11 +411,13 @@ impl Json<'_> {
         {
             return Err(BAD);
         }
-        Ok(StepReport {
+        let step = StepReport {
             index,
             name,
             script,
             shell,
+            continue_on_error,
+            outcome_tolerated,
             observation: StepObservation {
                 outcome,
                 exit_code,
@@ -410,7 +427,13 @@ impl Json<'_> {
                 output_complete,
                 retain_workspace,
             },
-        })
+        };
+        // The selected policy changes control flow, never the raw observation.
+        // No interruption, incomplete output or unclosed workspace is tolerated.
+        if step.outcome_tolerated != step.can_tolerate_failure() {
+            return Err(BAD);
+        }
+        Ok(step)
     }
 
     fn shell(&mut self) -> Result<Option<StepShell>> {

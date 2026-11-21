@@ -260,6 +260,27 @@ fn multistep_and_unavailable_runner_profiles_fail_explicitly() {
 }
 
 #[test]
+fn optional_failure_policy_is_refused_before_command_only_admission() {
+    let mut selected = graph("echo build");
+    let mut later = selected.jobs[0].clone();
+    later.id = "test".into();
+    later.needs = vec!["build".into()];
+    later.steps[0].continue_on_error = true;
+    selected.jobs.push(later);
+    let mut c = coordinator();
+    assert!(matches!(
+        enqueue(&mut c, selected),
+        Err(CoordinatorRefusal::UnsupportedExecution { job_id, reason })
+            if job_id == "test" && reason == "step continue-on-error requires the job-scoped workflow executor"
+    ));
+    assert!(c.active_runs.is_empty());
+    assert!(c.idempotency_map.is_empty());
+    assert!(c.outbox_facts.is_empty());
+    assert_eq!(c.obligations, ObligationSummary::default());
+    assert!(enqueue(&mut c, graph("echo build")).is_ok());
+}
+
+#[test]
 fn invalid_inputs_do_not_start_jobs_issue_secrets_or_leak_slots() {
     let mut c = coordinator();
     let run = enqueue(&mut c, graph("echo building")).unwrap();

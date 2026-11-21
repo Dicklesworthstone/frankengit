@@ -185,6 +185,14 @@ fn run_fixture(
     format: GitHashAlgorithm,
     fail: bool,
 ) -> (OneNode, NodeConfig, TrustedWorkflowRun) {
+    run_fixture_with_policy(temp, format, fail, false)
+}
+fn run_fixture_with_policy(
+    temp: &Temp,
+    format: GitHashAlgorithm,
+    fail: bool,
+    continue_on_error: bool,
+) -> (OneNode, NodeConfig, TrustedWorkflowRun) {
     let root = temp.0.join("source");
     fs::create_dir_all(root.join("refs/heads")).unwrap();
     fs::write(root.join("HEAD"), "ref: refs/heads/main\n").unwrap();
@@ -193,8 +201,13 @@ fn run_fixture(
         GitHashAlgorithm::Sha256 => "[core]\nrepositoryformatversion = 1\nbare = true\n[extensions]\nobjectformat = sha256\n",
     }).unwrap();
     let script = if fail { "false" } else { "printf retained" };
+    let policy = if continue_on_error {
+        "        continue-on-error: true\n"
+    } else {
+        ""
+    };
     let source = format!(
-        "name: report\non: push\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: {script}\n"
+        "name: report\non: push\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: {script}\n{policy}"
     );
     let blob = loose(
         &root,
@@ -261,7 +274,7 @@ fn run_fixture(
             },
         ))
         .unwrap();
-    assert_eq!(run.succeeded(), !fail);
+    assert_eq!(run.succeeded(), !fail || continue_on_error);
     (node, config, run)
 }
 fn submitted_record(run: &TrustedWorkflowRun) -> WorkflowCheckRecord {
@@ -491,4 +504,63 @@ fn actual_failed_job_is_recorded_as_failure_without_a_green_conclusion() {
         Some(&run.source_commit)
     );
     node.shutdown().unwrap();
+}
+
+#[test]
+fn native_optional_failure_publishes_success_with_exact_raw_evidence_after_reopen() {
+    let temp = Temp::new();
+    let (node, config, run) = run_fixture_with_policy(&temp, GitHashAlgorithm::Sha256, true, true);
+    let step = &run.execution.jobs[0].steps[0];
+    assert!(step.continue_on_error && step.outcome_tolerated);
+    assert_eq!(
+        step.observation.outcome,
+        fgit_runner::workflow::StepOutcome::Failed
+    );
+    assert_eq!(step.observation.exit_code, Some(1));
+    assert!(
+        run.execution
+            .to_json()
+            .starts_with("{\"schema_version\":3,")
+    );
+    let record = submitted_record(&run);
+    assert_eq!(record.conclusion, WorkflowCheckConclusion::Success);
+    let observed = decode_trusted_observation(
+        &record.evidence,
+        Commitment::of_bytes(&record.evidence),
+        MAX_CHECK_EVIDENCE_BYTES,
+        &|| true,
+    )
+    .unwrap();
+    assert_eq!(observed.report().jobs[0].steps[0], *step);
+    let published = publish(&node, &record, b"optional-failure");
+    assert!(matches!(
+        published.1.outcome,
+        DecisionOutcome::Committed { .. }
+    ));
+    node.shutdown().unwrap();
+
+    let mut reopened = OneNode::open_existing(config).unwrap();
+    serve(&mut reopened);
+    assert_eq!(publish(&reopened, &record, b"optional-failure"), published);
+    let event = record
+        .proposed_event(publisher(), GitHashAlgorithm::Sha256)
+        .unwrap();
+    let fgit_forge::AggregateId::WorkflowCheck(id) = event.aggregate else {
+        panic!("workflow aggregate")
+    };
+    let basis = materialize(&reopened).basis().clone();
+    let saved = reopened
+        .runtime()
+        .block_on(workflow_checks::read_at(
+            &reopened.authority,
+            reopened.request_context().authority(),
+            &basis,
+            id,
+            &|| false,
+        ))
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.record, record);
+    assert_eq!(saved.record.conclusion, WorkflowCheckConclusion::Success);
+    reopened.shutdown().unwrap();
 }
