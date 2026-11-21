@@ -933,7 +933,7 @@
       "read_mutation": "mutation",
       "capability": "prepare_publication",
       "cli_command": "fg workspace apply",
-      "rest_api_path": "POST /repos/{id}/commits"
+      "rest_api_path": "POST /{repository}/api/v1/source/apply"
     },
     {
       "tool": "frankengit_source_publish_rebase",

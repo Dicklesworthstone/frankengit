@@ -35,6 +35,7 @@ const AGENT_USAGE: &str = "Sponsored-agent source and metadata profile:
     [--allow-issues] [--allow-discussions] [--allow-pulls] [--allow-source]
     [--allow-agent-context]
     [--allow-issue-writes] [--allow-discussion-writes] [--allow-pull-writes]
+    [--allow-source-writes]
     [--allow-outcomes] [--object-format sha1|sha256] [--max-messages <1..100000>]
 
 Choose this profile instead of --trusted-local. --principal is forbidden: the
@@ -47,16 +48,22 @@ independently exposes the authenticated Agent Protocol context document under
 that same canonical scope; neither launch flag grants the other tool group.
 History, blame, historical tree/blob and reference comparison tools independently
 require source-history-read. With source-candidates, --allow-source exposes only
-prepare_patch (regular-file exact-tree-v1 or explicit exact-tree-binary-v1 for
-edited binary renames) and single-parent inspect operations of
+prepare_patch (regular-file exact-tree-v1, exact-tree-binary-v1 for edited binary
+renames, or exact-symlink-v1 for inert symlinks) and single-parent inspect operations of
 frankengit_source_candidate. Candidate data grants no publication authority.
+The independent --allow-source-writes ceiling with canonical source-publish
+exposes only frankengit_source_publish for one reviewed single-parent bundle.
+Its immutable finite ref/path ceiling, exact predecessor, ordinary protection,
+original durable key and canonical agent/sponsor evidence remain mandatory.
 Source work preserves the credential's real agent, sponsor and original request
-deadline, and creates no durable execution run. Source writes, initial-history,
-symlink/replay/rebase/PR/queue candidate preparation, PR-specific diffs, Git
-transport and general bundle export/import remain unavailable.
+deadline, and creates no durable execution run. Initial-history publication,
+branch/tag mutations, replay/rebase/PR/queue candidate preparation, Git transport
+and general bundle export/import remain unavailable. Complete blob proofs require
+source-verified-read; PR code diffs require pulls-diff-read and both source/PR ceilings.
 Issue, PR metadata/conversation, discussion and own-principal outcome tools keep
-their independent grants. Milestones, notifications, checks, reviews, artifacts,
-queues, events and administration remain unavailable.
+their independent grants. Milestones require their own scopes under issue ceilings.
+Notifications, checks, reviews, artifacts, queues, events and administration
+remain unavailable.
 The token file is private, regular and bounded; its contents are never arguments
 or receipts. Each call binds the complete tool name/arguments and original key
 to a bounded IntentRun. Expiry/revocation is checked again on the next request;

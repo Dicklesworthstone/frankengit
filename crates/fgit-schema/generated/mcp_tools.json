@@ -2589,10 +2589,10 @@
       "kind": "tool",
       "owner_subsystem": "git-core",
       "support_profile": "active",
-      "description": "Publish a reviewed native Git bundle and advance or initialize a branch atomically.",
+      "description": "Publish one reviewed native Git bundle under the independent source-write launch ceiling. Sponsored agents require canonical source-publish with immutable finite ref/path limits and may only advance an exact single-parent candidate. The ordinary operator profile also supports explicit initial history. Native quarantine, current protection, original agent/sponsor evidence, request deadline and durable-key recovery remain authoritative; no review or merge approval.",
       "read_mutation": "mutation",
       "capability": "prepare_publication",
-      "principal": "operator_bound",
+      "principal": "host_bound",
       "idempotency": "required_durable_key",
       "authority_root": "exact_predecessor_commit",
       "budget": {
@@ -2607,9 +2607,9 @@
       "disclosure": "untrusted_content_data",
       "receipt": "canonical_decision_digest",
       "cancellation": "non_preemptive_terminal_commit",
-      "refusal_codes": ["predecessor_tip_mismatch", "corrupt_bundle", "bundle_byte_limit", "idempotency_key_reused"],
+      "refusal_codes": ["predecessor_tip_mismatch", "corrupt_bundle", "bundle_byte_limit", "idempotency_key_reused", "tool_not_granted", "agent_operation_not_granted", "agent_credential_unavailable", "agent_request_required", "agent_request_key_mismatch", "source_mutation_outcome_unknown"],
       "cli_command": "fg workspace apply",
-      "rest_api_path": "POST /repos/{id}/commits"
+      "rest_api_path": "POST /{repository}/api/v1/source/apply"
     },
     {
       "name": "frankengit_source_publish_rebase",
