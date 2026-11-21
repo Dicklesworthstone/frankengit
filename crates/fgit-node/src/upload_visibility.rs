@@ -53,6 +53,9 @@ const VISIBLE_PROJECTION_CACHE_SCOPE: &[u8] = b"node/upload-visibility-cache/v1"
 /// session still materializes and authenticates its own basis first, wants and
 /// packs are still checked against it, and a refused or deadline-cut
 /// projection is never stored. Losing the entry only costs a recomputation.
+/// Every history-sized membership, object-fact and packing-hint allocation is
+/// shared immutably with matching sessions. Adapters retain their own deadline
+/// proofs; selecting a graph no longer copies its complete membership twice.
 #[derive(Debug, Default)]
 pub struct VisibleProjectionCache {
     entry: RwLock<Option<Arc<VisibleProjection>>>,
@@ -132,7 +135,9 @@ struct VisibleProjection {
     /// `None` only when no cache key could be built; such a projection is
     /// used by its own session and never published.
     key: Option<StoredKey>,
-    graph: VisibleGraph,
+    closure: Arc<PermittedObjectClosure>,
+    tag_targets: BTreeMap<GitOid, GitOid>,
+    path_hashes: Arc<BTreeMap<GitOid, u64>>,
     objects: Arc<BTreeMap<GitOid, partial_clone::FilterObject>>,
     facts: Arc<BTreeMap<GitOid, WalkFacts>>,
 }
@@ -147,9 +152,14 @@ struct StoredKey {
 }
 
 impl VisibleProjection {
-    fn new(key: Option<&ProjectionKey<'_>>, mut graph: VisibleGraph) -> Self {
-        let objects = Arc::new(core::mem::take(&mut graph.objects));
-        let facts = Arc::new(core::mem::take(&mut graph.facts));
+    fn new(key: Option<&ProjectionKey<'_>>, graph: VisibleGraph) -> Self {
+        let VisibleGraph {
+            closure,
+            tag_targets,
+            objects,
+            path_hashes,
+            facts,
+        } = graph;
         Self {
             key: key.map(|key| StoredKey {
                 binding: key.binding,
@@ -158,9 +168,11 @@ impl VisibleProjection {
                 maximum_object_bytes: key.maximum_object_bytes,
                 roots: key.roots.to_vec(),
             }),
-            graph,
-            objects,
-            facts,
+            closure: Arc::new(closure),
+            tag_targets,
+            path_hashes: Arc::new(path_hashes),
+            objects: Arc::new(objects),
+            facts: Arc::new(facts),
         }
     }
 
@@ -201,7 +213,7 @@ impl VisibleProjection {
 /// The derived set is not an RCR root and is deliberately not persisted.
 pub struct VisibleUploadPack {
     basis: PublicationBasis,
-    closure: PermittedObjectClosure,
+    closure: Arc<PermittedObjectClosure>,
     repository: AdmissionUploadPackRepository,
     pub(super) tags: tags::TagProjection,
     objects: Arc<BTreeMap<GitOid, partial_clone::FilterObject>>,
@@ -211,7 +223,7 @@ pub struct VisibleUploadPack {
     /// One deterministic ordering hint per named visible object. These never
     /// authorize membership or retain names; body verification still governs
     /// every selected object. Unnamed roots retain the zero hint.
-    path_hashes: BTreeMap<GitOid, u64>,
+    path_hashes: Arc<BTreeMap<GitOid, u64>>,
 }
 
 impl VisibleUploadPack {
@@ -479,7 +491,7 @@ impl OneNode {
         );
         let derived = projection.and_then(|projection| {
             tags::TagProjection::new(
-                &projection.graph.tag_targets,
+                &projection.tag_targets,
                 repository.advertised_refs(),
                 || source.checkpoint(),
             )
@@ -500,8 +512,12 @@ impl OneNode {
         if computed {
             cache.publish(Arc::clone(&projection));
         }
-        let closure = projection.graph.closure.clone();
-        let mut repository = repository.with_closure_objects(closure.objects().clone());
+        // All history-sized indexes are frozen by the completed walk. Each
+        // session pins those same allocations after its own basis/roots/limits
+        // match, rather than copying the full membership twice and the path
+        // hints once even for a metadata-only or up-to-date fetch.
+        let closure = Arc::clone(&projection.closure);
+        let mut repository = repository.with_shared_closure_objects(Arc::clone(&closure));
         repository.tag_peels = tags.peels.clone();
         let objects = Arc::clone(&projection.objects);
         repository.object_info_proof = Some(object_info::ObjectInfoProof::new(
@@ -521,7 +537,7 @@ impl OneNode {
             tags,
             objects,
             facts: Arc::clone(&projection.facts),
-            path_hashes: projection.graph.path_hashes.clone(),
+            path_hashes: Arc::clone(&projection.path_hashes),
         })
     }
 }

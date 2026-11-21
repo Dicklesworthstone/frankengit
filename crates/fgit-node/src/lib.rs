@@ -328,7 +328,9 @@ pub struct AdmissionUploadPackRepository {
     object_format: GitHashAlgorithm,
     refs: Vec<AdvertisedRef>,
     head_target: Option<RefName>,
-    closure_objects: BTreeSet<GitOid>,
+    /// Immutable visible membership shared by adapters for one verified graph.
+    /// Session-local proofs and deadlines remain separate below.
+    closure_objects: Arc<PermittedObjectClosure>,
     tag_peels: BTreeMap<GitOid, GitOid>,
     shallow_proof: Option<upload_visibility::shallow::ShallowProof>,
     object_info_proof: Option<upload_visibility::object_info::ObjectInfoProof>,
@@ -415,7 +417,7 @@ impl AdmissionUploadPackRepository {
             object_format,
             refs,
             head_target,
-            closure_objects: BTreeSet::new(),
+            closure_objects: Arc::new(PermittedObjectClosure::default()),
             tag_peels: BTreeMap::new(),
             shallow_proof: None,
             object_info_proof: None,
@@ -429,7 +431,14 @@ impl AdmissionUploadPackRepository {
     /// supplies only its private, exact-head visible-graph proof, never the
     /// cumulative admitted-history set or a physical object inventory.
     #[must_use]
-    pub fn with_closure_objects(mut self, objects: BTreeSet<GitOid>) -> Self {
+    pub fn with_closure_objects(self, objects: BTreeSet<GitOid>) -> Self {
+        self.with_shared_closure_objects(Arc::new(PermittedObjectClosure::new(objects)))
+    }
+
+    /// The native transport has already verified this immutable graph under
+    /// its exact authority basis. Sharing it does not share a session's
+    /// liveness or grant any proof to a replacement disclosure selection.
+    fn with_shared_closure_objects(mut self, objects: Arc<PermittedObjectClosure>) -> Self {
         self.closure_objects = objects;
         self.shallow_proof = None;
         self.object_info_proof = None;
@@ -473,7 +482,7 @@ impl UploadPackRepository for AdmissionUploadPackRepository {
     fn contains_want(&self, oid: AnyGitOid) -> bool {
         // The private visible-graph proof includes every advertised root.
         // Avoid scanning all refs for every metadata query (including misses).
-        self.closure_objects.contains(&oid)
+        self.closure_objects.objects().contains(&oid)
             || (self.object_info_proof.is_none()
                 && self.refs.iter().any(|reference| reference.oid == oid))
     }

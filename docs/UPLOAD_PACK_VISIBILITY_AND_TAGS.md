@@ -23,7 +23,39 @@ revocation of a transfer when another transaction changes policy after the
 snapshot was selected. The current profile eagerly verifies the complete
 visible graph before advertising and retains the existing finite node, edge,
 byte and deadline envelopes. It is not a streaming large-repository or latency
-optimization. No performance or side-channel-freedom claim is made.
+optimization by itself. No end-to-end throughput or side-channel-freedom claim
+is made.
+
+## Shared immutable upload indexes
+
+Sessions opened from the same service configuration reuse a complete visible
+projection only when its authenticated basis, advertised roots, object format,
+and limits match. They now also share the projection's immutable membership
+and path-hint allocations. Previously, even a warm `ls-remote` or fetch copied
+the full visible membership twice and its path-hint map once; cloning the
+repository adapter copied membership again. The selected session and its
+negotiation adapter now pin the same membership, alongside the already shared
+native object and edge facts.
+
+The ownership change removes those history-sized copies. It does not remove
+the initial graph verification, per-request ref processing, want/have traversal,
+pack selection, or payload verification. There is no new persistent index,
+storage format, protocol, or authority source.
+
+A later head creates a separate immutable projection, even when its refs have
+returned to the same values. Existing transfers keep their previously selected
+graph; it cannot satisfy a materialization at another basis. New sessions
+obtain independent deadline and work counters. Replacing membership through
+the public adapter builder clears its shallow, object-info, and ref-in-want
+proofs, without changing another adapter. Failed or cancelled preparation does
+not publish a projection.
+
+The native projection-cache tests cover SHA-1 and SHA-256 session/child reuse,
+deleted-ref and changed-generation isolation, strict-limit refusal, cancellation,
+adapter replacement, and independent deadlines. A component test builds a
+4,096-commit native history and verifies that 64 cloned adapters retain one
+membership allocation; it is an ownership check, not a transport throughput or
+process-RSS measurement.
 
 ## Partial-clone extension
 

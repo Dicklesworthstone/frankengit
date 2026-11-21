@@ -1,7 +1,10 @@
 //! A visible projection is reused across sessions only at its exact basis,
-//! roots and limits, and reuse reads no object (frankengit-8g42).
+//! roots and limits, and reuse reads no object (frankengit-8g42). Reusing or
+//! cloning an adapter must also share its complete immutable graph indexes,
+//! without sharing another connection's deadline or replacement proof.
 use super::*;
 use std::path::Path;
+mod shared;
 
 fn session_deadline() -> GitDaemonSessionDeadline {
     GitDaemonSessionDeadline::new(
@@ -132,6 +135,27 @@ fn assert_same_projection(left: &VisibleUploadPack, right: &VisibleUploadPack) {
     assert_eq!(left.path_hashes, right.path_hashes);
 }
 
+fn assert_shared_projection(left: &VisibleUploadPack, right: &VisibleUploadPack) {
+    assert_same_projection(left, right);
+    assert!(Arc::ptr_eq(&left.closure, &right.closure));
+    assert!(Arc::ptr_eq(&left.path_hashes, &right.path_hashes));
+    assert!(Arc::ptr_eq(&left.objects, &right.objects));
+    assert!(Arc::ptr_eq(&left.facts, &right.facts));
+    for selected in [left, right] {
+        assert!(Arc::ptr_eq(
+            &selected.closure,
+            &selected.repository().closure_objects
+        ));
+    }
+}
+
+fn assert_distinct_projection(left: &VisibleUploadPack, right: &VisibleUploadPack) {
+    assert!(!Arc::ptr_eq(&left.closure, &right.closure));
+    assert!(!Arc::ptr_eq(&left.path_hashes, &right.path_hashes));
+    assert!(!Arc::ptr_eq(&left.objects, &right.objects));
+    assert!(!Arc::ptr_eq(&left.facts, &right.facts));
+}
+
 #[test]
 fn a_session_at_an_unchanged_basis_reuses_the_projection_without_reading_objects() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
@@ -148,7 +172,7 @@ fn a_session_at_an_unchanged_basis_reuses_the_projection_without_reading_objects
         assert_eq!(node.upload_visibility_cache_stats(), (0, 1));
         let second = prepare(&node).unwrap();
         assert_eq!(node.upload_visibility_cache_stats(), (1, 1));
-        assert_same_projection(&first, &second);
+        assert_shared_projection(&first, &second);
         assert!(second.repository().contains_want(public));
         assert!(second.repository().contains_want(private));
 
@@ -156,7 +180,7 @@ fn a_session_at_an_unchanged_basis_reuses_the_projection_without_reading_objects
         let hidden = Hidden::object(&scratch.0, ancestor);
         let reused = prepare(&node).unwrap();
         assert_eq!(node.upload_visibility_cache_stats(), (2, 1));
-        assert_same_projection(&first, &reused);
+        assert_shared_projection(&first, &reused);
         node.shutdown().unwrap();
 
         // Its twin: a service with its own empty cache must read the object.
@@ -170,11 +194,12 @@ fn a_session_at_an_unchanged_basis_reuses_the_projection_without_reading_objects
         let recomputed = prepare(&cold).unwrap();
         assert_eq!(cold.upload_visibility_cache_stats(), (0, 2));
         assert_same_projection(&first, &recomputed);
+        assert_distinct_projection(&first, &recomputed);
         cold.shutdown().unwrap();
 
         // A child reopened from the original configuration shares its entry.
         let child = OneNode::open_existing(config).unwrap();
-        assert_same_projection(&first, &prepare(&child).unwrap());
+        assert_shared_projection(&first, &prepare(&child).unwrap());
         assert_eq!(child.upload_visibility_cache_stats(), (3, 1));
         child.shutdown().unwrap();
         drop(scratch);
@@ -208,6 +233,19 @@ fn a_new_basis_recomputes_instead_of_serving_the_previous_projection() {
         assert!(after.repository().contains_want(public));
         assert!(!after.repository().contains_want(private));
         assert!(!after.repository().is_common(private_blob));
+        assert_distinct_projection(&before, &after);
+        // A previously selected transfer pins its immutable graph. Advancing
+        // the cache must neither mutate that graph nor let it satisfy a new
+        // authority basis after the private ref has been deleted.
+        assert!(before.repository().contains_want(private));
+        assert!(before.repository().is_common(private_blob));
+        let request = node.request_context();
+        let current = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&request))
+            .unwrap();
+        assert!(before.closure_for(&current).is_err());
+        assert_eq!(after.closure_for(&current).unwrap().objects(), &visible);
 
         // The new basis is now the one that is reused.
         let again = prepare(&node).unwrap();
@@ -215,7 +253,7 @@ fn a_new_basis_recomputes_instead_of_serving_the_previous_projection() {
             node.upload_visibility_cache_stats(),
             (reused + 1, computed + 1)
         );
-        assert_same_projection(&after, &again);
+        assert_shared_projection(&after, &again);
         node.shutdown().unwrap();
         drop(scratch);
     }
@@ -247,7 +285,7 @@ fn a_service_with_tighter_limits_never_reuses_a_looser_projection() {
 
         // Its permitted twin: the original limits still reuse that entry.
         let twin = OneNode::open_existing(config).unwrap();
-        assert_same_projection(&loose, &prepare(&twin).unwrap());
+        assert_shared_projection(&loose, &prepare(&twin).unwrap());
         assert_eq!(twin.upload_visibility_cache_stats(), (1, 2));
         twin.shutdown().unwrap();
         drop(scratch);
@@ -283,6 +321,7 @@ fn an_equal_ref_view_at_a_later_generation_is_recomputed_not_reused() {
             "two decisions later the refs are equal, but the basis is not"
         );
         assert_same_projection(&first, &later);
+        assert_distinct_projection(&first, &later);
         node.shutdown().unwrap();
         drop(scratch);
     }
@@ -313,6 +352,7 @@ fn a_new_basis_reads_only_objects_the_previous_projection_never_read() {
         let seeded = prepare(&node).unwrap();
         assert_eq!(node.upload_visibility_cache_stats(), (0, 2));
         assert_same_projection(&first, &seeded);
+        assert_distinct_projection(&first, &seeded);
         assert!(seeded.repository().contains_want(public));
         node.shutdown().unwrap();
 
