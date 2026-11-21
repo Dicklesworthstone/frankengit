@@ -13,7 +13,8 @@
 //! Matched here: Git pkt-line framing (including flush, delimiter, and
 //! response-end), bounded v0/v1 advertisements and fetch negotiation,
 //! `multi_ack` / `multi_ack_detailed`, v2 `ls-refs`, `fetch` and `object-info` command
-//! sections, native SHA-1/SHA-256 object-ID widths, shallow/deepen and the
+//! sections, exact snapshot-bound `ref-in-want` fetches, native SHA-1/SHA-256
+//! object-ID widths, shallow/deepen and the
 //! documented object-filter forms, and side-band-64k packet multiplexing.
 //! V0/v1 wants must be advertised unless the server explicitly enables
 //! `allow-reachable-sha1-in-want`; that extension also requires repository
@@ -57,6 +58,7 @@ pub mod sparse;
 /// Hidden-ref authorization policy and visibility-filtered repository views.
 pub mod stale_disclosure;
 pub mod visibility;
+mod wanted_refs;
 
 /// The largest pkt-line frame permitted by Git's common protocol.
 pub const MAX_PKT_LINE_BYTES: usize = 65_520;
@@ -80,7 +82,9 @@ pub struct WireLimits {
     pub max_capabilities: usize,
     /// Maximum bytes in one capability token.
     pub max_capability_bytes: usize,
-    /// Maximum `want` IDs per fetch, or `oid` arguments per object-info query.
+    /// Maximum distinct `want` IDs plus `want-ref` names per fetch, or `oid`
+    /// arguments per object-info query. Different names count separately even
+    /// when they resolve to the same object.
     pub max_wants: usize,
     /// Maximum `have` object IDs in one fetch request.
     pub max_haves: usize,
@@ -237,6 +241,11 @@ pub enum WireError {
     WantNotAdvertised { oid: AnyGitOid },
     /// A v2 `want` was neither advertised nor permitted by the repository closure.
     WantNotReachable { oid: AnyGitOid },
+    /// A v2 `want-ref` did not name an exact visible ref in this snapshot.
+    /// Hidden and absent names have the same refusal.
+    UnknownWantedRef { name: Vec<u8> },
+    /// Git rejects requesting the same ref name twice in one fetch.
+    DuplicateWantedRef { name: Vec<u8> },
     /// A bounded request collection has reached its limit.
     TooManyObjectIds { field: &'static str, limit: usize },
     /// A request attempted `have` or `done` before any `want`.
@@ -354,6 +363,8 @@ impl Display for WireError {
             }
             Self::WantNotAdvertised { oid } => write!(formatter, "want {oid:?} was not advertised"),
             Self::WantNotReachable { oid } => write!(formatter, "want {oid:?} is not reachable"),
+            Self::UnknownWantedRef { name } => write!(formatter, "unknown wanted ref {name:?}"),
+            Self::DuplicateWantedRef { name } => write!(formatter, "duplicate wanted ref {name:?}"),
             Self::TooManyObjectIds { field, limit } => {
                 write!(formatter, "too many {field} IDs; limit {limit}")
             }
@@ -1305,12 +1316,23 @@ impl AdvertisedRef {
 pub trait UploadPackRepository {
     /// The native object format of this repository.
     fn object_format(&self) -> GitObjectFormat;
-    /// Deterministically ordered advertised refs, with no duplicate name or OID.
+    /// Deterministically ordered advertised refs, with unique names. Different
+    /// names may share an object (for example HEAD and its target branch).
     fn advertised_refs(&self) -> &[AdvertisedRef];
     /// Whether a v2 non-advertised want is in the canonical permitted closure.
     fn contains_want(&self, oid: AnyGitOid) -> bool;
     /// Whether a client `have` is already common with the advertised closure.
     fn is_common(&self, oid: AnyGitOid) -> bool;
+    /// Whether this view supplies exact visible refs from one authenticated
+    /// snapshot. Parser support alone must not advertise `ref-in-want`.
+    fn supports_ref_in_want(&self) -> bool {
+        false
+    }
+    /// Check the live request scope before resolving and returning wanted refs.
+    /// Called for hidden, absent and duplicate names as well as successful ones.
+    fn ref_in_want_checkpoint(&self) -> Result<(), WireError> {
+        Ok(())
+    }
     /// Whether this view supplies authorized object-size metadata. A transport
     /// must not advertise `object-info` from parser support alone.
     fn supports_object_info(&self) -> bool {
@@ -2579,6 +2601,10 @@ pub struct V2UploadPack {
     state: V2State,
     request_capabilities: Capabilities,
     wants: RequestObjectIds,
+    // The pack wants deduplicate resolved object IDs; selector accounting must
+    // separately retain explicit OIDs so aliases cannot bypass max_wants.
+    explicit_wants: RequestObjectIds,
+    wanted_refs: wanted_refs::WantedRefs,
     haves: RequestObjectIds,
     shallows: RequestObjectIds,
     deepen: Option<u32>,
@@ -2631,6 +2657,8 @@ impl V2UploadPack {
             state: V2State::AwaitCommand,
             request_capabilities: Capabilities::default(),
             wants: RequestObjectIds::default(),
+            explicit_wants: RequestObjectIds::default(),
+            wanted_refs: wanted_refs::WantedRefs::default(),
             haves: RequestObjectIds::default(),
             shallows: RequestObjectIds::default(),
             deepen: None,
@@ -2863,7 +2891,29 @@ impl V2UploadPack {
             if !repository.contains_want(oid) {
                 return Err(WireError::WantNotReachable { oid });
             }
+            if !self.explicit_wants.contains(&oid)
+                && self.explicit_wants.as_slice().len()
+                    >= self.limits.max_wants.saturating_sub(self.wanted_refs.len())
+            {
+                return Err(WireError::TooManyObjectIds {
+                    field: "want",
+                    limit: self.limits.max_wants,
+                });
+            }
+            self.explicit_wants
+                .insert("want", oid, self.limits.max_wants)?;
             self.wants.insert("want", oid, self.limits.max_wants)?;
+            return Ok(Transition::empty());
+        }
+        if let Some(name) = line.strip_prefix(b"want-ref ") {
+            self.require_fetch_feature(b"ref-in-want")?;
+            self.wanted_refs.accept(
+                name,
+                repository,
+                &self.limits,
+                self.explicit_wants.as_slice().len(),
+                &mut self.wants,
+            )?;
             return Ok(Transition::empty());
         }
         if let Some(rest) = line.strip_prefix(b"have ") {
@@ -3136,9 +3186,10 @@ impl V2UploadPack {
             options: self.options.with(PackOptions::SIDE_BAND_64K.0),
         };
         shallow_response::validate_relative_depth(&request)?;
+        self.wanted_refs.validate(repository)?;
         let mut output = Vec::new();
+        let mut used_bytes = 0;
         if !self.done && (!self.haves.is_empty() || self.wait_for_done) {
-            let mut used_bytes = 0;
             add_output_packet(
                 &mut output,
                 line_packet(b"acknowledgments\n"),
@@ -3213,15 +3264,36 @@ impl V2UploadPack {
             )?;
         }
         if self.automatic_shallow_updates && shallow_response::has_controls(&request) {
-            output.extend(shallow_response::response(
-                repository,
-                &request,
-                &self.limits,
-            )?);
+            for packet in shallow_response::response(repository, &request, &self.limits)? {
+                let bytes = match &packet {
+                    Packet::Data(line) => line.len() + 4,
+                    _ => 4,
+                };
+                add_output_packet(&mut output, packet, bytes, &mut used_bytes, &self.limits)?;
+            }
         }
-        output.push(line_packet(b"packfile\n"));
-        if self.automatic_shallow_updates && shallow_response::has_controls(&request) {
-            let _ = encode_packets(&output, &self.limits)?;
+        self.wanted_refs
+            .append_response(repository, &mut output, &mut used_bytes, &self.limits)?;
+        add_output_packet(
+            &mut output,
+            line_packet(b"packfile\n"),
+            b"packfile\n".len() + 4,
+            &mut used_bytes,
+            &self.limits,
+        )?;
+        // Keep the complete-prefix packet ceiling without allocating a second
+        // encoded copy of ACKs, shallow data and wanted-ref receipts.
+        for packet in &output {
+            let bytes = match packet {
+                Packet::Data(line) => line.len() + 4,
+                _ => 4,
+            };
+            if bytes > self.limits.max_packet_bytes {
+                return Err(WireError::PacketTooLarge {
+                    declared: bytes,
+                    limit: self.limits.max_packet_bytes,
+                });
+            }
         }
         self.state = V2State::Complete;
         Ok(Transition {

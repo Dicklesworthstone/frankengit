@@ -166,10 +166,9 @@ fn unadvertised_legacy_wants_require_both_server_capability_and_repository_permi
                             matches!(result,Err(WireError::WantNotAdvertised {oid}) if oid==wanted)
                         );
                     }
-                    assert_eq!(
-                        repository.checks.get(),
-                        usize::from(allow && wanted != oid(format, 1))
-                    );
+                    // Reachable-want support checks the indexed closure first,
+                    // including advertised tips, before the exact-tip fallback.
+                    assert_eq!(repository.checks.get(), usize::from(allow));
                 }
                 let mut machine =
                     LegacyUploadPack::new(version, Capabilities::default(), WireLimits::default())
