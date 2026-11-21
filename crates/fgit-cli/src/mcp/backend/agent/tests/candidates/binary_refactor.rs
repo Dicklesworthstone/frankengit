@@ -192,8 +192,8 @@ fn sponsored_binary_refactor_refuses_reverse_mismatch_and_symlinks_without_effec
         );
         args.insert("profile".into(), text("exact-symlink-v1"));
         assert_eq!(
-            backend.call(NAME, &args).unwrap_err().code,
-            "unsupported_patch_profile"
+            backend.call(NAME, &args).unwrap().object().unwrap()["profile"],
+            text("exact-symlink-v1")
         );
         assert_eq!(authority(&backend), before);
         assert!(

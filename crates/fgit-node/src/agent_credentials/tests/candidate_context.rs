@@ -10,6 +10,7 @@ use std::time::Duration;
 const INITIAL: &[u8] = b"diff --git a/file b/file\nnew file mode 100644\n--- /dev/null\n+++ b/file\n@@ -0,0 +1 @@\n+before\n";
 const PATCH: &[u8] =
     b"diff --git a/file b/file\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n-before\n+after\n";
+const SYMLINK: &[u8] = b"diff --git a/link b/link\nnew file mode 120000\n--- /dev/null\n+++ b/link\n@@ -0,0 +1 @@\n+../../outside\n\\ No newline at end of file\n";
 
 fn context(node: &OneNode, limits: ClassLimits) -> NodeRequestContext {
     let authority = crate::FsqliteCx::new();
@@ -125,6 +126,18 @@ fn candidate_engines_retain_original_context_cancellation_poll_quota_and_deadlin
                 ))
         };
         let candidate = prepare(&run.context(&node)).unwrap();
+        let prepare_symlink = |original: &NodeRequestContext| {
+            node.runtime()
+                .block_on(node.prepare_agent_source_symlink_patch_with_context_in(
+                    original,
+                    &proof,
+                    &reference,
+                    plan.commit,
+                    SYMLINK,
+                    &metadata,
+                ))
+        };
+        let symlink_candidate = prepare_symlink(&run.context(&node)).unwrap();
         let inspect = |original: &NodeRequestContext| {
             node.runtime()
                 .block_on(node.inspect_agent_source_bundle_with_context_in(
@@ -144,6 +157,7 @@ fn candidate_engines_retain_original_context_cancellation_poll_quota_and_deadlin
             // Credential expiry is not the reason either operation must stop.
             run.check(PATCH.len() as u64, 0).unwrap();
             cancelled(prepare(&original).unwrap_err(), exhaustion);
+            cancelled(prepare_symlink(&original).unwrap_err(), exhaustion);
             let error = inspect(&original).unwrap_err();
             let BundleInspectionRefusal::Envelope(error) = error else {
                 panic!("inspection lost its original context cause: {error:?}");
@@ -156,6 +170,15 @@ fn candidate_engines_retain_original_context_cancellation_poll_quota_and_deadlin
         assert_eq!(candidate.bundle_bytes(), repeated.bundle_bytes());
         assert!(inspect(&run.context(&node)).is_ok());
         assert!(node.read_git_object(candidate.candidate_commit).is_err());
+        let repeated_symlink = prepare_symlink(&run.context(&node)).unwrap();
+        assert_eq!(
+            symlink_candidate.bundle_bytes(),
+            repeated_symlink.bundle_bytes()
+        );
+        assert!(
+            node.read_git_object(symlink_candidate.candidate_commit)
+                .is_err()
+        );
         let after = node
             .runtime()
             .block_on(node.authenticate_authority_head())

@@ -57,7 +57,7 @@ pub(super) fn tool() -> Tool {
 pub(super) fn agent_tool() -> Tool {
     Tool {
         name: NAME,
-        description: "Prepare a regular-file exact patch against a visible current branch (prepare_patch, exact-tree-v1), explicitly select exact-tree-binary-v1 for edited binary renames, or inspect an uploaded single-parent candidate (inspect). Requires the independent canonical source-candidates scope and the source launch ceiling. Work retains the original agent request, deadline and bounded transport reservation. Read-only: no object import, checkout, shell, approval or publication. Returned publication arguments are unsigned handoff data; this agent profile has no source-publication tool.",
+        description: "Prepare a regular-file exact patch against a visible current branch (prepare_patch, exact-tree-v1), explicitly select exact-tree-binary-v1 for edited binary renames or exact-symlink-v1 for inert Git symlink bytes, or inspect an uploaded single-parent candidate (inspect). Requires the independent canonical source-candidates scope and the source launch ceiling. Work retains the original agent request, deadline and bounded transport reservation. Link targets are never followed. Read-only: no object import, checkout, shell, approval or publication. Returned publication arguments are unsigned handoff data; this agent profile has no source-publication tool.",
         schema: object([
             ("type", text("object")),
             (
@@ -74,7 +74,7 @@ pub(super) fn agent_tool() -> Tool {
 pub(super) fn agent_operation(args: &Object) -> Result<(), ToolError> {
     match required(args, "operation")? {
         "prepare_patch" => match string(args, "profile")? {
-            None | Some("exact-tree-v1" | "exact-tree-binary-v1") => Ok(()),
+            None | Some("exact-tree-v1" | "exact-tree-binary-v1" | "exact-symlink-v1") => Ok(()),
             Some(_) => Err(ToolError::invalid("unsupported_patch_profile")),
         },
         "inspect" => Ok(()),

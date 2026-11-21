@@ -15,8 +15,8 @@ also needs those independent source APIs. Existing grants, including masks
 `0x007f`, `0x00ff` and `0x01ff`, gain no candidate authority after an upgrade.
 
 Sponsored discovery exposes only `prepare_patch` with omitted profile,
-`exact-tree-v1` or explicit `exact-tree-binary-v1`, and `inspect` for an uploaded
-single-parent candidate. Initial history, symlink preparation, replay, rebase,
+`exact-tree-v1`, explicit `exact-tree-binary-v1` or `exact-symlink-v1`, and
+`inspect` for an uploaded single-parent candidate. Initial history, replay, rebase,
 PR and queue operations are refused before authentication or native dispatch.
 The trusted-local schema retains its existing operations.
 
@@ -86,7 +86,7 @@ review the complete resulting tree; binary entries expose blob identity, mode
 and byte count without decoding the payload as text. Publication continues to
 require the independent publisher and its original retry key.
 
-In the trusted-local profile, `prepare_patch` may explicitly select
+Both trusted-local and sponsored callers may explicitly select
 `"profile": "exact-symlink-v1"` to
 create, edit, delete or rename Git symlink blobs using mode `120000`. An omitted
 profile, or explicit `"exact-tree-v1"`, retains the existing regular-file
@@ -94,9 +94,11 @@ behavior. Link targets are inert bytes and are never traversed or materialized
 on the host. The same native parser, source/index verification, both-endpoint
 rename authorization, cumulative byte limits and complete candidate rules
 apply. The result reports the effective `profile` and exact `120000` path
-receipts. The option adds no new MCP grant, publication authority, host path
-input or sponsored-agent access; existing saved-bundle review and publication
-remain required.
+receipts. The option adds no new MCP grant, publication authority or host path
+input. Sponsored calls must borrow the original `SourceCandidateRequest`; the
+native symlink entrypoint retains its namespace, raw input reservation and
+deadline and cannot replace a stopped context with a renewed one. Existing
+saved-bundle review and independently authorized publication remain required.
 
 The complete result carries source RCR/base, candidate commit/tree, exact patch
 and bundle SHA-256, changed-path blob/mode receipts and `publication_arguments`.

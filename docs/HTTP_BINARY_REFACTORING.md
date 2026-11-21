@@ -1,9 +1,11 @@
 # Explicit binary refactoring over the native source HTTP endpoint
 
 `POST /api/v1/source/prepare` admits an optional `patch_profile` in the existing
-multipart `command` form. The two values are `exact-tree-v1` and
-`exact-tree-binary-v1`. The first explicitly selects the historical HTTP grammar;
-the second additionally permits edited binary moves. Omission retains the old
+multipart `command` form. `exact-tree-v1` explicitly selects the historical HTTP
+grammar; `exact-tree-binary-v1` additionally permits edited binary moves.
+The separate `exact-symlink-v1` profile permits inert Git symlink edits as
+described in the [source-change API](HTTP_SOURCE_CHANGE_API.md); the binary
+profile continues to refuse symlinks. Omission retains the old
 engine and successful response bytes. Empty, unknown, differently cased and
 duplicate values refuse; there is no fallback or profile inference from payloads.
 The preparation form admits nine fields so the profile and independently chosen
@@ -44,7 +46,9 @@ decision. Preparation itself neither stages objects nor creates a transaction.
 ## Authentication and evidence scope
 
 The same `allow_source` deployment gate and repository-scoped read credential
-remain mandatory for preparation and inspection. A receive-only credential cannot
+remain mandatory for preparation and inspection. Canonical sponsored callers
+instead need the independent `source-candidates` grant and retain their original
+request reservation, deadline and agent/sponsor attribution. A receive-only credential cannot
 prepare; a read-only credential cannot publish. Publication independently requires
 `allow_receive` and a receive grant. Profile text cannot manufacture privileges or
 a transaction key. This remains the existing loopback HTTP deployment, not a

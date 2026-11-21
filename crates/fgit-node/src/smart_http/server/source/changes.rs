@@ -87,6 +87,18 @@ pub(super) fn execute(
             // legacy grammar, including its edited-binary-rename refusal.
             let preparation = async {
                 if let Some(candidate_request) = candidate_request.as_ref() {
+                    if matches!(profile, Some(PatchProfile::Symlinks)) {
+                        return node
+                            .prepare_agent_source_symlink_patch_with_context_in(
+                                &context,
+                                candidate_request,
+                                &reference,
+                                base,
+                                payload,
+                                &metadata,
+                            )
+                            .await;
+                    }
                     return node
                         .prepare_agent_source_patch_with_context_in(
                             &context,
@@ -100,6 +112,18 @@ pub(super) fn execute(
                         .await;
                 }
                 match profile {
+                    Some(PatchProfile::Symlinks) => {
+                        node.prepare_trusted_symlink_patch_in(
+                            &context,
+                            &reference,
+                            base,
+                            *authenticated.principal_id().as_bytes(),
+                            payload,
+                            &metadata,
+                            PatchLimits::default(),
+                        )
+                        .await
+                    }
                     Some(PatchProfile::BinaryTree) => {
                         node.prepare_trusted_binary_refactor_in(
                             &context,

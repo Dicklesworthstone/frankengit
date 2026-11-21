@@ -102,7 +102,11 @@ fn patch_profile_selection_is_explicit_and_cannot_expand_the_transport_envelope(
         .unwrap();
     assert_eq!(
         properties["profile"].object().unwrap()["enum"],
-        Value::Array(vec![text("exact-tree-v1"), text("exact-tree-binary-v1")])
+        Value::Array(vec![
+            text("exact-tree-v1"),
+            text("exact-tree-binary-v1"),
+            text("exact-symlink-v1"),
+        ])
     );
 }
 #[test]

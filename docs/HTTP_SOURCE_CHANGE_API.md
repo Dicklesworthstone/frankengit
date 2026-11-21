@@ -75,6 +75,17 @@ must match the repository. Author, committer, positive timestamp and message are
 explicit Git content, not authenticated identities. No ambient branch, metadata,
 clock, expected-old refresh or force flag is inferred.
 
+Optional `patch_profile` selects an explicit native grammar. Omit it or select
+`exact-tree-v1` for the existing regular-file behavior. Select
+`exact-tree-binary-v1` for verified edited binary renames, or `exact-symlink-v1`
+to create, edit, delete or rename inert Git symlink blobs. Sponsored
+`source-candidates` requests and ordinary source readers use these same choices.
+The profile is echoed in response metadata when supplied; it never grants
+publication rights. Unknown or duplicate profiles refuse, and `inspect` and
+`apply` do not accept this preparation-only field. Optional
+`expected_result_tree` independently pins the complete native result; a mismatch
+returns 409 before any candidate is disclosed.
+
 With the complete encoded fields in prepare.form and an intentionally chosen
 patch in change.patch:
 
@@ -86,14 +97,19 @@ curl --fail-with-body --header @/secure/source-reader.headers \
   "$REPO_URL/api/v1/source/prepare"
 ```
 
-The native parser supports its exact regular-file unified-patch profile:
-creation, deletion, text modification, executable-bit changes, quoted raw paths
-and missing final newlines. Context and offsets must match exactly; supplied
-index prefixes must match the verified old/new blob identities. No fuzzy
-application, binary-patch format, symlink/gitlink edits, rename guessing, copies,
-external drivers, host traversal, or arbitrary object writes are introduced.
-Every file must succeed before a candidate is returned. Unchanged siblings are
-preserved by the existing native exporter.
+The native parser supports exact creation, deletion, text modification,
+executable-bit changes, quoted raw paths and missing final newlines. Context and
+offsets must match exactly; supplied index identities must match verified old/new
+blobs. The [binary profile](HTTP_BINARY_REFACTORING.md) checks both directions of
+encoded binary moves. Explicit `exact-symlink-v1` preserves mode `120000` and the
+exact target blob, including absolute paths and `..` components as source bytes.
+It never follows targets, writes a host link or reads a target from the host.
+The other profiles continue to refuse symlink edits. Repository entry paths
+still reject traversal, and both endpoints of a rename must pass the same
+native path checks. Fuzzy application, gitlinks, rename guessing, copies,
+external drivers and arbitrary object writes remain unsupported. Every file
+must succeed before a candidate is returned. Unchanged siblings are preserved
+by the existing native exporter.
 
 A successful response is multipart/mixed: JSON `metadata`, then the native binary
 `bundle`. It uses the same two-part extraction pattern documented in

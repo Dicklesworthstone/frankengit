@@ -112,27 +112,21 @@ pub(super) fn metadata(args: &Object) -> Result<MergeMetadata, ToolError> {
 }
 
 pub(super) fn schema() -> Value {
-    schema_for_profile(false)
+    patch_schema()
 }
 
 pub(super) fn agent_schema() -> Value {
-    schema_for_profile(true)
+    patch_schema()
 }
 
-fn schema_for_profile(agent: bool) -> Value {
+fn patch_schema() -> Value {
     let mut properties = common_properties("prepare_patch");
     properties.insert("profile".into(), object([
         ("type", text("string")),
-        ("enum", Value::Array(if agent {
-            vec![text("exact-tree-v1"), text("exact-tree-binary-v1")]
-        } else {
-            vec![text("exact-tree-v1"), text("exact-tree-binary-v1"), text("exact-symlink-v1")]
-        })),
-        ("description", text(if agent {
-            "Omit or select exact-tree-v1 for regular-file patches; exact-tree-binary-v1 explicitly permits edited binary renames with full old/new blob identities and verified forward/reverse members. Sponsored preparation does not permit symlink edits."
-        } else {
+        ("enum", Value::Array(vec![text("exact-tree-v1"), text("exact-tree-binary-v1"), text("exact-symlink-v1")])),
+        ("description", text(
             "Omit for existing regular-file behavior; exact-tree-binary-v1 explicitly permits edited binary renames with full old/new blob identities and verified forward/reverse members. exact-symlink-v1 explicitly permits inert Git symlink blobs without following targets."
-        })),
+        )),
     ]));
     payload_properties(&mut properties);
     input_schema(
@@ -169,17 +163,30 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
     workspace.copy_from_slice(&digest[..16]);
     let candidate =
         if let Some(candidate_request) = candidate_request.as_ref() {
-            backend
-                .node
-                .runtime()
-                .block_on(backend.node.prepare_agent_source_patch_in(
-                    candidate_request,
-                    &input.reference,
-                    input.base,
-                    &input.patch,
-                    &input.metadata,
-                    input.profile == PatchProfile::BinaryRefactor,
-                ))
+            if input.profile == PatchProfile::Symlinks {
+                backend
+                    .node
+                    .runtime()
+                    .block_on(backend.node.prepare_agent_source_symlink_patch_in(
+                        candidate_request,
+                        &input.reference,
+                        input.base,
+                        &input.patch,
+                        &input.metadata,
+                    ))
+            } else {
+                backend
+                    .node
+                    .runtime()
+                    .block_on(backend.node.prepare_agent_source_patch_in(
+                        candidate_request,
+                        &input.reference,
+                        input.base,
+                        &input.patch,
+                        &input.metadata,
+                        input.profile == PatchProfile::BinaryRefactor,
+                    ))
+            }
         } else {
             let request = backend.command_context();
             match input.profile {

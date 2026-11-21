@@ -4,6 +4,8 @@ use crate::smart_http::server::source;
 use fgit_identity::agent::SOURCE_CANDIDATES;
 use fgit_wire::smart_http::{BodyFraming, HttpLimits, HttpVersion, head};
 
+mod symlinks;
+
 const RESPONSE_LIMIT: usize = 1024 * 1024;
 const PATCH: &[u8] = b"diff --git a/created.txt b/created.txt\nnew file mode 100644\n--- /dev/null\n+++ b/created.txt\n@@ -0,0 +1 @@\n+candidate-only work\n";
 
