@@ -10,8 +10,8 @@ use super::{NodeTools, Object, Options, ToolError, Value, mutations, object, tex
 use fgit_authority::IdempotencyKey;
 use fgit_identity::agent::{
     DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, MILESTONES_READ,
-    MILESTONES_WRITE, OUTCOMES_READ, PULLS_READ, PULLS_WRITE, SOURCE_CANDIDATES,
-    SOURCE_HISTORY_READ, SOURCE_READ,
+    MILESTONES_WRITE, OUTCOMES_READ, PULLS_DIFF_READ, PULLS_READ, PULLS_WRITE, SOURCE_CANDIDATES,
+    SOURCE_HISTORY_READ, SOURCE_READ, SOURCE_VERIFIED_READ,
 };
 use fgit_node::agent_credentials::AgentRequest;
 use fgit_node::{LoopbackReceiveSession, NodeReceiveTransportRefusal};
@@ -139,6 +139,8 @@ pub(super) fn operation(options: &Options, name: &str) -> Option<u16> {
         }
         "frankengit_agent_context" if options.agent_context => Some(SOURCE_READ),
         super::candidate::NAME if options.source => Some(SOURCE_CANDIDATES),
+        super::verified_blob::NAME if options.source => Some(SOURCE_VERIFIED_READ),
+        super::review::PULL_DIFF if options.source && options.pulls => Some(PULLS_DIFF_READ),
         "frankengit_source_log"
         | "frankengit_source_blame"
         | "frankengit_source_historical_tree"
@@ -266,6 +268,19 @@ pub(super) fn response_checkpoint(
             .map_err(|_| "agent_response_expired_or_exhausted")?;
     }
     Ok(())
+}
+
+/// Defense in depth for a native handler reached outside normal dispatch.
+/// Completed response custody and a different operation cannot supply active
+/// read authority, even when the host enabled a broad source tool group.
+pub(super) fn check_operation(backend: &NodeTools, operation: u16) -> Result<(), ToolError> {
+    backend
+        .agent
+        .as_ref()
+        .and_then(|profile| profile.request.as_ref())
+        .ok_or(ToolError::failed("agent_request_required"))?
+        .check_operation(&backend.node, operation)
+        .map_err(auth_error)
 }
 
 pub(super) fn session(

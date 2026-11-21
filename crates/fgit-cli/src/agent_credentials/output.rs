@@ -4,8 +4,8 @@ use fgit_authority::TerminalOutcome;
 use fgit_identity::agent::{
     AgentCredentialCommand, AgentCredentialGrant, AgentCredentialId, DISCUSSIONS_READ,
     DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, MILESTONES_READ, MILESTONES_WRITE, OUTCOMES_READ,
-    PULLS_READ, PULLS_WRITE, SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ,
-    SourcePublicationScope,
+    PULLS_DIFF_READ, PULLS_READ, PULLS_WRITE, SOURCE_CANDIDATES, SOURCE_HISTORY_READ,
+    SOURCE_PUBLISH, SOURCE_READ, SOURCE_VERIFIED_READ, SourcePublicationScope,
 };
 use fgit_types::{DecisionOutcome, TxId};
 
@@ -24,6 +24,8 @@ fn grant(value: &AgentCredentialGrant) -> String {
         (MILESTONES_READ, "milestones-read"),
         (MILESTONES_WRITE, "milestones-write"),
         (SOURCE_PUBLISH, "source-publish"),
+        (SOURCE_VERIFIED_READ, "source-verified-read"),
+        (PULLS_DIFF_READ, "pulls-diff-read"),
     ]
     .into_iter()
     .filter(|(bit, _)| value.permits(*bit))

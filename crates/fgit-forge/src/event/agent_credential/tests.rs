@@ -283,7 +283,7 @@ fn source_reads_are_independent_of_legacy_metadata_scopes_and_unknown_flags() {
         assert!(explicit.validate().is_ok());
         assert!(explicit.permits(SOURCE_READ | metadata));
     }
-    for unknown in (13..16).map(|bit| 1u16 << bit) {
+    for unknown in (15..16).map(|bit| 1u16 << bit) {
         let invalid = AgentCredentialGrant {
             operations: SOURCE_READ | unknown,
             ..grant()
@@ -314,6 +314,9 @@ fn expanded_grant_issue_and_revocation_round_trip_without_widening_legacy_grants
         MILESTONES_READ | MILESTONES_WRITE,
         MILESTONES_WRITE | ISSUES_WRITE,
         0x0fff,
+        SOURCE_VERIFIED_READ,
+        PULLS_DIFF_READ,
+        SOURCE_VERIFIED_READ | PULLS_DIFF_READ | SOURCE_READ,
     ] {
         let grant = AgentCredentialGrant {
             operations,
@@ -333,7 +336,7 @@ fn expanded_grant_issue_and_revocation_round_trip_without_widening_legacy_grants
         assert_eq!(payload.as_bytes().len(), 178);
         assert_eq!(&payload.as_bytes()[176..178], &operations.to_be_bytes());
         let mut unknown = payload.into_bytes();
-        unknown[176..178].copy_from_slice(&(operations | (1 << 13)).to_be_bytes());
+        unknown[176..178].copy_from_slice(&(operations | (1 << 15)).to_be_bytes());
         assert!(
             ForgeEvent::read_payload(&mut Decoder::new(&unknown, DecodeLimits::DEFAULT)).is_err()
         );
@@ -413,7 +416,7 @@ fn history_access_is_independent_of_every_preexisting_operation() {
         assert!(combined.validate().is_ok());
         assert!(combined.permits(SOURCE_HISTORY_READ | other));
     }
-    for unknown in (13..16).map(|bit| 1u16 << bit) {
+    for unknown in (15..16).map(|bit| 1u16 << bit) {
         let invalid = AgentCredentialGrant {
             operations: SOURCE_HISTORY_READ | unknown,
             ..history
@@ -449,7 +452,7 @@ fn candidate_work_requires_a_new_explicit_grant_without_widening_old_masks() {
         assert!(combined.validate().is_ok());
         assert!(combined.permits(SOURCE_CANDIDATES | other));
     }
-    for unknown in (13..16).map(|bit| 1u16 << bit) {
+    for unknown in (15..16).map(|bit| 1u16 << bit) {
         let invalid = AgentCredentialGrant {
             operations: SOURCE_CANDIDATES | unknown,
             ..candidate
@@ -485,7 +488,7 @@ fn milestone_scopes_are_independent_and_do_not_expand_any_retained_grant() {
             assert!(combined.validate().is_ok());
             assert!(combined.permits(scope | other));
         }
-        for unknown in (13..16).map(|bit| 1u16 << bit) {
+        for unknown in (15..16).map(|bit| 1u16 << bit) {
             let invalid = AgentCredentialGrant {
                 operations: scope | unknown,
                 ..milestone
@@ -715,4 +718,33 @@ fn lossless_bounded_labels_reject_noncanonical_padding_and_aliases() {
     assert!(
         AgentCredentialId::from_aggregate_label(&format!("check/{}", "7".repeat(52))).is_none()
     );
+}
+
+#[test]
+fn proof_and_pull_diff_grants_preserve_prior_operation_bits_and_are_independent() {
+    assert_eq!(SOURCE_PUBLISH, 1 << 12);
+    assert_eq!(SOURCE_VERIFIED_READ, 1 << 13);
+    assert_eq!(PULLS_DIFF_READ, 1 << 14);
+    for historical in [0x007f, 0x00ff, 0x01ff, 0x03ff, 0x0fff, 0x1fff] {
+        let old = AgentCredentialGrant {
+            operations: historical,
+            ..grant()
+        };
+        assert!(old.validate().is_ok());
+        assert!(!old.permits(SOURCE_VERIFIED_READ));
+        assert!(!old.permits(PULLS_DIFF_READ));
+    }
+    for operation in [SOURCE_VERIFIED_READ, PULLS_DIFF_READ] {
+        let selected = AgentCredentialGrant {
+            operations: operation,
+            ..grant()
+        };
+        assert!(selected.validate().is_ok());
+        assert!(selected.permits(operation));
+        for other in (0..15).map(|bit| 1 << bit).filter(|bit| *bit != operation) {
+            assert!(!selected.permits(other));
+            assert!(!selected.permits(operation | other));
+        }
+        assert!(!selected.permits(1 << 15));
+    }
 }

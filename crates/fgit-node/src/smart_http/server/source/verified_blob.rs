@@ -1,4 +1,4 @@
-//! Binary blob proofs under the existing authenticated source-read gate.
+//! Binary blob proofs under the independently authenticated proof-read gate.
 //! The required head is a comparison, never a server-issued client trust pin.
 
 use std::collections::BTreeMap;
@@ -140,17 +140,17 @@ pub(super) fn execute(
     node: &OneNode,
     request: &Request<'_>,
     session: &LoopbackReceiveSession,
+    agent_request: Option<&crate::agent_credentials::AgentRequest>,
     maximum_response: u64,
 ) -> Result<Reply, ApiError> {
-    if session.authenticated_session().is_none() {
-        return Err(ApiError::new(Status::Unauthorized, "unauthorized"));
-    }
-    let selected = request.selection()?;
     let deadline = GitDaemonSessionDeadline::new(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
-    let context = node.session_request_context(&deadline);
+    // A session's public provenance alone cannot stand in for the exact active
+    // proof operation. Check it before interpreting selectors or reading source.
+    let context = request_context(node, session, agent_request, &deadline)?;
+    let selected = request.selection()?;
     let envelope = drive_request_while(
         node,
         &context,
@@ -161,20 +161,62 @@ pub(super) fn execute(
             &selected.path,
             selected.expected_head,
         ),
-        &mut || !deadline.expired(),
+        &mut || !deadline.expired() && context.is_live(),
     )
     .map_err(read_error)?;
-    if deadline.expired() {
+    if deadline.expired() || !context.is_live() {
         return Err(ApiError::from_status(Status::Timeout, false));
     }
     let body = encode_verified_blob_envelope(&envelope).map_err(|_| ApiError::unavailable())?;
     if body.len() > MAX_VERIFIED_BLOB_FRAME_BYTES || body.len() as u64 > maximum_response {
         return Err(ApiError::too_large());
     }
-    if deadline.expired() {
+    if deadline.expired() || !context.is_live() {
         return Err(ApiError::from_status(Status::Timeout, false));
     }
+    if let Some(request) = agent_request {
+        request.check(0, body.len() as u64).map_err(request_error)?;
+    }
     Ok(Reply { body })
+}
+
+fn request_context(
+    node: &OneNode,
+    session: &LoopbackReceiveSession,
+    agent_request: Option<&crate::agent_credentials::AgentRequest>,
+    deadline: &GitDaemonSessionDeadline,
+) -> Result<crate::NodeRequestContext, ApiError> {
+    let authenticated = session
+        .authenticated_session()
+        .ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?;
+    match authenticated.authentication() {
+        fgit_admission::evidence::AdmissionAuthentication::AgentCredential(authentication) => {
+            let request = agent_request
+                .filter(|request| request.authentication == authentication)
+                .ok_or_else(|| ApiError::new(Status::Forbidden, "forbidden"))?;
+            request
+                .check_operation(node, fgit_identity::agent::SOURCE_VERIFIED_READ)
+                .map_err(request_error)?;
+            Ok(request.context(node))
+        }
+        _ if agent_request.is_some() => Err(ApiError::new(Status::Forbidden, "forbidden")),
+        _ => Ok(node.authenticated_session_request_context(deadline, session)),
+    }
+}
+
+fn request_error(error: crate::NodeReceiveTransportRefusal) -> ApiError {
+    if let crate::NodeReceiveTransportRefusal::Admission(error) = error {
+        if let fgit_admission::AdmissionError::AsyncProjectionUnavailable(code) = *error {
+            return match code {
+                fgit_types::RefusalCode::CapabilityExpired => {
+                    ApiError::from_status(Status::Timeout, false)
+                }
+                fgit_types::RefusalCode::ResourceBudgetExceeded => ApiError::too_large(),
+                _ => ApiError::new(Status::Forbidden, "forbidden"),
+            };
+        }
+    }
+    ApiError::new(Status::Forbidden, "forbidden")
 }
 
 fn read_error(error: VerifiedBlobReadRefusal) -> ApiError {

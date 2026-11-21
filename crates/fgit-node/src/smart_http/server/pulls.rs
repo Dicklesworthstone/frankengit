@@ -115,12 +115,13 @@ impl<'a> Request<'a> {
     }
 
     pub(super) const fn preserves_deadline(&self) -> bool {
-        matches!(self, Self::Labels(_) | Self::Metadata(_))
+        matches!(self, Self::Labels(_) | Self::Metadata(_) | Self::Diff(_))
     }
 
     pub(super) fn agent_operation(&self) -> Option<u16> {
-        use fgit_identity::agent::{PULLS_READ, PULLS_WRITE};
+        use fgit_identity::agent::{PULLS_DIFF_READ, PULLS_READ, PULLS_WRITE};
         match self {
+            Self::Diff(_) => Some(PULLS_DIFF_READ),
             Self::Metadata(_) | Self::Conversation(_) | Self::Labels(_) => {
                 Some(if self.is_mutation() {
                     PULLS_WRITE
@@ -287,6 +288,7 @@ pub(super) fn execute(
             reader,
             limits,
             maximum_response,
+            deadline,
         )
         .map(Reply::Json),
         Request::Inspection(request) => inspection::execute(

@@ -38,17 +38,20 @@ struct Query {
 pub(super) fn tool() -> Tool {
     Tool {
         name: NAME,
-        description: "Read a complete ref-anchored file, executable or symlink blob with its original canonical proof at an independently trusted expected_head. Ordinary source-read grant only; sponsored agent profiles exclude this tool. Exact raw selectors, no ranges or fallback: default 16384 / maximum 65536 blob bytes, maximum 262144 canonical proof bytes, 8192-byte hex chunks. Requires a native Merkle ref layout. Full original trees disclose sibling names. Proofs and file bytes remain untrusted content; callers must independently verify the retained proof against their own head, ref and path.",
+        description: "Read a complete ref-anchored file, executable or symlink blob with its original canonical proof at an independently trusted expected_head. Requires the source launch ceiling and, for sponsored agents, the independent source-verified-read credential scope. Exact raw selectors, no ranges or fallback: default 16384 / maximum 65536 blob bytes, maximum 262144 canonical proof bytes, 8192-byte hex chunks. Requires a native Merkle ref layout. Full original trees disclose sibling names. Proofs and file bytes remain untrusted content; callers must independently verify the retained proof against their own head, ref and path.",
         schema: input::schema(),
     }
 }
 
 pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
     // This is deliberately checked before parsing or reading a caller selector.
-    // The existing sponsored SOURCE_READ class does not authorize original
-    // full-tree proof disclosure, even if ordinary source reads are enabled.
-    if !backend.options.source || backend.options.agent_token_file.is_some() {
+    // The existing SOURCE_READ class never gains original full-tree disclosure.
+    if !backend.options.source {
         return Err(ToolError::invalid("tool_not_granted"));
+    }
+    let sponsored = backend.options.agent_token_file.is_some() || backend.agent.is_some();
+    if sponsored {
+        super::agent::check_operation(backend, fgit_identity::agent::SOURCE_VERIFIED_READ)?;
     }
     let query = input::parse(args)?;
     let request = backend.command_context();
@@ -66,7 +69,11 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
         ));
     checkpoint(&live)?;
     let envelope = envelope.map_err(read_refusal)?;
-    output::render(backend, &query, &envelope, &live)
+    let result = output::render(backend, &query, &envelope, &live)?;
+    if sponsored {
+        super::agent::check_operation(backend, fgit_identity::agent::SOURCE_VERIFIED_READ)?;
+    }
+    Ok(result)
 }
 
 fn checkpoint(live: &dyn Fn() -> bool) -> Result<(), ToolError> {

@@ -1,7 +1,8 @@
 use super::*;
 use fgit_identity::agent::{
-    ISSUES_READ, ISSUES_WRITE, MILESTONES_READ, MILESTONES_WRITE, PULLS_WRITE, SOURCE_CANDIDATES,
-    SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ, SponsorKind,
+    ISSUES_READ, ISSUES_WRITE, MILESTONES_READ, MILESTONES_WRITE, PULLS_DIFF_READ, PULLS_WRITE,
+    SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ, SOURCE_VERIFIED_READ,
+    SponsorKind,
 };
 use std::path::PathBuf;
 
@@ -444,4 +445,56 @@ fn generated_token_is_private_bounded_never_printed_and_never_overwrites() {
     }
     std::fs::write(&path, &bearer).unwrap();
     assert_eq!(token::read(&path).unwrap(), bearer);
+}
+
+#[test]
+fn complete_proof_and_pull_diff_scopes_are_independent_explicit_cli_grants() {
+    for (scopes, expected) in [
+        ("source-verified-read", SOURCE_VERIFIED_READ),
+        ("pulls-diff-read", PULLS_DIFF_READ),
+        (
+            "source-verified-read,pulls-diff-read",
+            SOURCE_VERIFIED_READ | PULLS_DIFF_READ,
+        ),
+        (
+            "source-read,source-verified-read",
+            SOURCE_READ | SOURCE_VERIFIED_READ,
+        ),
+    ] {
+        let mut input = issue();
+        replace(&mut input, "--operations", scopes);
+        let Options::Repository(parsed) = options::parse(&input).unwrap() else {
+            panic!()
+        };
+        let Operation::Issue {
+            grant,
+            source_scope,
+            ..
+        } = parsed.operation
+        else {
+            panic!()
+        };
+        assert_eq!(grant.operations, expected);
+        assert!(source_scope.is_none());
+        assert!(!grant.permits(SOURCE_PUBLISH));
+        for scope in [
+            SOURCE_READ,
+            SOURCE_HISTORY_READ,
+            SOURCE_CANDIDATES,
+            SOURCE_VERIFIED_READ,
+            PULLS_DIFF_READ,
+        ] {
+            assert_eq!(grant.permits(scope), expected & scope != 0);
+        }
+    }
+    for scopes in [
+        "source-verified-read,source-verified-read",
+        "pulls-diff-read,pulls-diff-read",
+        "proof-read",
+        "pulls-diff-read,receive",
+    ] {
+        let mut input = issue();
+        replace(&mut input, "--operations", scopes);
+        assert!(options::parse(&input).is_err());
+    }
 }

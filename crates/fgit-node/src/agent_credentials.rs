@@ -369,6 +369,22 @@ impl AgentRequest {
         self.deadline = self.deadline.min(deadline);
     }
 
+    /// Require this request's one authenticated operation and exact repository
+    /// namespace before a native adapter reads data. This check does not mint a
+    /// different read grant or refresh the original request lifetime. Hosts
+    /// must still enforce their launch ceiling, selected-content visibility,
+    /// byte limits and response-time checks.
+    pub fn check_operation(
+        &self,
+        node: &OneNode,
+        operation: u16,
+    ) -> Result<(), NodeReceiveTransportRefusal> {
+        if self.operation != operation || !self.matches_namespace(node) {
+            return Err(refused(RefusalCode::CapabilityScopeViolation));
+        }
+        self.check(0, 0)
+    }
+
     /// Retain independently granted candidate authority for this request only.
     /// A public provenance record, source-read grant or metadata grant cannot
     /// construct this boundary. Native adapters still enforce the exact source
@@ -379,12 +395,7 @@ impl AgentRequest {
         &self,
         node: &OneNode,
     ) -> Result<SourceCandidateRequest<'_>, NodeReceiveTransportRefusal> {
-        if self.operation != fgit_identity::agent::SOURCE_CANDIDATES
-            || !self.matches_namespace(node)
-        {
-            return Err(refused(RefusalCode::CapabilityScopeViolation));
-        }
-        self.check(0, 0)?;
+        self.check_operation(node, fgit_identity::agent::SOURCE_CANDIDATES)?;
         Ok(SourceCandidateRequest(self))
     }
 

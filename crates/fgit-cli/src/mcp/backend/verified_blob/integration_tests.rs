@@ -222,7 +222,7 @@ fn launch_grant_and_direct_sponsored_guard_precede_caller_parsing() {
         fixture.backend_mut().options.agent_token_file =
             Some(std::path::PathBuf::from("must-not-be-read"));
         assert!(
-            !fixture
+            fixture
                 .backend()
                 .tools()
                 .iter()
@@ -230,7 +230,7 @@ fn launch_grant_and_direct_sponsored_guard_precede_caller_parsing() {
         );
         assert_eq!(
             call(fixture.backend(), &invalid).unwrap_err().code,
-            "tool_not_granted"
+            "agent_request_required"
         );
         fixture.backend_mut().options.agent_token_file = None;
         assert_eq!(fixture.state(), before);

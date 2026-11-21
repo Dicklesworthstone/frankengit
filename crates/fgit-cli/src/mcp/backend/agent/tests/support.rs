@@ -124,6 +124,12 @@ pub(super) struct Fixture {
 }
 impl Fixture {
     pub(super) fn new(format: GitHashAlgorithm) -> Self {
+        Self::with_layout(format, fgit_types::RootLayoutVersion::LegacyWholeBody)
+    }
+    pub(super) fn with_layout(
+        format: GitHashAlgorithm,
+        layout: fgit_types::RootLayoutVersion,
+    ) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
             "fg-mcp-agent-{}-{}",
@@ -158,7 +164,7 @@ impl Fixture {
             index_maintenance: None,
         };
         private_token(options.agent_token_file.as_ref().unwrap(), &token(0xaa));
-        let config = config(&options);
+        let config = config(&options).with_root_layout(layout);
         let (mut node, _) = OneNode::init(config).unwrap();
         node.bring_into_service(HeadGeneration::FIRST).unwrap();
         options.incarnation = Some(node.repository_incarnation_id());
@@ -220,7 +226,10 @@ impl Fixture {
         let credential_id = issue(
             &node,
             &token(0xaa),
-            grant(&node, ALL_OPERATIONS & !fgit_identity::agent::SOURCE_PUBLISH),
+            grant(
+                &node,
+                ALL_OPERATIONS & !fgit_identity::agent::SOURCE_PUBLISH,
+            ),
             "issue-primary",
         );
         node.shutdown().unwrap();

@@ -287,17 +287,15 @@ fn sponsored_history_scope_is_independent_of_prior_scopes_and_launch_flags() {
         "frankengit_agent_context",
         "frankengit_issue_list",
         "frankengit_pull_list",
+        "frankengit_pull_diff",
+        "frankengit_source_verified_blob",
     ] {
         assert_eq!(
             backend.call(name, &Object::new()).unwrap_err().code,
             "agent_operation_not_granted"
         );
     }
-    for name in [
-        "frankengit_pull_diff",
-        "frankengit_source_publish",
-        "frankengit_source_verified_blob",
-    ] {
+    for name in ["frankengit_source_publish"] {
         assert!(!backend.tools().iter().any(|tool| tool.name == name));
         assert_eq!(
             backend.call(name, &Object::new()).unwrap_err().code,

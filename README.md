@@ -473,10 +473,20 @@ and run under finite operation scopes, byte envelopes and expiry. An independent
 and authority-bound context with the actual agent and sponsor retained. The
 separate `source-history-read` grant enables bounded log, blame, historical
 tree/blob reads and comparisons of visible references through HTTP and MCP.
+An independent `source-verified-read` grant exposes complete ref-anchored blob
+proofs for independent verification against the caller's pinned authority head.
+The separate `pulls-diff-read` grant enables HTTP and MCP comparison of the exact
+source and target tips recorded by a PR at its required version. Both source
+and PR service ceilings must be enabled; later branch writes do not replace the
+recorded comparison. Existing source, history, PR metadata, and publication
+grants gain neither proof disclosure nor PR-diff access.
 The independent `source-candidates` scope enables HTTP exact-patch preparation
 and bundle inspection, including the shipped source authoring operators. The
-[MCP candidate tool](docs/MCP_SOURCE_CANDIDATES.md) exposes regular-file patch
-preparation and single-parent inspection under that same independent scope.
+[MCP candidate tool](docs/MCP_SOURCE_CANDIDATES.md) exposes regular-file,
+binary-refactoring, and explicit `exact-symlink-v1` patch preparation, plus
+single-parent inspection under that same independent scope. HTTP preparation
+accepts the same explicit symlink profile. Symlink targets remain inert Git
+blob bytes and are never followed on the host.
 Candidate objects stay unstaged and publication remains separately authorized.
 Existing metadata and current-source credentials gain no history permission;
 history APIs can include current-tip content but do not grant search, indexes

@@ -11,10 +11,12 @@ mod history;
 mod issue_search;
 mod lifecycle;
 mod milestones;
+mod pull_diff;
 mod pull_labels;
 mod pull_reopen;
 mod source;
 mod support;
+mod verified_blob;
 
 #[test]
 fn sponsored_profile_lists_only_exact_tools_even_with_operator_flags_planted() {
@@ -34,7 +36,7 @@ fn sponsored_profile_lists_only_exact_tools_even_with_operator_flags_planted() {
     options.writes.merges = true;
     options.principal = Some(SPONSOR);
     let tools = super::super::tools_for_options(&options);
-    assert_eq!(tools.len(), 62);
+    assert_eq!(tools.len(), 64);
     assert!(
         tools
             .iter()
@@ -50,7 +52,6 @@ fn sponsored_profile_lists_only_exact_tools_even_with_operator_flags_planted() {
         "frankengit_notifications",
         "frankengit_pull_checks",
         "frankengit_pull_reviews",
-        "frankengit_pull_diff",
         "frankengit_source_publish",
         "frankengit_branch_transaction",
         "frankengit_branch_create",

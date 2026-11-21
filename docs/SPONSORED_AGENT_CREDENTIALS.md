@@ -3,7 +3,8 @@
 This profile gives an agent its own repository-scoped principal and records its
 human or service sponsor in canonical admission evidence. It supports the native
 HTTP current-source browsing and context, separately granted source history and
-reference comparison, separately granted ephemeral source candidates, issue, pull-request metadata and
+reference comparison, separately granted complete blob proofs and exact pull-request
+code comparisons, separately granted ephemeral source candidates, issue, pull-request metadata and
 conversation, standalone discussion, independently granted milestone planning,
 and single-transaction outcome endpoints,
 plus the explicit MCP source and metadata profile. Each request creates a real bounded
@@ -92,9 +93,11 @@ observation schema. This grants no agent source-import capability.
 | `outcomes-read` | Own principal's single-transaction recovery by original key |
 | `source-read` | Bounded current source, reference listing, tag inspection, search, context and agent-context reads |
 | `source-history-read` | Bounded visible-ref commit history, blame, historical trees/files and reference diffs |
-| `source-candidates` | HTTP exact-patch preparation and single-parent bundle inspection; MCP regular-file `prepare_patch`, explicit `exact-tree-binary-v1` edited binary renames and single-parent `inspect`, against an explicit current branch |
+| `source-candidates` | HTTP exact-patch preparation and single-parent bundle inspection; MCP regular-file `prepare_patch`, explicit `exact-tree-binary-v1` edited binary renames, `exact-symlink-v1` inert symlink edits, and single-parent `inspect`, against an explicit current branch |
 | `milestones-read` | Native milestone listing, exact lifecycle history and same-snapshot open/closed issue counts |
 | `milestones-write` | Open, edit, close and reopen native milestones at explicit versions |
+| `source-verified-read` | Complete visible-ref blob proofs at an independently supplied authority head, including original tree witnesses |
+| `pulls-diff-read` | Code comparison selected by an exact native pull-request version |
 
 Scopes are independent: write does not imply read. Unknown scopes are rejected.
 Milestone scopes grant no issue text or issue mutation. Assigning or clearing an
@@ -115,8 +118,8 @@ current-source, history and candidate routes; it does not interpret arbitrary GE
 ordinary token's broader `read` scope as agent permission. Source selection and
 disclosure retain the existing canonical hidden-ref and visibility checks.
 
-Git upload-pack/receive-pack, verified-blob streaming, general bundle export/import,
-candidate application, initial-commit/replay/rebase preparation, PR-specific diffs,
+Git upload-pack/receive-pack, general bundle export/import,
+candidate application, initial-commit/replay/rebase preparation,
 reviews, checks, merges, queue operations, notifications, policy
 administration, workflow and artifact access, process execution, secrets and
 external effects are outside this profile. MCP offers the closed sponsored
@@ -169,6 +172,36 @@ the launch ceiling. History access does not enable search, agent context, source
 publication, candidate preparation, reviews, or Git transport. Native work and
 response disclosure share the originally authenticated request deadline;
 entering a history, blame or diff phase does not renew it.
+
+### Independently grant complete proofs and exact PR comparisons
+
+`source-verified-read` grants the HTTP `GET /api/v1/source/verified-blob`
+endpoint and MCP `frankengit_source_verified_blob` tool. Both require the source
+service/launch ceiling. The caller selects a visible full ref, raw repository
+path, and independently retained exact authority head. The original proof codec,
+Merkle layout requirement, native verifier, hidden-ref policy and complete-only
+byte bounds apply unchanged. Original trees disclose sibling names and object
+IDs, so neither `source-read` nor `source-history-read` grants this operation.
+Proof authority does not grant those source tools, candidates, Git transport,
+publication or reviews. See [complete blob proofs](VERIFIED_BLOB_READS.md) and
+[the MCP adapter](MCP_VERIFIED_BLOB_READS.md) for selectors and output limits.
+
+`pulls-diff-read` grants the HTTP `POST /api/v1/pulls/{number}/diff` endpoint and
+MCP `frankengit_pull_diff` tool. Sponsored callers need both source and PR service
+or launch ceilings, an exact positive PR version, and the existing closed
+comparison inputs. The current canonical PR record selects the before/after
+commits; subsequent source-branch movement does not silently substitute newer
+bytes. Current visibility applies to both recorded branches. This separate
+scope grants the comparison's necessary PR/source disclosure, with no general
+PR metadata, source browsing, review approval, merge or publication authority.
+See [PR diffs](PULL_REQUEST_DIFF_HTTP.md) for HTTP semantics.
+
+Every call authenticates the current canonical grant, retains the original
+agent/sponsor/run witness and deadline, and checks output before disclosure.
+A completed MCP response cannot authorize a later direct handler invocation.
+These new read scopes each permit only `ReadCanonicalObject`. Stored masks
+`0x0fff` and `0x1fff` gain neither operation; an immutable credential must be
+reissued with the intended additional scope.
 
 ### Current-source routes and authenticated context
 
@@ -266,13 +299,25 @@ landing remain unavailable. A sponsor or independently authorized operator must
 review and publish the returned artifact through ordinary admission. MCP exposes
 the same request-borrowed capability through `frankengit_source_candidate`, with
 regular-file `prepare_patch` (`exact-tree-v1`), explicit
-`exact-tree-binary-v1` edited binary renames, and single-parent `inspect`.
+`exact-tree-binary-v1` edited binary renames, explicit `exact-symlink-v1` Git
+symlink edits, and single-parent `inspect`.
 The binary profile checks both original endpoints, full native blob identities
 and forward/reverse members through the existing native planner. An omitted
 profile retains the original grammar. Binary selection does not permit symlinks,
 change the grant or create a publisher.
-Its discovery schema omits the other candidate engines, and dispatch rejects
-initial-history, symlink/replay/rebase/PR/queue preparation before authentication.
+The symlink profile creates, edits, deletes or renames inert mode-`120000` Git
+blobs through the same request-borrowed native boundary. Targets, including
+absolute paths and `..` components, remain exact source bytes: the planner never
+follows or materializes them as host links. The regular and binary profiles
+continue to refuse symlink edits. Source pins, both-endpoint path checks, request
+budgets and expiry remain mandatory, and inspection exposes the actual candidate
+tree and link bytes before any independently authorized publication.
+HTTP preparation selects the same explicit symlink profile with
+`patch_profile=exact-symlink-v1` in its multipart command. It retains the original
+authenticated HTTP context and reservation through native planning and response
+framing; its resulting bundle is inspected through the existing `inspect` route.
+The MCP discovery schema omits the other candidate engines, and dispatch rejects
+initial-history, replay/rebase/PR/queue preparation before authentication.
 MCP retains its narrower 16 KiB text-patch / 24 KiB decoded patch-or-bundle bounds,
 bounded inspection, 2 MiB tool result and 8 MiB response envelope. The native
 entrypoints also refuse raw input exceeding the original request reservation;
@@ -355,6 +400,8 @@ fg mcp ./repository TENANT_ID REPOSITORY_ID \
 | `--allow-source` | `source-history-read` | `frankengit_source_log`, `frankengit_source_blame`, `frankengit_source_historical_tree`, `frankengit_source_historical_blob`, `frankengit_source_compare` |
 | `--allow-source` | `source-candidates` | `frankengit_source_candidate`, limited to regular-file `prepare_patch` (including explicit `exact-tree-binary-v1`) and single-parent `inspect` |
 | `--allow-agent-context` | `source-read` | `frankengit_agent_context` |
+| `--allow-source` | `source-verified-read` | `frankengit_source_verified_blob` |
+| `--allow-source` and `--allow-pulls` | `pulls-diff-read` | `frankengit_pull_diff` |
 
 Each call requires its listed canonical scope. Neither launch flag implies the
 other, and a metadata-only credential cannot use either. Candidate discovery does
@@ -468,8 +515,8 @@ new publication. This principal-kind rule is repository scoped.
 Each HTTP request derives an `IntentRun` from the authenticated authority receipt,
 credential, agent, sponsor, selected route operation, retry key and request-header
 commitment. It reserves the actual bounded HTTP input/output envelopes. Metadata
-requests permit one operation class. A `source-history-read` request permits
-only `ReadCanonicalObject`. A `source-read` request permits exactly
+requests permit one operation class. A `source-history-read`, `source-verified-read` or `pulls-diff-read` request
+permits only `ReadCanonicalObject`. A `source-read` request permits exactly
 `ReadCanonicalObject` and `ReadDerivedGeneration` so the same bounded run can
 read native source and its authenticated search generations.
 Those read requests grant no write, process or publication class. A
@@ -503,15 +550,19 @@ timeout proves non-commit.
 The required operation mask remains a canonical `u16`. `source-read` occupies
 bit 7 (`0x0080`), `source-history-read` occupies bit 8 (`0x0100`),
 `source-candidates` occupies bit 9 (`0x0200`), `milestones-read` occupies bit 10
-(`0x0400`), and `milestones-write` occupies bit 11 (`0x0800`); the original
+(`0x0400`), and `milestones-write` occupies bit 11 (`0x0800`). The existing
+`source-publish` operation retains bit 12 (`0x1000`) and its mandatory immutable
+publication scope. `source-verified-read` occupies bit 13 (`0x2000`) and
+`pulls-diff-read` occupies bit 14 (`0x4000`); the original
 seven flags retain bits 0 through 6 and their exact encodings. A stored `0x007f`
 grant still grants only the original metadata and outcome operations. A stored
 `0x00ff` grant adds current-source access but grants no history operation, and
 `0x01ff` adds history without candidate authority. A stored `0x03ff` includes
 source candidates but grants neither milestone operation. Issuing any new
 capability requires an explicit new grant, and revocation must
-retain the exact original operation mask. Bits 12 through 15 remain unknown and
-refuse decoding or authentication. Upgrade every repository reader before
+retain the exact original operation mask. A stored `0x1fff` mask gains neither
+complete proof disclosure nor PR code comparison. Bit 15 remains unknown and
+refuses decoding or authentication. Upgrade every repository reader before
 issuing a grant with a newly supported bit: an older reader fails closed on its
 unknown flag; it must not strip the flag or fall back to another credential
 profile. Existing grant bytes, event discriminants, request identities and
@@ -548,6 +599,14 @@ execution remain separate work. The request-run commitment is provenance, not a
 durable execution journal.
 
 ## Validation status and focused commands
+
+The independent proof/PR-diff scopes add codec and CLI parsing checks and real
+persisted MCP and HTTP cases. Proof tests independently decode and verify native
+SHA-1/SHA-256 frames, preserve hidden/absent-ref indistinguishability, exercise
+stale pins, launch ceilings, expired/revoked credentials, exact egress limits and
+completed-request custody. These test definitions require execution at the
+candidate revision; they do not themselves establish a passing gate.
+
 
 The implementation adds canonical codec/lifecycle, authentication, policy replay,
 legacy-method downgrade, real-node restart/revocation, private-token CLI, and real

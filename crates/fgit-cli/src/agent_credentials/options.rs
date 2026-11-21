@@ -3,9 +3,9 @@ use fgit_authority::IdempotencyKey;
 use fgit_forge::{AggregateVersion, ExpectedVersion};
 use fgit_identity::agent::{
     AgentCredentialGrant, AgentCredentialId, DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ,
-    ISSUES_WRITE, MILESTONES_READ, MILESTONES_WRITE, OUTCOMES_READ, PULLS_READ, PULLS_WRITE,
-    SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ, SourcePublicationScope,
-    SponsorKind,
+    ISSUES_WRITE, MILESTONES_READ, MILESTONES_WRITE, OUTCOMES_READ, PULLS_DIFF_READ, PULLS_READ,
+    PULLS_WRITE, SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ,
+    SOURCE_VERIFIED_READ, SourcePublicationScope, SponsorKind,
 };
 use fgit_types::{GitHashAlgorithm, PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
 use std::{collections::BTreeMap, path::PathBuf};
@@ -84,6 +84,8 @@ fn operations(value: &str) -> Result<u16, String> {
             "milestones-read" => MILESTONES_READ,
             "milestones-write" => MILESTONES_WRITE,
             "source-publish" => SOURCE_PUBLISH,
+            "source-verified-read" => SOURCE_VERIFIED_READ,
+            "pulls-diff-read" => PULLS_DIFF_READ,
             _ => return Err("unknown or unsupported agent credential operation".into()),
         };
         if result & bit != 0 {

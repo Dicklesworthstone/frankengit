@@ -11,7 +11,7 @@ The proof bytes can be retained and independently verified with the existing
 [`fg verify-read` command](VERIFIED_BLOB_READS.md). No new proof format,
 authority root, publication operation or approval receipt is introduced.
 
-## Enable the ordinary source-read profile
+## Enable source proof access
 
 Start the existing MCP server with its ordinary trusted-local source grant and
 the repository's actual object format. An exact incarnation binding can also
@@ -34,11 +34,15 @@ the first layout. Existing legacy repositories refuse this tool with
 migrates or reinterprets its stored layout. See the
 [native creation and proof-serving instructions](VERIFIED_BLOB_READS.md).
 
-This tool is excluded from sponsored-agent discovery and dispatch. A direct
-adapter call also checks the ordinary source grant and rejects
-`--agent-token-file` before parsing any arguments. The canonical sponsored
-`SOURCE_READ` operation class is unchanged. Source writes, workflow-artifact
-access and other grants do not imply this read grant.
+Sponsored launches use `--agent-token-file` with `--allow-source` and require
+an explicitly issued `source-verified-read` canonical credential scope. Each
+call reauthenticates that scope at the current repository head. An active
+request retains its original sponsor, namespace and deadline through native
+construction and final response output. Direct handler calls require the exact
+active proof request; a completed response reservation cannot authorize a new
+read. Current-source, history, candidate and metadata scopes do not imply this
+separate original-tree disclosure permission. Ordinary trusted-local source
+access retains its existing behavior.
 
 Canonical hidden-ref policy remains authoritative. The native owner checks
 visibility before selecting the ref or constructing its proof. Proofs contain
@@ -200,7 +204,9 @@ truncated proof, partial-file success, pagination, range or unproven fallback.
 
 | Refusal | Meaning |
 | --- | --- |
-| `tool_not_granted` | Ordinary source access is absent, or the sponsored profile is selected. |
+| `tool_not_granted` | The source launch ceiling is absent. |
+| `agent_operation_not_granted` / `agent_credential_unavailable` | A sponsored token lacks the independent proof scope, or is expired, revoked or unavailable. |
+| `agent_request_required` | A sponsored direct handler call has no exact active request. |
 | `snapshot_required` / `invalid_snapshot_token` | The independent exact pin is missing or malformed. |
 | `source_snapshot_moved` | The selected current authority head differs from the supplied pin. |
 | `source_unavailable` | The ref/path is unavailable, including denied ref disclosure. |
@@ -219,13 +225,19 @@ principal, arbitrary object selector, force flag, host path or idempotency key.
 The MCP adapter is split into closed input parsing, native ownership and error
 mapping, and complete output rendering under
 `crates/fgit-cli/src/mcp/backend/verified_blob/`. The canonical registry entry
-records exact-head authority, ordinary read capability, complete-only budgets,
+records exact-head authority, read capability, the independent sponsored proof scope, complete-only budgets,
 untrusted content fields and the refusal vocabulary.
 
 Its tests exercise actual persisted native imports and the MCP protocol in
 both Git hash domains and both Merkle layouts; exact raw refs and paths;
 binary, empty, executable and symlink blobs; proof identity across reopen;
-stale pins and legacy-layout refusal; denied ordinary/sponsored grants;
+stale pins and legacy-layout refusal; independent sponsored grants and denied scope substitution;
 complete content/proof ceilings; and tampered objects, mismatched selectors,
 namespace errors and cancellation. The independent consumer verifier uses
 the retained request coordinates rather than response-selected trust roots.
+
+Sponsored regression cases additionally verify real canonical issuance,
+credential expiry and revocation, retained agent/sponsor provenance, exact output
+reservation limits and refusal of completed or expired direct-handler requests.
+Both sponsored and ordinary replies use the same complete proof format and
+independent consumer verifier; neither response grants approval or publication.

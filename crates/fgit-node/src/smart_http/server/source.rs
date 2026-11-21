@@ -144,7 +144,9 @@ impl<'a> Request<'a> {
     /// The current-commit reader belongs to the same ref-selected source surface
     /// as tree/blob; it cannot traverse parents or select an arbitrary object.
     pub(super) fn agent_operation(&self) -> Option<u16> {
-        use fgit_identity::agent::{SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_READ};
+        use fgit_identity::agent::{
+            SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_READ, SOURCE_VERIFIED_READ,
+        };
         match &self.0 {
             RequestKind::Read(_)
             | RequestKind::Regex(_)
@@ -157,12 +159,15 @@ impl<'a> Request<'a> {
                 Some(SOURCE_HISTORY_READ)
             }
             RequestKind::Change(request) => (!request.is_mutation()).then_some(SOURCE_CANDIDATES),
+            RequestKind::VerifiedBlob(_) => Some(SOURCE_VERIFIED_READ),
             RequestKind::Initial(_)
             | RequestKind::Replay(_)
             | RequestKind::Rebase(_)
-            | RequestKind::Bundle(_)
-            | RequestKind::VerifiedBlob(_) => None,
+            | RequestKind::Bundle(_) => None,
         }
+    }
+    fn requires_verified_read(&self) -> bool {
+        matches!(&self.0, RequestKind::VerifiedBlob(_))
     }
     fn requires_history_read(&self) -> bool {
         matches!(
@@ -284,6 +289,8 @@ pub(super) fn authenticate(
         profile.allow_receive() && grant.permits(Service::ReceivePack)
     } else if request.requires_history_read() {
         grant.permits_source_history_read()
+    } else if request.requires_verified_read() {
+        grant.permits_source_verified_read()
     } else if request.candidate_upload_maximum().is_some() {
         grant.permits_source_candidates()
     } else {
@@ -316,6 +323,7 @@ pub(super) fn authenticate(
                     fgit_identity::agent::SOURCE_READ
                         | fgit_identity::agent::SOURCE_HISTORY_READ
                         | fgit_identity::agent::SOURCE_CANDIDATES
+                        | fgit_identity::agent::SOURCE_VERIFIED_READ
                 )
             ) {
                 return Err(ApiError::new(Status::Forbidden, "forbidden"));
@@ -336,6 +344,7 @@ pub(super) fn authenticate(
     // authenticated reservation at execution, not just session provenance.
     let read = (!request.is_mutation()
         && !request.requires_history_read()
+        && !request.requires_verified_read()
         && request.candidate_upload_maximum().is_none())
     .then_some(HttpReadGrant {
         principal: grant.principal,
@@ -380,7 +389,7 @@ pub(super) fn execute(
 ) -> Result<Reply, ApiError> {
     let request = match &request.0 {
         RequestKind::VerifiedBlob(request) => {
-            return verified_blob::execute(node, request, session, maximum_response)
+            return verified_blob::execute(node, request, session, agent_request, maximum_response)
                 .map(|reply| Reply(ReplyBody::VerifiedBlob(reply)));
         }
         RequestKind::Retrieval(request) => {

@@ -4,11 +4,19 @@
 native PR comparison used by `fg pr diff`. It is a body-bearing read, not a
 review submission, merge preparation, approval, or repository transaction.
 
-Enable the native PR API. The SAME credential must carry both `read` and
+For an operator credential, enable the native PR API. The SAME credential must carry both `read` and
 `pulls-read`; neither PR metadata permission alone nor source permission alone
 suffices. `pulls-write`, review-write and merge-write do not imply either read
 grant. As with existing PR preparation, this route is governed by the PR API
 switch and does not require enabling the separate source-browser routes.
+
+A sponsored agent instead requires the independent canonical
+`pulls-diff-read` operation, with **both** the PR API and source API enabled.
+Existing `pulls-read`, `source-read`, `source-history-read`, source publication,
+and candidate grants do not acquire this access. The original authenticated
+agent and sponsor witness, request deadline, and output reservation remain
+attached through native comparison and complete response encoding. PR diff
+permission neither grants PR metadata routes nor permits source publication.
 
 Authentication, route binding and these grants are checked before body intake,
 including before `100 Continue`. An `Idempotency-Key` is rejected. The internal
@@ -25,7 +33,8 @@ object_format=sha256&expected_version=1&mode=merge-base
 
 The URL supplies the positive canonical PR number. `object_format` is required
 and must match the repository. `expected_version` is optional and, when present,
-must match the PR's actual aggregate version. `expected_head` optionally pins
+must match the PR's actual aggregate version. Sponsored requests must supply
+`expected_version`; it remains optional for operator credentials. `expected_head` optionally pins
 the complete read to a previously returned `snapshot_token`.
 
 The native reader selects the PR event, its recorded target/source tips,
@@ -76,6 +85,11 @@ head/version/tip mismatches, byte-path filtering, missing PRs, conjunctive
 credential scopes, withheld-body rejection, response bounds, rotation and
 absence of read-created canonical transactions. Router and parser tests cover
 closed route shapes and attempts to replace recorded selectors.
+
+The `sponsored_http_pull_diff_` tests additionally exercise independent agent
+grants, original agent/sponsor identity, expiry and revocation, both service
+ceilings, required PR versions, exact output limits, and recorded tips after a
+later branch write. These reads do not advance the authority head.
 
 These tests were added in an editing environment without Cargo, rustc or
 rustfmt. They were not executed there. Compilation, formatting, Clippy and

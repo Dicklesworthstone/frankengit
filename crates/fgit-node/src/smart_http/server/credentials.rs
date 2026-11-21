@@ -87,6 +87,8 @@ enum Scope {
     SourceHistoryRead,
     SourceCandidates,
     DefaultBranchWrite,
+    SourceVerifiedRead,
+    PullsDiffRead,
 }
 
 impl Scope {
@@ -152,8 +154,8 @@ impl Grant {
     pub(super) fn agent(request: &crate::agent_credentials::AgentRequest) -> Self {
         use fgit_identity::agent::{
             DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, MILESTONES_READ,
-            MILESTONES_WRITE, OUTCOMES_READ, PULLS_READ, PULLS_WRITE, SOURCE_CANDIDATES,
-            SOURCE_HISTORY_READ, SOURCE_READ,
+            MILESTONES_WRITE, OUTCOMES_READ, PULLS_DIFF_READ, PULLS_READ, PULLS_WRITE,
+            SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_READ, SOURCE_VERIFIED_READ,
         };
         let mut scopes = Scopes::default();
         let scope = match request.operation {
@@ -171,6 +173,8 @@ impl Grant {
             SOURCE_READ => Scope::SourceRead,
             SOURCE_HISTORY_READ => Scope::SourceHistoryRead,
             SOURCE_CANDIDATES => Scope::SourceCandidates,
+            SOURCE_VERIFIED_READ => Scope::SourceVerifiedRead,
+            PULLS_DIFF_READ => Scope::PullsDiffRead,
             _ => unreachable!("node authenticated a closed operation"),
         };
         scopes.insert(scope);
@@ -199,6 +203,16 @@ impl Grant {
     /// neither grants a Git transport. Existing operator reads retain both.
     pub const fn permits_source_history_read(&self) -> bool {
         self.scopes.contains(Scope::Read) || self.scopes.contains(Scope::SourceHistoryRead)
+    }
+    /// Original tree witnesses disclose sibling names. Sponsored proofs need
+    /// their own grant; existing ordinary repository reads retain this API.
+    pub const fn permits_source_verified_read(&self) -> bool {
+        self.scopes.contains(Scope::Read) || self.scopes.contains(Scope::SourceVerifiedRead)
+    }
+    /// Only the sponsored exact-PR comparison operation. Ordinary credentials
+    /// continue through their independently checked source and PR read grants.
+    pub const fn permits_pull_diff_read(&self) -> bool {
+        self.scopes.contains(Scope::PullsDiffRead)
     }
     /// Candidate preparation and inspection disclose source through a separate
     /// sponsored scope. They confer neither current-source APIs nor publication.

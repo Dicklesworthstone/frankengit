@@ -46,7 +46,15 @@ pub const MILESTONES_WRITE: u16 = 1 << 11;
 /// Apply an inspected single-parent source candidate within the explicit
 /// immutable ref/path ceiling. This grants no arbitrary Git push or merge.
 pub const SOURCE_PUBLISH: u16 = 1 << 12;
-pub const ALL_OPERATIONS: u16 = (1 << 13) - 1;
+/// Complete ref-anchored blob proofs at an independently selected authority
+/// head. Original tree witnesses disclose sibling entries, so current-source
+/// and history grants do not imply this separate proof-disclosure permission.
+pub const SOURCE_VERIFIED_READ: u16 = 1 << 13;
+/// Read the exact code comparison selected by a native pull request. This
+/// independently grants its necessary PR/source disclosure, not general PR or
+/// source APIs, review approval, candidate work or code publication.
+pub const PULLS_DIFF_READ: u16 = 1 << 14;
+pub const ALL_OPERATIONS: u16 = (1 << 15) - 1;
 /// A grant cannot survive indefinitely without a new sponsor decision.
 pub const MAX_LIFETIME_SECONDS: u64 = 30 * 24 * 60 * 60;
 const LABEL_ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";

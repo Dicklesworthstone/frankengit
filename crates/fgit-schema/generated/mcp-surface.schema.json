@@ -2525,7 +2525,7 @@
     },
     "frankengit_pull_diff": {
       "title": "frankengit_pull_diff",
-      "description": "Review the exact code tips recorded by a pull request at its required version.",
+      "description": "Review the exact code tips recorded by a pull request at its required version. Requires both source and PR launch ceilings; sponsored agents additionally need the independent pulls-diff-read scope. Current visibility applies to both recorded branches. Retains the original request deadline and grants no general PR/source APIs, review approval, merge or publication authority.",
       "type": "object",
       "properties": {
         "parameters": {
@@ -5033,7 +5033,7 @@
     },
     "frankengit_source_verified_blob": {
       "title": "frankengit_source_verified_blob",
-      "description": "Read a complete visible ref-anchored blob and its original canonical proof at an independently trusted exact authority head. Ordinary source-read grant only; sponsored profiles exclude full-tree proof disclosure. Native Merkle-layout proof, verifier and canonical codec are unchanged. Bounded complete chunks, no range, truncation, legacy fallback, publication authority, freshness claim or server-selected client trust root. The smaller MCP output limits apply after native construction within its fixed finite v1 budgets.",
+      "description": "Read a complete visible ref-anchored blob and its original canonical proof at an independently trusted exact authority head. Requires the source launch ceiling and, for sponsored agents, the independent source-verified-read scope authorizing original tree-witness disclosure. Native Merkle-layout proof, verifier and canonical codec are unchanged. Bounded complete chunks, no range, truncation, legacy fallback, publication authority, freshness claim or server-selected client trust root. The smaller MCP output limits apply after native construction within its fixed finite v1 budgets.",
       "type": "object",
       "properties": {
         "parameters": {
