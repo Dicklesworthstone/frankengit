@@ -485,7 +485,7 @@ fn sparse_native_fetch_of_annotated_blob_tag_keeps_its_user_given_target() {
     }
 }
 
-fn http_fetch(
+pub(super) fn http_fetch(
     node: &OneNode,
     version: u8,
     want: GitOid,

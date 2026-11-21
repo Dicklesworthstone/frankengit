@@ -1113,6 +1113,8 @@ pub enum ObjectFilter {
     BlobLimit(u64),
     /// Include trees and blobs with depth strictly below this cutoff.
     TreeDepth(u32),
+    /// Include only this native Git type, except explicitly requested objects.
+    ObjectType(ObjectType),
     /// Request a sparse path expression.
     SparsePath(Vec<u8>),
     /// Request a sparse specification object.

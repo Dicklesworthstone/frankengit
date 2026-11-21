@@ -3,6 +3,7 @@ use super::*;
 use fgit_wire::ObjectFilter;
 
 mod blob_limits;
+mod object_type;
 mod sparse;
 mod streaming_blobs;
 
@@ -585,6 +586,10 @@ fn unserved_filter_names_follow_upstream_and_served_filters_have_none() {
         ObjectFilter::BlobNone,
         ObjectFilter::BlobLimit(1024),
         ObjectFilter::TreeDepth(0),
+        ObjectFilter::ObjectType(ObjectType::Commit),
+        ObjectFilter::ObjectType(ObjectType::Tree),
+        ObjectFilter::ObjectType(ObjectType::Blob),
+        ObjectFilter::ObjectType(ObjectType::Tag),
         ObjectFilter::SparseObject(blob),
         ObjectFilter::Combine(vec![
             ObjectFilter::BlobLimit(1),

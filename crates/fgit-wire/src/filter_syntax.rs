@@ -1,7 +1,7 @@
 //! Bounded Git filter grammar, including percent-encoded compound filters.
 use super::{
-    GitObjectFormat, ObjectFilter, WireError, WireLimits, parse_object_id, parse_unsigned,
-    validate_opaque_path,
+    GitObjectFormat, ObjectFilter, ObjectType, WireError, WireLimits, parse_object_id,
+    parse_unsigned, validate_opaque_path,
 };
 
 const MAX_FILTER_NESTING: usize = 32;
@@ -79,6 +79,13 @@ fn parse_part(
             .ok()
             .and_then(|value| u32::try_from(value).ok())
             .map(ObjectFilter::TreeDepth)
+            .ok_or_else(|| invalid(text));
+    }
+    if let Some(value) = text.strip_prefix(b"object:type=") {
+        return std::str::from_utf8(value)
+            .ok()
+            .and_then(ObjectType::from_label)
+            .map(ObjectFilter::ObjectType)
             .ok_or_else(|| invalid(text));
     }
     if let Some(value) = text.strip_prefix(b"sparse:oid=") {

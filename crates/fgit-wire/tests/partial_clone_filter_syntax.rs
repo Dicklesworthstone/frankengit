@@ -1,9 +1,78 @@
 #![forbid(unsafe_code)]
 use fgit_wire::{
     AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, LegacyUploadPack, ObjectFilter,
-    Packet, UploadPackRepository, UploadPackVersion, WireError, WireLimits, parse_filter,
+    ObjectType, Packet, UploadPackRepository, UploadPackVersion, WireError, WireLimits,
+    parse_filter,
 };
 use std::cell::Cell;
+
+#[test]
+fn native_object_type_filters_are_exact_and_compose_with_encoded_terms() {
+    for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
+        for kind in [
+            ObjectType::Commit,
+            ObjectType::Tree,
+            ObjectType::Blob,
+            ObjectType::Tag,
+        ] {
+            assert_eq!(
+                parse_filter(
+                    format!("object:type={}", kind.label()).as_bytes(),
+                    format,
+                    &WireLimits::default(),
+                )
+                .unwrap(),
+                ObjectFilter::ObjectType(kind),
+            );
+        }
+        let limits = WireLimits {
+            max_filter_parts: 2,
+            ..WireLimits::default()
+        };
+        assert_eq!(
+            parse_filter(
+                b"combine:object%3Atype%3Dblob+blob%3Alimit%3D1k",
+                format,
+                &limits,
+            )
+            .unwrap(),
+            ObjectFilter::Combine(vec![
+                ObjectFilter::ObjectType(ObjectType::Blob),
+                ObjectFilter::BlobLimit(1024),
+            ]),
+        );
+        assert!(matches!(
+            parse_filter(
+                b"combine:object:type=blob+blob:none+tree:2",
+                format,
+                &limits,
+            ),
+            Err(WireError::TooManyFilterParts { limit: 2 }),
+        ));
+        for text in [
+            b"object:type=".as_slice(),
+            b"object:type=any",
+            b"object:type=Blob",
+            b"object:type=blob ",
+            b"object:type=blob,tree",
+            b"object:type=blob\0",
+            b"object:type=blob\n",
+            b"object:type=\xff",
+            b"object:type:blob",
+            b"object:type=blob+tree",
+            b"combine:object%3Atype%3DBLOB+blob:none",
+        ] {
+            assert!(
+                matches!(
+                    parse_filter(text, format, &WireLimits::default()),
+                    Err(WireError::InvalidFilter { .. }),
+                ),
+                "{format:?}: {}",
+                String::from_utf8_lossy(text),
+            );
+        }
+    }
+}
 
 #[test]
 fn scaled_blob_limits_and_encoded_compounds_preserve_native_meaning() {
