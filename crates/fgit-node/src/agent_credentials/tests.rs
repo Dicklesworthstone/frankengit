@@ -24,6 +24,7 @@ mod candidate_context;
 mod milestones;
 #[path = "../tests/authority_read_fault.rs"]
 mod read_fault;
+mod source_publication;
 
 struct Scratch(PathBuf);
 impl Scratch {

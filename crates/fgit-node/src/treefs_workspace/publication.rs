@@ -1,4 +1,4 @@
-//! Explicit local-operator publication of a reviewed workspace candidate.
+//! Native publication of a reviewed workspace candidate.
 //!
 //! A bundle is untrusted transport, never authority. The caller independently
 //! names the branch, expected old commit and reviewed new commit. This adapter
@@ -14,6 +14,7 @@ pub use bundle_review::BundleInspectionRefusal;
 
 use super::{NodeWorkspaceRefusal, workspace_request_live};
 use crate::VerifiedFabricPackSource;
+use crate::agent_credentials::SourcePublicationRequest;
 use crate::quarantine_validator::ProductionReceiveQuarantineHandoff;
 use crate::receive_staging::ReceiveStaging;
 use crate::{LoopbackReceiveSession, NodeReceiveTransportRefusal, NodeRequestContext, OneNode};
@@ -255,6 +256,63 @@ impl OneNode {
         input: &[u8],
         authentication: AdmissionAuthentication,
     ) -> Result<AdmissionResult, NodeWorkspaceRefusal> {
+        self.apply_workspace_bundle_profile_in(
+            request,
+            principal_id,
+            idempotency_key,
+            reference,
+            expected_base,
+            expected_candidate,
+            input,
+            authentication,
+            None,
+        )
+        .await
+    }
+
+    /// Apply one exact single-parent candidate under an independently issued
+    /// sponsored source-publication grant. The request owns the agent, sponsor,
+    /// original key and deadline; no public attribution is accepted as authority.
+    /// Current ref/path scope and ordinary branch protections are evaluated at
+    /// every deciding basis. This does not grant branch creation, Git receive,
+    /// review, merge, or publication of a multi-commit bundle.
+    pub async fn apply_agent_workspace_bundle_in(
+        &self,
+        request: &NodeRequestContext,
+        publication: &SourcePublicationRequest<'_>,
+        reference: &RefName,
+        expected_base: GitOid,
+        expected_candidate: GitOid,
+        input: &[u8],
+    ) -> Result<AdmissionResult, NodeWorkspaceRefusal> {
+        publication.check_context(self, request)?;
+        publication.check_input(input.len())?;
+        let operation = self.apply_workspace_bundle_profile_in(
+            request,
+            publication.principal(),
+            publication.key().as_bytes(),
+            reference,
+            expected_base,
+            expected_candidate,
+            input,
+            publication.authentication(),
+            Some(publication),
+        );
+        publication.drive_in(self, request, operation).await
+    }
+
+    async fn apply_workspace_bundle_profile_in(
+        &self,
+        request: &NodeRequestContext,
+        principal_id: PrincipalId,
+        idempotency_key: &[u8],
+        reference: &RefName,
+        expected_base: GitOid,
+        expected_candidate: GitOid,
+        input: &[u8],
+        authentication: AdmissionAuthentication,
+        publication: Option<&SourcePublicationRequest<'_>>,
+    ) -> Result<AdmissionResult, NodeWorkspaceRefusal> {
         if idempotency_key.len() > MAX_IDEMPOTENCY_KEY_BYTES {
             return Err(invalid("invalid bounded idempotency key"));
         }
@@ -289,6 +347,9 @@ impl OneNode {
             .map_err(receive_error)?;
         if !workspace_request_live(request) {
             return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
+        }
+        if let Some(publication) = publication {
+            publication.check_context(self, request)?;
         }
         let staging = ReceiveStaging::default();
         let (validated, parse_limits) = self
@@ -329,6 +390,70 @@ impl OneNode {
         }
         if !workspace_request_live(request) {
             return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
+        }
+        if let Some(publication) = publication {
+            publication.check_context(self, request)?;
+            // The verifier reads actual canonical and privately staged Git
+            // bytes. Neither a patch summary nor a caller path list can select
+            // the scoped source-publication exception.
+            let paths = {
+                use fgit_admission::merge::native::objects::MergeObjectLimits;
+                use fgit_admission::merge::native::protection::path_reviews::verify_source_paths;
+                let exhaustion = Cell::new(None);
+                let limits = MergeObjectLimits {
+                    max_object_bytes: parse_limits
+                        .max_object_bytes
+                        .min(MergeObjectLimits::default().max_object_bytes),
+                    ..MergeObjectLimits::default()
+                };
+                let live = || publication.check_context(self, request).is_ok();
+                let source = VerifiedFabricPackSource {
+                    fabric: &self.fabric,
+                    object_format: self.object_format,
+                    maximum_object_bytes: limits.max_object_bytes,
+                    database_context: request.authority(),
+                    database_exhaustion: &exhaustion,
+                    session_is_live: Some(&live),
+                }
+                .with_staging(&staging);
+                let verified = verify_source_paths(
+                    &source,
+                    expected_base,
+                    expected_candidate,
+                    limits,
+                    &mut || live(),
+                );
+                publication.check_context(self, request)?;
+                if exhaustion.get().is_some() {
+                    return Err(NodeWorkspaceRefusal::Cancelled {
+                        exhaustion: exhaustion.get(),
+                    });
+                }
+                verified.map_err(|failure| {
+                    let (fgit_admission::ProjectionFailure::Refuse(code)
+                    | fgit_admission::ProjectionFailure::Unavailable(code)) = failure;
+                    receive_error(NodeReceiveTransportRefusal::Admission(Box::new(
+                        fgit_admission::AdmissionError::AsyncProjectionUnavailable(code),
+                    )))
+                })?
+            };
+            let proof = publication.bind_paths(reference, paths);
+            let context = fgit_admission::AdmissionContext {
+                head_key: self.head_key.clone(),
+                tenant_id: self.tenant_id,
+                repository_id: self.repository_id,
+                principal_id,
+                idempotency_key: key,
+                object_format: self.object_format,
+            };
+            return self
+                .admit_basis_bound_scoped_source_receive_in(
+                    request, &context, &validated, &staging, &proof,
+                )
+                .await
+                .map_err(|error| {
+                    receive_error(NodeReceiveTransportRefusal::Admission(Box::new(error)))
+                });
         }
         let session = LoopbackReceiveSession::Authenticated(
             crate::AuthenticatedReceiveSession::new(principal_id, key)

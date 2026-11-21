@@ -1,8 +1,13 @@
 //! Canonical sponsored agent credentials and bounded request authentication.
 //!
 //! Issuance is an explicit trusted-local administration operation. Credential
-//! holders receive finite metadata, source reads and explicit candidate scopes,
-//! never source publication, review, merge, process execution or administration.
+//! holders receive finite metadata, source reads, explicit candidate scopes and
+//! independently scoped single-parent publication. Review, merge, arbitrary Git
+//! transport, process execution and administration remain separate authorities.
+
+mod source_publication;
+pub(crate) use source_publication::SourcePublicationProof;
+pub use source_publication::SourcePublicationRequest;
 
 use crate::source_retrieval::authorization::SourceReadContext;
 use crate::treefs_workspace::native_merge::NodeNativeMergeProjection;
@@ -195,7 +200,7 @@ impl OneNode {
     ) -> Result<AgentRequest, NodeReceiveTransportRefusal> {
         use fgit_identity::agent::{
             DISCUSSIONS_WRITE, ISSUES_WRITE, MILESTONES_WRITE, PULLS_WRITE, SOURCE_CANDIDATES,
-            SOURCE_READ, agent_credential_id, authenticate_agent_credential,
+            SOURCE_PUBLISH, SOURCE_READ, agent_credential_id, authenticate_agent_credential,
         };
         if !valid_agent_credential_token(bearer)
             || operation.count_ones() != 1
@@ -268,6 +273,8 @@ impl OneNode {
                 OperationClass::TreeFsWorkspace,
                 OperationClass::CreateCandidateObject,
             ])
+        } else if operation == SOURCE_PUBLISH {
+            ClassSet::from_classes(&[OperationClass::PublishRefTransaction])
         } else {
             ClassSet::from_classes(&[class])
         };

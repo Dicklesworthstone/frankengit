@@ -2631,6 +2631,7 @@ pub struct DurableAsyncAdmissionProjection<'materializer> {
     context: AdmissionContext,
     authentication: Option<AdmissionAuthentication>,
     agent_deadline: Option<std::time::Instant>,
+    source_publication: Option<&'materializer agent_credentials::SourcePublicationProof>,
     prepared: Mutex<Option<AsyncMaterializedBasis>>,
     /// At most one exact closure's pure preparation and canonical bytes.
     /// This never proves placement: each command still writes through its
@@ -2661,6 +2662,7 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
             context,
             authentication: None,
             agent_deadline: None,
+            source_publication: None,
             prepared: Mutex::new(None),
             prepared_closure: Mutex::new(None),
             publication: None,
@@ -2684,6 +2686,36 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
         self.authentication = Some(session.authentication);
         self.agent_deadline = session.agent_deadline;
         self
+    }
+
+    /// The scoped exception is selected only by the source candidate adapter,
+    /// after native objects prove the exact complete path delta. Generic Git
+    /// receive and branch mutation cannot construct it from a principal receipt.
+    pub(crate) fn with_source_publication(
+        mut self,
+        proof: &'materializer agent_credentials::SourcePublicationProof,
+    ) -> Self {
+        self.authentication = Some(AdmissionAuthentication::AgentCredential(
+            proof.authentication(),
+        ));
+        self.source_publication = Some(proof);
+        self
+    }
+
+    fn source_publication_checkpoint(&self, cx: &FsqliteCx) -> Result<(), RefusalCode> {
+        if let Some(proof) = self.source_publication {
+            match checkpoint_pack_context(cx) {
+                PackContextCheckpoint::Live => {}
+                PackContextCheckpoint::Stopped {
+                    budget_exhaustion: Some(_),
+                } => return Err(RefusalCode::ResourceBudgetExceeded),
+                PackContextCheckpoint::Stopped {
+                    budget_exhaustion: None,
+                } => return Err(RefusalCode::CancellationInProgress),
+            }
+            proof.checkpoint()?;
+        }
+        Ok(())
     }
 
     /// Enables retained-leaf checkpoint reads in their dedicated fabric
@@ -2722,21 +2754,51 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
         fold: &TransactionFoldReport,
         closure: &ValidatedClosure,
     ) -> Result<CommitMaterialization, AsyncProjectionFailure> {
-        let bodies = admission_authentication::direct_decision_evidence_in(
-            authority,
-            cx,
-            &self.context,
-            basis,
-            &current,
-            root_layout,
-            request,
-            fold,
-            self.authentication,
-            &|| cx.checkpoint().is_err(),
-        )
-        .await?;
+        self.source_publication_checkpoint(cx)
+            .map_err(AsyncProjectionFailure::Unavailable)?;
+        let bodies = if let Some(proof) = self.source_publication {
+            let now = proof
+                .checkpoint()
+                .map_err(AsyncProjectionFailure::Unavailable)?;
+            fgit_admission::merge::native::protection::direct_source_decision_evidence_at(
+                authority,
+                cx,
+                &self.context,
+                basis,
+                &current,
+                root_layout,
+                request,
+                fold,
+                proof.authentication(),
+                proof.reference(),
+                proof.paths(),
+                now,
+                &|| self.source_publication_checkpoint(cx).is_err(),
+            )
+            .await
+        } else {
+            admission_authentication::direct_decision_evidence_in(
+                authority,
+                cx,
+                &self.context,
+                basis,
+                &current,
+                root_layout,
+                request,
+                fold,
+                self.authentication,
+                &|| cx.checkpoint().is_err(),
+            )
+            .await
+        };
+        self.source_publication_checkpoint(cx)
+            .map_err(AsyncProjectionFailure::Unavailable)?;
+        let bodies = bodies?;
         let stage_context = cx.create_child();
-        let is_cancelled = || stage_context.checkpoint().is_err();
+        let is_cancelled = || {
+            stage_context.checkpoint().is_err()
+                || self.source_publication_checkpoint(&stage_context).is_err()
+        };
         let provider =
             DurableAdmissionEvidence::from_bodies(self.context.clone(), basis, request, bodies)
                 .map_err(async_projection_unavailable)?;
@@ -2773,11 +2835,11 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
         // is bounded synchronous link work (hard links and directory syncs;
         // every staged file was synced during validation), not a runtime bridge.
         if let Some(publication) = self.publication {
+            self.source_publication_checkpoint(&stage_context)
+                .map_err(AsyncProjectionFailure::Unavailable)?;
             publication
                 .staging
-                .publish(publication.fabric, &mut || {
-                    stage_context.checkpoint().is_ok()
-                })
+                .publish(publication.fabric, &mut || !is_cancelled())
                 .map_err(|error| AsyncProjectionFailure::Unavailable(publication_refusal(error)))?;
         }
         let ref_root = self
@@ -2825,6 +2887,10 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
 }
 
 impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionProjection<'_> {
+    fn publication_checkpoint(&self, cx: &FsqliteCx) -> Result<(), RefusalCode> {
+        self.source_publication_checkpoint(cx)
+    }
+
     async fn collect_cumulative_outcomes_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
@@ -2895,7 +2961,7 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
     }
 
     fn supports_ref_microbatching(&self) -> bool {
-        true
+        self.source_publication.is_none()
     }
 
     async fn materialize_batch_commit_async<'a>(
