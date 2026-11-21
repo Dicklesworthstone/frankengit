@@ -13,8 +13,10 @@ use crate::ProjectionFailure;
 mod objects;
 pub use objects::{verify_merge_paths, verify_rebase_paths, verify_source_paths};
 
-/// Complete native path delta of one single-parent source candidate. Only the
-/// object verifier can construct this witness; submitted path lists cannot.
+/// Complete authorization path delta of one single-parent source candidate.
+/// Nonempty directory creation/removal is represented by affected descendants;
+/// empty directories and type/mode replacements retain their own changed path.
+/// Only the object verifier can construct this witness; submitted lists cannot.
 #[derive(Debug)]
 pub struct VerifiedSourcePaths {
     before: fgit_types::GitOid,

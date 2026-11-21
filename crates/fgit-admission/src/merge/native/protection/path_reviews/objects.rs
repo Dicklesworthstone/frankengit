@@ -21,7 +21,10 @@ use crate::merge::native::objects::{
 /// Verify one exact single-parent source transition and all of its changed
 /// native paths. Reuses the merge path walk, including deletions, mode changes,
 /// both rename sides, directory replacement and gitlinks. No blob rendering or
-/// caller-supplied path summary participates in authorization.
+/// caller-supplied path summary participates in authorization. Pure nonempty
+/// directory creation/removal is represented by its affected descendants, so
+/// a narrow child grant can create its first file or remove its last file.
+/// Empty directories and type/mode replacements still require their own path.
 pub fn verify_source_paths(
     source: &impl CanonicalObjectSource,
     before: GitOid,
@@ -42,6 +45,7 @@ pub fn verify_source_paths(
         source,
         live,
         format: after.algorithm(),
+        source_publication: true,
         limits,
         objects: 0,
         bytes: 0,
@@ -90,6 +94,7 @@ pub fn verify_merge_paths(
         source,
         live,
         format: merge.merge_commit.algorithm(),
+        source_publication: false,
         limits,
         objects: 0,
         bytes: 0,
@@ -136,6 +141,7 @@ pub fn verify_rebase_paths(
         source,
         live,
         format: merge.merge_commit.algorithm(),
+        source_publication: false,
         limits,
         objects: 0,
         bytes: 0,
@@ -203,12 +209,16 @@ struct Trees {
     depth: usize,
     before: Option<GitOid>,
     after: Option<GitOid>,
+    /// A pure directory addition/removal is structural only when nonempty.
+    record_empty_directory: bool,
 }
 
 struct Walk<'a, S, L> {
     source: &'a S,
     live: &'a mut L,
     format: GitHashAlgorithm,
+    /// Merge/rebase review witnesses retain their structural directory paths.
+    source_publication: bool,
     limits: MergeObjectLimits,
     objects: usize,
     bytes: usize,
@@ -342,6 +352,7 @@ impl<S: CanonicalObjectSource, L: FnMut() -> bool> Walk<'_, S, L> {
             depth: 0,
             before: Some(before),
             after: Some(after),
+            record_empty_directory: false,
         });
         while let Some(trees) = self.pending.pop() {
             self.pending_bytes -= trees.path.len();
@@ -351,6 +362,11 @@ impl<S: CanonicalObjectSource, L: FnMut() -> bool> Walk<'_, S, L> {
             }
             let before = self.tree(trees.before)?;
             let mut after = self.tree(trees.after)?;
+            if trees.record_empty_directory && before.is_empty() && after.is_empty() {
+                // An explicit empty tree has no descendant to carry its scope.
+                // It is still a real entry change, never an ancestor exemption.
+                self.record_changed_path(&trees.path)?;
+            }
             for (name, old) in before {
                 checkpoint(self.live)?;
                 let new = after.remove(&name);
@@ -450,25 +466,14 @@ impl<S: CanonicalObjectSource, L: FnMut() -> bool> Walk<'_, S, L> {
         let only_subtree_identity = old_tree.is_some()
             && new_tree.is_some()
             && before.map(|entry| entry.mode) == after.map(|entry| entry.mode);
-        if !only_subtree_identity
-            && self
-                .unique
-                .as_ref()
-                .is_none_or(|paths| !paths.contains(&path))
-        {
-            if self.changed.len() == MAX_MERGE_CHANGED_PATHS {
-                return Err(budget());
-            }
-            self.changed_bytes = self
-                .changed_bytes
-                .checked_add(path.len())
-                .filter(|n| *n <= MAX_MERGE_CHANGED_PATH_BYTES)
-                .ok_or_else(budget)?;
-            self.changed.try_reserve(1).map_err(|_| budget())?;
-            self.changed.push(path.clone());
-            if let Some(paths) = &mut self.unique {
-                paths.insert(path.clone());
-            }
+        let structural_directory = self.source_publication
+            && matches!(
+                (before, after),
+                (None, Some(Entry { mode: 0o040_000, .. }))
+                    | (Some(Entry { mode: 0o040_000, .. }), None)
+            );
+        if !only_subtree_identity && !structural_directory {
+            self.record_changed_path(&path)?;
         }
         if old_tree != new_tree {
             // Either side may be a removed/replaced directory. Descend both,
@@ -487,7 +492,32 @@ impl<S: CanonicalObjectSource, L: FnMut() -> bool> Walk<'_, S, L> {
                 depth,
                 before: old_tree,
                 after: new_tree,
+                record_empty_directory: structural_directory,
             });
+        }
+        Ok(())
+    }
+
+    fn record_changed_path(&mut self, path: &[u8]) -> Result<(), ProjectionFailure> {
+        if self
+            .unique
+            .as_ref()
+            .is_some_and(|paths| paths.contains(path))
+        {
+            return Ok(());
+        }
+        if self.changed.len() == MAX_MERGE_CHANGED_PATHS {
+            return Err(budget());
+        }
+        self.changed_bytes = self
+            .changed_bytes
+            .checked_add(path.len())
+            .filter(|n| *n <= MAX_MERGE_CHANGED_PATH_BYTES)
+            .ok_or_else(budget)?;
+        self.changed.try_reserve(1).map_err(|_| budget())?;
+        self.changed.push(path.to_vec());
+        if let Some(paths) = &mut self.unique {
+            paths.insert(path.to_vec());
         }
         Ok(())
     }
