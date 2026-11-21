@@ -2267,14 +2267,19 @@ impl LegacyUploadPack {
                 (&rest[..offset], Some(&rest[offset + 1..]))
             });
         let oid = parse_object_id(oid_text, repository.object_format())?;
-        if !repository
-            .advertised_refs()
-            .iter()
-            .any(|reference| reference.oid == oid)
-            && !(self
-                .server_capabilities
-                .contains(b"allow-reachable-sha1-in-want")
-                && repository.contains_want(oid))
+        // Production views already index the authorized closure, including all
+        // advertised tips. Consult it first when the extension is enabled so a
+        // many-ref clone does not rescan the entire advertisement for each want.
+        // Keep the exact advertised-tip fallback for strict profiles and for
+        // low-level repositories whose closure omits an advertised object.
+        if !(self
+            .server_capabilities
+            .contains(b"allow-reachable-sha1-in-want")
+            && repository.contains_want(oid))
+            && !repository
+                .advertised_refs()
+                .iter()
+                .any(|reference| reference.oid == oid)
         {
             return Err(WireError::WantNotAdvertised { oid });
         }
