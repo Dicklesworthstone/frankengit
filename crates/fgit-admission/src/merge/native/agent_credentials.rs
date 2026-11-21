@@ -17,6 +17,7 @@ use fgit_authority::{
 use fgit_chronicle::PublicationBasis;
 use fgit_forge::event::agent_credential::{
     AgentCredentialAction, AgentCredentialCommand, AgentCredentialGrant, AgentCredentialId,
+    SOURCE_PUBLISH, SourcePublicationScope,
 };
 use fgit_forge::{
     AggregateId, AggregateVersion, ExpectedVersion, ForgeEvent, ForgeEventBatch, ForgeEventPayload,
@@ -33,6 +34,7 @@ pub struct AgentCredentialState {
     pub id: AgentCredentialId,
     pub version: AggregateVersion,
     pub grant: AgentCredentialGrant,
+    pub source_scope: Option<SourcePublicationScope>,
     pub grant_root: Digest,
     pub revoked: bool,
 }
@@ -51,10 +53,20 @@ pub fn grant_root(
     id: AgentCredentialId,
     grant: &AgentCredentialGrant,
 ) -> Result<Digest, AdmissionError> {
+    scoped_grant_root(id, grant, None)
+}
+
+/// The original extended issuance commits the complete immutable source scope.
+/// Passing no scope preserves the legacy issuance frame and root byte-for-byte.
+pub fn scoped_grant_root(
+    id: AgentCredentialId,
+    grant: &AgentCredentialGrant,
+    source_scope: Option<&SourcePublicationScope>,
+) -> Result<Digest, AdmissionError> {
     let command = AgentCredentialCommand {
         id,
         expected_version: ExpectedVersion::NewStream,
-        action: AgentCredentialAction::Issue(*grant),
+        action: AgentCredentialAction::issuance(*grant, source_scope.cloned()),
     };
     let event = command.proposed_event(grant.sponsor).map_err(unavailable)?;
     storage::root(&ForgeEventBatch::of_one(event))
@@ -113,13 +125,13 @@ where
         let ForgeEventPayload::AgentCredentialChangedNative(change) = &event.payload else {
             return Err(unavailable(RefusalCode::EvidenceInvalid));
         };
-        let (grant, revoked) = match &change.action {
-            AgentCredentialAction::Issue(grant) if event.version == AggregateVersion::FIRST => {
-                (grant, false)
-            }
-            AgentCredentialAction::Revoke(grant) if event.version.get() == 2 => (grant, true),
+        let revoked = match &change.action {
+            action if action.is_issue() && event.version == AggregateVersion::FIRST => false,
+            action if action.is_revocation() && event.version.get() == 2 => true,
             _ => return Err(unavailable(RefusalCode::EvidenceInvalid)),
         };
+        let grant = change.action.grant();
+        let source_scope = change.action.source_scope();
         if (!revoked && change.actor != grant.sponsor)
             || grant.repository != basis.body().repository_id
         {
@@ -133,7 +145,8 @@ where
             id,
             version: event.version,
             grant: *grant,
-            grant_root: grant_root(id, grant)?,
+            source_scope: source_scope.cloned(),
+            grant_root: scoped_grant_root(id, grant, source_scope)?,
             revoked,
         });
     }
@@ -309,7 +322,36 @@ where
     )
     .await
     .map_err(AdmissionError::from)?;
+    validate_authenticated_grant(
+        &state,
+        context,
+        agent,
+        config.repository_incarnation_id,
+        operation,
+        now,
+    )
+    .map_err(ProjectionFailure::Refuse)?;
+    Ok(())
+}
+
+/// Shared exact-current-grant checks for metadata and source publication.
+/// The caller must select `state` from the authenticated candidate basis, never
+/// from a cached registry, and independently enforce the complete source delta
+/// when requesting SOURCE_PUBLISH. An original terminal outcome is recovered
+/// before these new-publication checks.
+pub fn validate_authenticated_grant(
+    state: &AgentCredentialState,
+    context: &AdmissionContext,
+    agent: &crate::evidence::AgentAuthentication,
+    incarnation: fgit_types::RepositoryIncarnationId,
+    operation: u16,
+    now: u64,
+) -> Result<(), RefusalCode> {
+    if now < agent.authenticated_at() || now >= agent.expires_at() {
+        return Err(RefusalCode::CapabilityExpired);
+    }
     if state.revoked
+        || state.id != agent.credential_id()
         || state.grant_root != agent.grant_root()
         || state.grant.agent != context.principal_id
         || state.grant.agent != agent.agent()
@@ -317,14 +359,71 @@ where
         || state.grant.sponsor_kind != agent.sponsor_kind()
         || state.grant.tenant != context.tenant_id
         || state.grant.repository != context.repository_id
-        || state.grant.incarnation != config.repository_incarnation_id
+        || state.grant.incarnation != incarnation
         || agent.authenticated_at() < state.grant.issued_at
         || agent.expires_at() > state.grant.expires_at
         || !state.grant.permits(operation)
+        || (state.grant.permits(SOURCE_PUBLISH) != state.source_scope.is_some())
     {
-        return Err(denied().into());
+        return Err(RefusalCode::CapabilityScopeViolation);
     }
     Ok(())
+}
+
+/// Authenticate source publication against this exact candidate CAS basis.
+/// The returned immutable ceiling must still be applied to every actual changed
+/// path by the native candidate validator. No caller-selected path list can
+/// replace that tree-delta check, and this function bypasses no repository rule.
+pub async fn validate_source_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    basis: &PublicationBasis,
+    agent: &crate::evidence::AgentAuthentication,
+    now: u64,
+    reference: &fgit_types::RefName,
+    cancelled: &C,
+) -> Result<SourcePublicationScope, ProjectionFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
+    let unavailable =
+        |error: AdmissionError| error.into_projection_unavailable(RefusalCode::EvidenceInvalid);
+    live(cancelled).map_err(unavailable)?;
+    let state = read_at(store, cx, basis, agent.credential_id(), cancelled)
+        .await
+        .map_err(unavailable)?
+        .ok_or(ProjectionFailure::Refuse(
+            RefusalCode::CapabilityScopeViolation,
+        ))?;
+    let config = fgit_authority::read_repository_incarnation_configuration_async(
+        store,
+        cx,
+        &basis.body().configuration_root,
+    )
+    .await
+    .map_err(AdmissionError::from)
+    .map_err(unavailable)?;
+    validate_authenticated_grant(
+        &state,
+        context,
+        agent,
+        config.repository_incarnation_id,
+        SOURCE_PUBLISH,
+        now,
+    )
+    .map_err(ProjectionFailure::Refuse)?;
+    let scope = state.source_scope.ok_or(ProjectionFailure::Refuse(
+        RefusalCode::CapabilityScopeViolation,
+    ))?;
+    if !scope.permits_ref(reference) {
+        return Err(ProjectionFailure::Refuse(
+            RefusalCode::CapabilityScopeViolation,
+        ));
+    }
+    live(cancelled).map_err(unavailable)?;
+    Ok(scope)
 }
 
 impl<S, P> metadata::MetadataValidation<S, P> for Validation
@@ -362,9 +461,7 @@ where
         ) {
             return Err(refuse(RefusalCode::ProtectedRefTransitionDenied).into());
         }
-        let grant = match &change.action {
-            AgentCredentialAction::Issue(grant) | AgentCredentialAction::Revoke(grant) => grant,
-        };
+        let grant = change.action.grant();
         let config = fgit_authority::read_repository_incarnation_configuration_async(
             store,
             cx,
@@ -375,8 +472,7 @@ where
         if grant.tenant != self.tenant
             || grant.repository != basis.body().repository_id
             || grant.incarnation != config.repository_incarnation_id
-            || (matches!(change.action, AgentCredentialAction::Issue(_))
-                && change.actor != grant.sponsor)
+            || (change.action.is_issue() && change.actor != grant.sponsor)
         {
             return Err(refuse(RefusalCode::ProtectedRefTransitionDenied).into());
         }
@@ -391,7 +487,7 @@ where
         let states = read_all_at(store, cx, basis, &cancelled).await?;
         let current = states.iter().find(|state| state.id == id);
         match &change.action {
-            AgentCredentialAction::Issue(_) => {
+            AgentCredentialAction::Issue(_) | AgentCredentialAction::IssueSource { .. } => {
                 if current.is_some() {
                     return Err(refuse(RefusalCode::EvidenceStale).into());
                 }
@@ -410,10 +506,11 @@ where
                     return Err(refuse(RefusalCode::ProtectedRefTransitionDenied).into());
                 }
             }
-            AgentCredentialAction::Revoke(_) => {
+            AgentCredentialAction::Revoke(_) | AgentCredentialAction::RevokeSource { .. } => {
                 if current.is_none_or(|state| {
                     state.revoked
                         || state.grant != *grant
+                        || state.source_scope.as_ref() != change.action.source_scope()
                         || state.version != AggregateVersion::FIRST
                 }) {
                     return Err(refuse(RefusalCode::EvidenceStale).into());
@@ -431,3 +528,6 @@ where
         })
     }
 }
+
+#[cfg(test)]
+mod tests;

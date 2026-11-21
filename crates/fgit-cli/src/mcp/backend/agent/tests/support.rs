@@ -220,7 +220,7 @@ impl Fixture {
         let credential_id = issue(
             &node,
             &token(0xaa),
-            grant(&node, ALL_OPERATIONS),
+            grant(&node, ALL_OPERATIONS & !fgit_identity::agent::SOURCE_PUBLISH),
             "issue-primary",
         );
         node.shutdown().unwrap();

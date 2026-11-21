@@ -44,7 +44,7 @@ use core::fmt::Write as _;
 
 use crate::basis::{
     AggregateName, AuthenticationStrength, EvidenceKind, EvidenceReceipt, IssuerLabel,
-    PolicyInputRoot, PolicyInstant, RefUpdateFact, RefUpdateKind,
+    PolicyInputRoot, PolicyInstant, PrincipalKind, RefUpdateFact, RefUpdateKind,
 };
 use crate::content::{PolicySnapshot, PolicySnapshotId};
 use crate::error::{PolicyEvalRefusal, refusal_name};
@@ -233,6 +233,7 @@ pub fn evaluate(
         input.updates(),
         Some(input),
         input.principal().authentication(),
+        Some(input.principal().kind()),
         &actor_id,
         Some(&actor_snapshot),
     ))
@@ -249,6 +250,23 @@ pub(crate) fn evaluate_authenticated_reference(
         input.updates(),
         None,
         input.authentication(),
+        None,
+        &input.principal().to_string(),
+        None,
+    )
+}
+
+/// Only the native agent credential owner can establish this closed input.
+pub(crate) fn evaluate_agent_reference(
+    snapshot: &PolicySnapshot,
+    input: &crate::reference_profile::AgentReferenceInput,
+) -> PolicyEvaluation {
+    evaluate_facts(
+        snapshot,
+        input.updates(),
+        None,
+        AuthenticationStrength::SingleFactor,
+        Some(PrincipalKind::Agent),
         &input.principal().to_string(),
         None,
     )
@@ -259,6 +277,7 @@ fn evaluate_facts(
     updates: &[RefUpdateFact],
     input: Option<&PolicyInputRoot>,
     authentication: AuthenticationStrength,
+    principal_kind: Option<PrincipalKind>,
     actor_id: &str,
     actor_snapshot: Option<&str>,
 ) -> PolicyEvaluation {
@@ -271,6 +290,7 @@ fn evaluate_facts(
             policy,
             input,
             authentication,
+            principal_kind,
             subject: update,
             actor_id,
             actor_snapshot,
@@ -379,6 +399,7 @@ struct Facts<'a> {
     // has refused every selector that requires this complete input root.
     input: Option<&'a PolicyInputRoot>,
     authentication: AuthenticationStrength,
+    principal_kind: Option<PrincipalKind>,
     subject: &'a RefUpdateFact,
     actor_id: &'a str,
     actor_snapshot: Option<&'a str>,
@@ -514,12 +535,10 @@ fn holds(predicate: &Predicate, facts: &Facts<'_>) -> bool {
         Predicate::TextMatches { selector, pattern } => pattern.matches(facts.text(*selector)),
         Predicate::UpdateKindEquals(kind) => facts.subject.kind() == *kind,
         Predicate::UpdateKindIn(kinds) => kinds.contains(&facts.subject.kind()),
-        Predicate::PrincipalKindEquals(kind) => facts
-            .input
-            .is_some_and(|input| input.principal().kind() == *kind),
+        Predicate::PrincipalKindEquals(kind) => facts.principal_kind == Some(*kind),
         Predicate::PrincipalKindIn(kinds) => facts
-            .input
-            .is_some_and(|input| kinds.contains(&input.principal().kind())),
+            .principal_kind
+            .is_some_and(|kind| kinds.contains(&kind)),
         Predicate::AuthenticationCompare { operator, value } => {
             operator.holds(facts.authentication.rank(), value.rank())
         }

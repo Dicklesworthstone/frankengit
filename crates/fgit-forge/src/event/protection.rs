@@ -467,6 +467,15 @@ impl NativeProtectionEvent {
             fgit_policy::reference_profile::ReferencePolicyProfile::ReferenceAuthenticationV1,
         )
     }
+
+    pub(super) fn read_with_principal_kind_policy(
+        input: &mut Decoder<'_>,
+    ) -> Result<Self, CodecRefusal> {
+        Self::read_with_profile(
+            input,
+            fgit_policy::reference_profile::ReferencePolicyProfile::ReferencePrincipalKindV1,
+        )
+    }
     fn read_with_profile(
         input: &mut Decoder<'_>,
         profile: fgit_policy::reference_profile::ReferencePolicyProfile,
@@ -782,6 +791,8 @@ mod ref_policy_tests;
 
 #[cfg(test)]
 mod authentication_policy_tests;
+#[cfg(test)]
+mod principal_kind_policy_tests;
 
 #[cfg(test)]
 mod queue_tests;

@@ -23,8 +23,8 @@ mod policy_decision;
 pub use policy_decision::{
     ActivatedPolicyDecisionEvidence, ActorPolicyDecisionEvidence,
     AgentAuthenticationPolicyDecisionEvidence, AuthenticationPolicyDecisionEvidence,
-    EvaluatedPolicyDecisionEvidence, PolicyDecisionRecord, RefPolicyEvaluation, RefPolicyInput,
-    RefPolicyPublication,
+    EvaluatedPolicyDecisionEvidence, PolicyDecisionRecord, PrincipalKindPolicyDecisionEvidence,
+    RefPolicyEvaluation, RefPolicyInput, RefPolicyPublication,
 };
 #[path = "principal_snapshot.rs"]
 mod principal_snapshot;
@@ -539,6 +539,31 @@ impl DecisionEvidenceBodies {
     ) -> Result<(), RefusalCode> {
         let profile = fgit_policy::reference_profile::classify(&snapshot)
             .map_err(|_| RefusalCode::EvidenceInvalid)?;
+        if profile
+            == fgit_policy::reference_profile::ReferencePolicyProfile::ReferencePrincipalKindV1
+        {
+            let Some(AdmissionAuthentication::AgentCredential(agent)) =
+                self.principal_snapshot.authentication()
+            else {
+                // Transport authentication and an asserted ID establish no
+                // human, machine or service kind. Unknown cannot mean false.
+                return Err(RefusalCode::EvidenceMissing);
+            };
+            let record = PrincipalKindPolicyDecisionEvidence::evaluate(
+                self.policy_decision.base().clone(),
+                context,
+                basis,
+                current,
+                layout,
+                fold,
+                review_branches,
+                snapshot,
+                publication,
+                agent,
+            )?;
+            self.policy_decision = PolicyDecisionRecord::PrincipalKindActivated(Box::new(record));
+            return Ok(());
+        }
         if profile
             == fgit_policy::reference_profile::ReferencePolicyProfile::ReferenceAuthenticationV1
         {

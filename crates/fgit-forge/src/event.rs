@@ -59,6 +59,7 @@ const KIND_NATIVE_DISCUSSION_CHANGED: u32 = 24;
 const KIND_NATIVE_AGENT_CREDENTIAL_CHANGED: u32 = 25;
 const KIND_PATH_REVIEW_PROTECTION_CHANGED: u32 = 26;
 const KIND_NATIVE_PULL_REQUEST_LABELS_CHANGED: u32 = 27;
+const KIND_REPOSITORY_PRINCIPAL_KIND_REF_POLICY_CHANGED: u32 = 28;
 
 /// Complete native coordinates of one merge. The resulting target is always
 /// `merge_commit`; there is no independently writable, contradictory after-tip.
@@ -216,6 +217,9 @@ impl ForgeEventPayload {
                 if let Some(snapshot) = &change.protection.ref_policy {
                     use fgit_policy::reference_profile::ReferencePolicyProfile;
                     match fgit_policy::reference_profile::classify(snapshot).ok() {
+                        Some(ReferencePolicyProfile::ReferencePrincipalKindV1) => {
+                            KIND_REPOSITORY_PRINCIPAL_KIND_REF_POLICY_CHANGED
+                        }
                         Some(ReferencePolicyProfile::ReferenceAuthenticationV1) => {
                             KIND_REPOSITORY_AUTHENTICATED_REF_POLICY_CHANGED
                         }
@@ -686,6 +690,11 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
         KIND_REPOSITORY_AUTHENTICATED_REF_POLICY_CHANGED => {
             ForgeEventPayload::ReviewProtectionChanged(
                 protection::NativeProtectionEvent::read_with_authentication_policy(input)?,
+            )
+        }
+        KIND_REPOSITORY_PRINCIPAL_KIND_REF_POLICY_CHANGED => {
+            ForgeEventPayload::ReviewProtectionChanged(
+                protection::NativeProtectionEvent::read_with_principal_kind_policy(input)?,
             )
         }
         KIND_WORKFLOW_CHECK_OBSERVED => ForgeEventPayload::WorkflowCheckObservedNative(

@@ -11,7 +11,31 @@ use super::super::{NativeMergeIntent, NativeMergeMethod};
 use crate::ProjectionFailure;
 
 mod objects;
-pub use objects::{verify_merge_paths, verify_rebase_paths};
+pub use objects::{verify_merge_paths, verify_rebase_paths, verify_source_paths};
+
+/// Complete native path delta of one single-parent source candidate. Only the
+/// object verifier can construct this witness; submitted path lists cannot.
+#[derive(Debug)]
+pub struct VerifiedSourcePaths {
+    before: fgit_types::GitOid,
+    after: fgit_types::GitOid,
+    changed_paths: Vec<Vec<u8>>,
+}
+
+impl VerifiedSourcePaths {
+    #[must_use]
+    pub const fn before(&self) -> fgit_types::GitOid {
+        self.before
+    }
+    #[must_use]
+    pub const fn after(&self) -> fgit_types::GitOid {
+        self.after
+    }
+    #[must_use]
+    pub fn changed_paths(&self) -> &[Vec<u8>] {
+        &self.changed_paths
+    }
+}
 
 pub const MAX_MERGE_PATH_BYTES: usize = 4096;
 pub const MAX_MERGE_PATH_DEPTH: usize = 64;

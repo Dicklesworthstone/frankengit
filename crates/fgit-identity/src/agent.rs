@@ -2,8 +2,8 @@
 //!
 //! The caller supplies a grant read from the exact authenticated repository
 //! frontier and fresh revocation evidence. A successful result identifies the
-//! agent and its finite read/metadata ceiling; it does not create an IntentRun,
-//! authorize code publication, or widen the sponsor's authority.
+//! agent and its finite operation ceiling; it does not create an IntentRun,
+//! independently authorize publication, or widen the sponsor's authority.
 
 use fgit_crypto::{sha256_digest, verify_mac};
 use fgit_types::{PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
@@ -14,7 +14,7 @@ pub use fgit_forge::event::agent_credential::{
     AgentCredentialId, AgentCredentialSnapshot, DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ,
     ISSUES_WRITE, MAX_LIFETIME_SECONDS, MILESTONES_READ, MILESTONES_WRITE,
     NativeAgentCredentialEvent, OUTCOMES_READ, PULLS_READ, PULLS_WRITE, SOURCE_CANDIDATES,
-    SOURCE_HISTORY_READ, SOURCE_READ, SponsorKind,
+    SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ, SourcePublicationScope, SponsorKind,
 };
 
 /// Fixed finite input bound before hashing untrusted bearer bytes.

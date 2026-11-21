@@ -283,7 +283,7 @@ fn source_reads_are_independent_of_legacy_metadata_scopes_and_unknown_flags() {
         assert!(explicit.validate().is_ok());
         assert!(explicit.permits(SOURCE_READ | metadata));
     }
-    for unknown in (12..16).map(|bit| 1u16 << bit) {
+    for unknown in (13..16).map(|bit| 1u16 << bit) {
         let invalid = AgentCredentialGrant {
             operations: SOURCE_READ | unknown,
             ..grant()
@@ -313,7 +313,7 @@ fn expanded_grant_issue_and_revocation_round_trip_without_widening_legacy_grants
         MILESTONES_WRITE,
         MILESTONES_READ | MILESTONES_WRITE,
         MILESTONES_WRITE | ISSUES_WRITE,
-        ALL_OPERATIONS,
+        0x0fff,
     ] {
         let grant = AgentCredentialGrant {
             operations,
@@ -333,7 +333,7 @@ fn expanded_grant_issue_and_revocation_round_trip_without_widening_legacy_grants
         assert_eq!(payload.as_bytes().len(), 178);
         assert_eq!(&payload.as_bytes()[176..178], &operations.to_be_bytes());
         let mut unknown = payload.into_bytes();
-        unknown[176..178].copy_from_slice(&(operations | (1 << 12)).to_be_bytes());
+        unknown[176..178].copy_from_slice(&(operations | (1 << 13)).to_be_bytes());
         assert!(
             ForgeEvent::read_payload(&mut Decoder::new(&unknown, DecodeLimits::DEFAULT)).is_err()
         );
@@ -413,7 +413,7 @@ fn history_access_is_independent_of_every_preexisting_operation() {
         assert!(combined.validate().is_ok());
         assert!(combined.permits(SOURCE_HISTORY_READ | other));
     }
-    for unknown in (12..16).map(|bit| 1u16 << bit) {
+    for unknown in (13..16).map(|bit| 1u16 << bit) {
         let invalid = AgentCredentialGrant {
             operations: SOURCE_HISTORY_READ | unknown,
             ..history
@@ -449,7 +449,7 @@ fn candidate_work_requires_a_new_explicit_grant_without_widening_old_masks() {
         assert!(combined.validate().is_ok());
         assert!(combined.permits(SOURCE_CANDIDATES | other));
     }
-    for unknown in (12..16).map(|bit| 1u16 << bit) {
+    for unknown in (13..16).map(|bit| 1u16 << bit) {
         let invalid = AgentCredentialGrant {
             operations: SOURCE_CANDIDATES | unknown,
             ..candidate
@@ -485,7 +485,7 @@ fn milestone_scopes_are_independent_and_do_not_expand_any_retained_grant() {
             assert!(combined.validate().is_ok());
             assert!(combined.permits(scope | other));
         }
-        for unknown in (12..16).map(|bit| 1u16 << bit) {
+        for unknown in (13..16).map(|bit| 1u16 << bit) {
             let invalid = AgentCredentialGrant {
                 operations: scope | unknown,
                 ..milestone
@@ -518,7 +518,7 @@ fn required_tags_unknown_fields_and_every_truncation_fail_closed() {
     for (start, replacement) in [
         (8, u32::MAX.to_be_bytes()),
         (52, 26u32.to_be_bytes()),
-        (72, 3u32.to_be_bytes()),
+        (72, 5u32.to_be_bytes()),
         (108, 3u32.to_be_bytes()),
     ] {
         let mut changed = bytes.clone();
@@ -544,6 +544,147 @@ fn required_tags_unknown_fields_and_every_truncation_fail_closed() {
         &[
             0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 4, 1
         ]
+    );
+}
+
+fn source_scope(paths: &[&[u8]]) -> SourcePublicationScope {
+    SourcePublicationScope::new(
+        "exact:726566732f68656164732f6167656e74",
+        paths.iter().map(|path| path.to_vec()).collect(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn source_publication_requires_its_new_bit_and_explicit_extended_scope() {
+    let id = AgentCredentialId::try_new([9; 32]).unwrap();
+    let source = AgentCredentialGrant {
+        operations: SOURCE_PUBLISH,
+        ..grant()
+    };
+    let historical = AgentCredentialGrant {
+        operations: 0x0fff,
+        ..grant()
+    };
+    assert!(!historical.permits(SOURCE_PUBLISH));
+    for other in (0..12).map(|bit| 1u16 << bit) {
+        assert!(!source.permits(other));
+    }
+    for action in [
+        AgentCredentialAction::Issue(source),
+        AgentCredentialAction::IssueSource {
+            grant: historical,
+            scope: source_scope(&[b"src"]),
+        },
+    ] {
+        assert_eq!(
+            AgentCredentialCommand {
+                id,
+                expected_version: ExpectedVersion::NewStream,
+                action,
+            }
+            .proposed_event(source.sponsor),
+            Err(RefusalCode::EvidenceInvalid)
+        );
+    }
+    let issued = AgentCredentialCommand {
+        id,
+        expected_version: ExpectedVersion::NewStream,
+        action: AgentCredentialAction::IssueSource {
+            grant: source,
+            scope: source_scope(&[b"src"]),
+        },
+    }
+    .proposed_event(source.sponsor)
+    .unwrap();
+    let original = apply_event(None, &issued).unwrap();
+    assert_eq!(original.source_scope, Some(source_scope(&[b"src"])));
+    assert!(!original.grant.permits(SOURCE_READ | SOURCE_CANDIDATES));
+    let mut legacy_bytes = Encoder::new();
+    issue().write_payload(&mut legacy_bytes).unwrap();
+    assert_eq!(legacy_bytes.as_bytes().len(), 178);
+    assert_eq!(&legacy_bytes.as_bytes()[72..76], &1u32.to_be_bytes());
+}
+
+#[test]
+fn source_issue_and_revocation_round_trip_and_pin_every_attenuation() {
+    let grant = AgentCredentialGrant {
+        operations: SOURCE_PUBLISH | SOURCE_READ,
+        ..grant()
+    };
+    let scope = source_scope(&[b"src", b"data/\xff"]);
+    let issued = AgentCredentialCommand {
+        id: AgentCredentialId::try_new([9; 32]).unwrap(),
+        expected_version: ExpectedVersion::NewStream,
+        action: AgentCredentialAction::issuance(grant, Some(scope.clone())),
+    }
+    .proposed_event(grant.sponsor)
+    .unwrap();
+    let original = apply_event(None, &issued).unwrap();
+    let revoke = |scope| {
+        AgentCredentialCommand {
+            id: original.id,
+            expected_version: ExpectedVersion::Exactly(AggregateVersion::FIRST),
+            action: AgentCredentialAction::revocation(grant, Some(scope)),
+        }
+        .proposed_event(grant.sponsor)
+        .unwrap()
+    };
+    let revoked = revoke(scope.clone());
+    for (event, tag) in [(&issued, 3u32), (&revoked, 4)] {
+        let frame = encode_body(event).unwrap();
+        assert_eq!(
+            decode_body::<ForgeEvent>(&frame, DecodeLimits::DEFAULT).unwrap(),
+            *event
+        );
+        let mut bytes = Encoder::new();
+        event.write_payload(&mut bytes).unwrap();
+        assert_eq!(&bytes.as_bytes()[72..76], &tag.to_be_bytes());
+        assert_eq!(&bytes.as_bytes()[176..178], &grant.operations.to_be_bytes());
+        for end in 0..bytes.as_bytes().len() {
+            assert!(
+                ForgeEvent::read_payload(&mut Decoder::new(
+                    &bytes.as_bytes()[..end],
+                    DecodeLimits::DEFAULT,
+                ))
+                .is_err(),
+                "source action {tag}, truncation {end}"
+            );
+        }
+        // A newer source grant cannot be reinterpreted as a legacy flat grant.
+        let mut downgraded = bytes.into_bytes();
+        downgraded[72..76].copy_from_slice(&(tag - 2).to_be_bytes());
+        assert!(
+            ForgeEvent::read_payload(&mut Decoder::new(&downgraded, DecodeLimits::DEFAULT,))
+                .is_err()
+        );
+    }
+    let final_state = apply_event(Some(&original), &revoked).unwrap();
+    assert!(final_state.revoked);
+    assert_eq!(final_state.source_scope, original.source_scope);
+    assert_eq!(final_state.grant, original.grant);
+    for replacement in [source_scope(&[b"src"]), source_scope(&[b""])] {
+        assert_eq!(
+            apply_event(Some(&original), &revoke(replacement)),
+            Err(RefusalCode::EvidenceStale)
+        );
+    }
+    let other_ref = SourcePublicationScope::new(
+        "exact:726566732f68656164732f6d61696e",
+        scope.path_prefixes().to_vec(),
+    )
+    .unwrap();
+    assert_eq!(
+        apply_event(Some(&original), &revoke(other_ref)),
+        Err(RefusalCode::EvidenceStale)
+    );
+    assert_eq!(
+        apply_event(Some(&final_state), &issued),
+        Err(RefusalCode::EvidenceStale)
+    );
+    assert_eq!(
+        apply_event(Some(&final_state), &revoked),
+        Err(RefusalCode::EvidenceStale)
     );
 }
 

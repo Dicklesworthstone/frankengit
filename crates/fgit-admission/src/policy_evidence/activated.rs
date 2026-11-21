@@ -123,6 +123,10 @@ impl ActivatedPolicyDecisionEvidence {
                 Profile::RepositoryRefV1 | Profile::RepositoryActorIdV1,
                 None
             ) | (Profile::RepositoryAuthenticationV1, Some(_))
+                | (
+                    Profile::RepositoryPrincipalKindV1,
+                    Some(AdmissionAuthentication::AgentCredential(_))
+                )
         ) || (self.publication == RefPolicyPublication::NativeMerge
             && !self.references.review_branches.is_empty())
         {
@@ -331,7 +335,10 @@ impl ActivatedPolicyDecisionEvidence {
     ) -> Result<(), CodecRefusal> {
         if self.evaluation.profile != profile
             || !profile.accepts(&self.evaluation.snapshot)
-            || (profile == Profile::RepositoryAuthenticationV1) != self.authentication.is_some()
+            || matches!(
+                profile,
+                Profile::RepositoryAuthenticationV1 | Profile::RepositoryPrincipalKindV1
+            ) != self.authentication.is_some()
         {
             return Err(invalid("policy_decision.activated_profile"));
         }

@@ -224,10 +224,10 @@ fn canonical_agent_http_metadata_scope_revocation_and_original_outcome_provenanc
         incarnation: node.repository_incarnation_id(),
         issued_at: now - 1,
         expires_at: now + 3600,
-        operations: ALL_OPERATIONS,
+        operations: ALL_OPERATIONS & !fgit_identity::agent::SOURCE_PUBLISH,
     };
     for (token, operations, key) in [
-        (original.as_str(), ALL_OPERATIONS, "issue-http-original"),
+        (original.as_str(), ALL_OPERATIONS & !fgit_identity::agent::SOURCE_PUBLISH, "issue-http-original"),
         (read_only.as_str(), ISSUES_READ, "issue-http-read-only"),
         (write_only.as_str(), ISSUES_WRITE, "issue-http-write-only"),
     ] {

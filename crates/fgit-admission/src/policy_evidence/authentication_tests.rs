@@ -5,7 +5,7 @@ use fgit_types::{GitHashAlgorithm, GitOidSha1, GitOidSha256};
 
 const CREDENTIAL: &str = "policy release { rule credential { when actor.id == \"33333333333333333333333333333333\" and actor.authentication >= single_factor then allow } default deny \"verified credential required\" }";
 
-fn setup(
+pub(super) fn setup(
     algorithm: GitHashAlgorithm,
 ) -> (
     AdmissionContext,
@@ -27,7 +27,7 @@ fn setup(
     )
 }
 
-fn agent(context: &AdmissionContext, sponsor_kind: SponsorKind) -> AgentAuthentication {
+pub(super) fn agent(context: &AdmissionContext, sponsor_kind: SponsorKind) -> AgentAuthentication {
     AgentAuthentication::try_new(
         context.principal_id,
         PrincipalId::from_bytes([0x44; 16]),
@@ -41,7 +41,7 @@ fn agent(context: &AdmissionContext, sponsor_kind: SponsorKind) -> AgentAuthenti
     .unwrap()
 }
 
-fn with_policy(
+pub(super) fn with_policy(
     bodies: &DecisionEvidenceBodies,
     policy: PolicyDecisionRecord,
 ) -> DecisionEvidenceBodies {

@@ -4,7 +4,8 @@ use fgit_forge::{AggregateVersion, ExpectedVersion};
 use fgit_identity::agent::{
     AgentCredentialGrant, AgentCredentialId, DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ,
     ISSUES_WRITE, MILESTONES_READ, MILESTONES_WRITE, OUTCOMES_READ, PULLS_READ, PULLS_WRITE,
-    SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_READ, SponsorKind,
+    SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ, SourcePublicationScope,
+    SponsorKind,
 };
 use fgit_types::{GitHashAlgorithm, PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
 use std::{collections::BTreeMap, path::PathBuf};
@@ -29,6 +30,7 @@ pub(super) enum Operation {
         principal: PrincipalId,
         key: IdempotencyKey,
         grant: AgentCredentialGrant,
+        source_scope: Option<SourcePublicationScope>,
         token_file: PathBuf,
     },
     Revoke {
@@ -81,6 +83,7 @@ fn operations(value: &str) -> Result<u16, String> {
             "source-candidates" => SOURCE_CANDIDATES,
             "milestones-read" => MILESTONES_READ,
             "milestones-write" => MILESTONES_WRITE,
+            "source-publish" => SOURCE_PUBLISH,
             _ => return Err("unknown or unsupported agent credential operation".into()),
         };
         if result & bit != 0 {
@@ -93,8 +96,8 @@ fn operations(value: &str) -> Result<u16, String> {
 
 pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     if args.is_empty()
-        || args.len() > 40
-        || args.iter().any(|arg| arg.len() > 4096)
+        || args.len() > 170
+        || args.iter().any(|arg| arg.len() > 8704)
         || args.iter().map(String::len).sum::<usize>() > 32768
     {
         return Err(USAGE.into());
@@ -118,6 +121,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     let repository = RepositoryId::from_hex(&args[3]).map_err(|_| "invalid repository ID")?;
     let operation = args[0].as_str();
     let mut fields = BTreeMap::new();
+    let mut source_paths = Vec::new();
     let mut trusted = false;
     let mut index = 4;
     while index < args.len() {
@@ -143,6 +147,8 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
                         | "--issued-at"
                         | "--expires-at"
                         | "--operations"
+                        | "--source-ref-scope"
+                        | "--source-path-hex"
                 ));
         if !allowed {
             return Err("unknown or inapplicable agent-credential option".into());
@@ -151,6 +157,38 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
             .get(index)
             .ok_or("missing agent-credential option value")?;
         index += 1;
+        if flag == "--source-path-hex" {
+            if source_paths.len() == fgit_forge::event::agent_credential::MAX_SOURCE_PATH_PREFIXES
+                || value.len() > 2 * fgit_forge::event::agent_credential::MAX_SOURCE_PATH_BYTES
+                || !value.len().is_multiple_of(2)
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(
+                    "source paths must be bounded lowercase hexadecimal native prefixes".into(),
+                );
+            }
+            source_paths.push(
+                value
+                    .as_bytes()
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| {
+                        let digit = |byte: u8| {
+                            if byte <= b'9' {
+                                byte - b'0'
+                            } else {
+                                byte - b'a' + 10
+                            }
+                        };
+                        (digit(pair[0]) << 4) | digit(pair[1])
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            continue;
+        }
         if value.is_empty() || fields.insert(flag, value.as_str()).is_some() {
             return Err("empty or duplicate agent-credential option".into());
         }
@@ -205,10 +243,22 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
             grant
                 .validate()
                 .map_err(|error| format!("invalid agent grant: {error}"))?;
+            let source_scope = if grant.permits(SOURCE_PUBLISH) {
+                Some(
+                    SourcePublicationScope::new(get("--source-ref-scope")?, source_paths)
+                        .map_err(|error| format!("invalid source publication scope: {error}"))?,
+                )
+            } else {
+                if fields.contains_key("--source-ref-scope") || !source_paths.is_empty() {
+                    return Err("source scope options require the source-publish operation".into());
+                }
+                None
+            };
             Operation::Issue {
                 principal,
                 key,
                 grant,
+                source_scope,
                 token_file: get("--token-file")?.into(),
             }
         } else {

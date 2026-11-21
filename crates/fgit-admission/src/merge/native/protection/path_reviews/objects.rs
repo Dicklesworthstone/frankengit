@@ -10,13 +10,62 @@ use fgit_types::{GitHashAlgorithm, GitOid, RefusalCode};
 
 use super::{
     MAX_MERGE_CHANGED_PATH_BYTES, MAX_MERGE_CHANGED_PATHS, MAX_MERGE_PATH_BYTES,
-    MAX_MERGE_PATH_DEPTH, VerifiedMergePaths,
+    MAX_MERGE_PATH_DEPTH, VerifiedMergePaths, VerifiedSourcePaths,
 };
 use crate::ProjectionFailure;
 use crate::merge::native::objects::{
     MAX_REBASE_MERGE_COMMIT_BYTES, MAX_REBASE_MERGE_COMMITS, MAX_REUSED_BLOB_BYTES,
     MergeObjectLimits,
 };
+
+/// Verify one exact single-parent source transition and all of its changed
+/// native paths. Reuses the merge path walk, including deletions, mode changes,
+/// both rename sides, directory replacement and gitlinks. No blob rendering or
+/// caller-supplied path summary participates in authorization.
+pub fn verify_source_paths(
+    source: &impl CanonicalObjectSource,
+    before: GitOid,
+    after: GitOid,
+    limits: MergeObjectLimits,
+    live: &mut impl FnMut() -> bool,
+) -> Result<VerifiedSourcePaths, ProjectionFailure> {
+    checkpoint(live)?;
+    if before.is_zero()
+        || after.is_zero()
+        || before == after
+        || before.algorithm() != after.algorithm()
+    {
+        return Err(invalid());
+    }
+    validate_limits(limits)?;
+    let mut walk = Walk {
+        source,
+        live,
+        format: after.algorithm(),
+        limits,
+        objects: 0,
+        bytes: 0,
+        entries: 0,
+        changed_bytes: 0,
+        changed: Vec::new(),
+        unique: None,
+        pending: Vec::new(),
+        pending_bytes: 0,
+    };
+    let before_tree = walk.commit_tree(before)?;
+    let (after_tree, parent) = walk.rebase_commit(after)?;
+    if parent != before {
+        return Err(invalid());
+    }
+    walk.compare_trees(before_tree, after_tree)?;
+    checkpoint(walk.live)?;
+    walk.changed.sort_unstable();
+    Ok(VerifiedSourcePaths {
+        before,
+        after,
+        changed_paths: walk.changed,
+    })
+}
 
 /// Compare the actual target-before and candidate commit trees. Every loaded
 /// commit/tree is independently hashed; identical subtree identities require

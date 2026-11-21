@@ -20,6 +20,7 @@ usage: fg agent-credential issue <storage-root> <tenant-id> <repository-id>
   --sponsor-kind human|service --token-file <private-file>
   --issued-at <unix-seconds> --expires-at <unix-seconds>
   --operations <comma-separated-scopes> --idempotency-key <key>
+  [--source-ref-scope <finite-hex-ref-selectors> --source-path-hex <hex-prefix> ...]
   [--object-format sha1|sha256]
 usage: fg agent-credential revoke <storage-root> <tenant-id> <repository-id>
   --trusted-local --incarnation <id> --principal <administrator-id>
@@ -31,14 +32,20 @@ usage: fg agent-credential show <storage-root> <tenant-id> <repository-id>
 
 Scopes: issues-read, issues-write, pulls-read, pulls-write,
         discussions-read, discussions-write, outcomes-read, source-read,
-        source-history-read, source-candidates, milestones-read, milestones-write.
+        source-history-read, source-candidates, milestones-read, milestones-write,
+        source-publish.
 source-read permits current source browsing, ref/tag discovery, search and context.
 source-history-read permits bounded history, blame, historical files and reference diffs.
 source-candidates permits bounded HTTP exact-patch preparation and bundle inspection.
 milestones-read permits milestone metadata, history and same-snapshot issue counts.
 milestones-write permits opening, editing, closing and reopening milestones.
 Issue milestone assignments still require issues-write.
-Every scope is independent. This initial profile cannot grant source/Git writes,
+source-publish permits single-parent source candidate application within an explicit
+finite ref/path ceiling; it requires both source scope options. Ref selectors use
+exact:<lowercase-native-ref-hex> or prefix:<slash-terminated-namespace-hex>, comma-separated.
+Path selectors are repeatable lowercase native path hex; src covers src and src/*,
+not src-other. A sole --source-path-hex '' explicitly permits the whole tree.
+Every scope is independent. This profile cannot grant arbitrary Git transport,
 reviews, merges, policy administration, secrets or external effects.
 Canonical credentials authenticate an agent and its explicitly attested sponsor;
 the request host must additionally enforce a bounded sponsored IntentRun.
@@ -77,14 +84,17 @@ fn run_to(args: &[String], out: &mut impl Write) -> Result<u8, String> {
     // Validate secret input before opening repository resources. The secret is
     // immediately reduced to its digest and never enters command receipts.
     let issue = if let Operation::Issue {
-        grant, token_file, ..
+        grant,
+        source_scope,
+        token_file,
+        ..
     } = &options.operation
     {
         let bearer = token::read(token_file)?;
         Some(AgentCredentialCommand {
             id: agent_credential_id(&bearer).map_err(|error| error.to_string())?,
             expected_version: fgit_forge::ExpectedVersion::NewStream,
-            action: AgentCredentialAction::Issue(*grant),
+            action: AgentCredentialAction::issuance(*grant, source_scope.clone()),
         })
     } else {
         None
@@ -138,7 +148,10 @@ fn run_to(args: &[String], out: &mut impl Write) -> Result<u8, String> {
                         AgentCredentialCommand {
                             id: *id,
                             expected_version: *expected_version,
-                            action: AgentCredentialAction::Revoke(state.grant),
+                            action: AgentCredentialAction::revocation(
+                                state.grant,
+                                state.source_scope,
+                            ),
                         }
                     }
                     Operation::Show { .. } => return Err("credential operation mismatch".into()),

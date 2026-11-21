@@ -56,11 +56,68 @@ fn bearer_authentication_retains_agent_sponsor_and_exact_independent_ceiling() {
         SOURCE_CANDIDATES,
         MILESTONES_READ,
         MILESTONES_WRITE,
+        SOURCE_PUBLISH,
         1 << 15,
     ] {
         assert_eq!(
             authenticated.authorize(operation),
             Err(AgentCredentialRefusal::OperationNotGranted)
+        );
+    }
+}
+
+#[test]
+fn source_publication_is_explicit_and_retains_full_authentication_contract() {
+    let source = AgentCredentialGrant {
+        operations: SOURCE_PUBLISH,
+        ..grant()
+    };
+    let authenticated = authenticate(&source, BEARER, 100, RevocationEvidence::Live).unwrap();
+    assert_eq!(authenticated.authorize(SOURCE_PUBLISH), Ok(()));
+    for operation in (0..16)
+        .map(|bit| 1u16 << bit)
+        .filter(|bit| *bit != SOURCE_PUBLISH)
+    {
+        assert_eq!(
+            authenticated.authorize(operation),
+            Err(AgentCredentialRefusal::OperationNotGranted)
+        );
+    }
+    let old = AgentCredentialGrant {
+        operations: 0x0fff,
+        ..source
+    };
+    assert_eq!(
+        authenticate(&old, BEARER, 100, RevocationEvidence::Live)
+            .unwrap()
+            .authorize(SOURCE_PUBLISH),
+        Err(AgentCredentialRefusal::OperationNotGranted)
+    );
+    for (now, revocation, expected) in [
+        (
+            99,
+            RevocationEvidence::Live,
+            AgentCredentialRefusal::NotYetValid,
+        ),
+        (
+            200,
+            RevocationEvidence::Live,
+            AgentCredentialRefusal::Expired,
+        ),
+        (
+            100,
+            RevocationEvidence::Revoked,
+            AgentCredentialRefusal::Revoked,
+        ),
+        (
+            100,
+            RevocationEvidence::NotChecked,
+            AgentCredentialRefusal::RevocationEvidenceRequired,
+        ),
+    ] {
+        assert_eq!(
+            authenticate(&source, BEARER, now, revocation),
+            Err(expected)
         );
     }
 }

@@ -1,8 +1,9 @@
-//! Canonical sponsored authentication for bounded source reads and forge metadata.
+//! Canonical sponsored authentication for bounded source work and forge metadata.
 //!
 //! These immutable grants identify an agent and its operator-attested sponsor.
-//! They do not authorize code publication, reviews, merges, administration, or an
-//! agent run.
+//! Source publication additionally requires an explicit immutable ref/path
+//! ceiling. Grants never authorize reviews, merges, administration, or an agent
+//! run by themselves.
 //! A host must additionally establish and enforce its sponsored IntentRun before
 //! using any granted operation. Issuance and revocation become authoritative
 //! only when ordinary repository admission selects these events.
@@ -11,6 +12,9 @@ use super::{ForgeEvent, ForgeEventPayload, invalid_native};
 use crate::{AggregateId, AggregateVersion, ExpectedVersion};
 use fgit_codec::{CodecRefusal, Decoder, Encoder};
 use fgit_types::{PrincipalId, RefusalCode, RepositoryId, RepositoryIncarnationId, TenantId};
+
+mod source_scope;
+pub use source_scope::{MAX_SOURCE_PATH_BYTES, MAX_SOURCE_PATH_PREFIXES, SourcePublicationScope};
 
 pub const ISSUES_READ: u16 = 1 << 0;
 pub const ISSUES_WRITE: u16 = 1 << 1;
@@ -39,7 +43,10 @@ pub const MILESTONES_READ: u16 = 1 << 10;
 /// Open, edit, close and reopen native milestones. Issue membership changes
 /// still require ISSUES_WRITE; this scope grants neither issue nor milestone reads.
 pub const MILESTONES_WRITE: u16 = 1 << 11;
-pub const ALL_OPERATIONS: u16 = (1 << 12) - 1;
+/// Apply an inspected single-parent source candidate within the explicit
+/// immutable ref/path ceiling. This grants no arbitrary Git push or merge.
+pub const SOURCE_PUBLISH: u16 = 1 << 12;
+pub const ALL_OPERATIONS: u16 = (1 << 13) - 1;
 /// A grant cannot survive indefinitely without a new sponsor decision.
 pub const MAX_LIFETIME_SECONDS: u64 = 30 * 24 * 60 * 60;
 const LABEL_ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
@@ -249,23 +256,70 @@ impl AgentCredentialGrant {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AgentCredentialAction {
     Issue(AgentCredentialGrant),
     /// Permanent tombstone retaining the original grant at the current frontier.
     Revoke(AgentCredentialGrant),
+    /// Extended issuance; legacy issue/revoke encodings remain unchanged.
+    IssueSource {
+        grant: AgentCredentialGrant,
+        scope: SourcePublicationScope,
+    },
+    /// Permanent revocation retains the complete original source ceiling.
+    RevokeSource {
+        grant: AgentCredentialGrant,
+        scope: SourcePublicationScope,
+    },
 }
 
 impl AgentCredentialAction {
     #[must_use]
     pub const fn grant(&self) -> &AgentCredentialGrant {
         match self {
-            Self::Issue(grant) | Self::Revoke(grant) => grant,
+            Self::Issue(grant)
+            | Self::Revoke(grant)
+            | Self::IssueSource { grant, .. }
+            | Self::RevokeSource { grant, .. } => grant,
+        }
+    }
+
+    #[must_use]
+    pub const fn source_scope(&self) -> Option<&SourcePublicationScope> {
+        match self {
+            Self::IssueSource { scope, .. } | Self::RevokeSource { scope, .. } => Some(scope),
+            Self::Issue(_) | Self::Revoke(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_issue(&self) -> bool {
+        matches!(self, Self::Issue(_) | Self::IssueSource { .. })
+    }
+
+    #[must_use]
+    pub const fn is_revocation(&self) -> bool {
+        matches!(self, Self::Revoke(_) | Self::RevokeSource { .. })
+    }
+
+    #[must_use]
+    pub fn issuance(grant: AgentCredentialGrant, scope: Option<SourcePublicationScope>) -> Self {
+        match scope {
+            Some(scope) => Self::IssueSource { grant, scope },
+            None => Self::Issue(grant),
+        }
+    }
+
+    #[must_use]
+    pub fn revocation(grant: AgentCredentialGrant, scope: Option<SourcePublicationScope>) -> Self {
+        match scope {
+            Some(scope) => Self::RevokeSource { grant, scope },
+            None => Self::Revoke(grant),
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NativeAgentCredentialEvent {
     pub actor: PrincipalId,
     pub action: AgentCredentialAction,
@@ -277,10 +331,14 @@ impl NativeAgentCredentialEvent {
             return Err(invalid_native("agent_credential.actor"));
         }
         self.action.grant().validate()?;
-        if let AgentCredentialAction::Issue(grant) = self.action {
-            if self.actor != grant.sponsor {
-                return Err(invalid_native("agent_credential.sponsor_actor"));
-            }
+        if self.action.grant().permits(SOURCE_PUBLISH) != self.action.source_scope().is_some() {
+            return Err(invalid_native("agent_credential.source_scope_required"));
+        }
+        if let Some(scope) = self.action.source_scope() {
+            scope.validate()?;
+        }
+        if self.action.is_issue() && self.actor != self.action.grant().sponsor {
+            return Err(invalid_native("agent_credential.sponsor_actor"));
         }
         Ok(())
     }
@@ -288,7 +346,7 @@ impl NativeAgentCredentialEvent {
     pub(super) fn write(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
         self.validate()?;
         out.write_opaque_id(self.actor.as_bytes());
-        match self.action {
+        match &self.action {
             AgentCredentialAction::Issue(grant) => {
                 out.write_scalar(1u32);
                 grant.write(out)?;
@@ -296,6 +354,16 @@ impl NativeAgentCredentialEvent {
             AgentCredentialAction::Revoke(grant) => {
                 out.write_scalar(2u32);
                 grant.write(out)?;
+            }
+            AgentCredentialAction::IssueSource { grant, scope } => {
+                out.write_scalar(3u32);
+                grant.write(out)?;
+                scope.write(out)?;
+            }
+            AgentCredentialAction::RevokeSource { grant, scope } => {
+                out.write_scalar(4u32);
+                grant.write(out)?;
+                scope.write(out)?;
             }
         }
         Ok(())
@@ -307,6 +375,14 @@ impl NativeAgentCredentialEvent {
         let action = match input.read_scalar::<u32>("agent_credential.action")? {
             1 => AgentCredentialAction::Issue(AgentCredentialGrant::read(input)?),
             2 => AgentCredentialAction::Revoke(AgentCredentialGrant::read(input)?),
+            3 => AgentCredentialAction::IssueSource {
+                grant: AgentCredentialGrant::read(input)?,
+                scope: SourcePublicationScope::read(input)?,
+            },
+            4 => AgentCredentialAction::RevokeSource {
+                grant: AgentCredentialGrant::read(input)?,
+                scope: SourcePublicationScope::read(input)?,
+            },
             observed => {
                 return Err(CodecRefusal::VariantUnknown {
                     field: "agent_credential.action",
@@ -321,7 +397,7 @@ impl NativeAgentCredentialEvent {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentCredentialCommand {
     pub id: AgentCredentialId,
     pub expected_version: ExpectedVersion,
@@ -341,7 +417,7 @@ impl AgentCredentialCommand {
             version,
             payload: ForgeEventPayload::AgentCredentialChangedNative(NativeAgentCredentialEvent {
                 actor,
-                action: self.action,
+                action: self.action.clone(),
             }),
         };
         validate_event(&event).map_err(|_| RefusalCode::EvidenceInvalid)?;
@@ -350,11 +426,12 @@ impl AgentCredentialCommand {
 }
 
 /// Derived state of exactly one canonical issue/revoke stream.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentCredentialSnapshot {
     pub id: AgentCredentialId,
     pub version: AggregateVersion,
     pub grant: AgentCredentialGrant,
+    pub source_scope: Option<SourcePublicationScope>,
     pub revoked: bool,
     pub last_actor: PrincipalId,
 }
@@ -370,10 +447,7 @@ pub(super) fn validate_event(event: &ForgeEvent) -> Result<(), CodecRefusal> {
     }
     if let ForgeEventPayload::AgentCredentialChangedNative(change) = &event.payload {
         change.validate()?;
-        let required_version = match change.action {
-            AgentCredentialAction::Issue(_) => 1,
-            AgentCredentialAction::Revoke(_) => 2,
-        };
+        let required_version = if change.action.is_issue() { 1 } else { 2 };
         if event.version.get() != required_version {
             return Err(invalid_native("agent_credential.aggregate_version"));
         }
@@ -393,25 +467,28 @@ pub fn apply_event(
     else {
         return Err(RefusalCode::EvidenceInvalid);
     };
-    match (previous, change.action) {
-        (None, AgentCredentialAction::Issue(grant)) => Ok(AgentCredentialSnapshot {
+    match previous {
+        None if change.action.is_issue() => Ok(AgentCredentialSnapshot {
             id,
             version: event.version,
-            grant,
+            grant: *change.action.grant(),
+            source_scope: change.action.source_scope().cloned(),
             revoked: false,
             last_actor: change.actor,
         }),
-        (Some(previous), AgentCredentialAction::Revoke(grant))
-            if previous.id == id
+        Some(previous)
+            if change.action.is_revocation()
+                && previous.id == id
                 && !previous.revoked
-                && previous.grant == grant
+                && previous.grant == *change.action.grant()
+                && previous.source_scope.as_ref() == change.action.source_scope()
                 && previous.version.is_immediate_predecessor_of(event.version) =>
         {
             Ok(AgentCredentialSnapshot {
                 version: event.version,
                 revoked: true,
                 last_actor: change.actor,
-                ..*previous
+                ..previous.clone()
             })
         }
         _ => Err(RefusalCode::EvidenceStale),
