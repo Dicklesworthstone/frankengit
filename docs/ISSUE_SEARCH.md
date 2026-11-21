@@ -78,6 +78,17 @@ read quota and leaves writer permits and mutation quotas available to writes.
 GET list/history bodies remain forbidden. Transport or quota refusal does not
 create a transaction or imply an unknown mutation outcome.
 
+## Browser adapter
+
+The existing `/ui/issues/` triage form exposes the same exact-principal and
+`none` assignment predicates through its **Assigned principal** field. Leave it
+blank to include both assigned and unassigned issues. History pages also link
+to searches for a displayed assignee or for unassigned issues at that history's
+snapshot. Continuation retains the original predicate, head and candidate
+cursor even if the form changes. The browser validates the echoed assignment
+predicate and each row's assignment membership before displaying results.
+See [browser issue triage](BROWSER_ISSUE_TRIAGE.md) for cancellation and bounds.
+
 ## MCP adapter
 
 `frankengit_issue_search` is available with the existing issue-read launch grant.

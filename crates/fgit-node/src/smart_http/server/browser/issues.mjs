@@ -227,12 +227,17 @@ export function issueHistory(reply, number, { after = 0, limit = 20, head = null
 // A frozen copy prevents edits to a form/array from changing an in-flight query.
 export function issueSearchQuery(input = {}) {
   object(input);
-  if (Object.keys(input).some(key => !['state', 'opened_by', 'labels', 'text', 'case_sensitive', 'milestone'].includes(key))) {
+  if (Object.keys(input).some(key => !['state', 'opened_by', 'labels', 'text', 'case_sensitive', 'milestone', 'assignee'].includes(key))) {
     fail('Unknown issue search field.');
   }
   const state = input.state ?? null, opened_by = input.opened_by ?? null;
   const needle = input.text ?? null, case_sensitive = input.case_sensitive ?? false;
   const milestone = input.milestone ?? null;
+  const assignee = input.assignee ?? null;
+  if (assignee !== null && assignee !== 'none' &&
+      (typeof assignee !== 'string' || !/^[0-9a-f]{32}$/.test(assignee))) {
+    fail('Issue assignee must be none or a 32-character lowercase hexadecimal principal ID.');
+  }
   if (milestone !== null && milestone !== 'none') natural(milestone, 'milestone filter', 1);
   if (state !== null && !['open', 'closed'].includes(state)) fail('Invalid issue search state.');
   if (opened_by !== null && (typeof opened_by !== 'string' || !/^[0-9a-f]{32}$/.test(opened_by))) {
@@ -246,6 +251,7 @@ export function issueSearchQuery(input = {}) {
     fail('Case-sensitive matching requires literal search text.');
   }
   return Object.freeze({ state, opened_by, text: needle, case_sensitive, ...(milestone === null ? {} : { milestone }),
+    ...(assignee === null ? {} : { assignee }),
     labels: Object.freeze(checkedLabels(input.labels ?? [])) });
 }
 function searchParameters({ after = 0, limit = 20, head = null, maxScan = 200 } = {}) {
@@ -256,6 +262,11 @@ function searchParameters({ after = 0, limit = 20, head = null, maxScan = 200 } 
   return { after, limit, head, maxScan };
 }
 function matchesSearch(row, query) {
+  // Older snapshots predate assignments. A malformed present array is rejected
+  // by issueState before this predicate; only an absent field means empty.
+  const assignees = row.assignees ?? [];
+  if (query.assignee !== undefined && (query.assignee === 'none'
+    ? assignees.length !== 0 : !assignees.includes(query.assignee))) return false;
   if (query.milestone !== undefined && issueMilestone(row) !== (query.milestone === 'none' ? null : query.milestone)) return false;
   if ((query.state !== null && row.state !== query.state) ||
       (query.opened_by !== null && row.opened_by !== query.opened_by) ||
@@ -278,6 +289,7 @@ export function issueSearchPage(reply, input, options = {}) {
       echo.text_scope !== 'title_or_body' || echo.state !== query.state ||
       echo.opened_by !== query.opened_by || echo.text !== query.text ||
       (echo.milestone ?? null) !== (query.milestone ?? null) ||
+      (echo.assignee ?? null) !== (query.assignee ?? null) ||
       echo.case_sensitive !== query.case_sensitive || reply.refs_changed !== false ||
       reply.transaction_created !== false) fail('Issue search response changed its predicate or read-only contract.');
   checkedLabels(echo.labels, true);
@@ -549,6 +561,7 @@ export class IssueClient {
     if (query.text !== null) body.append('query', query.text);
     if (query.opened_by !== null) body.append('opened_by', query.opened_by);
     if (query.milestone !== undefined) body.append('milestone', String(query.milestone));
+    if (query.assignee !== undefined) body.append('assignee', query.assignee);
     for (const label of query.labels) body.append('label', label);
     if (head !== null) body.append('expected_head', head);
     const raw = await this.#request('issues/search', { method: 'POST', body: body.toString(), view: true });

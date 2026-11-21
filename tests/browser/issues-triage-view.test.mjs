@@ -55,15 +55,17 @@ function historyReply() {
 }
 
 test('triage form sends the native AND predicate and a bounded read only', async () => {
-  const query = { state: 'open', text: 'HTTP', opened_by: actor, labels: ['bug'], case_sensitive: false };
-  const ui = await setup(() => json(searchPage({}, query)));
+  const query = { state: 'open', text: 'HTTP', opened_by: actor, assignee: actor, labels: ['bug'], case_sensitive: false };
+  const ui = await setup(() => json(searchPage({ issues: [issue(1, { assignees: [actor] })] }, query)));
   ui.get('issue-search-query').value = 'HTTP'; ui.get('issue-search-state').value = 'open';
   ui.get('issue-search-opener').value = actor; ui.get('issue-search-labels').value = 'bug';
+  ui.get('issue-search-assignee').value = actor;
   await ui.get('issue-search').fire('submit');
   assert.equal(ui.calls.length, 1);
   const call = ui.calls[0], form = new URLSearchParams(call.body);
   assert.equal(form.get('state'), 'open'); assert.equal(form.get('query'), 'HTTP');
   assert.deepEqual(form.getAll('label'), ['bug']); assert.equal(form.get('opened_by'), actor);
+  assert.equal(form.get('assignee'), actor);
   assert.equal(form.get('max_scan'), '200'); assert.equal(form.get('limit'), '20');
   assert.equal(call.headers['Idempotency-Key'], undefined); assert.equal(call.url.includes(token), false);
   assert.match(ui.get('issue-content').textContent, /Applied filters/);
@@ -72,21 +74,24 @@ test('triage form sends the native AND predicate and a bounded read only', async
 });
 
 test('empty limited scans continue with frozen filters, native cursor and original head', async () => {
-  const query = { text: 'original', labels: ['bug'] };
+  const query = { text: 'original', labels: ['bug'], assignee: 'none' };
   const ui = await setup((_call, count) => json(count === 1
     ? searchPage({ issues: [], scanned: 200, complete: false, stop_reason: 'scan_limit',
       has_more_candidates: true, next_after: 350 }, query)
     : searchPage({ issues: [], after: 350 }, query)));
   ui.get('issue-search-query').value = 'original'; ui.get('issue-search-labels').value = 'bug';
+  ui.get('issue-search-assignee').value = 'none';
   await ui.get('issue-search').fire('submit');
   assert.match(ui.get('issue-content').textContent, /Unexamined candidates remain/);
   assert.match(ui.get('issue-status').textContent, /another match is not guaranteed/);
   ui.get('issue-search-query').value = 'changed'; ui.get('issue-search-labels').value = 'later';
+  ui.get('issue-search-assignee').value = actor;
   ui.get('issue-search-scan').value = '10';
   await button(ui.get('issue-paging'), 'Continue searching').fire('click');
   const next = new URLSearchParams(ui.calls[1].body);
   assert.equal(next.get('after'), '350'); assert.equal(next.get('expected_head'), head);
   assert.equal(next.get('query'), 'original'); assert.deepEqual(next.getAll('label'), ['bug']);
+  assert.equal(next.get('assignee'), 'none');
   assert.equal(next.get('max_scan'), '200'); assert.equal(ui.get('issue-paging').children.length, 0);
   assert.match(ui.get('issue-content').textContent, /remaining snapshot suffix/);
   assert.match(ui.get('issue-status').textContent, /Search complete/);
@@ -120,9 +125,10 @@ test('disconnect clears private filters and late results but preserves the pendi
   const before = ui.client.pending;
   ui.get('issue-search-query').value = 'private query'; ui.get('issue-search-labels').value = 'private label';
   ui.get('issue-search-opener').value = actor;
+  ui.get('issue-search-assignee').value = actor;
   const search = ui.view.search({});
   ui.view.disconnect(); pending.resolve(json(searchPage())); await search;
-  for (const id of ['issue-search-query', 'issue-search-labels', 'issue-search-opener']) assert.equal(ui.get(id).value, '');
+  for (const id of ['issue-search-query', 'issue-search-labels', 'issue-search-opener', 'issue-search-assignee']) assert.equal(ui.get(id).value, '');
   assert.equal(ui.get('issue-content').textContent, ''); assert.match(ui.get('issue-status').textContent, /Disconnected/);
   assert.deepEqual(ui.client.pending, before); assert.equal(ui.client.connected, false);
 });
@@ -183,4 +189,76 @@ test('the existing explicit publication workflow still clears stale search resul
   assert.match(ui.get('issue-status').textContent, /Committed/);
   assert.equal(ui.calls[1].headers['Idempotency-Key'], key);
   assert.equal(new URLSearchParams(ui.calls[1].body).get('body'), 'private prepared draft');
+});
+
+test('unassigned triage and a blank assignment field remain different explicit searches', async () => {
+  const ui = await setup((_call, count) => json(searchPage({}, count === 1 ? { assignee: 'none' } : {})));
+  ui.get('issue-search-assignee').value = 'none';
+  await ui.get('issue-search').fire('submit');
+  assert.equal(new URLSearchParams(ui.calls[0].body).get('assignee'), 'none');
+  assert.match(ui.get('issue-content').textContent, /"assignee":"none"/);
+  ui.get('issue-search-assignee').value = '';
+  await ui.get('issue-search').fire('submit');
+  assert.equal(new URLSearchParams(ui.calls[1].body).has('assignee'), false);
+  assert.ok(!ui.get('issue-content').textContent.includes('"assignee"'));
+});
+
+test('issue assignment shortcuts preserve the issue snapshot and never mutate a draft', async () => {
+  for (const assignees of [[actor, 'e'.repeat(32)], []]) {
+    const history = historyReply();
+    history.issue.assignees = assignees;
+    if (assignees.length) {
+      history.issue.version = 2;
+      history.events.push({ version: 2, actor, action: { name: 'assign', assignees } });
+    }
+    const selected = assignees.at(-1) ?? 'none';
+    const ui = await setup(call => json(call.url.endsWith('/search')
+      ? searchPage({ issues: [issue(1, { assignees })] }, { assignee: selected }) : history), true);
+    const pending = ui.client.pending;
+    await ui.view.read(1);
+    await button(ui.get('issue-content'), selected === 'none' ? 'Find unassigned issues' : `Find issues assigned to ${selected}`).fire('click');
+    assert.equal(ui.calls.length, 2);
+    const request = ui.calls[1], form = new URLSearchParams(request.body);
+    assert.equal(form.get('assignee'), selected); assert.equal(form.get('expected_head'), head);
+    assert.equal(form.get('after'), '0'); assert.equal(form.get('max_scan'), '200');
+    assert.equal(form.has('principal'), false); assert.equal(request.headers['Idempotency-Key'], undefined);
+    assert.deepEqual(ui.client.pending, pending); assert.equal(ui.client.pending.sent, false);
+    assert.match(ui.get('issue-status').textContent, /Search complete/);
+  }
+});
+
+test('detached assignment shortcuts cannot revive an old snapshot or disconnected session', async () => {
+  const ui = await setup(call => json(call.url.includes('/issues/1?') ? historyReply() : listReply()));
+  await ui.view.read(1);
+  const stale = button(ui.get('issue-content'), 'Find unassigned issues');
+  await ui.view.read(null);
+  await stale.fire('click'); assert.equal(ui.calls.length, 2);
+  await ui.view.read(1);
+  const disconnected = button(ui.get('issue-content'), 'Find unassigned issues');
+  ui.view.disconnect(); await disconnected.fire('click');
+  assert.equal(ui.calls.length, 3); assert.equal(ui.get('issue-content').textContent, '');
+});
+
+test('invalid assignment input clears old results without silently broadening the query', async () => {
+  const ui = await setup(() => json(searchPage())); await ui.view.search({});
+  for (const value of ['None', 'admin', 'A'.repeat(32), '0'.repeat(31), '0'.repeat(33), ` ${actor}`, `${actor}\n`]) {
+    ui.get('issue-search-assignee').value = value;
+    await ui.get('issue-search').fire('submit');
+    assert.equal(ui.calls.length, 1); assert.equal(ui.get('issue-content').textContent, '');
+    assert.match(ui.get('issue-status').textContent, /assignee/);
+  }
+});
+
+test('a delayed assignment result cannot replace a newer unassigned search', async () => {
+  const pending = deferred();
+  const ui = await setup((_call, count) => count === 1 ? pending.promise
+    : json(searchPage({ issues: [issue(2, { title: 'unassigned result', assignees: [] })] }, { assignee: 'none' })));
+  const old = ui.view.search({ assignee: actor });
+  await ui.view.search({ assignee: 'none' });
+  assert.equal(ui.calls[0].signal.aborted, true);
+  pending.resolve(json(searchPage({ issues: [issue(1, { title: 'old assignment', assignees: [actor] })] }, { assignee: actor })));
+  await old;
+  assert.match(ui.get('issue-content').textContent, /unassigned result/);
+  assert.ok(!ui.get('issue-content').textContent.includes('old assignment'));
+  assert.match(ui.get('issue-content').textContent, /"assignee":"none"/);
 });

@@ -168,3 +168,75 @@ test('input changes during transport cannot rewrite the checked predicate', asyn
   const result = await reading;
   assert.deepEqual(result.query.labels, ['bug']); assert.equal(result.query.text, 'HTTP');
 });
+
+test('assignee predicates are exact, immutable and distinct from an omitted filter', () => {
+  const input = { assignee: actor, state: 'open', labels: ['bug'] };
+  const query = issueSearchQuery(input); input.assignee = 'none';
+  assert.equal(query.assignee, actor); assert.ok(Object.isFrozen(query));
+  assert.equal(issueSearchQuery({ assignee: 'none' }).assignee, 'none');
+  assert.deepEqual(issueSearchQuery({ assignee: null }), issueSearchQuery({}));
+});
+
+test('malformed assignee filters refuse before any transport or publication', async () => {
+  const client = fresh(() => assert.fail('invalid assignment predicate dispatched'));
+  await client.connect(token); await client.stage(1, 1, 'comment', { body: 'retained draft' });
+  const before = client.pending;
+  for (const assignee of ['', 'all', 'None', 'unassigned', 'A'.repeat(32), 'g'.repeat(32),
+    '0'.repeat(31), '0'.repeat(33), `${actor}\n`, ` ${actor}`, [actor], 0, true, {}]) {
+    await assert.rejects(client.search({ assignee }), /assignee/i);
+  }
+  assert.deepEqual(client.pending, before);
+});
+
+test('native assignment search sends only the selected read predicate and pins its response', async () => {
+  for (const assignee of [actor, 'none']) {
+    let call;
+    const input = { assignee, state: 'open', labels: ['bug'], text: 'HTTP' };
+    const query = issueSearchQuery(input), assignees = assignee === 'none' ? [] : [actor];
+    const client = fresh(async (url, options) => { call = { url: String(url), ...options };
+      return json(searchPage({ issues: [issue(1, { assignees })] }, query)); });
+    await client.connect(token);
+    const result = await client.search(input, { head });
+    const form = new URLSearchParams(call.body);
+    assert.equal(form.get('assignee'), assignee); assert.equal(form.get('expected_head'), head);
+    assert.equal(form.get('state'), 'open'); assert.deepEqual(form.getAll('label'), ['bug']);
+    assert.equal(form.has('principal'), false); assert.equal(form.has('idempotency_key'), false);
+    assert.equal(call.headers['Idempotency-Key'], undefined); assert.equal(client.pending, null);
+    assert.equal(result.query.assignee, assignee);
+  }
+});
+
+test('assignment response echoes cannot broaden, narrow or replace the requested filter', () => {
+  for (const assignee of [actor, 'none']) {
+    const valid = searchPage({ issues: [] }, { assignee });
+    assert.equal(issueSearchPage(valid, { assignee }).reply.count, 0);
+    for (const replacement of [null, undefined, 'all', 'e'.repeat(32), [], true]) {
+      const changed = structuredClone(valid); changed.query.assignee = replacement;
+      assert.throws(() => issueSearchPage(changed, { assignee }), /predicate/);
+    }
+    const omitted = structuredClone(valid); delete omitted.query.assignee;
+    assert.throws(() => issueSearchPage(omitted, { assignee }), /predicate/);
+    assert.throws(() => issueSearchPage(valid, {}), /predicate/);
+  }
+  // Legacy unfiltered responses can omit the newly added echo. Explicit null
+  // still means no assignment predicate; it cannot stand in for "none".
+  assert.equal(page().reply.count, 1);
+  assert.equal(page({ query: { ...searchPage().query, assignee: null } }).reply.count, 1);
+});
+
+test('assignment membership is checked at the selected page and combines with every filter', () => {
+  const input = { assignee: actor, state: 'open', labels: ['bug'], opened_by: actor, text: 'HTTP' };
+  assert.equal(page({ issues: [issue(1, { assignees: [actor, 'e'.repeat(32)] })] }, input).reply.count, 1);
+  for (const extra of [{ assignees: [] }, { assignees: ['e'.repeat(32)] }, { assignees: undefined },
+    { assignees: null }, { assignees: [actor, actor] }, { assignees: [actor], state: 'closed' },
+    { assignees: [actor], labels: [] }, { assignees: [actor], title: 'no match' }]) {
+    assert.throws(() => page({ issues: [issue(1, extra)] }, input));
+  }
+  for (const extra of [{ assignees: [] }, {}]) {
+    assert.equal(page({ issues: [issue(1, extra)] }, { assignee: 'none' }).reply.count, 1);
+  }
+  assert.throws(() => page({ issues: [issue(1, { assignees: [actor] })] }, { assignee: 'none' }));
+  const maximum = Array.from({ length: 16 }, (_, index) => index.toString(16).padStart(32, '0'));
+  assert.equal(page({ issues: [issue(1, { assignees: maximum })] }, { assignee: maximum[0] }).reply.count, 1);
+  assert.throws(() => page({ issues: [issue(1, { assignees: [...maximum, actor] })] }, { assignee: actor }));
+});
