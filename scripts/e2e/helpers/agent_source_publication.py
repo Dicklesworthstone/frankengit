@@ -21,18 +21,20 @@ def record(f, case, **details):
     print(json.dumps(row), flush=True)
 
 
-def credential(f, label, reference=REF, paths=(b'src', b'lib'), candidate_only=False):
+def credential(f, label, reference=REF, paths=(b'src', b'lib'), candidate_only=False,
+               operations=None, ref_scope=None):
     path = f.root / (label + '.token')
     f.command('generate-' + label, ['agent-credential', 'generate-token', '--output', path])
     now = int(time.time())
+    operations = operations or ('source-candidates' if candidate_only else 'source-publish,outcomes-read')
     args = ['agent-credential', 'issue', *f.scope, '--trusted-local',
             '--incarnation', f.incarnation, '--principal', PRINCIPAL, '--agent', AGENT,
             '--sponsor-kind', 'human', '--token-file', path, '--issued-at', now - 1,
             '--expires-at', now + 3600, '--operations',
-            'source-candidates' if candidate_only else 'source-publish,outcomes-read',
+            operations,
             '--idempotency-key', 'issue-' + label, '--object-format', f.fmt]
-    if not candidate_only:
-        args += ['--source-ref-scope', 'exact:' + reference.encode().hex()]
+    if {'source-publish', 'source-branch-create'} & set(operations.split(',')):
+        args += ['--source-ref-scope', ref_scope or 'exact:' + reference.encode().hex()]
         for prefix in paths:
             args += ['--source-path-hex', prefix.hex()]
     receipt = json.loads(f.command('issue-' + label, args))
@@ -57,9 +59,9 @@ def request(server, route, grant, key, body=b'', media='application/x-www-form-u
         connection.close()
 
 
-def apply(server, grant, key, base, candidate, bundle, status=200):
+def apply(server, grant, key, base, candidate, bundle, status=200, reference=REF):
     boundary = 'agent-source-publication'
-    fields = dict(object_format=server.f.fmt, ref=REF, expected_commit=base, candidate_commit=candidate)
+    fields = dict(object_format=server.f.fmt, ref=reference, expected_commit=base, candidate_commit=candidate)
     parts = [('command', 'application/x-www-form-urlencoded', urlencode(fields).encode()),
              ('bundle', 'application/x-git-bundle', bundle)]
     body = b''.join(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\nContent-Type: {media}\r\n\r\n'.encode()
@@ -67,9 +69,9 @@ def apply(server, grant, key, base, candidate, bundle, status=200):
     return request(server, 'source/apply', grant, key, body, f'multipart/form-data; boundary={boundary}', status)
 
 
-def arguments(key, base, candidate, bundle):
+def arguments(key, base, candidate, bundle, reference=REF):
     assert 0 < len(bundle) <= 24 * 1024
-    return dict(idempotency_key=key, reference=REF, expected_base=base, expected_candidate=candidate,
+    return dict(idempotency_key=key, reference=reference, expected_base=base, expected_candidate=candidate,
                 bundle_hex_chunks=[bundle[i:i + 8192].hex() for i in range(0, len(bundle), 8192)])
 
 
@@ -191,9 +193,85 @@ def campaign(f):
     record(f, 'reopened-mcp-recovers-original-witness-under-narrower-replacement')
 
 
+def task_branch_campaign(f):
+    """Real branch creation closes the scoped author's branch-to-change workflow."""
+    reference = 'refs/heads/agent/task-1'
+    create = 'frankengit_branch_create'
+    scope = 'prefix:' + b'refs/heads/agent/'.hex()
+    author = credential(f, 'task-author', ref_scope=scope,
+                        operations='source-candidates,source-branch-create,source-publish,outcomes-read')
+    legacy = credential(f, 'legacy-author', reference=reference)
+    candidate_only = credential(f, 'task-candidate-only', candidate_only=True)
+    key = 'http-task-branch'
+    form = dict(object_format=f.fmt, ref=reference, new_commit=f.base)
+    body = urlencode(form).encode()
+    create_args = dict(reference=reference, target=f.base, idempotency_key=key)
+    with HTTP(f, 'task-http') as server:
+        for grant in (legacy, candidate_only):
+            request(server, 'source/branches/create', grant, 'legacy-cannot-create', body, status=403)
+        record(f, 'legacy-publication-and-candidate-grants-cannot-create-task-branches')
+        forbidden = urlencode(dict(form, ref='refs/heads/other/task-1')).encode()
+        refused = request(server, 'source/branches/create', author, 'outside-task-namespace', forbidden, status=409)
+        assert refused['outcome'] == 'refused' and refused['code'] == 'CapabilityScopeViolation'
+        record(f, 'task-creation-enforces-credential-reference-namespace')
+        created = request(server, 'source/branches/create', author, key, body)
+        assert created['outcome'] == 'committed' and created['principal_id'] == AGENT
+        original = request(server, 'outcomes', author, key)
+        original_provenance = provenance(original, author['id'])
+        assert original['transaction']['tx_id'] == created['tx_id']
+        duplicate = request(server, 'source/branches/create', author, 'existing-task-branch', body, status=409)
+        assert duplicate['outcome'] == 'refused'
+        record(f, 'http-creates-absent-agent-branch-with-original-principal-evidence', tx_id=created['tx_id'])
+        prepared, bundle = server.request('prepare', dict(f.form(), ref=reference), f.patch, token=author['token'])
+        f.validate(prepared, bundle, reference)
+        inspected = server.request('inspect', dict(object_format=f.fmt, ref=reference,
+                                    expected_commit=f.base, candidate_commit=f.candidate),
+                                   bundle, token=author['token'])
+        assert inspected['candidate_commit'] == f.candidate
+        record(f, 'agent-prepares-and-inspects-source-change-on-its-own-task-branch')
+    replay, published, second_branch = mcp(f, author, [
+        (create, create_args),
+        (PUBLISH, arguments('task-source-publish', f.base, f.candidate, bundle, reference)),
+        (create, dict(reference='refs/heads/agent/task-2', target=f.candidate,
+                      idempotency_key='mcp-task-branch'))], 'task-mcp')
+    assert replay['outcome'] == 'committed' and replay['tx_id'] == created['tx_id']
+    assert published['outcome'] == 'committed' and second_branch['outcome'] == 'committed'
+    record(f, 'mcp-replays-http-creation-publishes-source-and-creates-next-task', tx_id=second_branch['tx_id'])
+    with HTTP(f, 'task-advance-source') as server:
+        operator = dict(token=f.token)
+        # The candidate bundle remains bound to its task ref. Move main to the
+        # already published visible commit through native branch admission.
+        advance = urlencode(dict(object_format=f.fmt, ref=REF,
+                                 expected_commit=f.base, new_commit=f.candidate)).encode()
+        advanced = request(server, 'source/branches/update', operator, 'advance-main-after-task', advance)
+        assert advanced['outcome'] == 'committed'
+        # Every visible branch has now moved off the original base. The old
+        # creation still recovers from its immutable decision, not fresh scope.
+        assert request(server, 'source/branches/create', author, key, body) == created
+        assert request(server, 'outcomes', author, key) == original
+        record(f, 'http-recovery-survives-source-and-task-tip-movement')
+    replacement = credential(f, 'task-replacement', reference='refs/heads/replacement',
+                             operations='source-branch-create,outcomes-read')
+    revoked = json.loads(f.command('revoke-task-author', [
+        'agent-credential', 'revoke', *f.scope, '--trusted-local', '--incarnation', f.incarnation,
+        '--principal', PRINCIPAL, '--credential-id', author['id'], '--expected-version', '1',
+        '--idempotency-key', 'revoke-task-author', '--object-format', f.fmt]))
+    assert revoked['outcome'] == 'committed'
+    replay, recovered = mcp(f, replacement, [
+        (create, create_args), (OUTCOME, dict(idempotency_key=key))], 'task-rotated-mcp')
+    assert replay['outcome'] == 'committed' and replay['tx_id'] == created['tx_id']
+    assert provenance(recovered, author['id']) == original_provenance
+    with HTTP(f, 'task-rotated-http') as server:
+        request(server, 'source/branches/create', author, key, body, status=401)
+        assert request(server, 'source/branches/create', replacement, key, body) == created
+        assert request(server, 'outcomes', replacement, key) == original
+    record(f, 'task-creation-retains-original-outcome-after-revocation-rotation-and-restart')
+
+
 if __name__ == '__main__':
     fg, root = str(Path(sys.argv[1]).resolve()), Path(sys.argv[2]).resolve()
     root.mkdir(parents=True, exist_ok=True)
     for fmt in ['sha1', 'sha256']:
         campaign(Fixture(fg, root, fmt))
+        task_branch_campaign(Fixture(fg, root / 'task-branches', fmt))
     (root / 'results.json').write_text(json.dumps(RESULTS, indent=2) + '\n')

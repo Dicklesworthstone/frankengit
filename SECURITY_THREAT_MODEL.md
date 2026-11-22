@@ -549,6 +549,17 @@ incarnation and object format; missing active requests cannot fall back to local
 operator attribution. Canonical revocation is checked on every call, and nested
 retrieval and response disclosure retain the original finite deadline.
 Caller fields and repository text cannot replace these identities or add operations.
+Sponsored task-branch creation requires the independent `SOURCE_BRANCH_CREATE`
+grant, its finite target-ref ceiling and the transport's source-write deployment
+ceiling. Neither `SOURCE_PUBLISH` nor read/candidate/metadata scopes imply it.
+The native sealed request requires an absent destination and an exact verified
+current visible branch tip. Every publication basis rechecks that membership,
+destination visibility, canonical credential and branch protection. A hidden-only,
+retained or guessed object cannot become disclosed by creating a branch.
+Creation changes no source files and grants no update, delete, rename, initial
+history or arbitrary Git receive authority. Original-request deadlines survive
+authority I/O; historical terminal recovery preserves the original identity
+witness without treating a later branch state as the earlier outcome.
 Sponsored milestone planning similarly uses independent `MILESTONES_READ` and
 `MILESTONES_WRITE` operations. Existing issue/source credential masks acquire no
 milestone access; milestone scopes expose metadata and aggregate issue counts,

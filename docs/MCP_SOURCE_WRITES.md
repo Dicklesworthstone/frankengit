@@ -27,9 +27,12 @@ broker. Do not forward the channel to an untrusted remote principal.
 ## Sponsored agent publication
 
 A sponsored launch may also select `--allow-source-writes`. Its closed inventory
-contains only `frankengit_source_publish`, with an exact existing branch, base
-and single-parent candidate. The canonical credential must independently grant
-`source-publish` and carry its bounded ref and changed-path scope. The launch
+contains `frankengit_source_publish`, with an exact existing branch, base
+and single-parent candidate, and `frankengit_branch_create`, with an absent
+destination and an exact current visible branch tip. Each call requires its
+own independent canonical grant: `source-publish` or `source-branch-create`,
+respectively. Both require a bounded source scope; its path ceiling constrains
+publication, while creation changes no files. The launch
 flag cannot supply or widen that authority. See
 [scoped source publication](AGENT_SCOPED_SOURCE_PUBLICATION.md) for the native
 grant and admission contract.
@@ -51,10 +54,18 @@ from its current canonical credential.
 
 The agent schema requires `expected_base` and does not advertise `initial`.
 Any presence of that field, including `false` or `null`, refuses before
-credential lookup. Initial history, branch creation/update/deletion/rename,
+credential lookup. Initial history, branch update/deletion/rename,
 multi-branch transactions, tags and `frankengit_source_publish_rebase` remain
 outside the sponsored profile. Candidate output is untrusted handoff data and
 never authorizes any of these operations.
+
+Task-branch creation uses the existing `reference` or `reference_hex`, `target`
+and `idempotency_key` fields. The destination must match the credential's ref
+ceiling. Its target must still be the exact tip of a currently visible branch
+at the native publication basis; retained objects, tag tips and historical
+ancestors are insufficient. No implicit current-tip lookup, arbitrary-object
+import or source editing is permitted. See
+[sponsored task branches](SPONSORED_AGENT_CREDENTIALS.md#create-an-independently-scoped-task-branch).
 
 The adapter retains the original authenticated request, key and deadline while
 the native publisher verifies the complete candidate and current ref/path

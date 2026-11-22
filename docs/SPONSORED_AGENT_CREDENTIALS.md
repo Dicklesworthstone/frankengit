@@ -433,6 +433,78 @@ discovery omits the `initial` argument, and dispatch rejects unsupported
 publication shapes before credential lookup. Preparing a candidate or presenting
 a public principal receipt cannot construct native publication authority.
 
+### Create an independently scoped task branch
+
+The separate `source-branch-create` operation lets an agent start a task branch
+without an operator creating that branch first. It does not follow from
+`source-publish`, source reading, candidate preparation or PR permission.
+The new branch must be absent, fall within the credential's immutable ref
+ceiling, and point to an explicitly supplied **current visible branch tip**.
+A retained object, a tag tip or a historical ancestor alone is insufficient.
+Creation imports no objects and changes no source files.
+
+Issue a credential with both creation and publication when the agent should
+start a branch and then edit it:
+
+```sh
+fg agent-credential issue ./repository TENANT_ID REPOSITORY_ID \
+  --trusted-local --incarnation INCARNATION_ID \
+  --principal SPONSOR_ID --agent AGENT_ID --sponsor-kind human \
+  --token-file ./agent.token --issued-at ISSUED_UNIX_SECONDS \
+  --expires-at EXPIRES_UNIX_SECONDS \
+  --operations source-read,source-candidates,source-branch-create,source-publish,outcomes-read \
+  --source-ref-scope prefix:726566732f68656164732f6167656e742f \
+  --source-path-hex 737263 \
+  --idempotency-key issue-task-author-1
+```
+
+Both source scope options are required for either creation or publication.
+The path prefixes constrain changes under `source-publish`; a creation-only
+grant cannot edit those paths. In this example, an agent can create
+`refs/heads/agent/task-1` from a visible `main` tip and subsequently publish
+changes under `src`. It cannot create or move `refs/heads/main`.
+
+| Entry point | Required host ceiling | Exact request |
+| --- | --- | --- |
+| HTTP `POST /api/v1/source/branches/create` | `--allow-source` and `--allow-receive` | Form `object_format`, `ref`, `new_commit`, plus the original `Idempotency-Key` header |
+| MCP `frankengit_branch_create` | `--allow-source-writes` | `reference` or `reference_hex`, `target`, and original `idempotency_key` |
+| Native `OneNode::create_agent_branch_in` | Borrowed `SourceBranchCreationRequest` | Original request context, destination ref and exact tip |
+
+For example, after separately reading a permitted current tip, call MCP with:
+
+```json
+{
+  "name": "frankengit_branch_create",
+  "arguments": {
+    "reference": "refs/heads/agent/task-1",
+    "target": "EXACT_CURRENT_VISIBLE_BRANCH_TIP",
+    "idempotency_key": "task-1-create"
+  }
+}
+```
+
+`target` is the full nonzero lowercase SHA-1 or SHA-256 OID in the repository's
+hash domain; the placeholder above is not a valid request value. No source ref,
+default branch or newer tip is inferred. Source reading is independently
+authorized, so a creation-only credential may instead receive the exact tip
+from its sponsor.
+
+The native path uses the ordinary sealed ref transaction and exact-predecessor
+authority-head CAS. It rechecks current visible-tip membership, destination
+visibility, credential revocation, expiry and ref scope at the publication
+basis, including after a CAS loss. Existing branch protection still applies.
+It cannot overwrite an existing branch, force an update, delete or rename a
+branch, publish initial history, or submit an arbitrary receive transaction.
+
+Retry the identical destination, tip and key after a lost response. A known
+terminal outcome is recovered before current tip checks, so the same request
+can recover its original result after the source or destination branch moves.
+Changed operands under the same key refuse. Authentication and outcome evidence
+retain the original agent and sponsor across token rotation; a newly authorized
+request is still required to recover through a replacement credential.
+The original bounded request context remains in force through admission and
+response output. Cancellation does not establish non-commit.
+
 ## Use the credential with MCP
 
 Launch either `fg mcp` or the standalone `fg-mcp` with the private credential
@@ -660,7 +732,7 @@ timeout proves non-commit.
 | Principal snapshot | Schema 1.2: full agent authentication witness |
 | Authentication policy evidence | Schema 1.5: full witness binding |
 
-The required operation mask remains a canonical `u16`. `source-read` occupies
+Legacy operation masks retain their canonical `u16` encoding. `source-read` occupies
 bit 7 (`0x0080`), `source-history-read` occupies bit 8 (`0x0100`),
 `source-candidates` occupies bit 9 (`0x0200`), `milestones-read` occupies bit 10
 (`0x0400`), and `milestones-write` occupies bit 11 (`0x0800`). The existing
@@ -676,13 +748,23 @@ source candidates but grants neither milestone operation. Issuing any new
 capability requires an explicit new grant, and revocation must
 retain the exact original operation mask. A stored `0x1fff` mask gains neither
 complete proof disclosure nor PR code comparison. A stored `0x7fff` mask gains no
-feedback permission. All 16 bits are now assigned, so `ALL_OPERATIONS` is
-`u16::MAX`; an additional operation scope requires a versioned encoding rather
-than reinterpreting an existing bit. The empty operation mask remains invalid.
-Upgrade every repository reader before issuing a grant with a newly supported
-bit: an older reader fails closed on its unknown flag; it must not strip the flag
-or fall back to another credential profile. Existing grant bytes, event
-discriminants, request identities and revocation semantics are unchanged.
+feedback permission. A stored `0xffff` mask includes all sixteen legacy operations
+and gains no branch creation.
+
+`source-branch-create` occupies bit 16 (`0x10000`) and requires the same immutable
+source-scope carrier as `source-publish`. Scoped issuance/revocation action codes
+5 and 6 carry a canonical `u32` operation mask; they are required only when a
+higher bit is present. Codes 1 through 4 retain their exact historical `u16`
+encoding. The decoder rejects extended encodings of legacy-only masks, unknown
+operation bits, and missing or invalid scope, so one grant has one canonical
+encoding. The in-memory known-operation mask is `0x1ffff`; zero remains invalid.
+
+Upgrade every repository reader before issuing an extended grant: older readers
+fail closed on the new action code and must not strip its high bit or fall back
+to another credential profile. Existing grant bytes, event-family discriminants,
+request identities and revocation semantics are unchanged. Revocation retains
+the complete original grant and selects the corresponding legacy or extended
+encoding.
 
 The forge stream label is `agent/` plus 52 unpadded lowercase RFC 4648 base32
 characters. This preserves all 256 digest bits within the 64-byte slug bound;

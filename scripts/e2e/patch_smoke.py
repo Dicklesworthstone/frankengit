@@ -27,10 +27,10 @@ def tree(entries):
                     for name, mode, identity in sorted(entries))
 
 
-def bundle_objects(data, fmt, base, candidate):
+def bundle_objects(data, fmt, base, candidate, reference='refs/heads/main'):
     header, pack = data.split(b"\n\n", 1)
     expected = (b"# v2 git bundle\n" if fmt == "sha1" else b"# v3 git bundle\n@object-format=sha256\n")
-    assert header == expected + f"-{base} patch base\n{candidate} refs/heads/main".encode()
+    assert header == expected + f"-{base} patch base\n{candidate} {reference}".encode()
     width = hashlib.new(fmt).digest_size
     assert pack[:8] == b"PACK\0\0\0\2"
     assert hashlib.new(fmt, pack[:-width]).digest() == pack[-width:]

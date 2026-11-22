@@ -465,6 +465,16 @@ Email and push delivery remain separate work.
 
 ### Sponsored agent source and metadata credentials
 
+Sponsored agents can start their own scoped task branches with the independent
+`source-branch-create` grant through HTTP or MCP. Creation requires an absent
+destination within the credential's ref ceiling and an explicit current visible
+branch tip. Normal protection and current credential checks still apply at
+publication, and exact retries recover the original outcome. Combined with
+independently granted candidate preparation, source publication and PR metadata,
+this removes the operator's per-task branch-creation step. See
+[sponsored task branches](docs/SPONSORED_AGENT_CREDENTIALS.md#create-an-independently-scoped-task-branch)
+for issuance and the supported workflow.
+
 `fg agent-credential generate-token|issue|revoke|show` manages immutable,
 repository-incarnation-bound credentials with an explicit agent and human or
 service sponsor. Native HTTP requests authenticate the current canonical grant

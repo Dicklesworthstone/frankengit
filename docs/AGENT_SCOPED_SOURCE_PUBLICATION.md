@@ -28,7 +28,10 @@ options are mandatory when issuing `source-publish`. The canonical grant root
 binds the scope, agent, sponsor, tenant, repository, incarnation and lifetime.
 Tokens keep the existing private-file handling and are never publication input.
 
-An administrator provisions the target branch first. This profile excludes
+The target branch must already exist when publishing. An agent can provision
+its own task branch with the independent `source-branch-create` grant described
+in [sponsored agent credentials](SPONSORED_AGENT_CREDENTIALS.md#create-an-independently-scoped-task-branch),
+or an administrator can provision it. A publication grant alone excludes
 initial history, branch creation or deletion, forced updates, tags, multi-commit
 rebase publication, reviews and merges. An agent can publish a candidate to its
 existing branch and open or update a PR using an independent PR metadata grant.
