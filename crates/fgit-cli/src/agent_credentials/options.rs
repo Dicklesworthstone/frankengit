@@ -3,10 +3,10 @@ use fgit_authority::IdempotencyKey;
 use fgit_forge::{AggregateVersion, ExpectedVersion};
 use fgit_identity::agent::{
     AgentCredentialGrant, AgentCredentialId, DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ,
-    ISSUES_WRITE, MILESTONES_READ, MILESTONES_WRITE, OUTCOMES_READ, PULLS_DIFF_READ,
-    PULLS_FEEDBACK_READ, PULLS_READ, PULLS_WRITE, SOURCE_BRANCH_CREATE, SOURCE_CANDIDATES,
-    SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ, SOURCE_VERIFIED_READ, SourcePublicationScope,
-    SponsorKind,
+    ISSUES_WRITE, MILESTONES_READ, MILESTONES_WRITE, OUTCOMES_READ, PULLS_CHECK_EVIDENCE_READ,
+    PULLS_DIFF_READ, PULLS_FEEDBACK_READ, PULLS_READ, PULLS_WRITE, SOURCE_BRANCH_CREATE,
+    SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ, SOURCE_VERIFIED_READ,
+    SourcePublicationScope, SponsorKind,
 };
 use fgit_types::{GitHashAlgorithm, PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
 use std::{collections::BTreeMap, path::PathBuf};
@@ -89,6 +89,7 @@ fn operations(value: &str) -> Result<u32, String> {
             "pulls-diff-read" => PULLS_DIFF_READ,
             "pulls-feedback-read" => PULLS_FEEDBACK_READ,
             "source-branch-create" => SOURCE_BRANCH_CREATE,
+            "pulls-check-evidence-read" => PULLS_CHECK_EVIDENCE_READ,
             _ => return Err("unknown or unsupported agent credential operation".into()),
         };
         if result & bit != 0 {

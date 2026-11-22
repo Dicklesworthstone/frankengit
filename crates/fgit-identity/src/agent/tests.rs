@@ -58,6 +58,7 @@ fn bearer_authentication_retains_agent_sponsor_and_exact_independent_ceiling() {
         MILESTONES_WRITE,
         SOURCE_PUBLISH,
         PULLS_FEEDBACK_READ,
+        PULLS_CHECK_EVIDENCE_READ,
     ] {
         assert_eq!(
             authenticated.authorize(operation),
@@ -471,7 +472,7 @@ fn wrong_secret_unbounded_input_and_malformed_grant_are_refused_without_secret_d
             ..grant
         },
         AgentCredentialGrant {
-            operations: ALL_OPERATIONS | (1 << 17),
+            operations: ALL_OPERATIONS | (1 << 18),
             ..grant
         },
         AgentCredentialGrant {
@@ -511,6 +512,103 @@ fn wrong_secret_unbounded_input_and_malformed_grant_are_refused_without_secret_d
 }
 
 #[test]
+fn check_evidence_authentication_requires_explicit_disclosure_and_live_binding() {
+    let evidence = AgentCredentialGrant {
+        operations: PULLS_CHECK_EVIDENCE_READ,
+        ..grant()
+    };
+    let authenticated = authenticate(&evidence, BEARER, 100, RevocationEvidence::Live).unwrap();
+    assert_eq!(authenticated.grant(), &evidence);
+    assert_eq!(authenticated.principal(), evidence.agent);
+    assert_eq!(authenticated.sponsor(), evidence.sponsor);
+    assert_eq!(authenticated.authorize(PULLS_CHECK_EVIDENCE_READ), Ok(()));
+    assert_eq!(
+        authenticated.authorize(0),
+        Err(AgentCredentialRefusal::OperationNotGranted)
+    );
+    for operation in (0..17).map(|bit| 1u32 << bit) {
+        assert_eq!(
+            authenticated.authorize(operation),
+            Err(AgentCredentialRefusal::OperationNotGranted)
+        );
+        assert_eq!(
+            authenticated.authorize(operation | PULLS_CHECK_EVIDENCE_READ),
+            Err(AgentCredentialRefusal::OperationNotGranted)
+        );
+    }
+    for operations in [PULLS_FEEDBACK_READ, 0xffff, 0x1ffff] {
+        let retained = AgentCredentialGrant {
+            operations,
+            ..evidence
+        };
+        assert_eq!(
+            authenticate(&retained, BEARER, 100, RevocationEvidence::Live)
+                .unwrap()
+                .authorize(PULLS_CHECK_EVIDENCE_READ),
+            Err(AgentCredentialRefusal::OperationNotGranted)
+        );
+    }
+    for (now, revocation, expected) in [
+        (
+            99,
+            RevocationEvidence::Live,
+            AgentCredentialRefusal::NotYetValid,
+        ),
+        (
+            200,
+            RevocationEvidence::Live,
+            AgentCredentialRefusal::Expired,
+        ),
+        (
+            100,
+            RevocationEvidence::Revoked,
+            AgentCredentialRefusal::Revoked,
+        ),
+        (
+            100,
+            RevocationEvidence::NotChecked,
+            AgentCredentialRefusal::RevocationEvidenceRequired,
+        ),
+    ] {
+        assert_eq!(
+            authenticate(&evidence, BEARER, now, revocation),
+            Err(expected)
+        );
+    }
+    for (tenant, repository, incarnation) in [
+        (
+            TenantId::from_bytes([8; 16]),
+            evidence.repository,
+            evidence.incarnation,
+        ),
+        (
+            evidence.tenant,
+            RepositoryId::from_bytes([8; 16]),
+            evidence.incarnation,
+        ),
+        (
+            evidence.tenant,
+            evidence.repository,
+            RepositoryIncarnationId::from_bytes([8; 16]),
+        ),
+    ] {
+        assert_eq!(
+            authenticate_agent_credential(
+                agent_credential_id(BEARER).unwrap(),
+                &evidence,
+                BEARER,
+                tenant,
+                repository,
+                incarnation,
+                100,
+                RevocationEvidence::Live,
+            ),
+            Err(AgentCredentialRefusal::BindingMismatch)
+        );
+    }
+}
+
+#[test]
 fn feedback_authentication_requires_its_explicit_bit_and_live_bound_evidence() {
     let feedback = AgentCredentialGrant {
         operations: PULLS_FEEDBACK_READ,
@@ -521,6 +619,10 @@ fn feedback_authentication_requires_its_explicit_bit_and_live_bound_evidence() {
     assert_eq!(authenticated.principal(), feedback.agent);
     assert_eq!(authenticated.sponsor(), feedback.sponsor);
     assert_eq!(authenticated.authorize(PULLS_FEEDBACK_READ), Ok(()));
+    assert_eq!(
+        authenticated.authorize(PULLS_CHECK_EVIDENCE_READ),
+        Err(AgentCredentialRefusal::OperationNotGranted)
+    );
     assert_eq!(
         authenticated.authorize(SOURCE_BRANCH_CREATE),
         Err(AgentCredentialRefusal::OperationNotGranted)

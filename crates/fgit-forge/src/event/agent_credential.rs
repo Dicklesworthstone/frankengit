@@ -64,9 +64,14 @@ pub const PULLS_FEEDBACK_READ: u32 = 1 << 15;
 /// Grants containing this bit use scoped action codes 5/6 and a u32 mask;
 /// historical action codes 1..4 retain their exact u16 operation bytes.
 pub const SOURCE_BRANCH_CREATE: u32 = 1 << 16;
+/// Read bounded evidence for one canonical pull-request check, pinned to its
+/// exact head and evidence digest. This independently grants that diagnostic
+/// disclosure, never generic artifact access, check execution, source writes,
+/// review decisions or merges. Evidence-only grants need no source ceiling.
+pub const PULLS_CHECK_EVIDENCE_READ: u32 = 1 << 17;
 /// Closed known operation vocabulary. No existing bit or retained credential
 /// is reinterpreted when an independently granted operation is added.
-pub const ALL_OPERATIONS: u32 = (1 << 17) - 1;
+pub const ALL_OPERATIONS: u32 = (1 << 18) - 1;
 const LEGACY_OPERATION_MASK: u32 = 0xffff;
 /// A grant cannot survive indefinitely without a new sponsor decision.
 pub const MAX_LIFETIME_SECONDS: u64 = 30 * 24 * 60 * 60;
@@ -299,7 +304,7 @@ impl AgentCredentialGrant {
             },
         };
         value.validate()?;
-        // Codes 5/6 are not alternate spellings of old grants. A canonical
+        // Codes 5..8 are not alternate spellings of old grants. A canonical
         // extended action must actually need at least one known high bit.
         if extended != value.extended_operations() {
             return Err(invalid_native("agent_credential.operation_encoding"));
@@ -310,8 +315,11 @@ impl AgentCredentialGrant {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AgentCredentialAction {
+    /// Unscoped issuance. Code 1 retains its u16 mask; code 7 requires a known
+    /// high operation bit and encodes a u32 mask without a source ceiling.
     Issue(AgentCredentialGrant),
     /// Permanent tombstone retaining the original grant at the current frontier.
+    /// Codes 2/8 use the same legacy/extended distinction as issuance.
     Revoke(AgentCredentialGrant),
     /// Scoped issuance. Codes 3/4 retain u16 masks; codes 5/6 require a known
     /// high operation bit and encode u32 masks. Existing bytes stay unchanged.
@@ -401,12 +409,14 @@ impl NativeAgentCredentialEvent {
         out.write_opaque_id(self.actor.as_bytes());
         match &self.action {
             AgentCredentialAction::Issue(grant) => {
-                out.write_scalar(1u32);
-                grant.write(out, false)?;
+                let extended = grant.extended_operations();
+                out.write_scalar(if extended { 7u32 } else { 1 });
+                grant.write(out, extended)?;
             }
             AgentCredentialAction::Revoke(grant) => {
-                out.write_scalar(2u32);
-                grant.write(out, false)?;
+                let extended = grant.extended_operations();
+                out.write_scalar(if extended { 8u32 } else { 2 });
+                grant.write(out, extended)?;
             }
             AgentCredentialAction::IssueSource { grant, scope } => {
                 let extended = grant.extended_operations();
@@ -446,6 +456,8 @@ impl NativeAgentCredentialEvent {
                 grant: AgentCredentialGrant::read(input, true)?,
                 scope: SourcePublicationScope::read(input)?,
             },
+            7 => AgentCredentialAction::Issue(AgentCredentialGrant::read(input, true)?),
+            8 => AgentCredentialAction::Revoke(AgentCredentialGrant::read(input, true)?),
             observed => {
                 return Err(CodecRefusal::VariantUnknown {
                     field: "agent_credential.action",

@@ -84,6 +84,15 @@ publication, PR-specific diffs, verified-blob streaming, general bundle
 export/import, queues and workflow artifacts remain unavailable. See the
 [candidate guide](MCP_SOURCE_CANDIDATES.md) for the bounded artifact handoff.
 
+With `pulls-feedback-read`, the existing `--allow-pulls` ceiling exposes bounded
+PR reviews and canonical check summaries. The separate `pulls-check-evidence-read`
+scope under that same ceiling enables `frankengit_pull_check_evidence` for one
+exact canonical check at a pinned head and evidence digest. Sponsored evidence
+reads need no artifact flag or root and grant no generic artifact inspection or
+namespace access. Trusted-local evidence reads retain both `--allow-pulls` and
+`--allow-artifacts`. See [exact check evidence](MCP_CHECK_EVIDENCE.md) for its
+bounded byte pages, current source/target visibility and original request limits.
+
 Agent mode requires the exact incarnation and rejects `--trusted-local` and
 `--principal`. Every call verifies the current canonical grant and retains its
 agent, human or service sponsor, original deadline and response byte reservation.

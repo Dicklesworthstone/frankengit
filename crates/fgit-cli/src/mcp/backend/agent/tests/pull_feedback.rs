@@ -23,7 +23,10 @@ fn authority(node: &OneNode) -> RepositoryAuthorityHeadId {
 }
 
 fn accepted(terminal: TerminalOutcome) {
-    assert!(matches!(terminal.outcome, DecisionOutcome::Committed { .. }));
+    assert!(matches!(
+        terminal.outcome,
+        DecisionOutcome::Committed { .. }
+    ));
 }
 
 struct FeedbackFixture {
@@ -182,9 +185,9 @@ fn query() -> Object {
         ("number", text("1")),
         ("limit", super::super::super::json::number(1)),
     ])
-        .object()
-        .unwrap()
-        .clone()
+    .object()
+    .unwrap()
+    .clone()
 }
 
 #[test]
@@ -214,7 +217,10 @@ fn feedback_reads_real_reviews_with_pinned_pages_and_no_other_authority() {
             panic!("continued review rows")
         };
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].object().unwrap()["decision"], text("request-changes"));
+        assert_eq!(
+            rows[0].object().unwrap()["decision"],
+            text("request-changes")
+        );
         assert_eq!(second.object().unwrap()["complete"], Value::Bool(true));
         assert_eq!(
             second.object().unwrap()["snapshot_token"],
@@ -223,7 +229,10 @@ fn feedback_reads_real_reviews_with_pinned_pages_and_no_other_authority() {
 
         let checks = backend.call(checks::NAME, &query()).unwrap();
         assert_eq!(checks.object().unwrap()["found"], Value::Bool(true));
-        assert_eq!(checks.object().unwrap()["source_current"], Value::Bool(true));
+        assert_eq!(
+            checks.object().unwrap()["source_current"],
+            Value::Bool(true)
+        );
         assert_eq!(checks.object().unwrap()["merge_permission"], Value::Null);
         assert_eq!(
             checks.object().unwrap()["snapshot_token"],
@@ -250,17 +259,17 @@ fn feedback_reads_real_reviews_with_pinned_pages_and_no_other_authority() {
             );
         }
         backend.options.source = true;
-        for name in ["frankengit_pull_show", "frankengit_source_blob"] {
+        for name in [
+            "frankengit_pull_show",
+            "frankengit_source_blob",
+            "frankengit_pull_check_evidence",
+        ] {
             assert_eq!(
                 backend.call(name, &Object::new()).unwrap_err().code,
                 "agent_operation_not_granted"
             );
         }
-        for name in [
-            "frankengit_pull_review",
-            "frankengit_pull_merge",
-            "frankengit_pull_check_evidence",
-        ] {
+        for name in ["frankengit_pull_review", "frankengit_pull_merge"] {
             assert_eq!(
                 backend.call(name, &Object::new()).unwrap_err().code,
                 "tool_not_granted"
@@ -294,7 +303,9 @@ fn feedback_requires_the_new_grant_and_retains_expiry_revocation_and_active_oper
             backend.close().unwrap();
         }
         let mut backend = NodeTools::open(fixture.fixture.options.clone()).unwrap();
-        backend.call("frankengit_pull_list", &Object::new()).unwrap();
+        backend
+            .call("frankengit_pull_list", &Object::new())
+            .unwrap();
         let other = backend.agent.as_mut().unwrap().response.take().unwrap();
         backend.agent.as_mut().unwrap().request = Some(other);
         for handler in [pull_reviews::call, checks::call] {

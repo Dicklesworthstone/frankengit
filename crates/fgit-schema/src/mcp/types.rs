@@ -118,6 +118,8 @@ impl CapabilityRequirement {
     pub const READ_AGENT_CONTEXT: Self = Self("read_agent_context");
     /// Whole launch-selected trusted-workflow custody namespace, including hidden-ref outputs.
     pub const READ_WORKFLOW_ARTIFACT: Self = Self("read_workflow_artifact");
+    /// Exact selected canonical PR-check evidence, without general artifact custody.
+    pub const READ_PULL_CHECK_EVIDENCE: Self = Self("read_pull_check_evidence");
     pub const TREEFS_WORKSPACE: Self = Self("treefs_workspace");
     pub const EXECUTE_SANDBOXED_PROCESS: Self = Self("execute_sandboxed_process");
     pub const NETWORK_DESTINATION: Self = Self("network_destination");
@@ -133,11 +135,12 @@ impl CapabilityRequirement {
     pub const CONSUME_BUDGET: Self = Self("consume_budget");
 
     /// All valid capability strings.
-    pub const ALL_VALID: [&'static str; 16] = [
+    pub const ALL_VALID: [&'static str; 17] = [
         "read_canonical_object",
         "read_derived_generation",
         "read_agent_context",
         "read_workflow_artifact",
+        "read_pull_check_evidence",
         "treefs_workspace",
         "execute_sandboxed_process",
         "network_destination",

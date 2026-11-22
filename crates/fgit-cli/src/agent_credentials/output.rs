@@ -4,9 +4,9 @@ use fgit_authority::TerminalOutcome;
 use fgit_identity::agent::{
     AgentCredentialCommand, AgentCredentialGrant, AgentCredentialId, DISCUSSIONS_READ,
     DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, MILESTONES_READ, MILESTONES_WRITE, OUTCOMES_READ,
-    PULLS_DIFF_READ, PULLS_FEEDBACK_READ, PULLS_READ, PULLS_WRITE, SOURCE_BRANCH_CREATE,
-    SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ, SOURCE_VERIFIED_READ,
-    SourcePublicationScope,
+    PULLS_CHECK_EVIDENCE_READ, PULLS_DIFF_READ, PULLS_FEEDBACK_READ, PULLS_READ, PULLS_WRITE,
+    SOURCE_BRANCH_CREATE, SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ,
+    SOURCE_VERIFIED_READ, SourcePublicationScope,
 };
 use fgit_types::{DecisionOutcome, TxId};
 
@@ -29,6 +29,7 @@ fn grant(value: &AgentCredentialGrant) -> String {
         (PULLS_DIFF_READ, "pulls-diff-read"),
         (PULLS_FEEDBACK_READ, "pulls-feedback-read"),
         (SOURCE_BRANCH_CREATE, "source-branch-create"),
+        (PULLS_CHECK_EVIDENCE_READ, "pulls-check-evidence-read"),
     ]
     .into_iter()
     .filter(|(bit, _)| value.permits(*bit))
@@ -211,6 +212,14 @@ mod tests {
                 "\"operations\":[\"pulls-feedback-read\"]",
             ),
             (
+                PULLS_CHECK_EVIDENCE_READ,
+                "\"operations\":[\"pulls-check-evidence-read\"]",
+            ),
+            (
+                PULLS_FEEDBACK_READ | PULLS_CHECK_EVIDENCE_READ,
+                "\"operations\":[\"pulls-feedback-read\",\"pulls-check-evidence-read\"]",
+            ),
+            (
                 PULLS_DIFF_READ | PULLS_FEEDBACK_READ,
                 "\"operations\":[\"pulls-diff-read\",\"pulls-feedback-read\"]",
             ),
@@ -227,6 +236,13 @@ mod tests {
                 .contains(expected)
             );
         }
+        assert!(
+            !grant(&AgentCredentialGrant {
+                operations: 0x1ffff,
+                ..value
+            })
+            .contains("pulls-check-evidence-read")
+        );
         assert!(
             !grant(&AgentCredentialGrant {
                 operations: 0x7fff,

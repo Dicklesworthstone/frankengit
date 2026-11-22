@@ -13,9 +13,10 @@ pub use fgit_forge::event::agent_credential::{
     ALL_OPERATIONS, AgentCredentialAction, AgentCredentialCommand, AgentCredentialGrant,
     AgentCredentialId, AgentCredentialSnapshot, DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ,
     ISSUES_WRITE, MAX_LIFETIME_SECONDS, MILESTONES_READ, MILESTONES_WRITE,
-    NativeAgentCredentialEvent, OUTCOMES_READ, PULLS_DIFF_READ, PULLS_FEEDBACK_READ, PULLS_READ,
-    PULLS_WRITE, SOURCE_BRANCH_CREATE, SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_PUBLISH,
-    SOURCE_READ, SOURCE_VERIFIED_READ, SourcePublicationScope, SponsorKind,
+    NativeAgentCredentialEvent, OUTCOMES_READ, PULLS_CHECK_EVIDENCE_READ, PULLS_DIFF_READ,
+    PULLS_FEEDBACK_READ, PULLS_READ, PULLS_WRITE, SOURCE_BRANCH_CREATE, SOURCE_CANDIDATES,
+    SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ, SOURCE_VERIFIED_READ, SourcePublicationScope,
+    SponsorKind,
 };
 
 /// Fixed finite input bound before hashing untrusted bearer bytes.

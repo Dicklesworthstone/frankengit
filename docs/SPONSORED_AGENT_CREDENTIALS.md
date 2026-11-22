@@ -4,7 +4,8 @@ This profile gives an agent its own repository-scoped principal and records its
 human or service sponsor in canonical admission evidence. It supports the native
 HTTP current-source browsing and context, separately granted source history and
 reference comparison, separately granted complete blob proofs and exact pull-request
-code comparisons, independently granted review and check feedback,
+code comparisons, independently granted review and check feedback and exact
+canonical check evidence,
 separately granted ephemeral source candidates and scoped
 single-parent source publication, issue and pull-request metadata and conversation,
 standalone discussion, independently granted milestone planning,
@@ -102,6 +103,7 @@ observation schema. This grants no agent source-import capability.
 | `source-verified-read` | Complete visible-ref blob proofs at an independently supplied authority head, including original tree witnesses |
 | `pulls-diff-read` | Code comparison selected by an exact native pull-request version |
 | `pulls-feedback-read` | Bounded pull-request review pages and canonical check summaries |
+| `pulls-check-evidence-read` | Bounded evidence for one exact canonical PR check at a pinned snapshot; no generic artifact access |
 
 Scopes are independent: write does not imply read. Unknown scopes are rejected.
 Milestone scopes grant no issue text or issue mutation. Assigning or clearing an
@@ -124,9 +126,9 @@ disclosure retain the existing canonical hidden-ref and visibility checks.
 
 Git upload-pack/receive-pack, general bundle export/import,
 initial-commit/replay/rebase preparation,
-review and check mutations, raw check evidence, merges, queue operations, notifications, policy
-administration, workflow and artifact access, process execution, secrets and
-external effects are outside this profile. MCP offers the closed sponsored
+review and check mutations, merges, queue operations, notifications, policy
+administration, generic artifact access, workflow or process execution, secrets
+and external effects are outside this profile. MCP offers the closed sponsored
 source and metadata tools described below and keeps its existing trusted-local
 profile. Its source ceiling exposes only the two independently granted candidate
 operations below, not the operator profile's other candidate engines or general
@@ -237,6 +239,51 @@ input/output limits through native reads and response disclosure. A feedback
 request permits only `ReadCanonicalObject`. MCP handlers require the active
 verified feedback request even when invoked directly; a metadata request,
 expired reservation or completed response cannot substitute for it.
+
+### Independently grant exact check evidence and diagnostics
+
+Use `--operations pulls-check-evidence-read` to let an agent read the canonical
+evidence for one selected PR check, including retained failed-job stdout/stderr
+when present. This scope is independent of `pulls-feedback-read`, `pulls-read`
+and all source or publication scopes. A diagnostic workflow that also discovers
+check summaries needs both `pulls-feedback-read,pulls-check-evidence-read` in its
+immutable credential. Neither an existing feedback grant nor an old all-scopes
+grant acquires evidence access when the node is upgraded.
+
+| Transport | Required host ceiling | Read entry point and exact selectors |
+| --- | --- | --- |
+| HTTP | `--allow-pulls` | `GET /api/v1/pulls/{number}/checks/evidence?check=<check-id>&expected_head=<snapshot-token>` |
+| MCP | `--allow-pulls` | `frankengit_pull_check_evidence`, with `number`, `check`, `expected_head` and `expected_evidence_sha256` |
+
+The sponsored profile needs no artifact launch flag or artifact root. Its
+dedicated authority covers only the selected canonical check evidence; it does
+not enable artifact inspection, arbitrary artifact IDs, namespace reads,
+workflow execution, check publication, review decisions or merges. Ordinary HTTP
+credentials still require both `pulls-read` and `artifact-read` for this route.
+Trusted-local MCP still requires both `--allow-pulls` and `--allow-artifacts`
+and the existing artifact-root configuration. No new launch flag is introduced.
+
+Both transports preserve the existing pinned-snapshot selection and apply
+current visibility to both recorded PR branches. A retained pin can select an
+older observation after the branch advances, but cannot bypass current hidden-ref
+policy, revocation or request expiry. At a selected snapshot where the PR's
+recorded source is already stale, the evidence is unavailable.
+
+The HTTP selector grammar is unchanged: only `check` and `expected_head` select
+the evidence, with no digest query parameter. The response identifies and
+verifies the exact canonical evidence digest. MCP additionally requires the
+caller's expected SHA-256 from the selected summary and verifies the complete
+evidence before returning each bounded byte range. Continue with the same PR,
+check, head and digest. Evidence and decoded logs remain untrusted execution
+content.
+
+Every call reauthenticates the canonical credential and carries the original
+agent, sponsor, repository binding, request-run witness, monotonic deadline and
+input/output ceilings through the native read and disclosure. The request permits
+only `ReadCanonicalObject`; it cannot be reused as a summary, source, candidate,
+artifact or mutation request. MCP direct handlers require the matching active
+verified evidence request. See [HTTP check evidence](PULL_REQUEST_WORKFLOW_CHECKS.md#selected-check-evidence-and-execution-output)
+and [MCP check evidence](MCP_CHECK_EVIDENCE.md) for byte limits and continuation.
 
 ### Current-source routes and authenticated context
 
@@ -531,10 +578,12 @@ A write-only launch exposes writes without read or recovery tools, and a
 credential with only a write scope cannot use a separately selected read ceiling.
 Discussion reads and writes use `--allow-discussions` and
 `--allow-discussion-writes`. The independent `pulls-feedback-read` scope under
-`--allow-pulls` adds the review and check-summary tools described above. Metadata
-grants do not expose the operator profile's review/check mutations, raw check
-evidence, notifications, event feeds, source, queues, artifacts, agent-context or
-administration tools. An unknown or unsupported tool
+`--allow-pulls` adds the review and check-summary tools described above. The
+separate `pulls-check-evidence-read` scope under the same ceiling enables
+`frankengit_pull_check_evidence` for pinned canonical diagnostics. Metadata
+grants do not imply that evidence scope or expose the operator profile's
+review/check mutations, notifications, event feeds, source, queues, generic
+artifacts, agent-context or administration tools. An unknown or unsupported tool
 is refused before credential or repository lookup.
 
 Milestone tools reuse the issue-service launch ceilings and independently check
@@ -698,7 +747,7 @@ Each HTTP request derives an `IntentRun` from the authenticated authority receip
 credential, agent, sponsor, selected route operation, retry key and request-header
 commitment. It reserves the actual bounded HTTP input/output envelopes. Metadata
 requests permit one operation class. A `source-history-read`, `source-verified-read`,
-`pulls-diff-read` or `pulls-feedback-read` request permits only
+`pulls-diff-read`, `pulls-feedback-read` or `pulls-check-evidence-read` request permits only
 `ReadCanonicalObject`. A `source-read` request permits exactly
 `ReadCanonicalObject` and `ReadDerivedGeneration` so the same bounded run can
 read native source and its authenticated search generations.
@@ -749,19 +798,31 @@ capability requires an explicit new grant, and revocation must
 retain the exact original operation mask. A stored `0x1fff` mask gains neither
 complete proof disclosure nor PR code comparison. A stored `0x7fff` mask gains no
 feedback permission. A stored `0xffff` mask includes all sixteen legacy operations
-and gains no branch creation.
+and gains neither branch creation nor check evidence disclosure.
 
 `source-branch-create` occupies bit 16 (`0x10000`) and requires the same immutable
-source-scope carrier as `source-publish`. Scoped issuance/revocation action codes
-5 and 6 carry a canonical `u32` operation mask; they are required only when a
-higher bit is present. Codes 1 through 4 retain their exact historical `u16`
-encoding. The decoder rejects extended encodings of legacy-only masks, unknown
-operation bits, and missing or invalid scope, so one grant has one canonical
-encoding. The in-memory known-operation mask is `0x1ffff`; zero remains invalid.
+source-scope carrier as `source-publish`. `pulls-check-evidence-read` occupies bit
+17 (`0x20000`) and requires no source scope by itself. A stored `0x1ffff` mask
+retains all previously assigned operations and gains no check evidence access.
+
+| Issuance / revocation action codes | Operation encoding | Source scope |
+| --- | --- | --- |
+| 1 / 2 | Historical `u16` | Absent |
+| 3 / 4 | Historical `u16` | Required |
+| 5 / 6 | Extended `u32`, with at least one known high bit | Required |
+| 7 / 8 | Extended `u32`, with at least one known high bit | Absent |
+
+Evidence-only grants use action codes 7/8. A grant that separately includes
+`source-publish` or `source-branch-create` retains its mandatory source ceiling
+and uses codes 5/6 when an extended bit is present. Codes 1 through 6 retain
+their previous representation. The decoder rejects extended encodings of
+legacy-only masks, unknown operation bits, missing or invalid required scopes,
+and unnecessary source scopes, so one grant has one canonical encoding. The
+in-memory known-operation mask is `0x3ffff`; zero remains invalid.
 
 Upgrade every repository reader before issuing an extended grant: older readers
-fail closed on the new action code and must not strip its high bit or fall back
-to another credential profile. Existing grant bytes, event-family discriminants,
+fail closed on an unknown action code or operation bit and must not strip the
+high bit or fall back to another credential profile. Existing grant bytes, event-family discriminants,
 request identities and revocation semantics are unchanged. Revocation retains
 the complete original grant and selects the corresponding legacy or extended
 encoding.

@@ -68,7 +68,9 @@ Issue, PR metadata/conversation, discussion and own-principal outcome tools keep
 their independent grants. Milestones require their own scopes under issue ceilings.
 PR review/check summaries require pulls-feedback-read under --allow-pulls; they
 grant no review approval, merge permission or raw check-evidence disclosure.
-Notifications, review writes, check evidence, artifacts, queues, events and
+Exact canonical check evidence separately requires pulls-check-evidence-read
+under --allow-pulls. It grants no general artifact access or execution authority.
+Notifications, review writes, artifacts, queues, events and
 administration remain unavailable.
 The token file is private, regular and bounded; its contents are never arguments
 or receipts. Each call binds the complete tool name/arguments and original key

@@ -34,14 +34,16 @@ Scopes: issues-read, issues-write, pulls-read, pulls-write,
         discussions-read, discussions-write, outcomes-read, source-read,
         source-history-read, source-candidates, milestones-read, milestones-write,
         source-publish, source-verified-read, pulls-diff-read, pulls-feedback-read,
-        source-branch-create.
+        source-branch-create, pulls-check-evidence-read.
 source-read permits current source browsing, ref/tag discovery, search and context.
 source-history-read permits bounded history, blame, historical files and reference diffs.
 source-candidates permits bounded HTTP exact-patch preparation and bundle inspection.
 source-verified-read permits complete ref-anchored blob proofs including original tree witnesses.
 pulls-diff-read permits exact versioned pull-request code comparisons, without review approval.
 pulls-feedback-read permits bounded review pages and canonical check summaries.
-Check evidence bodies, logs and artifacts require separate authority.
+pulls-check-evidence-read permits bounded evidence for an exact canonical check,
+pinned to its expected head and evidence digest. It grants no generic artifact access.
+Check evidence bodies and logs require this separate authority from feedback summaries.
 milestones-read permits milestone metadata, history and same-snapshot issue counts.
 milestones-write permits opening, editing, closing and reopening milestones.
 Issue milestone assignments still require issues-write.

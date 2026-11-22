@@ -240,7 +240,7 @@ pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
     if options.pulls {
         tools.extend(pulls::tools());
         tools.push(checks::tool());
-        if options.artifacts {
+        if options.artifacts || options.agent_token_file.is_some() {
             tools.push(check_evidence::tool());
         }
         tools.push(pull_comments::read_tool());
@@ -495,7 +495,10 @@ impl NodeTools {
         {
             return pulls::call(self, name, args);
         }
-        if self.options.pulls && self.options.artifacts && name == check_evidence::NAME {
+        if self.options.pulls
+            && (self.options.artifacts || self.options.agent_token_file.is_some())
+            && name == check_evidence::NAME
+        {
             return check_evidence::call(self, args);
         }
         if self.options.pulls && name == checks::NAME {

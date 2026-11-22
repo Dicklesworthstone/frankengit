@@ -39,7 +39,7 @@ fn sponsored_profile_lists_only_exact_tools_even_with_operator_flags_planted() {
     options.writes.merges = true;
     options.principal = Some(SPONSOR);
     let tools = super::super::tools_for_options(&options);
-    assert_eq!(tools.len(), 68);
+    assert_eq!(tools.len(), 69);
     assert!(
         tools
             .iter()
@@ -60,6 +60,15 @@ fn sponsored_profile_lists_only_exact_tools_even_with_operator_flags_planted() {
         assert_eq!(operation(&options, name), Some(PULLS_FEEDBACK_READ));
         assert!(tools.iter().any(|tool| tool.name == name));
     }
+    assert_eq!(
+        operation(&options, "frankengit_pull_check_evidence"),
+        Some(PULLS_CHECK_EVIDENCE_READ)
+    );
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool.name == "frankengit_pull_check_evidence")
+    );
     assert!(
         tools
             .iter()
@@ -75,7 +84,7 @@ fn sponsored_profile_lists_only_exact_tools_even_with_operator_flags_planted() {
     backend.options = options;
     for name in [
         "frankengit_notifications",
-        "frankengit_pull_check_evidence",
+        "frankengit_artifact_read",
         "frankengit_pull_review",
         "frankengit_branch_transaction",
         "frankengit_branch_update",

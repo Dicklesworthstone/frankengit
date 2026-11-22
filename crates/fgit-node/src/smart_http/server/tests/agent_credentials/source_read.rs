@@ -3,6 +3,8 @@
 
 mod branch_creation;
 mod candidates;
+#[cfg(target_os = "linux")]
+mod check_evidence;
 mod commit;
 mod history;
 mod pull_diff;

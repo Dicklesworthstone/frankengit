@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 mod branch_creation;
 mod candidate_context;
+mod check_evidence;
 mod milestones;
 #[path = "../tests/authority_read_fault.rs"]
 mod read_fault;
@@ -1025,7 +1026,7 @@ fn feedback_requests_preserve_explicit_read_authority_across_reopen_and_revocati
                 .is_err()
         );
         feedback.namespace = namespace;
-        for operation in [0, PULLS_FEEDBACK_READ | ISSUES_READ, 1 << 17] {
+        for operation in [0, PULLS_FEEDBACK_READ | ISSUES_READ, 1 << 18] {
             assert!(matches!(
                 node.runtime().block_on(node.authenticate_agent_request_in(
                     &node.request_context(),

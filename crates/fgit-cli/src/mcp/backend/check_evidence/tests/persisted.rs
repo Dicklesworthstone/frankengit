@@ -3,6 +3,7 @@ use super::*;
 use crate::mcp::protocol::Server;
 use fgit_types::RepositoryIncarnationId;
 mod fixture;
+mod sponsored;
 use fixture::Fixture;
 
 fn head(backend: &NodeTools) -> RepositoryAuthorityHeadId {
@@ -100,11 +101,11 @@ fn grant_matrix(backend: &mut NodeTools, fixture: &Fixture, selection: &Object) 
     }
     backend.options.agent_token_file = Some(fixture.root.join("not-a-credential"));
     assert!(backend.options.validate_access().is_err());
-    assert!(!backend.tools().iter().any(|tool| tool.name == NAME));
+    assert!(backend.tools().iter().any(|tool| tool.name == NAME));
     assert!(!backend.is_mutation(NAME));
     assert_eq!(
         call(backend, selection).unwrap_err().code,
-        "tool_not_granted"
+        "agent_request_required"
     );
     backend.options.agent_token_file = None;
     let incarnation = backend.options.incarnation;
@@ -317,8 +318,8 @@ fn sponsored_feedback_reads_actual_failed_check_summary_without_execution_output
     use fgit_authority::IdempotencyKey;
     use fgit_forge::ExpectedVersion;
     use fgit_identity::agent::{
-        AgentCredentialAction, AgentCredentialCommand, AgentCredentialGrant,
-        PULLS_FEEDBACK_READ, SponsorKind, agent_credential_id,
+        AgentCredentialAction, AgentCredentialCommand, AgentCredentialGrant, PULLS_FEEDBACK_READ,
+        SponsorKind, agent_credential_id,
     };
     use fgit_node::LoopbackReceiveSession;
     use fgit_types::DecisionOutcome;
@@ -362,7 +363,10 @@ fn sponsored_feedback_reads_actual_failed_check_summary_without_execution_output
                 Default::default(),
             ))
             .unwrap();
-        assert!(matches!(terminal.outcome, DecisionOutcome::Committed { .. }));
+        assert!(matches!(
+            terminal.outcome,
+            DecisionOutcome::Committed { .. }
+        ));
         administrator.close().unwrap();
         let token_file = fixture.root.join("feedback.token");
         let mut file = std::fs::OpenOptions::new()
@@ -386,14 +390,14 @@ fn sponsored_feedback_reads_actual_failed_check_summary_without_execution_output
         assert!(!wire.contains("MCP-CHECK-FAILED"));
         assert!(!wire.contains("MCP-CHECK-ERROR"));
         assert!(!wire.contains(&bearer));
-        assert!(!backend.tools().iter().any(|tool| tool.name == NAME));
+        assert!(backend.tools().iter().any(|tool| tool.name == NAME));
         assert_eq!(
             backend.call(NAME, &selection).unwrap_err().code,
-            "tool_not_granted"
+            "agent_operation_not_granted"
         );
         assert_eq!(
             call(&backend, &selection).unwrap_err().code,
-            "tool_not_granted"
+            "agent_request_required"
         );
         assert_eq!(head(&backend), before);
 
@@ -401,8 +405,14 @@ fn sponsored_feedback_reads_actual_failed_check_summary_without_execution_output
         let current = backend
             .call("frankengit_pull_checks", &args([("number", text("7"))]))
             .unwrap();
-        assert_eq!(current.object().unwrap()["source_current"], Value::Bool(false));
-        assert_eq!(current.object().unwrap()["checks"], Value::Array(Vec::new()));
+        assert_eq!(
+            current.object().unwrap()["source_current"],
+            Value::Bool(false)
+        );
+        assert_eq!(
+            current.object().unwrap()["checks"],
+            Value::Array(Vec::new())
+        );
         let retained = backend
             .call(
                 "frankengit_pull_checks",

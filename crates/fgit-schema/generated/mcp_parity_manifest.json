@@ -561,7 +561,7 @@
       "owner_subsystem": "forge",
       "support_profile": "active",
       "read_mutation": "read_only",
-      "capability": "read_workflow_artifact",
+      "capability": "read_pull_check_evidence",
       "cli_command": "fg-mcp (frankengit_pull_check_evidence)",
       "rest_api_path": "GET /{repository}/api/v1/pulls/{number}/checks/evidence"
     },

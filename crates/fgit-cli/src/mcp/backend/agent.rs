@@ -10,9 +10,9 @@ use super::{NodeTools, Object, Options, ToolError, Value, mutations, object, tex
 use fgit_authority::IdempotencyKey;
 use fgit_identity::agent::{
     DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, MILESTONES_READ,
-    MILESTONES_WRITE, OUTCOMES_READ, PULLS_DIFF_READ, PULLS_FEEDBACK_READ, PULLS_READ, PULLS_WRITE,
-    SOURCE_BRANCH_CREATE, SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ,
-    SOURCE_VERIFIED_READ,
+    MILESTONES_WRITE, OUTCOMES_READ, PULLS_CHECK_EVIDENCE_READ, PULLS_DIFF_READ,
+    PULLS_FEEDBACK_READ, PULLS_READ, PULLS_WRITE, SOURCE_BRANCH_CREATE, SOURCE_CANDIDATES,
+    SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ, SOURCE_VERIFIED_READ,
 };
 use fgit_node::agent_credentials::AgentRequest;
 use fgit_node::{LoopbackReceiveSession, NodeReceiveTransportRefusal};
@@ -50,7 +50,7 @@ impl Profile {
 }
 
 /// One exhaustive list owns both discovery and dispatch. Do not derive this
-/// from broad operator groups: those also grant notifications, evidence bodies,
+/// from broad operator groups: those also grant notifications, artifact custody,
 /// review mutations and events not covered by these grants. Candidate and source
 /// publication operations have closed argument gates before authentication.
 pub(super) fn operation(options: &Options, name: &str) -> Option<u32> {
@@ -147,6 +147,7 @@ pub(super) fn operation(options: &Options, name: &str) -> Option<u32> {
         super::pull_reviews::NAME | super::checks::NAME if options.pulls => {
             Some(PULLS_FEEDBACK_READ)
         }
+        super::check_evidence::NAME if options.pulls => Some(PULLS_CHECK_EVIDENCE_READ),
         "frankengit_source_log"
         | "frankengit_source_blame"
         | "frankengit_source_historical_tree"

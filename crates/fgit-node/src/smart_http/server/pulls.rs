@@ -122,10 +122,17 @@ impl<'a> Request<'a> {
     }
 
     pub(super) fn agent_operation(&self) -> Option<u32> {
-        use fgit_identity::agent::{PULLS_DIFF_READ, PULLS_FEEDBACK_READ, PULLS_READ, PULLS_WRITE};
+        use fgit_identity::agent::{
+            PULLS_CHECK_EVIDENCE_READ, PULLS_DIFF_READ, PULLS_FEEDBACK_READ, PULLS_READ,
+            PULLS_WRITE,
+        };
         match self {
             Self::Diff(_) => Some(PULLS_DIFF_READ),
-            Self::Checks(request) if request.evidence.is_none() => Some(PULLS_FEEDBACK_READ),
+            Self::Checks(request) => Some(if request.evidence.is_some() {
+                PULLS_CHECK_EVIDENCE_READ
+            } else {
+                PULLS_FEEDBACK_READ
+            }),
             Self::Collaboration(request) if !request.is_mutation() => Some(PULLS_FEEDBACK_READ),
             Self::Metadata(_) | Self::Conversation(_) | Self::Labels(_) => {
                 Some(if self.is_mutation() {

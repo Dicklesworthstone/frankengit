@@ -6,7 +6,14 @@ This surface belongs to the existing FG096 MCP surface work and the canonical wo
 
 ## Launch and authority
 
-The tool is advertised only when the trusted-local process has **both** existing `--allow-pulls` and `--allow-artifacts` grants. The artifact grant retains its existing Linux-only launch restrictions: an exact repository incarnation and an existing private absolute artifact root are required. No new launch flag or caller-selected scope is introduced.
+The tool has two independently authorized launch profiles:
+
+| Profile | Required launch configuration | Authority for each call |
+|---|---|---|
+| Trusted-local operator | `--trusted-local --allow-pulls --allow-artifacts`, exact incarnation and existing private absolute artifact root | Both existing PR and artifact read grants |
+| Sponsored agent | `--agent-token-file`, exact incarnation and `--allow-pulls` | Live canonical credential with the independent `pulls-check-evidence-read` scope |
+
+No new launch flag or caller-selected scope is introduced. Listing the tool does not authorize a sponsored call. The operator's artifact grant retains its existing Linux-only launch restrictions:
 
 ```sh
 fg-mcp /srv/frankengit/node TENANT_ID REPOSITORY_ID \
@@ -20,11 +27,25 @@ fg-mcp /srv/frankengit/node TENANT_ID REPOSITORY_ID \
 
 Replace the uppercase identifiers and paths with the configured repository's exact values. Use its actual Git object format. The process applies the existing artifact-root ownership and private-directory checks; it does not create an absent root on behalf of a read request.
 
-The combined launch also exposes the existing artifact inspection and content tools. Their independent whole-custody-namespace grant, including outputs associated with hidden refs, is unchanged. This **PR check evidence tool** additionally requires the PR grant and applies the node's **current hidden-ref policy to both the source and target branch**, even when reading an older retained snapshot.
+That operator launch also exposes the existing artifact inspection and content tools. Their independent whole-custody-namespace grant, including outputs associated with hidden refs, is unchanged.
 
-Sponsored-agent profiles cannot discover or call the new tool. The adapter checks both grants and the sponsored exclusion before argument parsing or native I/O, and checks the launch-pinned incarnation before reading. An artifact ID, a payload digest, a check ID, or possession of a snapshot token never grants authority.
+A sponsored diagnostic reader instead uses:
 
-The schema registry represents the necessary `read_workflow_artifact` capability. That single registry capability is not the complete launch authorization: the native MCP adapter also requires PR-read. The registry does not invent a union or broaden the capability type.
+```sh
+fg-mcp /srv/frankengit/node TENANT_ID REPOSITORY_ID \
+  --agent-token-file /private/agent.token \
+  --expected-incarnation INCARNATION_ID \
+  --object-format sha256 \
+  --allow-pulls
+```
+
+Its credential must explicitly grant `pulls-check-evidence-read`. Neither `pulls-read` nor `pulls-feedback-read` implies this disclosure. No artifact root or artifact grant is required or enabled in this profile; generic artifact inspection, content tools and namespace reads remain unavailable. `--trusted-local` and `--agent-token-file` remain mutually exclusive.
+
+Both profiles apply the node's **current hidden-ref policy to both the source and target branch**, even when reading an older retained snapshot. The adapter checks the launch-pinned incarnation and the active request's authority before native I/O. An artifact ID, a payload digest, a check ID, or possession of a snapshot token never grants authority.
+
+Each sponsored call authenticates the current canonical grant and retains its original agent, sponsor, repository binding, request-run witness, deadline and byte budgets. The handler requires the matching active verified evidence request even on direct dispatch; an expired request, a summary request or a completed response cannot authorize another read. Its native operation class is only `ReadCanonicalObject`, with no execution or publication authority.
+
+The schema registry declares the dedicated `read_pull_check_evidence` capability. That classification describes exact canonical check disclosure; it does not grant the generic `read_workflow_artifact` capability. The native adapter separately enforces the selected profile's launch and credential requirements above.
 
 ## Select the exact observation
 
@@ -39,6 +60,8 @@ First call the existing check-list tool for the desired PR:
   }
 }
 ```
+
+In sponsored mode, listing checks separately requires `pulls-feedback-read`. Issue both scopes when the agent should discover summaries and inspect their diagnostics. An evidence-only grant may instead use exact selection coordinates supplied by an authorized caller.
 
 Select one returned row and copy all four coordinates into the evidence request:
 
@@ -94,7 +117,7 @@ Likewise, `page.source_current` describes the source branch at the **selected sn
 
 | Refusal | Meaning |
 |---|---|
-| `tool_not_granted` | Either independent grant is absent, or a sponsored profile attempts the operation. |
+| `tool_not_granted` | The selected profile's required launch ceiling or active-request authority is absent. |
 | `snapshot_unavailable` | The exact requested head is unavailable through the native snapshot-selection rules. |
 | `pull_check_evidence_unavailable` | No disclosed matching PR/check evidence exists at the selected source; absent, hidden and stale subjects share this result. |
 | `check_evidence_invalid` | Native page structure, complete evidence length or complete evidence digest failed validation. |
@@ -111,7 +134,7 @@ Failures return a typed tool error, never a successful empty evidence body. Canc
 
 The adapter is split into argument/grant handling, validated selection and rendering, and optional native report-span decoding. It adds one existing internal `fgit-runner` dependency edge only on Linux, matching the decoder's platform boundary. It adds no third-party package or feature.
 
-The focused tests cover registry/catalog and served-field parity; exact input rejection; complete-body corruption before one-byte disclosure; mismatched heads, IDs, digest, length and Git format; malformed/stale pages; zero-byte evidence; EOF and overflow; all four pulls/artifacts grant combinations; sponsored exclusion; report binding; and bounded output.
+The focused tests cover registry/catalog and served-field parity; exact input rejection; complete-body corruption before one-byte disclosure; mismatched heads, IDs, digest, length and Git format; malformed/stale pages; zero-byte evidence; EOF and overflow; all four operator pulls/artifacts grant combinations; report binding; and bounded output. The sponsored credential tests preserve old scope masks, reject implicit feedback-to-evidence authority, and retain canonical issuance, expiry, revocation, repository binding and original request limits.
 
 The persisted integration fixture prepares real native source commits, executes a failed trusted-local job, publishes its canonical observation, opens a PR, and reads it through MCP in SHA-1 and SHA-256 repositories. It reconstructs exact byte ranges, locates actual stdout/stderr and exit status, checks that reads do not change the authority head, and verifies retained-snapshot behavior after the source advances and after reopening the node.
 
@@ -120,4 +143,5 @@ Related contracts:
 - [Canonical workflow observations](CANONICAL_WORKFLOW_OBSERVATIONS.md)
 - [MCP read-only server](MCP_READ_ONLY_SERVER.md)
 - [Independent workflow artifact reads](MCP_WORKFLOW_ARTIFACT_READ.md)
+- [Sponsored agent credentials](SPONSORED_AGENT_CREDENTIALS.md#independently-grant-exact-check-evidence-and-diagnostics)
 - [Normative protocol contracts](NORMATIVE_PROTOCOL_CONTRACTS.md)
