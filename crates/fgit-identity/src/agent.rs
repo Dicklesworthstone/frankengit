@@ -14,8 +14,8 @@ pub use fgit_forge::event::agent_credential::{
     AgentCredentialId, AgentCredentialSnapshot, DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ,
     ISSUES_WRITE, MAX_LIFETIME_SECONDS, MILESTONES_READ, MILESTONES_WRITE,
     NativeAgentCredentialEvent, OUTCOMES_READ, PULLS_DIFF_READ, PULLS_FEEDBACK_READ, PULLS_READ,
-    PULLS_WRITE, SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ,
-    SOURCE_VERIFIED_READ, SourcePublicationScope, SponsorKind,
+    PULLS_WRITE, SOURCE_BRANCH_CREATE, SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_PUBLISH,
+    SOURCE_READ, SOURCE_VERIFIED_READ, SourcePublicationScope, SponsorKind,
 };
 
 /// Fixed finite input bound before hashing untrusted bearer bytes.
@@ -92,7 +92,7 @@ impl AuthenticatedAgentCredential {
 
     /// Checks the requested explicit flag(s), without interpreting an unknown
     /// flag as a broader permission. This is a ceiling, not publication consent.
-    pub fn authorize(&self, operation: u16) -> Result<(), AgentCredentialRefusal> {
+    pub fn authorize(&self, operation: u32) -> Result<(), AgentCredentialRefusal> {
         if self.grant.permits(operation) {
             Ok(())
         } else {

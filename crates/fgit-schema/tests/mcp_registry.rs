@@ -53,6 +53,130 @@ const fn valid_prototype() -> McpToolEntry {
 }
 
 #[test]
+fn sponsored_branch_creation_declares_host_binding_without_broadening_other_mutations() {
+    let creation = find_tool("frankengit_branch_create").unwrap();
+    assert_eq!(creation.principal, PrincipalRequirement::HostBound);
+    assert_eq!(creation.read_mutation, ReadMutationClass::Mutation);
+    assert_eq!(
+        creation.capability,
+        CapabilityRequirement::PREPARE_PUBLICATION
+    );
+    assert_eq!(
+        creation.idempotency,
+        IdempotencyRequirement::RequiredDurableKey
+    );
+    assert_eq!(
+        creation.receipt,
+        EvidenceReceiptClass::CanonicalDecisionDigest
+    );
+    assert_eq!(
+        creation.cancellation,
+        CancellationBehavior::NonPreemptiveTerminalCommit
+    );
+    assert!(creation.description.contains("source-branch-create"));
+    assert!(creation.description.contains("source-publish grant alone"));
+    assert!(
+        creation
+            .description
+            .contains("finite destination-ref scope")
+    );
+    assert!(
+        creation
+            .description
+            .contains("historical decisions, not current refs")
+    );
+    let target = creation
+        .input_fields
+        .iter()
+        .find(|field| field.name == "target")
+        .unwrap();
+    assert!(target.required);
+    assert_eq!(target.classification, FieldClassification::SelectorPosition);
+    assert!(
+        target
+            .description
+            .contains("current tip of a visible branch")
+    );
+    assert!(
+        creation
+            .output_fields
+            .iter()
+            .any(|field| field.name == "tx_id" && field.required)
+    );
+    for field in [
+        "principal",
+        "sponsor",
+        "credential",
+        "force",
+        "initial",
+        "commands",
+        "bundle_hex_chunks",
+    ] {
+        assert!(
+            !creation
+                .input_fields
+                .iter()
+                .any(|input| input.name == field)
+        );
+    }
+    for code in [
+        "agent_operation_not_granted",
+        "agent_request_key_mismatch",
+        "source_mutation_outcome_unknown",
+    ] {
+        assert!(creation.refusal_codes.contains(&code));
+    }
+    assert_eq!(
+        creation.rest_api_path,
+        "POST /{repository}/api/v1/source/branches/create"
+    );
+
+    // Catalog admission requires independent host attribution and the mutation
+    // ceiling. Canonical token authentication still happens in the real host.
+    assert!(matches!(
+        admit_call(creation.name, 1, "{}", &["prepare_publication"], None),
+        Err(McpRefusal::PrincipalRequired { .. })
+    ));
+    assert!(matches!(
+        admit_call(
+            creation.name,
+            1,
+            "{}",
+            &["read_canonical_object"],
+            Some("host-bound-agent")
+        ),
+        Err(McpRefusal::CapabilityDenied { .. })
+    ));
+    let admitted = admit_call(
+        creation.name,
+        1,
+        "{}",
+        &["prepare_publication"],
+        Some("host-bound-agent"),
+    )
+    .unwrap();
+    assert_eq!(admitted.principal, Some("host-bound-agent"));
+    for name in [
+        "frankengit_branch_update",
+        "frankengit_branch_delete",
+        "frankengit_branch_rename",
+        "frankengit_branch_transaction",
+        "frankengit_source_publish_rebase",
+    ] {
+        assert_eq!(
+            find_tool(name).unwrap().principal,
+            PrincipalRequirement::OperatorBound
+        );
+    }
+    for artifact in fgit_schema::emit::artifacts()
+        .into_iter()
+        .filter(|artifact| matches!(artifact.name, "mcp-surface.schema.json" | "mcp_tools.json"))
+    {
+        assert!(artifact.contents.contains(creation.description));
+    }
+}
+
+#[test]
 fn current_native_index_reuse_is_explicit_and_retains_each_tools_read_grant() {
     for (name, capability, principal) in [
         (

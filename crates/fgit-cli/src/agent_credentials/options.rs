@@ -4,8 +4,9 @@ use fgit_forge::{AggregateVersion, ExpectedVersion};
 use fgit_identity::agent::{
     AgentCredentialGrant, AgentCredentialId, DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ,
     ISSUES_WRITE, MILESTONES_READ, MILESTONES_WRITE, OUTCOMES_READ, PULLS_DIFF_READ,
-    PULLS_FEEDBACK_READ, PULLS_READ, PULLS_WRITE, SOURCE_CANDIDATES, SOURCE_HISTORY_READ,
-    SOURCE_PUBLISH, SOURCE_READ, SOURCE_VERIFIED_READ, SourcePublicationScope, SponsorKind,
+    PULLS_FEEDBACK_READ, PULLS_READ, PULLS_WRITE, SOURCE_BRANCH_CREATE, SOURCE_CANDIDATES,
+    SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ, SOURCE_VERIFIED_READ, SourcePublicationScope,
+    SponsorKind,
 };
 use fgit_types::{GitHashAlgorithm, PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
 use std::{collections::BTreeMap, path::PathBuf};
@@ -67,8 +68,8 @@ fn credential_id(value: &str) -> Result<AgentCredentialId, String> {
     AgentCredentialId::try_new(bytes).ok_or_else(|| "credential ID must be nonzero".into())
 }
 
-fn operations(value: &str) -> Result<u16, String> {
-    let mut result = 0u16;
+fn operations(value: &str) -> Result<u32, String> {
+    let mut result = 0u32;
     for operation in value.split(',') {
         let bit = match operation {
             "issues-read" => ISSUES_READ,
@@ -87,6 +88,7 @@ fn operations(value: &str) -> Result<u16, String> {
             "source-verified-read" => SOURCE_VERIFIED_READ,
             "pulls-diff-read" => PULLS_DIFF_READ,
             "pulls-feedback-read" => PULLS_FEEDBACK_READ,
+            "source-branch-create" => SOURCE_BRANCH_CREATE,
             _ => return Err("unknown or unsupported agent credential operation".into()),
         };
         if result & bit != 0 {
@@ -246,14 +248,17 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
             grant
                 .validate()
                 .map_err(|error| format!("invalid agent grant: {error}"))?;
-            let source_scope = if grant.permits(SOURCE_PUBLISH) {
+            let source_scope = if grant.requires_source_scope() {
                 Some(
                     SourcePublicationScope::new(get("--source-ref-scope")?, source_paths)
                         .map_err(|error| format!("invalid source publication scope: {error}"))?,
                 )
             } else {
                 if fields.contains_key("--source-ref-scope") || !source_paths.is_empty() {
-                    return Err("source scope options require the source-publish operation".into());
+                    return Err(
+                        "source scope options require source-publish or source-branch-create"
+                            .into(),
+                    );
                 }
                 None
             };

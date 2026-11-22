@@ -75,7 +75,7 @@ fn source_publication_is_explicit_and_retains_full_authentication_contract() {
     let authenticated = authenticate(&source, BEARER, 100, RevocationEvidence::Live).unwrap();
     assert_eq!(authenticated.authorize(SOURCE_PUBLISH), Ok(()));
     for operation in (0..16)
-        .map(|bit| 1u16 << bit)
+        .map(|bit| 1u32 << bit)
         .filter(|bit| *bit != SOURCE_PUBLISH)
     {
         assert_eq!(
@@ -123,6 +123,44 @@ fn source_publication_is_explicit_and_retains_full_authentication_contract() {
 }
 
 #[test]
+fn branch_creation_never_follows_from_existing_source_or_metadata_authority() {
+    let legacy = AgentCredentialGrant {
+        operations: 0xffff,
+        ..grant()
+    };
+    assert_eq!(
+        authenticate(&legacy, BEARER, 100, RevocationEvidence::Live)
+            .unwrap()
+            .authorize(SOURCE_BRANCH_CREATE),
+        Err(AgentCredentialRefusal::OperationNotGranted)
+    );
+    let creator = AgentCredentialGrant {
+        operations: SOURCE_BRANCH_CREATE,
+        ..grant()
+    };
+    let authenticated = authenticate(&creator, BEARER, 100, RevocationEvidence::Live).unwrap();
+    assert_eq!(authenticated.authorize(SOURCE_BRANCH_CREATE), Ok(()));
+    for operation in (0..16).map(|bit| 1u32 << bit) {
+        assert_eq!(
+            authenticated.authorize(operation),
+            Err(AgentCredentialRefusal::OperationNotGranted)
+        );
+    }
+    assert_eq!(
+        authenticate(&creator, BEARER, 200, RevocationEvidence::Live),
+        Err(AgentCredentialRefusal::Expired)
+    );
+    assert_eq!(
+        authenticate(&creator, BEARER, 100, RevocationEvidence::Revoked),
+        Err(AgentCredentialRefusal::Revoked)
+    );
+    assert_eq!(
+        authenticate(&creator, BEARER, 100, RevocationEvidence::NotChecked),
+        Err(AgentCredentialRefusal::RevocationEvidenceRequired)
+    );
+}
+
+#[test]
 fn milestone_authentication_requires_explicit_independent_scopes_and_live_evidence() {
     let old = AgentCredentialGrant {
         operations: 0x03ff,
@@ -138,7 +176,7 @@ fn milestone_authentication_requires_explicit_independent_scopes_and_live_eviden
         assert_eq!(authenticated.authorize(scope), Ok(()));
         assert_eq!(authenticated.principal(), milestone.agent);
         assert_eq!(authenticated.sponsor(), milestone.sponsor);
-        for other in (0..16).map(|bit| 1u16 << bit).filter(|bit| *bit != scope) {
+        for other in (0..16).map(|bit| 1u32 << bit).filter(|bit| *bit != scope) {
             assert_eq!(
                 authenticated.authorize(other),
                 Err(AgentCredentialRefusal::OperationNotGranted)
@@ -259,7 +297,7 @@ fn history_credential_cannot_be_used_for_current_source_or_metadata() {
     assert_eq!(authenticated.authorize(SOURCE_HISTORY_READ), Ok(()));
     assert_eq!(authenticated.principal(), history.agent);
     assert_eq!(authenticated.sponsor(), history.sponsor);
-    for operation in (0..8).map(|bit| 1u16 << bit) {
+    for operation in (0..8).map(|bit| 1u32 << bit) {
         assert_eq!(
             authenticated.authorize(operation),
             Err(AgentCredentialRefusal::OperationNotGranted)
@@ -312,7 +350,7 @@ fn candidate_credential_is_independent_and_preserves_expiry_and_revocation() {
     };
     let authenticated = authenticate(&candidate, BEARER, 100, RevocationEvidence::Live).unwrap();
     assert_eq!(authenticated.authorize(SOURCE_CANDIDATES), Ok(()));
-    for operation in (0..9).map(|bit| 1u16 << bit) {
+    for operation in (0..9).map(|bit| 1u32 << bit) {
         assert_eq!(
             authenticated.authorize(operation),
             Err(AgentCredentialRefusal::OperationNotGranted)
@@ -433,6 +471,10 @@ fn wrong_secret_unbounded_input_and_malformed_grant_are_refused_without_secret_d
             ..grant
         },
         AgentCredentialGrant {
+            operations: ALL_OPERATIONS | (1 << 17),
+            ..grant
+        },
+        AgentCredentialGrant {
             issued_at: 0,
             ..grant
         },
@@ -480,10 +522,14 @@ fn feedback_authentication_requires_its_explicit_bit_and_live_bound_evidence() {
     assert_eq!(authenticated.sponsor(), feedback.sponsor);
     assert_eq!(authenticated.authorize(PULLS_FEEDBACK_READ), Ok(()));
     assert_eq!(
+        authenticated.authorize(SOURCE_BRANCH_CREATE),
+        Err(AgentCredentialRefusal::OperationNotGranted)
+    );
+    assert_eq!(
         authenticated.authorize(0),
         Err(AgentCredentialRefusal::OperationNotGranted)
     );
-    for operation in (0..15).map(|bit| 1u16 << bit) {
+    for operation in (0..15).map(|bit| 1u32 << bit) {
         assert_eq!(
             authenticated.authorize(operation),
             Err(AgentCredentialRefusal::OperationNotGranted)
@@ -526,7 +572,10 @@ fn feedback_authentication_requires_its_explicit_bit_and_live_bound_evidence() {
             AgentCredentialRefusal::RevocationEvidenceRequired,
         ),
     ] {
-        assert_eq!(authenticate(&feedback, BEARER, now, revocation), Err(expected));
+        assert_eq!(
+            authenticate(&feedback, BEARER, now, revocation),
+            Err(expected)
+        );
     }
     assert_eq!(
         authenticate_agent_credential(

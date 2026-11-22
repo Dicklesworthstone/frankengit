@@ -251,6 +251,27 @@ fn grants_have_finite_lifetimes_explicit_scopes_and_nonzero_distinct_identities(
 }
 
 #[test]
+fn extended_operation_masks_reject_every_unassigned_flag() {
+    assert_eq!(ALL_OPERATIONS, 0x1ffff);
+    let known = AgentCredentialGrant {
+        operations: ALL_OPERATIONS,
+        ..grant()
+    };
+    assert!(known.validate().is_ok());
+    for unknown in (17..32).map(|bit| 1u32 << bit) {
+        let malformed = AgentCredentialGrant {
+            operations: known.operations | unknown,
+            ..known
+        };
+        assert!(malformed.validate().is_err());
+        assert!(!malformed.permits(ISSUES_READ));
+        assert!(!malformed.permits(unknown));
+        assert!(!known.permits(unknown));
+        assert!(!known.permits(ISSUES_READ | unknown));
+    }
+}
+
+#[test]
 fn source_reads_are_independent_of_legacy_metadata_and_feedback_scopes() {
     // Freeze the original seven-bit mask rather than giving historical grants
     // whatever future operations ALL_OPERATIONS might come to contain.
@@ -339,8 +360,11 @@ fn expanded_grant_issue_and_revocation_round_trip_without_widening_legacy_grants
         // The required u16 operation field retains its original location and
         // meaning; granting the new bit does not reinterpret any older byte.
         assert_eq!(payload.as_bytes().len(), 178);
-        assert_eq!(&payload.as_bytes()[176..178], &operations.to_be_bytes());
-        // All sixteen bits are assigned. The empty mask remains invalid.
+        assert_eq!(
+            &payload.as_bytes()[176..178],
+            &u16::try_from(operations).unwrap().to_be_bytes()
+        );
+        // All historical u16 bits are assigned. The empty mask remains invalid.
         let mut invalid = payload.into_bytes();
         invalid[176..178].fill(0);
         assert!(
@@ -415,7 +439,7 @@ fn history_access_is_independent_of_every_preexisting_operation() {
     assert!(history.validate().is_ok());
     assert!(history.permits(SOURCE_HISTORY_READ));
     assert!(!history.permits(0));
-    for other in (0..8).map(|bit| 1u16 << bit) {
+    for other in (0..8).map(|bit| 1u32 << bit) {
         assert!(old.permits(other));
         assert!(!history.permits(other));
         assert!(!history.permits(SOURCE_HISTORY_READ | other));
@@ -450,7 +474,7 @@ fn candidate_work_requires_a_new_explicit_grant_without_widening_old_masks() {
     assert!(candidate.validate().is_ok());
     assert!(!old.permits(SOURCE_CANDIDATES));
     assert!(candidate.permits(SOURCE_CANDIDATES));
-    for other in (0..9).map(|bit| 1u16 << bit) {
+    for other in (0..9).map(|bit| 1u32 << bit) {
         assert!(old.permits(other));
         assert!(!candidate.permits(other));
         assert!(!candidate.permits(SOURCE_CANDIDATES | other));
@@ -487,7 +511,7 @@ fn milestone_scopes_are_independent_and_do_not_expand_any_retained_grant() {
         assert!(milestone.validate().is_ok());
         assert!(milestone.permits(scope));
         assert!(!milestone.permits(0));
-        for other in (0..12).map(|bit| 1u16 << bit).filter(|bit| *bit != scope) {
+        for other in (0..12).map(|bit| 1u32 << bit).filter(|bit| *bit != scope) {
             assert!(!milestone.permits(other));
             assert!(!milestone.permits(scope | other));
             let combined = AgentCredentialGrant {
@@ -514,6 +538,37 @@ fn required_tags_unknown_fields_and_every_truncation_fail_closed() {
     let mut out = Encoder::new();
     event.write_payload(&mut out).unwrap();
     let bytes = out.into_bytes();
+    let frozen_legacy = [
+        &[0u8; 8][..],
+        &13u32.to_be_bytes(),
+        &[9; 32],
+        &1u64.to_be_bytes(),
+        &25u32.to_be_bytes(),
+        &[2; 16],
+        &1u32.to_be_bytes(),
+        &[1; 16],
+        &[2; 16],
+        &1u32.to_be_bytes(),
+        &[3; 16],
+        &[4; 16],
+        &[5; 16],
+        &100u64.to_be_bytes(),
+        &200u64.to_be_bytes(),
+        &0x000bu16.to_be_bytes(),
+    ]
+    .concat();
+    assert_eq!(
+        bytes, frozen_legacy,
+        "legacy grants must retain their exact canonical bytes"
+    );
+    let revoked = revoke(&apply_event(None, &event).unwrap());
+    let mut revoked_bytes = Encoder::new();
+    revoked.write_payload(&mut revoked_bytes).unwrap();
+    let mut frozen_revoked = frozen_legacy;
+    frozen_revoked[44..52].copy_from_slice(&2u64.to_be_bytes());
+    frozen_revoked[56..72].fill(7);
+    frozen_revoked[72..76].copy_from_slice(&2u32.to_be_bytes());
+    assert_eq!(revoked_bytes.as_bytes(), frozen_revoked);
     assert_eq!(bytes.len(), 178);
     assert_eq!(&bytes[..8], &[0; 8]);
     assert_eq!(&bytes[8..12], &13u32.to_be_bytes());
@@ -529,7 +584,7 @@ fn required_tags_unknown_fields_and_every_truncation_fail_closed() {
     for (start, replacement) in [
         (8, u32::MAX.to_be_bytes()),
         (52, 26u32.to_be_bytes()),
-        (72, 5u32.to_be_bytes()),
+        (72, 7u32.to_be_bytes()),
         (108, 3u32.to_be_bytes()),
     ] {
         let mut changed = bytes.clone();
@@ -578,7 +633,7 @@ fn source_publication_requires_its_new_bit_and_explicit_extended_scope() {
         ..grant()
     };
     assert!(!historical.permits(SOURCE_PUBLISH));
-    for other in (0..12).map(|bit| 1u16 << bit) {
+    for other in (0..12).map(|bit| 1u32 << bit) {
         assert!(!source.permits(other));
     }
     for action in [
@@ -618,6 +673,118 @@ fn source_publication_requires_its_new_bit_and_explicit_extended_scope() {
 }
 
 #[test]
+fn task_branch_creation_is_an_independent_scoped_grant_without_legacy_widening() {
+    assert_eq!(SOURCE_BRANCH_CREATE, 1 << 16);
+    let legacy = AgentCredentialGrant {
+        operations: 0xffff,
+        ..grant()
+    };
+    assert!(!legacy.permits(SOURCE_BRANCH_CREATE));
+    for operations in [SOURCE_BRANCH_CREATE, SOURCE_BRANCH_CREATE | SOURCE_PUBLISH] {
+        let grant = AgentCredentialGrant {
+            operations,
+            ..grant()
+        };
+        assert!(grant.requires_source_scope());
+        assert!(!grant.permits(SOURCE_READ | SOURCE_CANDIDATES));
+        let id = AgentCredentialId::try_new([8; 32]).unwrap();
+        let command = |action| AgentCredentialCommand {
+            id,
+            expected_version: ExpectedVersion::NewStream,
+            action,
+        };
+        assert_eq!(
+            command(AgentCredentialAction::Issue(grant)).proposed_event(grant.sponsor),
+            Err(RefusalCode::EvidenceInvalid)
+        );
+        let issued = command(AgentCredentialAction::issuance(
+            grant,
+            Some(source_scope(&[b"src"])),
+        ))
+        .proposed_event(grant.sponsor)
+        .unwrap();
+        let state = apply_event(None, &issued).unwrap();
+        let revoked = AgentCredentialCommand {
+            id,
+            expected_version: ExpectedVersion::Exactly(AggregateVersion::FIRST),
+            action: AgentCredentialAction::revocation(grant, state.source_scope.clone()),
+        }
+        .proposed_event(grant.sponsor)
+        .unwrap();
+        for (event, tag) in [(&issued, 5u32), (&revoked, 6)] {
+            let frame = encode_body(event).unwrap();
+            assert_eq!(
+                decode_body::<ForgeEvent>(&frame, DecodeLimits::DEFAULT).unwrap(),
+                *event
+            );
+            let mut payload = Encoder::new();
+            event.write_payload(&mut payload).unwrap();
+            assert_eq!(&payload.as_bytes()[72..76], &tag.to_be_bytes());
+            assert_eq!(&payload.as_bytes()[176..180], &operations.to_be_bytes());
+            for end in 0..payload.as_bytes().len() {
+                assert!(
+                    ForgeEvent::read_payload(&mut Decoder::new(
+                        &payload.as_bytes()[..end],
+                        DecodeLimits::DEFAULT,
+                    ))
+                    .is_err()
+                );
+            }
+            for invalid_mask in [
+                0,
+                SOURCE_PUBLISH,
+                0xffff,
+                SOURCE_BRANCH_CREATE | (1 << 17),
+                u32::MAX,
+            ] {
+                let mut malformed = payload.as_bytes().to_vec();
+                malformed[176..180].copy_from_slice(&invalid_mask.to_be_bytes());
+                assert!(
+                    ForgeEvent::read_payload(&mut Decoder::new(&malformed, DecodeLimits::DEFAULT))
+                        .is_err()
+                );
+            }
+            // Wider masks cannot be smuggled into a historical action code,
+            // and the new action tags have no unscoped alias.
+            for invalid_tag in [tag - 2, tag - 4, 7] {
+                let mut downgraded = payload.as_bytes().to_vec();
+                downgraded[72..76].copy_from_slice(&invalid_tag.to_be_bytes());
+                assert!(
+                    ForgeEvent::read_payload(&mut Decoder::new(&downgraded, DecodeLimits::DEFAULT))
+                        .is_err()
+                );
+            }
+        }
+        assert!(apply_event(Some(&state), &revoked).unwrap().revoked);
+        if operations == SOURCE_BRANCH_CREATE {
+            assert!(!state.grant.permits(SOURCE_PUBLISH));
+        }
+    }
+    // Retain both existing action tags and existing bytes when the new bit is
+    // absent; neither upgrading a reader nor adding a scope grants creation.
+    let old_event = AgentCredentialCommand {
+        id: AgentCredentialId::try_new([7; 32]).unwrap(),
+        expected_version: ExpectedVersion::NewStream,
+        action: AgentCredentialAction::issuance(legacy, Some(source_scope(&[b"src"]))),
+    }
+    .proposed_event(legacy.sponsor)
+    .unwrap();
+    let frame = encode_body(&old_event).unwrap();
+    let mut old_payload = Encoder::new();
+    old_event.write_payload(&mut old_payload).unwrap();
+    assert_eq!(&old_payload.as_bytes()[72..76], &3u32.to_be_bytes());
+    assert_eq!(&old_payload.as_bytes()[176..178], &u16::MAX.to_be_bytes());
+    let decoded = decode_body::<ForgeEvent>(&frame, DecodeLimits::DEFAULT).unwrap();
+    assert_eq!(encode_body(&decoded).unwrap(), frame);
+    assert!(
+        !apply_event(None, &decoded)
+            .unwrap()
+            .grant
+            .permits(SOURCE_BRANCH_CREATE)
+    );
+}
+
+#[test]
 fn source_issue_and_revocation_round_trip_and_pin_every_attenuation() {
     let grant = AgentCredentialGrant {
         operations: SOURCE_PUBLISH | SOURCE_READ,
@@ -651,7 +818,10 @@ fn source_issue_and_revocation_round_trip_and_pin_every_attenuation() {
         let mut bytes = Encoder::new();
         event.write_payload(&mut bytes).unwrap();
         assert_eq!(&bytes.as_bytes()[72..76], &tag.to_be_bytes());
-        assert_eq!(&bytes.as_bytes()[176..178], &grant.operations.to_be_bytes());
+        assert_eq!(
+            &bytes.as_bytes()[176..178],
+            &u16::try_from(grant.operations).unwrap().to_be_bytes()
+        );
         for end in 0..bytes.as_bytes().len() {
             assert!(
                 ForgeEvent::read_payload(&mut Decoder::new(
@@ -662,6 +832,15 @@ fn source_issue_and_revocation_round_trip_and_pin_every_attenuation() {
                 "source action {tag}, truncation {end}"
             );
         }
+        // A wider encoding cannot alias an existing source grant, even when
+        // its complete u32 mask and scope would otherwise parse correctly.
+        let mut wide_alias = bytes.as_bytes().to_vec();
+        wide_alias[72..76].copy_from_slice(&(tag + 2).to_be_bytes());
+        wide_alias.splice(176..178, grant.operations.to_be_bytes());
+        assert!(
+            ForgeEvent::read_payload(&mut Decoder::new(&wide_alias, DecodeLimits::DEFAULT))
+                .is_err()
+        );
         // A newer source grant cannot be reinterpreted as a legacy flat grant.
         let mut downgraded = bytes.into_bytes();
         downgraded[72..76].copy_from_slice(&(tag - 2).to_be_bytes());
@@ -758,9 +937,9 @@ fn proof_and_pull_diff_grants_preserve_prior_operation_bits_and_are_independent(
 }
 
 #[test]
-fn feedback_uses_the_last_bit_without_widening_any_retained_grant() {
+fn feedback_retains_the_last_legacy_bit_without_widening_any_retained_grant() {
     assert_eq!(PULLS_FEEDBACK_READ, 0x8000);
-    assert_eq!(ALL_OPERATIONS, u16::MAX);
+    assert_eq!(ALL_OPERATIONS & 0xffff, u32::from(u16::MAX));
     let old = AgentCredentialGrant {
         operations: 0x7fff,
         ..grant()
@@ -774,7 +953,8 @@ fn feedback_uses_the_last_bit_without_widening_any_retained_grant() {
     assert!(feedback.validate().is_ok());
     assert!(feedback.permits(PULLS_FEEDBACK_READ));
     assert!(!feedback.permits(0));
-    for operation in (0..15).map(|bit| 1u16 << bit) {
+    assert!(!feedback.permits(SOURCE_BRANCH_CREATE));
+    for operation in (0..15).map(|bit| 1u32 << bit) {
         assert!(old.permits(operation));
         assert!(!old.permits(operation | PULLS_FEEDBACK_READ));
         assert!(!feedback.permits(operation));
@@ -790,13 +970,17 @@ fn feedback_uses_the_last_bit_without_widening_any_retained_grant() {
 
 #[test]
 fn complete_masks_preserve_their_wire_bits_and_source_publication_ceiling() {
-    for operations in [0x7fff, ALL_OPERATIONS] {
+    for operations in [0x7fff, 0xffff] {
         let grant = AgentCredentialGrant {
             operations,
             ..grant()
         };
         assert!(grant.validate().is_ok());
-        assert_eq!(grant.permits(PULLS_FEEDBACK_READ), operations == u16::MAX);
+        assert_eq!(
+            grant.permits(PULLS_FEEDBACK_READ),
+            operations == u32::from(u16::MAX)
+        );
+        assert!(!grant.permits(SOURCE_BRANCH_CREATE));
         let command = AgentCredentialCommand {
             id: AgentCredentialId::try_new([9; 32]).unwrap(),
             expected_version: ExpectedVersion::NewStream,
@@ -819,7 +1003,11 @@ fn complete_masks_preserve_their_wire_bits_and_source_publication_ceiling() {
         .unwrap();
         let mut payload = Encoder::new();
         issued.write_payload(&mut payload).unwrap();
-        assert_eq!(&payload.as_bytes()[176..178], &operations.to_be_bytes());
+        assert_eq!(&payload.as_bytes()[72..76], &3u32.to_be_bytes());
+        assert_eq!(
+            &payload.as_bytes()[176..178],
+            &u16::try_from(operations).unwrap().to_be_bytes()
+        );
         let bytes = encode_body(&issued).unwrap();
         let decoded = decode_body::<ForgeEvent>(&bytes, DecodeLimits::DEFAULT).unwrap();
         assert_eq!(encode_body(&decoded).unwrap(), bytes);

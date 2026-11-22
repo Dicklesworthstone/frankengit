@@ -6,7 +6,7 @@ use crate::{NodeReceiveTransportRefusal, NodeRequestContext, NodeWorkspaceRefusa
 use fgit_admission::evidence::{AdmissionAuthentication, AgentAuthentication};
 use fgit_admission::merge::native::protection::path_reviews::VerifiedSourcePaths;
 use fgit_authority::IdempotencyKey;
-use fgit_types::{PrincipalId, RefName, RefusalCode};
+use fgit_types::{GitOid, PrincipalId, RefName, RefusalCode};
 use std::future::{Future, poll_fn};
 use std::pin::pin;
 use std::time::Instant;
@@ -102,30 +102,73 @@ impl SourcePublicationRequest<'_> {
     ) -> SourcePublicationProof {
         SourcePublicationProof {
             reference: reference.clone(),
-            paths,
+            change: SourcePublicationChange::Update(paths),
             authentication: self.0.authentication,
             deadline: self.0.deadline(),
         }
     }
 }
 
-/// Native object evidence and the request witness which selected its sole
-/// publication exception. Only the borrowed request above can bind this proof.
+/// Native object evidence and the request witness selecting one independently
+/// granted effect. Only its matching borrowed request can bind this proof.
 #[derive(Debug)]
 pub(crate) struct SourcePublicationProof {
     reference: RefName,
-    paths: VerifiedSourcePaths,
+    change: SourcePublicationChange,
     authentication: AgentAuthentication,
     deadline: Instant,
 }
 
+/// The two independently granted source effects have disjoint proof shapes.
+/// A branch creation never supplies a source delta or authorizes source edits.
+#[derive(Debug)]
+pub(crate) enum SourcePublicationChange {
+    Update(VerifiedSourcePaths),
+    BranchCreate(GitOid),
+}
+
 impl SourcePublicationProof {
+    pub(super) fn branch_creation(
+        reference: RefName,
+        target: GitOid,
+        authentication: AgentAuthentication,
+        deadline: Instant,
+    ) -> Self {
+        Self {
+            reference,
+            change: SourcePublicationChange::BranchCreate(target),
+            authentication,
+            deadline,
+        }
+    }
+
     pub(crate) fn reference(&self) -> &RefName {
         &self.reference
     }
 
-    pub(crate) fn paths(&self) -> &VerifiedSourcePaths {
-        &self.paths
+    pub(crate) fn change(&self) -> &SourcePublicationChange {
+        &self.change
+    }
+
+    /// Rechecked for every exact admission snapshot, including CAS losers.
+    /// The native branch adapter independently verifies the selected commit
+    /// bytes. No retained historical or hidden-only object grants a new ref.
+    pub(crate) fn validate_snapshot(
+        &self,
+        snapshot: &fgit_admission::AdmissionSnapshot,
+    ) -> Result<(), RefusalCode> {
+        if let SourcePublicationChange::BranchCreate(target) = &self.change {
+            if snapshot.hidden_refs.hides(self.reference.as_bytes())
+                || !snapshot.refs.iter().any(|(reference, oid)| {
+                    reference.as_bytes().starts_with(b"refs/heads/")
+                        && !snapshot.hidden_refs.hides(reference.as_bytes())
+                        && oid == target
+                })
+            {
+                return Err(RefusalCode::CapabilityScopeViolation);
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn authentication(&self) -> AgentAuthentication {

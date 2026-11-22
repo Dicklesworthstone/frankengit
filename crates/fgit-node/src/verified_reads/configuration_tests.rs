@@ -415,7 +415,7 @@ fn credential(node: &OneNode, token: &str, grant: AgentCredentialGrant, revoke: 
     );
 }
 
-fn grant(node: &OneNode, operations: u16) -> AgentCredentialGrant {
+fn grant(node: &OneNode, operations: u32) -> AgentCredentialGrant {
     let now = crate::agent_credentials::epoch_seconds().unwrap();
     AgentCredentialGrant {
         agent: AGENT,

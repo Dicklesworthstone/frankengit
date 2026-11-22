@@ -56,9 +56,10 @@ where
     if name != reference
         || *new != target
         || current.refs().contains_key(reference)
-        || !current.refs().iter().any(|(name, oid)| {
-            name.as_bytes().starts_with(b"refs/heads/") && *oid == target
-        })
+        || !current
+            .refs()
+            .iter()
+            .any(|(name, oid)| name.as_bytes().starts_with(b"refs/heads/") && *oid == target)
         || effects.refs.len() != 1
         || !effects.forge.is_empty()
         || !effects.retention.is_empty()

@@ -114,14 +114,14 @@ fn agent_source_and_context_grants_have_independent_closed_tool_inventories() {
         (vec!["--allow-source"], source_tools.clone()),
         (
             vec!["--allow-source-writes"],
-            BTreeSet::from(["frankengit_source_publish"]),
+            BTreeSet::from(["frankengit_source_publish", "frankengit_branch_create"]),
         ),
         (
             vec!["--allow-source", "--allow-source-writes"],
             source_tools
                 .iter()
                 .copied()
-                .chain(["frankengit_source_publish"])
+                .chain(["frankengit_source_publish", "frankengit_branch_create"])
                 .collect(),
         ),
         (

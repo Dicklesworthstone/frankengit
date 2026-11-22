@@ -27,6 +27,7 @@ use fgit_wire::{Capabilities, GitObjectFormat, Packet, encode_packets};
 use std::cell::Cell;
 use std::collections::{BTreeSet, VecDeque};
 
+mod agent;
 mod transaction;
 
 const fn invalid(reason: &'static str) -> NodeWorkspaceRefusal {
@@ -212,7 +213,7 @@ impl OneNode {
             .authenticated_session()
             .ok_or_else(|| receive_error(NodeReceiveTransportRefusal::Unauthenticated))?;
         let semantic = branch_request(self.object_format, commands)?;
-        self.admit_branch_commands_durable_in(request, session, commands, semantic, limits)
+        self.admit_branch_commands_durable_in(request, session, commands, semantic, limits, None)
             .await
     }
 
@@ -223,6 +224,7 @@ impl OneNode {
         commands: &[RefCommand],
         semantic: SemanticRequest,
         limits: AdmissionLimits,
+        source_publication: Option<&crate::agent_credentials::SourcePublicationProof>,
     ) -> Result<AdmissionResult, NodeWorkspaceRefusal> {
         let authenticated = session
             .authenticated_session()
@@ -263,6 +265,16 @@ impl OneNode {
             .materialize_admission_in(request)
             .await
             .map_err(|error| NodeWorkspaceRefusal::Authority(Box::new(error)))?;
+        if let Some(proof) = source_publication {
+            proof.checkpoint().map_err(|code| {
+                admission_error(fgit_admission::AdmissionError::AsyncProjectionUnavailable(
+                    code,
+                ))
+            })?;
+            proof
+                .validate_snapshot(materialized.snapshot())
+                .map_err(|_| NodeWorkspaceRefusal::RefUnavailable)?;
+        }
         for command in attempt.request.ref_commands() {
             if materialized
                 .snapshot()
@@ -439,6 +451,14 @@ impl OneNode {
             idempotency_key: authenticated.client_idempotency_key().clone(),
             object_format: self.object_format,
         };
+        if let Some(proof) = source_publication {
+            return self
+                .admit_basis_bound_scoped_source_receive_in(
+                    request, &context, &validated, None, proof, limits,
+                )
+                .await
+                .map_err(admission_error);
+        }
         self.admit_basis_bound_validated_receive_with_authentication_in(
             request,
             &context,

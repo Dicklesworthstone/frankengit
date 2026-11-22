@@ -1,13 +1,79 @@
 use super::*;
 use fgit_identity::agent::{
     ISSUES_READ, ISSUES_WRITE, MILESTONES_READ, MILESTONES_WRITE, PULLS_DIFF_READ,
-    PULLS_FEEDBACK_READ, PULLS_READ, PULLS_WRITE, SOURCE_CANDIDATES, SOURCE_HISTORY_READ,
-    SOURCE_PUBLISH, SOURCE_READ, SOURCE_VERIFIED_READ, SponsorKind,
+    PULLS_FEEDBACK_READ, PULLS_READ, PULLS_WRITE, SOURCE_BRANCH_CREATE, SOURCE_CANDIDATES,
+    SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ, SOURCE_VERIFIED_READ, SponsorKind,
 };
 use std::path::PathBuf;
 
 fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).into()).collect()
+}
+
+#[test]
+fn task_branch_issuance_is_independent_and_requires_an_explicit_source_ceiling() {
+    for (operations, expected) in [
+        ("source-branch-create", SOURCE_BRANCH_CREATE),
+        (
+            "source-branch-create,source-publish",
+            SOURCE_BRANCH_CREATE | SOURCE_PUBLISH,
+        ),
+        (
+            "source-read,source-branch-create",
+            SOURCE_READ | SOURCE_BRANCH_CREATE,
+        ),
+    ] {
+        let mut input = issue();
+        replace(&mut input, "--operations", operations);
+        assert!(options::parse(&input).is_err());
+        input.extend(strings(&[
+            "--source-ref-scope",
+            "prefix:726566732f68656164732f6167656e742f",
+        ]));
+        assert!(options::parse(&input).is_err());
+        input.extend(strings(&["--source-path-hex", "737263"]));
+        let Options::Repository(parsed) = options::parse(&input).unwrap() else {
+            panic!()
+        };
+        let Operation::Issue {
+            grant,
+            source_scope: Some(scope),
+            ..
+        } = parsed.operation
+        else {
+            panic!()
+        };
+        assert_eq!(grant.operations, expected);
+        for operation in [
+            SOURCE_BRANCH_CREATE,
+            SOURCE_PUBLISH,
+            SOURCE_READ,
+            SOURCE_CANDIDATES,
+        ] {
+            assert_eq!(grant.permits(operation), expected & operation != 0);
+        }
+        assert!(
+            scope.permits_ref(&fgit_types::RefName::try_new(b"refs/heads/agent/task-1").unwrap())
+        );
+        assert!(
+            !scope.permits_ref(
+                &fgit_types::RefName::try_new(b"refs/heads/agent-other/task-1").unwrap()
+            )
+        );
+        assert!(!scope.permits_ref(&fgit_types::RefName::try_new(b"refs/heads/main").unwrap()));
+        assert_eq!(scope.path_prefixes(), &[b"src".to_vec()]);
+
+        for unsupported in [
+            "source-branch-create,source-branch-create",
+            "source-branch-create,receive",
+            "source-branch-write",
+            "source-branch-create,",
+        ] {
+            let mut invalid = input.clone();
+            replace(&mut invalid, "--operations", unsupported);
+            assert!(options::parse(&invalid).is_err(), "{unsupported}");
+        }
+    }
 }
 
 #[test]
@@ -38,6 +104,7 @@ fn source_publication_issuance_requires_explicit_native_ref_and_path_ceilings() 
         panic!()
     };
     assert_eq!(grant.operations, SOURCE_PUBLISH);
+    assert!(!grant.permits(SOURCE_BRANCH_CREATE));
     assert!(!grant.permits(SOURCE_READ | SOURCE_CANDIDATES | ISSUES_WRITE));
     assert_eq!(
         scope.path_prefixes(),
@@ -531,7 +598,7 @@ fn feedback_cli_issuance_is_explicit_and_never_implies_source_or_write_scopes() 
         };
         assert_eq!(grant.operations, expected);
         assert!(source_scope.is_none());
-        for operation in (0..16).map(|bit| 1u16 << bit) {
+        for operation in (0..17).map(|bit| 1u32 << bit) {
             assert_eq!(grant.permits(operation), expected & operation != 0);
         }
         input.extend(strings(&[
@@ -559,5 +626,7 @@ fn feedback_cli_issuance_is_explicit_and_never_implies_source_or_write_scopes() 
     let output = String::from_utf8(output).unwrap();
     assert!(output.contains("pulls-feedback-read permits bounded review pages"));
     assert!(output.contains("canonical check summaries"));
-    assert!(output.contains("Check evidence bodies, logs and artifacts require separate authority."));
+    assert!(
+        output.contains("Check evidence bodies, logs and artifacts require separate authority.")
+    );
 }

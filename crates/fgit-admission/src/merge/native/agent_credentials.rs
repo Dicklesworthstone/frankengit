@@ -17,7 +17,7 @@ use fgit_authority::{
 use fgit_chronicle::PublicationBasis;
 use fgit_forge::event::agent_credential::{
     AgentCredentialAction, AgentCredentialCommand, AgentCredentialGrant, AgentCredentialId,
-    SOURCE_PUBLISH, SourcePublicationScope,
+    SOURCE_BRANCH_CREATE, SOURCE_PUBLISH, SourcePublicationScope,
 };
 use fgit_forge::{
     AggregateId, AggregateVersion, ExpectedVersion, ForgeEvent, ForgeEventBatch, ForgeEventPayload,
@@ -334,7 +334,7 @@ where
     Ok(())
 }
 
-/// Shared exact-current-grant checks for metadata and source publication.
+/// Shared exact-current-grant checks for metadata and scoped source operations.
 /// The caller must select `state` from the authenticated candidate basis, never
 /// from a cached registry, and independently enforce the complete source delta
 /// when requesting SOURCE_PUBLISH. An original terminal outcome is recovered
@@ -344,7 +344,7 @@ pub fn validate_authenticated_grant(
     context: &AdmissionContext,
     agent: &crate::evidence::AgentAuthentication,
     incarnation: fgit_types::RepositoryIncarnationId,
-    operation: u16,
+    operation: u32,
     now: u64,
 ) -> Result<(), RefusalCode> {
     if now < agent.authenticated_at() || now >= agent.expires_at() {
@@ -363,7 +363,7 @@ pub fn validate_authenticated_grant(
         || agent.authenticated_at() < state.grant.issued_at
         || agent.expires_at() > state.grant.expires_at
         || !state.grant.permits(operation)
-        || (state.grant.permits(SOURCE_PUBLISH) != state.source_scope.is_some())
+        || (state.grant.requires_source_scope() != state.source_scope.is_some())
     {
         return Err(RefusalCode::CapabilityScopeViolation);
     }
@@ -382,6 +382,66 @@ pub async fn validate_source_at<S, C>(
     agent: &crate::evidence::AgentAuthentication,
     now: u64,
     reference: &fgit_types::RefName,
+    cancelled: &C,
+) -> Result<SourcePublicationScope, ProjectionFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
+    validate_scoped_source_at(
+        store,
+        cx,
+        context,
+        basis,
+        agent,
+        now,
+        reference,
+        SOURCE_PUBLISH,
+        cancelled,
+    )
+    .await
+}
+
+/// Independently authenticate task-branch creation at the exact deciding basis.
+/// This returns no source-edit authority. The caller must also prove the target
+/// is an absent branch and its commit remains a currently visible branch tip.
+pub async fn validate_branch_creation_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    basis: &PublicationBasis,
+    agent: &crate::evidence::AgentAuthentication,
+    now: u64,
+    reference: &fgit_types::RefName,
+    cancelled: &C,
+) -> Result<SourcePublicationScope, ProjectionFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
+    validate_scoped_source_at(
+        store,
+        cx,
+        context,
+        basis,
+        agent,
+        now,
+        reference,
+        SOURCE_BRANCH_CREATE,
+        cancelled,
+    )
+    .await
+}
+
+async fn validate_scoped_source_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    basis: &PublicationBasis,
+    agent: &crate::evidence::AgentAuthentication,
+    now: u64,
+    reference: &fgit_types::RefName,
+    operation: u32,
     cancelled: &C,
 ) -> Result<SourcePublicationScope, ProjectionFailure>
 where
@@ -410,7 +470,7 @@ where
         context,
         agent,
         config.repository_incarnation_id,
-        SOURCE_PUBLISH,
+        operation,
         now,
     )
     .map_err(ProjectionFailure::Refuse)?;

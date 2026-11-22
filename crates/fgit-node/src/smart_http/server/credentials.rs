@@ -91,6 +91,7 @@ enum Scope {
     SourceVerifiedRead,
     PullsDiffRead,
     PullsFeedbackRead,
+    SourceBranchCreate,
 }
 
 impl Scope {
@@ -157,8 +158,8 @@ impl Grant {
         use fgit_identity::agent::{
             DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, MILESTONES_READ,
             MILESTONES_WRITE, OUTCOMES_READ, PULLS_DIFF_READ, PULLS_FEEDBACK_READ, PULLS_READ,
-            PULLS_WRITE, SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ,
-            SOURCE_VERIFIED_READ,
+            PULLS_WRITE, SOURCE_BRANCH_CREATE, SOURCE_CANDIDATES, SOURCE_HISTORY_READ,
+            SOURCE_PUBLISH, SOURCE_READ, SOURCE_VERIFIED_READ,
         };
         let mut scopes = Scopes::default();
         let scope = match request.operation {
@@ -177,6 +178,7 @@ impl Grant {
             SOURCE_HISTORY_READ => Scope::SourceHistoryRead,
             SOURCE_CANDIDATES => Scope::SourceCandidates,
             SOURCE_PUBLISH => Scope::SourcePublish,
+            SOURCE_BRANCH_CREATE => Scope::SourceBranchCreate,
             SOURCE_VERIFIED_READ => Scope::SourceVerifiedRead,
             PULLS_DIFF_READ => Scope::PullsDiffRead,
             PULLS_FEEDBACK_READ => Scope::PullsFeedbackRead,
@@ -233,6 +235,11 @@ impl Grant {
     /// This does not confer receive-pack or other source writes.
     pub const fn permits_source_publication(&self) -> bool {
         self.scopes.contains(Scope::Receive) || self.scopes.contains(Scope::SourcePublish)
+    }
+    /// Sponsored branch creation has its own explicit grant. It never implies
+    /// candidate publication, other branch mutations, or receive-pack access.
+    pub const fn permits_source_branch_creation(&self) -> bool {
+        self.scopes.contains(Scope::Receive) || self.scopes.contains(Scope::SourceBranchCreate)
     }
     pub const fn permits_issues(&self, mutation: bool) -> bool {
         if mutation {
@@ -738,6 +745,7 @@ mod tests {
         assert!(value.permits_source_publication());
         value.scopes = Scopes(Scope::SourcePublish.mask());
         assert!(value.permits_source_publication());
+        assert!(!value.permits_source_branch_creation());
         assert!(!value.permits(Service::UploadPack));
         assert!(!value.permits(Service::ReceivePack));
         assert!(!value.permits_source_read());
@@ -745,6 +753,7 @@ mod tests {
         assert!(!value.permits_source_verified_read());
         assert!(!value.permits_source_candidates());
         assert!(!value.permits_pull_diff_read());
+        assert!(!value.permits_pull_feedback_read());
         assert!(!value.permits_reviewed_merge());
         assert!(!value.permits_queue_landing());
         assert!(!value.permits_outcomes());
@@ -763,12 +772,56 @@ mod tests {
             Scope::SourceCandidates,
             Scope::SourceVerifiedRead,
             Scope::PullsDiffRead,
+            Scope::PullsFeedbackRead,
+            Scope::SourceBranchCreate,
         ] {
             value.scopes = Scopes(scope.mask());
             assert!(!value.permits_source_publication());
         }
         // A file grant cannot synthesize canonical sponsorship and path scope.
         assert!(Scope::parse("source-publish").is_err());
+    }
+
+    #[test]
+    fn source_branch_creation_permission_is_independent_of_publication_and_git() {
+        let mut value = grant(PrincipalId::from_bytes([7; 16]), "receive").unwrap();
+        assert!(value.permits_source_branch_creation());
+        value.scopes = Scopes(Scope::SourceBranchCreate.mask());
+        assert!(value.permits_source_branch_creation());
+        assert!(!value.permits_source_publication());
+        assert!(!value.permits(Service::UploadPack));
+        assert!(!value.permits(Service::ReceivePack));
+        assert!(!value.permits_source_read());
+        assert!(!value.permits_source_history_read());
+        assert!(!value.permits_source_verified_read());
+        assert!(!value.permits_source_candidates());
+        assert!(!value.permits_pull_diff_read());
+        assert!(!value.permits_pull_feedback_read());
+        assert!(!value.permits_outcomes());
+        assert!(!value.permits_reviewed_merge());
+        assert!(!value.permits_queue_landing());
+        for mutation in [false, true] {
+            assert!(!value.permits_issues(mutation));
+            assert!(!value.permits_pulls(mutation));
+            assert!(!value.permits_reviews(mutation));
+            assert!(!value.permits_protection(mutation));
+            assert!(!value.permits_queues(mutation));
+            assert!(!value.permits_discussions(mutation));
+        }
+        for scope in [
+            Scope::Read,
+            Scope::SourceRead,
+            Scope::SourceHistoryRead,
+            Scope::SourceCandidates,
+            Scope::SourcePublish,
+            Scope::SourceVerifiedRead,
+            Scope::PullsDiffRead,
+            Scope::PullsFeedbackRead,
+        ] {
+            value.scopes = Scopes(scope.mask());
+            assert!(!value.permits_source_branch_creation());
+        }
+        assert!(Scope::parse("source-branch-create").is_err());
     }
 
     #[test]

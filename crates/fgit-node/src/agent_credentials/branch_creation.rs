@@ -1,7 +1,10 @@
 //! Explicit, request-owned authority to create an absent scoped task branch.
 
 use super::{AgentRequest, SourcePublicationProof};
-use crate::{LoopbackReceiveSession, NodeReceiveTransportRefusal, NodeRequestContext, NodeWorkspaceRefusal, OneNode};
+use crate::{
+    LoopbackReceiveSession, NodeReceiveTransportRefusal, NodeRequestContext, NodeWorkspaceRefusal,
+    OneNode,
+};
 use fgit_authority::IdempotencyKey;
 use fgit_types::{GitOid, RefName};
 use std::future::{Future, poll_fn};
@@ -35,20 +38,22 @@ impl SourceBranchCreationRequest<'_> {
         match crate::checkpoint_pack_context(context.authority()) {
             crate::PackContextCheckpoint::Live => {}
             crate::PackContextCheckpoint::Stopped { budget_exhaustion } => {
-                return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: budget_exhaustion });
+                return Err(NodeWorkspaceRefusal::Cancelled {
+                    exhaustion: budget_exhaustion,
+                });
             }
         }
-        self.0.check(0, 0).map_err(|error| {
-            NodeWorkspaceRefusal::WorkspacePublication(Box::new(error))
-        })
+        self.0
+            .check(0, 0)
+            .map_err(|error| NodeWorkspaceRefusal::WorkspacePublication(Box::new(error)))
     }
 
     pub(crate) fn check_input(&self, input_bytes: usize) -> Result<(), NodeWorkspaceRefusal> {
-        let input_bytes = u64::try_from(input_bytes)
-            .map_err(|_| NodeWorkspaceRefusal::WorkspaceCapacity)?;
-        self.0.check(input_bytes, 0).map_err(|error| {
-            NodeWorkspaceRefusal::WorkspacePublication(Box::new(error))
-        })
+        let input_bytes =
+            u64::try_from(input_bytes).map_err(|_| NodeWorkspaceRefusal::WorkspaceCapacity)?;
+        self.0
+            .check(input_bytes, 0)
+            .map_err(|error| NodeWorkspaceRefusal::WorkspacePublication(Box::new(error)))
     }
 
     pub(crate) fn key(&self) -> &IdempotencyKey {
@@ -59,9 +64,16 @@ impl SourceBranchCreationRequest<'_> {
         self.0.authenticated_session()
     }
 
-    pub(crate) fn bind_branch(&self, reference: &RefName, target: GitOid) -> SourcePublicationProof {
+    pub(crate) fn bind_branch(
+        &self,
+        reference: &RefName,
+        target: GitOid,
+    ) -> SourcePublicationProof {
         SourcePublicationProof::branch_creation(
-            reference.clone(), target, self.0.authentication, self.0.deadline(),
+            reference.clone(),
+            target,
+            self.0.authentication,
+            self.0.deadline(),
         )
     }
 

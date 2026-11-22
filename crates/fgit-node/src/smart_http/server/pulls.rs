@@ -121,7 +121,7 @@ impl<'a> Request<'a> {
         ) || matches!(self, Self::Collaboration(request) if !request.is_mutation())
     }
 
-    pub(super) fn agent_operation(&self) -> Option<u16> {
+    pub(super) fn agent_operation(&self) -> Option<u32> {
         use fgit_identity::agent::{PULLS_DIFF_READ, PULLS_FEEDBACK_READ, PULLS_READ, PULLS_WRITE};
         match self {
             Self::Diff(_) => Some(PULLS_DIFF_READ),

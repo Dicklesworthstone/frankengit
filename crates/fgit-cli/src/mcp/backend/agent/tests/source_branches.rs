@@ -228,11 +228,8 @@ fn sponsored_mcp_creates_edits_publishes_and_opens_its_own_task_branch() {
             .unwrap()
             .clone();
         publication.insert("idempotency_key".into(), text("publish-sponsored-task"));
-        let candidate = GitOid::from_hex(
-            format,
-            publication["expected_candidate"].text().unwrap(),
-        )
-        .unwrap();
+        let candidate =
+            GitOid::from_hex(format, publication["expected_candidate"].text().unwrap()).unwrap();
         assert!(backend.node.read_git_object(candidate).is_err());
         assert_eq!(refs(&backend)[&reference], fixture.fixture.tip);
         committed(&invoke(
@@ -271,7 +268,7 @@ fn sponsored_mcp_creates_edits_publishes_and_opens_its_own_task_branch() {
                 &mut backend,
                 9,
                 source_writes::CREATE,
-                &creation,
+                &creation
             ),
             created
         );
@@ -353,7 +350,7 @@ fn task_branch_creation_needs_its_independent_grant_and_source_write_ceiling() {
         creator
             .call(
                 source_writes::PUBLISH,
-                &recovery("not-publication-authority"),
+                &recovery("not-publication-authority")
             )
             .unwrap_err()
             .code,
@@ -383,7 +380,10 @@ fn task_branch_creation_needs_its_independent_grant_and_source_write_ceiling() {
             .any(|tool| tool.name == source_writes::CREATE)
     );
     assert_eq!(
-        disabled.call(source_writes::CREATE, &args).unwrap_err().code,
+        disabled
+            .call(source_writes::CREATE, &args)
+            .unwrap_err()
+            .code,
         "tool_not_granted"
     );
     assert_eq!(
@@ -399,7 +399,13 @@ fn task_branch_creation_needs_its_independent_grant_and_source_write_ceiling() {
     let schema = tool.schema.object().unwrap();
     assert_eq!(schema["additionalProperties"], Value::Bool(false));
     let properties = schema["properties"].object().unwrap();
-    for forbidden in ["initial", "force", "expected_old", "commands", "bundle_hex_chunks"] {
+    for forbidden in [
+        "initial",
+        "force",
+        "expected_old",
+        "commands",
+        "bundle_hex_chunks",
+    ] {
         assert!(!properties.contains_key(forbidden));
     }
     assert!(
@@ -429,10 +435,7 @@ fn task_branch_creation_respects_ref_scope_absence_and_visible_target() {
             Value::Bool(false)
         );
         assert!(backend.result_is_error(source_writes::CREATE, &refused));
-        assert_eq!(
-            backend.call(source_writes::CREATE, &args).unwrap(),
-            refused
-        );
+        assert_eq!(backend.call(source_writes::CREATE, &args).unwrap(), refused);
         assert_eq!(refs(&backend), before);
     }
     let prepared = backend
@@ -447,8 +450,7 @@ fn task_branch_creation_respects_ref_scope_absence_and_visible_target() {
         .clone();
     let oid = GitOid::from_hex(fixture.options.format, candidate.text().unwrap()).unwrap();
     assert!(backend.node.read_git_object(oid).is_err());
-    let mut unstaged =
-        fixture.creation(REFERENCE, "cannot-create-from-unpublished-candidate");
+    let mut unstaged = fixture.creation(REFERENCE, "cannot-create-from-unpublished-candidate");
     unstaged.insert("target".into(), candidate);
     assert!(backend.call(source_writes::CREATE, &unstaged).is_err());
     assert_eq!(refs(&backend), before);
@@ -531,7 +533,13 @@ fn task_branch_handler_retains_original_operation_key_and_deadline() {
         fixture.credential,
         "revoke-before-closed-task-dispatch",
     );
-    for forbidden in ["initial", "force", "expected_old", "commands", "bundle_hex_chunks"] {
+    for forbidden in [
+        "initial",
+        "force",
+        "expected_old",
+        "commands",
+        "bundle_hex_chunks",
+    ] {
         let mut altered = args.clone();
         altered.insert(forbidden.into(), Value::Null);
         assert_eq!(

@@ -200,13 +200,7 @@ fn explicit_http_branch_creation_recovers_original_sponsorship_in_both_formats()
             field(&decode(&duplicate), "outcome").text(),
             Some("refused")
         );
-        let outcome = fixture.request(
-            &creator.bearer,
-            "POST",
-            "/api/v1/outcomes",
-            "",
-            Some(key),
-        );
+        let outcome = fixture.request(&creator.bearer, "POST", "/api/v1/outcomes", "", Some(key));
         let original = original_provenance(&outcome).to_owned();
         for evidence in [
             format!("\"agent\":\"{}\"", creator.grant.agent),
@@ -221,7 +215,10 @@ fn explicit_http_branch_creation_recovers_original_sponsorship_in_both_formats()
 
         fixture.selected.nodes.close().unwrap();
         let node = reopen(fixture.config.clone());
-        assert_eq!(refs(&node)[&RefName::try_new(TASK).unwrap()], fixture.commit);
+        assert_eq!(
+            refs(&node)[&RefName::try_new(TASK).unwrap()],
+            fixture.commit
+        );
         credential(
             &node,
             &AgentCredentialCommand {
@@ -276,23 +273,20 @@ fn explicit_http_branch_creation_recovers_original_sponsorship_in_both_formats()
 fn advance_main(node: &OneNode, base: GitOid) -> GitOid {
     let reference = RefName::try_new(b"refs/heads/main").unwrap();
     let context = node.request_context();
-    let candidate = node
-        .runtime()
-        .block_on(node.prepare_trusted_patch_in(
-            &context,
-            &reference,
-            base,
-            [0xe4; 16],
-            b"diff --git a/created.txt b/created.txt\nnew file mode 100644\n--- /dev/null\n+++ b/created.txt\n@@ -0,0 +1 @@\n+task source\n",
-            &MergeMetadata {
-                author: "A <a@example.invalid>".into(),
-                committer: "A <a@example.invalid>".into(),
-                timestamp: 2,
-                message: b"Advance main for task creation\n".to_vec(),
-            },
-            Default::default(),
-        ))
-        .unwrap();
+    let candidate = node.runtime().block_on(node.prepare_trusted_patch_in(
+        &context,
+        &reference,
+        base,
+        [0xe4; 16],
+        b"diff --git a/created.txt b/created.txt\nnew file mode 100644\n--- /dev/null\n+++ b/created.txt\n@@ -0,0 +1 @@\n+task source\n",
+        &MergeMetadata {
+            author: "A <a@example.invalid>".into(),
+            committer: "A <a@example.invalid>".into(),
+            timestamp: 2,
+            message: b"Advance main for task creation\n".to_vec(),
+        },
+        Default::default(),
+    )).unwrap();
     let result = node
         .runtime()
         .block_on(node.apply_workspace_bundle_durable_in(
@@ -437,7 +431,8 @@ fn http_task_creation_retains_live_proof_retry_key_budget_and_ingress_deadline()
     let route = std::str::from_utf8(&fixture.selected.route).unwrap();
     let raw = format!(
         "POST {route}/api/v1/source/branches/create HTTP/1.1\r\nHost: local\r\nAuthorization: Bearer {}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nIdempotency-Key: original-task-request\r\n\r\n",
-        creator.bearer, body.len(),
+        creator.bearer,
+        body.len(),
     );
     let envelope = head::parse(raw.as_bytes(), HttpLimits::default())
         .unwrap()
@@ -503,7 +498,7 @@ fn http_task_creation_retains_live_proof_retry_key_budget_and_ingress_deadline()
         execute(
             &publication.authenticated_session(),
             Some(&publication),
-            &deadline,
+            &deadline
         )
         .err()
         .unwrap()

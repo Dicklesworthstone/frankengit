@@ -52,18 +52,24 @@ prepare_patch (regular-file exact-tree-v1, exact-tree-binary-v1 for edited binar
 renames, or exact-symlink-v1 for inert symlinks) and single-parent inspect operations of
 frankengit_source_candidate. Candidate data grants no publication authority.
 The independent --allow-source-writes ceiling with canonical source-publish
-exposes only frankengit_source_publish for one reviewed single-parent bundle.
+exposes frankengit_source_publish for one reviewed single-parent bundle.
 Its immutable finite ref/path ceiling, exact predecessor, ordinary protection,
 original durable key and canonical agent/sponsor evidence remain mandatory.
+The same launch ceiling separately exposes frankengit_branch_create, requiring
+the independent source-branch-create grant and its finite destination-ref scope.
+It creates only an absent branch at an exact current visible branch tip. Existing
+source-publish grants acquire no branch-creation authority.
 Source work preserves the credential's real agent, sponsor and original request
 deadline, and creates no durable execution run. Initial-history publication,
-branch/tag mutations, replay/rebase/PR/queue candidate preparation, Git transport
+other branch/tag mutations, replay/rebase/PR/queue candidate preparation, Git transport
 and general bundle export/import remain unavailable. Complete blob proofs require
 source-verified-read; PR code diffs require pulls-diff-read and both source/PR ceilings.
 Issue, PR metadata/conversation, discussion and own-principal outcome tools keep
 their independent grants. Milestones require their own scopes under issue ceilings.
-Notifications, checks, reviews, artifacts, queues, events and administration
-remain unavailable.
+PR review/check summaries require pulls-feedback-read under --allow-pulls; they
+grant no review approval, merge permission or raw check-evidence disclosure.
+Notifications, review writes, check evidence, artifacts, queues, events and
+administration remain unavailable.
 The token file is private, regular and bounded; its contents are never arguments
 or receipts. Each call binds the complete tool name/arguments and original key
 to a bounded IntentRun. Expiry/revocation is checked again on the next request;

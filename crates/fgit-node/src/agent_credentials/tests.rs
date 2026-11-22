@@ -20,6 +20,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod branch_creation;
 mod candidate_context;
 mod milestones;
 #[path = "../tests/authority_read_fault.rs"]
@@ -119,7 +120,7 @@ fn denied(value: &(TxId, TerminalOutcome), expected: RefusalCode) {
         "{value:?}"
     );
 }
-fn authentication(node: &OneNode, token: &str, retry: &str, operation: u16) -> AgentRequest {
+fn authentication(node: &OneNode, token: &str, retry: &str, operation: u32) -> AgentRequest {
     node.runtime()
         .block_on(node.authenticate_agent_request_in(
             &node.request_context(),
@@ -1005,8 +1006,10 @@ fn feedback_requests_preserve_explicit_read_authority_across_reopen_and_revocati
                 "feedback requests must not acquire {class:?}"
             );
         }
-        feedback.check_operation(&node, PULLS_FEEDBACK_READ).unwrap();
-        for operation in (0..15).map(|bit| 1u16 << bit) {
+        feedback
+            .check_operation(&node, PULLS_FEEDBACK_READ)
+            .unwrap();
+        for operation in (0..15).map(|bit| 1u32 << bit) {
             assert!(feedback.check_operation(&node, operation).is_err());
         }
         assert!(feedback.mcp_source_read_context(&node).is_err());
@@ -1016,9 +1019,13 @@ fn feedback_requests_preserve_explicit_read_authority_across_reopen_and_revocati
         assert!(feedback.check(4096, 8193).is_err());
         let namespace = feedback.namespace;
         feedback.namespace.incarnation = RepositoryIncarnationId::from_bytes([0xff; 16]);
-        assert!(feedback.check_operation(&node, PULLS_FEEDBACK_READ).is_err());
+        assert!(
+            feedback
+                .check_operation(&node, PULLS_FEEDBACK_READ)
+                .is_err()
+        );
         feedback.namespace = namespace;
-        for operation in [0, PULLS_FEEDBACK_READ | ISSUES_READ] {
+        for operation in [0, PULLS_FEEDBACK_READ | ISSUES_READ, 1 << 17] {
             assert!(matches!(
                 node.runtime().block_on(node.authenticate_agent_request_in(
                     &node.request_context(),
@@ -1034,7 +1041,11 @@ fn feedback_requests_preserve_explicit_read_authority_across_reopen_and_revocati
         }
         feedback.constrain_deadline(Instant::now() - std::time::Duration::from_secs(1));
         assert!(!feedback.context(&node).is_live());
-        assert!(feedback.check_operation(&node, PULLS_FEEDBACK_READ).is_err());
+        assert!(
+            feedback
+                .check_operation(&node, PULLS_FEEDBACK_READ)
+                .is_err()
+        );
         node.shutdown().unwrap();
 
         let mut reopened = OneNode::open_existing(scratch.config(format)).unwrap();

@@ -5,9 +5,11 @@
 //! independently scoped single-parent publication. Review decisions, merge, arbitrary Git
 //! transport, process execution and administration remain separate authorities.
 
+mod branch_creation;
 mod source_publication;
-pub(crate) use source_publication::SourcePublicationProof;
+pub use branch_creation::SourceBranchCreationRequest;
 pub use source_publication::SourcePublicationRequest;
+pub(crate) use source_publication::{SourcePublicationChange, SourcePublicationProof};
 
 use crate::source_retrieval::authorization::SourceReadContext;
 use crate::treefs_workspace::native_merge::NodeNativeMergeProjection;
@@ -193,18 +195,21 @@ impl OneNode {
         request: &NodeRequestContext,
         bearer: &[u8],
         key: &IdempotencyKey,
-        operation: u16,
+        operation: u32,
         request_commitment: [u8; 32],
         input_limit: u64,
         output_limit: u64,
     ) -> Result<AgentRequest, NodeReceiveTransportRefusal> {
         use fgit_identity::agent::{
-            DISCUSSIONS_WRITE, ISSUES_WRITE, MILESTONES_WRITE, PULLS_WRITE, SOURCE_CANDIDATES,
-            SOURCE_PUBLISH, SOURCE_READ, agent_credential_id, authenticate_agent_credential,
+            ALL_OPERATIONS, DISCUSSIONS_WRITE, ISSUES_WRITE, MILESTONES_WRITE, PULLS_WRITE,
+            SOURCE_BRANCH_CREATE, SOURCE_CANDIDATES, SOURCE_PUBLISH, SOURCE_READ,
+            agent_credential_id, authenticate_agent_credential,
         };
-        // All u16 flags are assigned; one request still selects exactly one
-        // independently granted operation and cannot combine authorities.
-        if !valid_agent_credential_token(bearer) || operation.count_ones() != 1 {
+        // One request selects exactly one known independently granted operation.
+        if !valid_agent_credential_token(bearer)
+            || operation.count_ones() != 1
+            || operation & !ALL_OPERATIONS != 0
+        {
             return Err(NodeReceiveTransportRefusal::Unauthenticated);
         }
         if input_limit > MAX_REQUEST_BYTES || output_limit == 0 || output_limit > MAX_REQUEST_BYTES
@@ -272,7 +277,7 @@ impl OneNode {
                 OperationClass::TreeFsWorkspace,
                 OperationClass::CreateCandidateObject,
             ])
-        } else if operation == SOURCE_PUBLISH {
+        } else if operation == SOURCE_PUBLISH || operation == SOURCE_BRANCH_CREATE {
             ClassSet::from_classes(&[OperationClass::PublishRefTransaction])
         } else {
             ClassSet::from_classes(&[class])
@@ -293,7 +298,16 @@ impl OneNode {
             LogicalTime::new(expiry),
         )
         .map_err(|_| refused(RefusalCode::EvidenceInvalid))?;
-        let mut identity = Vec::from(b"frankengit/agent-metadata/run-id/v1\0".as_slice());
+        // Preserve the original commitment bytes for every historical
+        // operation. Wider independently granted operations have their own
+        // domain and cannot silently change the v1 scalar representation.
+        let legacy_operation = u16::try_from(operation).ok();
+        let domain = if legacy_operation.is_some() {
+            b"frankengit/agent-metadata/run-id/v1\0"
+        } else {
+            b"frankengit/agent-metadata/run-id/v2\0"
+        };
+        let mut identity = Vec::from(domain.as_slice());
         identity.extend_from_slice(
             seed.commitment()
                 .map_err(|_| refused(RefusalCode::EvidenceInvalid))?
@@ -302,7 +316,11 @@ impl OneNode {
         identity.extend_from_slice(id.as_bytes());
         identity.extend_from_slice(state.grant.agent.as_bytes());
         identity.extend_from_slice(state.grant.sponsor.as_bytes());
-        identity.extend_from_slice(&operation.to_be_bytes());
+        if let Some(legacy_operation) = legacy_operation {
+            identity.extend_from_slice(&legacy_operation.to_be_bytes());
+        } else {
+            identity.extend_from_slice(&operation.to_be_bytes());
+        }
         identity.extend_from_slice(&request_commitment);
         identity.extend_from_slice(key.as_bytes());
         let hash = sha256_digest(&identity);
@@ -358,7 +376,7 @@ impl OneNode {
 pub struct AgentRequest {
     pub(crate) authentication: AgentAuthentication,
     run: IntentRun,
-    pub(crate) operation: u16,
+    pub(crate) operation: u32,
     namespace: LexicalNamespace,
     key: IdempotencyKey,
     deadline: Instant,
@@ -383,7 +401,7 @@ impl AgentRequest {
     pub fn check_operation(
         &self,
         node: &OneNode,
-        operation: u16,
+        operation: u32,
     ) -> Result<(), NodeReceiveTransportRefusal> {
         if self.operation != operation || !self.matches_namespace(node) {
             return Err(refused(RefusalCode::CapabilityScopeViolation));

@@ -448,7 +448,12 @@ impl OneNode {
             };
             return self
                 .admit_basis_bound_scoped_source_receive_in(
-                    request, &context, &validated, &staging, &proof,
+                    request,
+                    &context,
+                    &validated,
+                    Some(&staging),
+                    &proof,
+                    AdmissionLimits::default(),
                 )
                 .await
                 .map_err(|error| {

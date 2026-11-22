@@ -276,6 +276,7 @@ pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
     if options.writes.source {
         if options.agent_token_file.is_some() {
             tools.push(source_writes::agent_tool());
+            tools.push(source_writes::agent_branch_tool());
         } else {
             tools.extend(source_writes::tools());
             tools.extend(tags::write_tools());

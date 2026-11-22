@@ -2700,9 +2700,10 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
         self
     }
 
-    /// The scoped exception is selected only by the source candidate adapter,
-    /// after native objects prove the exact complete path delta. Generic Git
-    /// receive and branch mutation cannot construct it from a principal receipt.
+    /// Only request-owned publication or task-branch authority selects this
+    /// scoped exception. Its variant carries either the complete native path
+    /// delta or an exact visible branch-tip target. Generic Git receive and
+    /// branch mutation cannot construct it from a principal receipt.
     pub(crate) fn with_source_publication(
         mut self,
         proof: &'materializer agent_credentials::SourcePublicationProof,
@@ -2772,7 +2773,9 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
             let now = proof
                 .checkpoint()
                 .map_err(AsyncProjectionFailure::Unavailable)?;
-            fgit_admission::merge::native::protection::direct_source_decision_evidence_at(
+            match proof.change() {
+                agent_credentials::SourcePublicationChange::Update(paths) =>
+                    fgit_admission::merge::native::protection::direct_source_decision_evidence_at(
                 authority,
                 cx,
                 &self.context,
@@ -2783,11 +2786,29 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
                 fold,
                 proof.authentication(),
                 proof.reference(),
-                proof.paths(),
+                paths,
                 now,
                 &|| self.source_publication_checkpoint(cx).is_err(),
             )
-            .await
+            .await,
+                agent_credentials::SourcePublicationChange::BranchCreate(target) =>
+                    fgit_admission::merge::native::protection::direct_branch_creation_decision_evidence_at(
+                        authority,
+                        cx,
+                        &self.context,
+                        basis,
+                        &current,
+                        root_layout,
+                        request,
+                        fold,
+                        proof.authentication(),
+                        proof.reference(),
+                        *target,
+                        now,
+                        &|| self.source_publication_checkpoint(cx).is_err(),
+                    )
+                    .await,
+            }
         } else {
             admission_authentication::direct_decision_evidence_in(
                 authority,
@@ -2953,6 +2974,13 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
             )
             .await
             .map_err(async_projection_unavailable)?;
+        if let Some(proof) = self.source_publication {
+            self.source_publication_checkpoint(cx)
+                .map_err(AsyncProjectionFailure::Unavailable)?;
+            proof
+                .validate_snapshot(materialized.snapshot())
+                .map_err(AsyncProjectionFailure::Refuse)?;
+        }
         let prepared = AsyncMaterializedBasis {
             basis: basis.clone(),
             ref_state: match materialized.snapshot().head_target.clone() {

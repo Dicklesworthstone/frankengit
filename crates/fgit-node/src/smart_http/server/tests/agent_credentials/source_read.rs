@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 //! Canonical sponsored credentials cross the real HTTP/source/index boundary.
 
+mod branch_creation;
 mod candidates;
 mod commit;
 mod history;

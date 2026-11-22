@@ -22,8 +22,10 @@ use fgit_types::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+mod agent_branch;
 mod agent_source;
 mod candidate_checks;
+pub use agent_branch::direct_branch_creation_decision_evidence_at;
 pub use agent_source::direct_source_decision_evidence_at;
 mod checks;
 pub mod path_reviews;

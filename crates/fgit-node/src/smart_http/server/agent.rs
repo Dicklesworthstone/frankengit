@@ -8,12 +8,12 @@ use crate::{GitDaemonSessionDeadline, GitDaemonSessionTimeout, GitDaemonSessionW
 use fgit_authority::IdempotencyKey;
 use fgit_identity::agent::{
     DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_WRITE, MILESTONES_WRITE, OUTCOMES_READ,
-    PULLS_WRITE, SOURCE_CANDIDATES, SOURCE_PUBLISH,
+    PULLS_WRITE, SOURCE_BRANCH_CREATE, SOURCE_CANDIDATES, SOURCE_PUBLISH,
 };
 use fgit_wire::smart_http::head::Envelope;
 use std::time::Duration;
 
-fn operation(envelope: &Envelope<'_>) -> Result<u16, Status> {
+fn operation(envelope: &Envelope<'_>) -> Result<u32, Status> {
     if let Some(request) = pulls::Request::parse(envelope).map_err(|error| error.status)? {
         return request.agent_operation().ok_or(Status::Forbidden);
     }
@@ -62,7 +62,12 @@ pub(super) fn authenticate(
     }
     let operation = operation(envelope)?;
     let mutation = operation
-        & (ISSUES_WRITE | PULLS_WRITE | DISCUSSIONS_WRITE | MILESTONES_WRITE | SOURCE_PUBLISH)
+        & (ISSUES_WRITE
+            | PULLS_WRITE
+            | DISCUSSIONS_WRITE
+            | MILESTONES_WRITE
+            | SOURCE_PUBLISH
+            | SOURCE_BRANCH_CREATE)
         != 0;
     let retry = retry_key(raw_head).map_err(|_| Status::BadRequest)?;
     let key = if mutation || operation == OUTCOMES_READ {
@@ -258,7 +263,6 @@ mod tests {
             "initial",
             "history",
             "verified-blob",
-            "branches/create",
             "branches/update",
             "branches/delete",
             "branches/rename",
@@ -286,6 +290,27 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert!(operation(&envelope).is_err(), "{action}");
+        }
+    }
+
+    #[test]
+    fn sponsored_branch_creation_selects_only_its_independent_form_operation() {
+        for (action, expected) in [
+            ("branches/create", Some(SOURCE_BRANCH_CREATE)),
+            ("branches/update", None),
+            ("branches/delete", None),
+            ("branches/rename", None),
+            ("branches/transaction", None),
+            ("tags/lightweight", None),
+            ("initial/apply", None),
+        ] {
+            let raw = format!(
+                "POST /repo/api/v1/source/{action} HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n\r\n"
+            );
+            let envelope = head::parse(raw.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            assert_eq!(operation(&envelope).ok(), expected, "{action}");
         }
     }
 

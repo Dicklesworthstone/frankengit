@@ -1,6 +1,7 @@
 //! Real persisted node, canonical grants and MCP adapters. No credential mocks.
 use super::super::super::protocol::{ReadTools, Server};
 use super::*;
+use fgit_identity::agent::ALL_OPERATIONS;
 use fgit_node::OneNode;
 use fgit_types::{GitHashAlgorithm, HeadGeneration, RepositoryId};
 use support::*;
@@ -15,6 +16,7 @@ mod pull_feedback;
 mod pull_labels;
 mod pull_reopen;
 mod source;
+mod source_branches;
 mod source_publication;
 mod support;
 mod verified_blob;
@@ -37,7 +39,7 @@ fn sponsored_profile_lists_only_exact_tools_even_with_operator_flags_planted() {
     options.writes.merges = true;
     options.principal = Some(SPONSOR);
     let tools = super::super::tools_for_options(&options);
-    assert_eq!(tools.len(), 67);
+    assert_eq!(tools.len(), 68);
     assert!(
         tools
             .iter()
@@ -50,10 +52,23 @@ fn sponsored_profile_lists_only_exact_tools_even_with_operator_flags_planted() {
         operation(&options, "frankengit_source_publish"),
         Some(SOURCE_PUBLISH)
     );
+    assert_eq!(
+        operation(&options, "frankengit_branch_create"),
+        Some(SOURCE_BRANCH_CREATE)
+    );
+    for name in ["frankengit_pull_reviews", "frankengit_pull_checks"] {
+        assert_eq!(operation(&options, name), Some(PULLS_FEEDBACK_READ));
+        assert!(tools.iter().any(|tool| tool.name == name));
+    }
     assert!(
         tools
             .iter()
             .any(|tool| tool.name == "frankengit_source_publish")
+    );
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool.name == "frankengit_branch_create")
     );
     assert!(NodeTools::open(options.clone()).is_err());
     let mut backend = NodeTools::open(fixture.options.clone()).unwrap();
@@ -63,7 +78,9 @@ fn sponsored_profile_lists_only_exact_tools_even_with_operator_flags_planted() {
         "frankengit_pull_check_evidence",
         "frankengit_pull_review",
         "frankengit_branch_transaction",
-        "frankengit_branch_create",
+        "frankengit_branch_update",
+        "frankengit_branch_delete",
+        "frankengit_branch_rename",
         "frankengit_protection_show",
         "frankengit_protection_set",
         "shell",
@@ -274,7 +291,10 @@ fn repository_incarnation_expiry_and_invalid_tokens_refuse_before_metadata_discl
         (0xb1, current - 3, current - 1),
         (0xb2, current + 3600, current + 7200),
     ] {
-        let mut invalid_time = grant(&administrator.node, !fgit_identity::agent::SOURCE_PUBLISH);
+        let mut invalid_time = grant(
+            &administrator.node,
+            ALL_OPERATIONS & !(SOURCE_PUBLISH | SOURCE_BRANCH_CREATE),
+        );
         invalid_time.issued_at = issued_at;
         invalid_time.expires_at = expires_at;
         issue(

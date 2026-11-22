@@ -10,8 +10,8 @@ use super::{NodeTools, Object, Options, ToolError, Value, mutations, object, tex
 use fgit_authority::IdempotencyKey;
 use fgit_identity::agent::{
     DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, MILESTONES_READ,
-    MILESTONES_WRITE, OUTCOMES_READ, PULLS_DIFF_READ, PULLS_FEEDBACK_READ, PULLS_READ,
-    PULLS_WRITE, SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ,
+    MILESTONES_WRITE, OUTCOMES_READ, PULLS_DIFF_READ, PULLS_FEEDBACK_READ, PULLS_READ, PULLS_WRITE,
+    SOURCE_BRANCH_CREATE, SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ,
     SOURCE_VERIFIED_READ,
 };
 use fgit_node::agent_credentials::AgentRequest;
@@ -53,7 +53,7 @@ impl Profile {
 /// from broad operator groups: those also grant notifications, evidence bodies,
 /// review mutations and events not covered by these grants. Candidate and source
 /// publication operations have closed argument gates before authentication.
-pub(super) fn operation(options: &Options, name: &str) -> Option<u16> {
+pub(super) fn operation(options: &Options, name: &str) -> Option<u32> {
     match name {
         "frankengit_issue_list" | "frankengit_issue_show" | "frankengit_issue_search"
             if options.issues =>
@@ -141,6 +141,7 @@ pub(super) fn operation(options: &Options, name: &str) -> Option<u16> {
         "frankengit_agent_context" if options.agent_context => Some(SOURCE_READ),
         super::candidate::NAME if options.source => Some(SOURCE_CANDIDATES),
         super::source_writes::PUBLISH if options.writes.source => Some(SOURCE_PUBLISH),
+        super::source_writes::CREATE if options.writes.source => Some(SOURCE_BRANCH_CREATE),
         super::verified_blob::NAME if options.source => Some(SOURCE_VERIFIED_READ),
         super::review::PULL_DIFF if options.source && options.pulls => Some(PULLS_DIFF_READ),
         super::pull_reviews::NAME | super::checks::NAME if options.pulls => {
@@ -159,8 +160,14 @@ pub(super) fn operation(options: &Options, name: &str) -> Option<u16> {
     }
 }
 
-pub(super) fn is_write(operation: u16) -> bool {
-    operation & (ISSUES_WRITE | PULLS_WRITE | DISCUSSIONS_WRITE | MILESTONES_WRITE | SOURCE_PUBLISH)
+pub(super) fn is_write(operation: u32) -> bool {
+    operation
+        & (ISSUES_WRITE
+            | PULLS_WRITE
+            | DISCUSSIONS_WRITE
+            | MILESTONES_WRITE
+            | SOURCE_PUBLISH
+            | SOURCE_BRANCH_CREATE)
         != 0
 }
 
@@ -207,7 +214,7 @@ pub(super) fn call(backend: &mut NodeTools, name: &str, args: &Object) -> Result
     if operation == SOURCE_CANDIDATES {
         super::candidate::agent_operation(args)?;
     }
-    if operation == SOURCE_PUBLISH {
+    if matches!(operation, SOURCE_PUBLISH | SOURCE_BRANCH_CREATE) {
         super::source_writes::agent_operation(name, args)?;
     }
     let key = if is_write(operation) || operation == OUTCOMES_READ {
@@ -282,7 +289,7 @@ pub(super) fn response_checkpoint(
 /// Defense in depth for a native handler reached outside normal dispatch.
 /// Completed response custody and a different operation cannot supply active
 /// read authority, even when the host enabled a broad source tool group.
-pub(super) fn check_operation(backend: &NodeTools, operation: u16) -> Result<(), ToolError> {
+pub(super) fn check_operation(backend: &NodeTools, operation: u32) -> Result<(), ToolError> {
     backend
         .agent
         .as_ref()
@@ -352,6 +359,21 @@ pub(super) fn source_publication_request(
         .and_then(|profile| profile.request.as_ref())
         .ok_or(ToolError::failed("agent_request_required"))?
         .source_publication(&backend.node)
+        .map_err(auth_error)
+}
+
+/// Branch creation has its own canonical operation. Neither the source-write
+/// launch ceiling nor an active source-publication request can substitute for
+/// the original authenticated creation request.
+pub(super) fn source_branch_creation_request(
+    backend: &NodeTools,
+) -> Result<fgit_node::agent_credentials::SourceBranchCreationRequest<'_>, ToolError> {
+    backend
+        .agent
+        .as_ref()
+        .and_then(|profile| profile.request.as_ref())
+        .ok_or(ToolError::failed("agent_request_required"))?
+        .source_branch_creation(&backend.node)
         .map_err(auth_error)
 }
 

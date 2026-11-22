@@ -1,7 +1,7 @@
 //! Repository source reads, ref lifecycle and exact candidate operations.
-//! Read grants never imply publication. Branch/tag mutations require receive
-//! scope. Exact candidate Apply also accepts a live scoped sponsored proof;
-//! every source publication retains the explicit Git-write switch.
+//! Read grants never imply publication. Exact candidate Apply and task-branch
+//! creation accept independent live scoped sponsored proofs; other branch/tag
+//! mutations require receive scope. All retain the explicit Git-write switch.
 
 mod archive;
 mod artifact;
@@ -144,10 +144,10 @@ impl<'a> Request<'a> {
     /// bundles; classifying every read as source access would widen this grant.
     /// The current-commit reader belongs to the same ref-selected source surface
     /// as tree/blob; it cannot traverse parents or select an arbitrary object.
-    pub(super) fn agent_operation(&self) -> Option<u16> {
+    pub(super) fn agent_operation(&self) -> Option<u32> {
         use fgit_identity::agent::{
-            SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ,
-            SOURCE_VERIFIED_READ,
+            SOURCE_BRANCH_CREATE, SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_PUBLISH,
+            SOURCE_READ, SOURCE_VERIFIED_READ,
         };
         match &self.0 {
             RequestKind::Read(_)
@@ -155,6 +155,7 @@ impl<'a> Request<'a> {
             | RequestKind::Indexed(_)
             | RequestKind::Symbols(_)
             | RequestKind::Retrieval(_) => Some(SOURCE_READ),
+            RequestKind::Refs(request) if request.is_create() => Some(SOURCE_BRANCH_CREATE),
             RequestKind::Refs(request) => (!request.is_mutation()).then_some(SOURCE_READ),
             RequestKind::Tags(request) => (!request.is_mutation()).then_some(SOURCE_READ),
             RequestKind::History(_) | RequestKind::Historical(_) | RequestKind::Review(_) => {
@@ -174,6 +175,9 @@ impl<'a> Request<'a> {
     }
     fn requires_verified_read(&self) -> bool {
         matches!(&self.0, RequestKind::VerifiedBlob(_))
+    }
+    fn is_branch_creation(&self) -> bool {
+        matches!(&self.0, RequestKind::Refs(request) if request.is_create())
     }
     fn requires_history_read(&self) -> bool {
         matches!(
@@ -303,6 +307,8 @@ pub(super) fn authenticate(
     }
     let permitted = if request.publication_upload_maximum().is_some() {
         profile.allow_receive() && grant.permits_source_publication()
+    } else if request.is_branch_creation() {
+        profile.allow_receive() && grant.permits_source_branch_creation()
     } else if request.is_mutation() {
         profile.allow_receive() && grant.permits(Service::ReceivePack)
     } else if request.requires_history_read() {
@@ -342,6 +348,7 @@ pub(super) fn authenticate(
                         | fgit_identity::agent::SOURCE_HISTORY_READ
                         | fgit_identity::agent::SOURCE_CANDIDATES
                         | fgit_identity::agent::SOURCE_PUBLISH
+                        | fgit_identity::agent::SOURCE_BRANCH_CREATE
                         | fgit_identity::agent::SOURCE_VERIFIED_READ
                 )
             ) {
@@ -561,10 +568,12 @@ pub(super) fn execute(
                 node,
                 request,
                 session,
+                agent_request,
                 framing,
                 reader,
                 http,
                 maximum_response,
+                admission_deadline,
             )
             .map(Reply::json);
         }

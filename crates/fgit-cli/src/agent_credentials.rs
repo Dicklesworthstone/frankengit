@@ -33,7 +33,8 @@ usage: fg agent-credential show <storage-root> <tenant-id> <repository-id>
 Scopes: issues-read, issues-write, pulls-read, pulls-write,
         discussions-read, discussions-write, outcomes-read, source-read,
         source-history-read, source-candidates, milestones-read, milestones-write,
-        source-publish, source-verified-read, pulls-diff-read, pulls-feedback-read.
+        source-publish, source-verified-read, pulls-diff-read, pulls-feedback-read,
+        source-branch-create.
 source-read permits current source browsing, ref/tag discovery, search and context.
 source-history-read permits bounded history, blame, historical files and reference diffs.
 source-candidates permits bounded HTTP exact-patch preparation and bundle inspection.
@@ -49,6 +50,10 @@ finite ref/path ceiling; it requires both source scope options. Ref selectors us
 exact:<lowercase-native-ref-hex> or prefix:<slash-terminated-namespace-hex>, comma-separated.
 Path selectors are repeatable lowercase native path hex; src covers src and src/*,
 not src-other. A sole --source-path-hex '' explicitly permits the whole tree.
+source-branch-create independently permits an absent task branch at an exact current
+visible branch tip within the same finite ref ceiling. Both source scope options
+are required; path selectors constrain source-publish when separately granted.
+Creation changes no files and never implies update, delete, rename or publication.
 Every scope is independent. This profile cannot grant arbitrary Git transport,
 review decisions, merges, policy administration, secrets or external effects.
 Canonical credentials authenticate an agent and its explicitly attested sponsor;

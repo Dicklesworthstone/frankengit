@@ -324,7 +324,7 @@ fn scoped_http_publication_requires_original_key_proof_body_budget_and_deadline(
         .unwrap()
         .unwrap();
     let selected = source::Request::parse(&envelope).unwrap();
-    let authenticate = |token: &str, operation: u16, input_limit: u64| {
+    let authenticate = |token: &str, operation: u32, input_limit: u64| {
         node.runtime()
             .block_on(node.authenticate_agent_request_in(
                 &node.request_context(),

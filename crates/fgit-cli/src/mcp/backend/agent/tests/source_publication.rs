@@ -18,7 +18,7 @@ const RETRY: &str = "scoped-mcp-publication";
 fn issue_source(
     node: &OneNode,
     byte: u8,
-    operations: u16,
+    operations: u32,
     prefixes: &[&[u8]],
     retry: &str,
 ) -> AgentCredentialId {
@@ -46,7 +46,7 @@ struct PublicationFixture {
     credential: AgentCredentialId,
 }
 impl PublicationFixture {
-    fn new(format: GitHashAlgorithm, operations: u16, prefixes: &[&[u8]]) -> Self {
+    fn new(format: GitHashAlgorithm, operations: u32, prefixes: &[&[u8]]) -> Self {
         let fixture = Fixture::new(format);
         let administrator = NodeTools::open(fixture.options.clone()).unwrap();
         let credential = issue_source(
@@ -147,7 +147,7 @@ fn refs(backend: &NodeTools) -> BTreeMap<RefName, GitOid> {
         .clone()
 }
 
-fn reservation(backend: &NodeTools, operation: u16, retry: &str) -> AgentRequest {
+fn reservation(backend: &NodeTools, operation: u32, retry: &str) -> AgentRequest {
     backend
         .node
         .runtime()
@@ -418,7 +418,6 @@ fn source_publication_rejects_initial_and_rebase_before_credential_lookup() {
     }
     for name in [
         source_writes::PUBLISH_REBASE,
-        source_writes::CREATE,
         source_writes::UPDATE,
         source_writes::DELETE,
         source_writes::RENAME,

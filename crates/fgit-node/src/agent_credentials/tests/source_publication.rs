@@ -8,11 +8,11 @@ use fgit_identity::agent::{SOURCE_PUBLISH, SourcePublicationScope};
 use fgit_types::{GitOid, RefName};
 
 const INITIAL: &[u8] = b"diff --git a/src/file b/src/file\nnew file mode 100644\n--- /dev/null\n+++ b/src/file\n@@ -0,0 +1 @@\n+before\ndiff --git a/src-other/file b/src-other/file\nnew file mode 100644\n--- /dev/null\n+++ b/src-other/file\n@@ -0,0 +1 @@\n+outside\n";
-const PATCH: &[u8] = b"diff --git a/src/file b/src/file\n--- a/src/file\n+++ b/src/file\n@@ -1 +1 @@\n-before\n+after\n";
+pub(super) const PATCH: &[u8] = b"diff --git a/src/file b/src/file\n--- a/src/file\n+++ b/src/file\n@@ -1 +1 @@\n-before\n+after\n";
 const OUTSIDE: &[u8] = b"diff --git a/src-other/file b/src-other/file\n--- a/src-other/file\n+++ b/src-other/file\n@@ -1 +1 @@\n-outside\n+changed\n";
 const DELETE_OUTSIDE: &[u8] = b"diff --git a/src-other/file b/src-other/file\ndeleted file mode 100644\n--- a/src-other/file\n+++ /dev/null\n@@ -1 +0,0 @@\n-outside\n";
 
-fn reference() -> RefName {
+pub(super) fn reference() -> RefName {
     RefName::try_new(b"refs/heads/main").unwrap()
 }
 
@@ -25,7 +25,7 @@ fn metadata() -> MergeMetadata {
     }
 }
 
-fn seed(node: &OneNode) -> GitOid {
+pub(super) fn seed(node: &OneNode) -> GitOid {
     let request = node.command_request_context(None);
     let (_, plan, bundle) = node
         .runtime()
@@ -53,7 +53,7 @@ fn seed(node: &OneNode) -> GitOid {
     plan.commit
 }
 
-fn candidate(node: &OneNode, base: GitOid, patch: &[u8]) -> WorkspacePatchCandidate {
+pub(super) fn candidate(node: &OneNode, base: GitOid, patch: &[u8]) -> WorkspacePatchCandidate {
     node.runtime()
         .block_on(node.prepare_trusted_patch_in(
             &node.command_request_context(None),
@@ -67,7 +67,7 @@ fn candidate(node: &OneNode, base: GitOid, patch: &[u8]) -> WorkspacePatchCandid
         .unwrap()
 }
 
-fn scope(reference: &RefName, prefixes: &[&[u8]]) -> SourcePublicationScope {
+pub(super) fn scope(reference: &RefName, prefixes: &[&[u8]]) -> SourcePublicationScope {
     let hex: String = reference
         .as_bytes()
         .iter()
@@ -119,7 +119,7 @@ fn apply(
         ))
 }
 
-fn assert_committed(result: &AdmissionResult) {
+pub(super) fn assert_committed(result: &AdmissionResult) {
     assert!(result.session.atomic);
     assert_eq!(result.commands.len(), 1);
     assert!(
@@ -131,7 +131,7 @@ fn assert_committed(result: &AdmissionResult) {
     );
 }
 
-fn assert_refused(result: &AdmissionResult, code: RefusalCode) {
+pub(super) fn assert_refused(result: &AdmissionResult, code: RefusalCode) {
     assert_eq!(result.commands.len(), 1);
     assert!(
         matches!(result.commands[0].terminal.outcome, DecisionOutcome::Refused { code: actual, .. } if actual == code),

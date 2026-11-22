@@ -4,7 +4,7 @@
 use super::*;
 use fgit_identity::agent::{MILESTONES_READ, MILESTONES_WRITE, OUTCOMES_READ};
 
-const PLANNING: u16 =
+const PLANNING: u32 =
     MILESTONES_READ | MILESTONES_WRITE | ISSUES_READ | ISSUES_WRITE | OUTCOMES_READ;
 const OPEN: &str = "expected_version=0&title=Agent+release&body=Native+planning&due_at=0";
 

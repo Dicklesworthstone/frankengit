@@ -153,10 +153,10 @@
       "kind": "tool",
       "owner_subsystem": "git-core",
       "support_profile": "active",
-      "description": "Create an absent branch at an explicit already-visible commit through canonical admission.",
+      "description": "Create one absent branch through ordinary native admission under the source-write launch ceiling. Sponsored agents independently require canonical source-branch-create with a finite destination-ref scope, and the target must be the exact current tip of a visible branch. A source-publish grant alone supplies no branch-creation authority. Current protection, the original authenticated agent/sponsor, request deadline and durable-key recovery remain mandatory. No object import, overwrite, update, deletion, rename or multi-branch authority. Recovered receipts describe historical decisions, not current refs.",
       "read_mutation": "mutation",
       "capability": "prepare_publication",
-      "principal": "operator_bound",
+      "principal": "host_bound",
       "idempotency": "required_durable_key",
       "authority_root": "exact_predecessor_commit",
       "budget": {
@@ -171,9 +171,9 @@
       "disclosure": "public_repository_data",
       "receipt": "canonical_decision_digest",
       "cancellation": "non_preemptive_terminal_commit",
-      "refusal_codes": ["branch_already_exists", "commit_not_found", "protected_branch", "idempotency_key_reused"],
+      "refusal_codes": ["branch_already_exists", "commit_not_found", "protected_branch", "idempotency_key_reused", "tool_not_granted", "agent_operation_not_granted", "agent_credential_unavailable", "agent_request_required", "agent_request_key_mismatch", "agent_request_expired", "source_mutation_outcome_unknown"],
       "cli_command": "fg branch create",
-      "rest_api_path": "POST /repos/{id}/branches"
+      "rest_api_path": "POST /{repository}/api/v1/source/branches/create"
     },
     {
       "name": "frankengit_branch_delete",

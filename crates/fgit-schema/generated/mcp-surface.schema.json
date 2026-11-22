@@ -255,7 +255,7 @@
     },
     "frankengit_branch_create": {
       "title": "frankengit_branch_create",
-      "description": "Create an absent branch at an explicit already-visible commit through canonical admission.",
+      "description": "Create one absent branch through ordinary native admission under the source-write launch ceiling. Sponsored agents independently require canonical source-branch-create with a finite destination-ref scope, and the target must be the exact current tip of a visible branch. A source-publish grant alone supplies no branch-creation authority. Current protection, the original authenticated agent/sponsor, request deadline and durable-key recovery remain mandatory. No object import, overwrite, update, deletion, rename or multi-branch authority. Recovered receipts describe historical decisions, not current refs.",
       "type": "object",
       "properties": {
         "parameters": {
@@ -276,7 +276,7 @@
             },
             "target": {
               "type": "string",
-              "description": "Exact nonzero target commit OID in the repository hash format.",
+              "description": "Exact nonzero target commit OID in the repository hash format. Sponsored creation requires the current tip of a visible branch; unpublished candidates and historical-only commits are ineligible.",
               "x-classification": "selector_position",
               "maxLength": 64,
               "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"

@@ -49,13 +49,25 @@ pub(super) fn agent_tool() -> Tool {
     }
 }
 
+pub(super) fn agent_branch_tool() -> Tool {
+    Tool {
+        name: CREATE,
+        description: "Create one absent task branch at the exact current tip of a visible branch under the independent canonical source-branch-create grant and source-write launch ceiling. The credential's finite destination-ref scope, current visibility, ordinary protection, original retry key and agent/sponsor evidence remain mandatory. No object import, new commit, branch overwrite, update, deletion, rename, atomic multi-branch transaction or merge authority. A recovered receipt is a historical decision, not a claim about today's refs.",
+        schema: schema_for_profile(CREATE, true),
+    }
+}
+
 /// This closed profile gate runs before credential lookup and is repeated by
 /// the handler so bypassing protocol dispatch cannot open an operator route.
 pub(super) fn agent_operation(name: &str, args: &Object) -> Result<(), ToolError> {
-    if name != PUBLISH || args.contains_key("initial") {
-        return Err(ToolError::invalid("tool_not_granted"));
+    match name {
+        PUBLISH if !args.contains_key("initial") => Ok(()),
+        CREATE => require_fields(
+            args,
+            &["reference", "reference_hex", "target", "idempotency_key"],
+        ),
+        _ => Err(ToolError::invalid("tool_not_granted")),
     }
-    Ok(())
 }
 
 fn schema(name: &str) -> Value {
@@ -332,6 +344,28 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
                     bytes,
                 ))
         }
+    } else if sponsored {
+        let [command] = input.commands.as_slice() else {
+            return Err(ToolError::invalid("invalid_branch_creation_shape"));
+        };
+        let (ExpectedOld::Absent, ProposedNew::Update(target)) =
+            (command.expected_old, command.proposed_new)
+        else {
+            return Err(ToolError::invalid("invalid_branch_creation_shape"));
+        };
+        // This opaque request is independent of publication authority. Do not
+        // send sponsored branch commands through the broad operator adapter.
+        let creation = super::agent::source_branch_creation_request(backend)?;
+        backend
+            .node
+            .runtime()
+            .block_on(backend.node.create_agent_branch_in(
+                &request,
+                &creation,
+                &command.name,
+                target,
+                Default::default(),
+            ))
     } else if name == TRANSACTION {
         backend
             .node

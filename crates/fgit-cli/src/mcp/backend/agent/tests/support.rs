@@ -3,8 +3,8 @@ use fgit_authority::{ExpectedOld, ProposedNew, RefCommand, TerminalOutcome};
 use fgit_forge::ExpectedVersion;
 use fgit_forge::preparation::MergeMetadata;
 use fgit_identity::agent::{
-    AgentCredentialAction, AgentCredentialCommand, AgentCredentialGrant,
-    AgentCredentialId, SponsorKind, agent_credential_id,
+    AgentCredentialAction, AgentCredentialCommand, AgentCredentialGrant, AgentCredentialId,
+    SponsorKind, agent_credential_id,
 };
 use fgit_node::{NodeConfig, OneNode};
 use fgit_types::{
@@ -47,7 +47,7 @@ pub(super) fn private_token(path: &Path, bearer: &str) {
     file.write_all(bearer.as_bytes()).unwrap();
     file.write_all(b"\n").unwrap();
 }
-pub(super) fn grant(node: &OneNode, operations: u16) -> AgentCredentialGrant {
+pub(super) fn grant(node: &OneNode, operations: u32) -> AgentCredentialGrant {
     let now = now();
     AgentCredentialGrant {
         agent: AGENT,
@@ -228,7 +228,7 @@ impl Fixture {
             &token(0xaa),
             grant(
                 &node,
-                !fgit_identity::agent::SOURCE_PUBLISH,
+                ALL_OPERATIONS & !(SOURCE_PUBLISH | SOURCE_BRANCH_CREATE),
             ),
             "issue-primary",
         );

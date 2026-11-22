@@ -63,7 +63,7 @@
       "read_mutation": "mutation",
       "capability": "prepare_publication",
       "cli_command": "fg branch create",
-      "rest_api_path": "POST /repos/{id}/branches"
+      "rest_api_path": "POST /{repository}/api/v1/source/branches/create"
     },
     {
       "tool": "frankengit_branch_delete",
