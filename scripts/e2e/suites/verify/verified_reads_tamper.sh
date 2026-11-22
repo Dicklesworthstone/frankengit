@@ -48,7 +48,7 @@ TARGETS=(
   "fgit-verified-read:tamper_campaign:10"
   "fgit-verified-read:head_chain_freshness:7"
   "fgit-verified-read:proof_cost:10"
-  "fgit-node:verified_read_served_tamper:4"
+  "fgit-node:verified_read_served_tamper:6"
 )
 
 # The corpus's declared tamper-class count, asserted separately from the
@@ -56,7 +56,7 @@ TARGETS=(
 # function count cannot see a class being removed; the Rust denominator guard
 # emits this
 # marker and the assertion below reads it.
-EXPECTED_TAMPER_CLASSES=20
+EXPECTED_TAMPER_CLASSES=22
 
 # The cases whose absence would hollow out this bead, asserted individually.
 LOAD_BEARING=(
@@ -72,6 +72,8 @@ LOAD_BEARING=(
   an_outcome_envelope_is_checked_against_the_outcome_index_root_not_whichever_root_verifies
   a_v1_configuration_cannot_stand_in_for_the_incarnation_body_the_head_selected
   a_server_produced_envelope_verifies_and_the_same_envelope_tampered_does_not
+  a_server_produced_v2_object_envelope_verifies_across_multi_commit_and_refusal_heads_and_rejects_witness_tampering
+  non_authority_bound_object_layouts_and_v1_capability_refuse_object_proof_serving
   an_unproven_client_is_still_served_by_a_proof_capable_node
   a_fabricated_receipt_is_refused_by_authentication_before_anything_is_materialized
   a_relayed_envelope_crosses_the_wire_and_the_client_runs_both_checks_on_the_decoded_form

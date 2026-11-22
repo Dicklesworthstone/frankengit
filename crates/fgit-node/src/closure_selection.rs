@@ -14,9 +14,10 @@ use super::{
     ADMISSION_CLOSURE_KEY_PREFIX, AdmissionMaterializationRefusal, Arc, AsyncAuthorityStore,
     AuthenticatedHead, AuthoritySelectedClosure, BTreeSet, CachePermit, CanonicalRefState,
     ClosureSelectionSource, Digest, GitOid, ImmutableRead, MaterializedAdmissionState,
-    PermittedObjectClosure, PublicationBasis, RefusalCode, RepositoryCommitId, RepositoryId,
-    RwLock, admission_immutable_key, capsule_history, decode_body,
-    ensure_materializer_catch_up_live, permitted_object_closure_root, repository_commit_id,
+    PermittedObjectClosure, PublicationBasis, RefusalCode, RepositoryCommitId,
+    RepositoryCommitRecord, RepositoryId, RootLayoutVersion, RwLock, admission_immutable_key,
+    capsule_history, decode_body, ensure_materializer_catch_up_live, permitted_object_closure_root,
+    repository_commit_id,
 };
 
 /// One disposable verified prefix shared by independently opened service
@@ -73,6 +74,7 @@ pub struct ClosurePrefix {
     pub(super) cache_permit: CachePermit,
     pub(super) roots: Arc<BTreeSet<Digest>>,
     pub(super) selected: Arc<AuthoritySelectedClosure>,
+    pub(super) latest_committed_rcr: Option<Arc<RepositoryCommitRecord>>,
 }
 
 impl ClosurePrefix {
@@ -83,6 +85,7 @@ impl ClosurePrefix {
             cache_permit: state.cache_permit,
             roots: Arc::clone(&state.closure_roots),
             selected: Arc::clone(&state.selected_closure),
+            latest_committed_rcr: state.latest_committed_rcr.as_ref().map(Arc::clone),
         }
     }
 }
@@ -94,6 +97,8 @@ pub struct ClosureSelection {
     pending: BTreeSet<Digest>,
     inherited: BTreeSet<GitOid>,
     source: ClosureSelectionSource,
+    capsule_closure_root: Option<Digest>,
+    latest_committed_rcr: Option<Arc<RepositoryCommitRecord>>,
 }
 
 impl ClosureSelection {
@@ -102,8 +107,16 @@ impl ClosureSelection {
         authority: &Authority,
         cx: &Authority::Context,
         repository_id: RepositoryId,
+        root_layout: RootLayoutVersion,
         is_cancelled: &(impl Fn() -> bool + Sync),
-    ) -> Result<(AuthoritySelectedClosure, BTreeSet<Digest>), AdmissionMaterializationRefusal>
+    ) -> Result<
+        (
+            AuthoritySelectedClosure,
+            BTreeSet<Digest>,
+            Option<Arc<RepositoryCommitRecord>>,
+        ),
+        AdmissionMaterializationRefusal,
+    >
     where
         Authority: AsyncAuthorityStore + ?Sized,
     {
@@ -126,10 +139,14 @@ impl ClosureSelection {
             let closure =
                 decode_body::<PermittedObjectClosure>(&frame, fgit_codec::DecodeLimits::DEFAULT)
                     .map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
-            if permitted_object_closure_root(&closure)
-                .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?
-                != closure_root
-            {
+            let observed_root = if self.capsule_closure_root == Some(closure_root) {
+                permitted_object_closure_root(&closure)
+                    .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?
+            } else {
+                fgit_admission::object_closure_root(root_layout, &closure)
+                    .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?
+            };
+            if observed_root != closure_root {
                 return Err(AdmissionMaterializationRefusal::CanonicalRoot(
                     RefusalCode::InternalInvariantBreach,
                 ));
@@ -143,6 +160,18 @@ impl ClosureSelection {
         }
         ensure_materializer_catch_up_live(is_cancelled)?;
         let closure = PermittedObjectClosure::new(united);
+        if root_layout.commits_authority_object_closure_merkle()
+            && let Some(record) = &self.latest_committed_rcr
+            && fgit_admission::object_closure_root(root_layout, &closure)
+                .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?
+                != record.object_closure_root
+        {
+            return Err(
+                AdmissionMaterializationRefusal::SelectedCommitStateMismatch {
+                    field: "object_closure_root",
+                },
+            );
+        }
         let root = permitted_object_closure_root(&closure)
             .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?;
         ensure_materializer_catch_up_live(is_cancelled)?;
@@ -153,6 +182,7 @@ impl ClosureSelection {
                 source: self.source,
             },
             self.roots,
+            self.latest_committed_rcr,
         ))
     }
 }
@@ -172,6 +202,7 @@ where
     let mut successor_id = current.id();
     let mut walked = 0_usize;
     let mut latest_record: Option<RepositoryCommitId> = None;
+    let mut latest_committed_rcr: Option<Arc<RepositoryCommitRecord>> = None;
     let mut roots = BTreeSet::new();
 
     loop {
@@ -202,12 +233,16 @@ where
                     current_refs,
                     checkpoint,
                 )?;
+                let latest_committed_rcr = latest_committed_rcr
+                    .or_else(|| cached.latest_committed_rcr.as_ref().map(Arc::clone));
                 ensure_materializer_catch_up_live(is_cancelled)?;
                 return Ok(ClosureSelection {
                     roots,
                     pending,
                     inherited: cached.selected.closure.objects().clone(),
                     source,
+                    capsule_closure_root: None,
+                    latest_committed_rcr,
                 });
             }
         }
@@ -228,6 +263,8 @@ where
                     roots,
                     inherited: BTreeSet::new(),
                     source,
+                    capsule_closure_root: None,
+                    latest_committed_rcr,
                 });
             }
             capsule_history::HistoryStep::Checkpoint {
@@ -266,6 +303,8 @@ where
                         roots,
                         inherited: BTreeSet::new(),
                         source,
+                        capsule_closure_root: Some(capsule.object_closure_root),
+                        latest_committed_rcr,
                     });
                 }
                 successor_id = predecessor.id();
@@ -310,6 +349,7 @@ where
                 .map_err(|error| AdmissionMaterializationRefusal::Delivery(Box::new(error)))?;
             }
             latest_record = Some(record_id);
+            latest_committed_rcr = Some(Arc::new(record.clone()));
         }
         // Set insertion deduplicates repeated empty/event roots without the
         // old quadratic Vec::contains scan. Closure identities and the final

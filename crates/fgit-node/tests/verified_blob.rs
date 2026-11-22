@@ -50,6 +50,7 @@ fn actual_imported_bytes_have_exact_ref_path_proofs_in_both_hash_domains() {
         for layout in [
             RootLayoutVersion::RefStateMerkleV2,
             RootLayoutVersion::RefStateAndObjectClosureMerkleV2,
+            RootLayoutVersion::AuthorityBoundObjectClosureMerkleV2,
         ] {
             let scratch = Scratch::new();
             let (node, commit) = fixture_with_config(

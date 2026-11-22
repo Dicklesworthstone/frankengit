@@ -3,7 +3,8 @@
 //! The V2 ref root authenticates symbolic HEAD without reinterpreting V1.
 
 use fgit_codec::{
-    CryptoBodyIdentity, DecodeLimits, RepositoryConfigurationBody, body_id, harness::genesis_head,
+    CryptoBodyIdentity, DecodeLimits, RepositoryConfigurationBody, body_id,
+    harness::{commit_record, genesis_head},
     split_frame,
 };
 use fgit_crypto::{
@@ -11,15 +12,18 @@ use fgit_crypto::{
     ref_state_membership_proof, ref_state_membership_proof_v2, ref_state_merkle_root,
     ref_state_merkle_root_v2, ref_state_non_membership_proof, ref_state_non_membership_proof_v2,
 };
+use fgit_types::identity::RepositoryCommitId;
 use fgit_types::{
     Digest, GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256, RefName, RootLayoutVersion,
 };
 use fgit_verified_read::{
-    PinnedAuthorityHead, RefDisclosurePolicy, VerifiedMembership, VerifiedReadAnswer,
-    VerifiedReadEnvelope, VerifiedReadRefusal, authorize_ref_absence,
-    authorize_ref_absence_witness, decode_ref_state_non_membership_proof,
-    decode_verified_read_envelope, encode_ref_state_non_membership_proof,
-    encode_verified_read_envelope, verify_envelope,
+    ObjectClosureWitness, PinnedAuthorityHead, RefDisclosurePolicy, VerifiedMembership,
+    VerifiedReadAnswer, VerifiedReadAnswerV2, VerifiedReadEnvelope, VerifiedReadEnvelopeV2,
+    VerifiedReadRefusal, authorize_ref_absence, authorize_ref_absence_witness,
+    decode_ref_state_non_membership_proof, decode_verified_read_envelope,
+    decode_verified_read_envelope_v2, encode_ref_state_non_membership_proof,
+    encode_verified_read_envelope, encode_verified_read_envelope_v2, verify_envelope,
+    verify_envelope_v2,
 };
 
 struct Disclosure {
@@ -86,6 +90,7 @@ fn v2_ref_membership_survives_relay_but_not_a_changed_head_target() {
     for layout in [
         RootLayoutVersion::RefStateMerkleV2,
         RootLayoutVersion::RefStateAndObjectClosureMerkleV2,
+        RootLayoutVersion::AuthorityBoundObjectClosureMerkleV2,
     ] {
         for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
             let main = name(b"refs/heads/main");
@@ -134,6 +139,7 @@ fn v2_absence_relay_covers_empty_and_all_ordered_intervals() {
     for layout in [
         RootLayoutVersion::RefStateMerkleV2,
         RootLayoutVersion::RefStateAndObjectClosureMerkleV2,
+        RootLayoutVersion::AuthorityBoundObjectClosureMerkleV2,
     ] {
         for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
             let target = name(b"refs/heads/unborn-\xff");
@@ -400,27 +406,53 @@ fn ordered_absence_neighbours_must_be_disclosed_in_both_layouts() {
 }
 
 #[test]
-fn combined_v2_keeps_object_proofs_while_ref_only_v2_refuses_them() {
+fn authority_bound_v2_accepts_commit_witnessed_object_proofs_while_older_layouts_refuse_them() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let objects = vec![oid(format, 1), oid(format, 2)];
         let object_root = object_closure_merkle_root(&objects).unwrap();
         let proof = object_closure_membership_proof(&objects, &objects[0]).unwrap();
         for layout in [
+            RootLayoutVersion::AuthorityBoundObjectClosureMerkleV2,
             RootLayoutVersion::RefStateAndObjectClosureMerkleV2,
             RootLayoutVersion::RefStateMerkleV2,
         ] {
-            let (pin, value) = envelope(
-                layout,
-                format,
-                ref_state_merkle_root_v2(&[], None).unwrap(),
-                VerifiedReadAnswer::ObjectMembership {
+            let configuration = RepositoryConfigurationBody {
+                root_layout: layout,
+                object_format: format,
+                hidden_ref_rules: Vec::new(),
+            };
+            let cfg_id = body_id(&CryptoBodyIdentity, &configuration).unwrap();
+            let mut head = genesis_head();
+            head.configuration_root = Digest::new(cfg_id.algorithm(), *cfg_id.digest());
+            head.ref_root = ref_state_merkle_root_v2(&[], None).unwrap();
+
+            let mut rcr = commit_record();
+            rcr.repository_id = head.repository_id;
+            rcr.resulting_ref_root = head.ref_root;
+            rcr.object_closure_root = object_root;
+            rcr.policy_epoch = head.policy_epoch;
+            let rcr_id = RepositoryCommitId::from_internal_object_id(
+                body_id(&CryptoBodyIdentity, &rcr).unwrap(),
+            )
+            .unwrap();
+            head.latest_committed_rcr_id = Some(rcr_id);
+            head.latest_repository_sequence = Some(rcr.repository_sequence);
+
+            let pin = PinnedAuthorityHead::new(head.clone());
+            let value = VerifiedReadEnvelopeV2::new(
+                head,
+                Some(configuration),
+                VerifiedReadAnswerV2::ObjectMembership {
                     oid: objects[0],
+                    witness: ObjectClosureWitness::SelectedCommitRecord(Box::new(rcr)),
                     proof: Box::new(proof.clone()),
                 },
             );
-            let pin = PinnedAuthorityHead::new_with_object_closure(pin.body().clone(), object_root);
-            let result = verify_envelope(&pin, &relay(&value));
-            if layout.admits_object_closure_membership_proof() {
+            let wire = encode_verified_read_envelope_v2(&value).unwrap();
+            let relayed = decode_verified_read_envelope_v2(&wire, DecodeLimits::DEFAULT).unwrap();
+            assert_eq!(encode_verified_read_envelope_v2(&relayed).unwrap(), wire);
+            let result = verify_envelope_v2(&pin, &relayed);
+            if layout.commits_authority_object_closure_merkle() {
                 assert_eq!(result, Ok(VerifiedMembership::Object));
             } else {
                 assert!(matches!(result, Err(VerifiedReadRefusal::ObjectLayout(_))));

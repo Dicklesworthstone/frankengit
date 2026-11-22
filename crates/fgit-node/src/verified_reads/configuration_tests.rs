@@ -27,7 +27,7 @@ use fgit_codec::{
     CryptoBodyIdentity, DecodeLimits, HiddenRefPolicyBody, RepositoryIncarnationConfigurationBody,
     RepositoryIncarnationConfigurationBodyV2_1, RepositoryIncarnationConfigurationBodyV2_2,
 };
-use fgit_crypto::{GitObjectKind, git_object_id, object_closure_merkle_root, sha256_digest};
+use fgit_crypto::{GitObjectKind, git_object_id, sha256_digest};
 use fgit_forge::{AggregateVersion, ExpectedVersion};
 use fgit_git_object::ObjectType;
 use fgit_identity::agent::{
@@ -44,8 +44,9 @@ use fgit_verified_read::blob::{
 };
 use fgit_verified_read::{
     PinnedAuthorityHead, ReadResponse, VerifiedMembership, VerifiedReadConfiguration,
-    VerifiedReadEnvelope, VerifiedReadRefusal, decode_verified_read_envelope,
-    encode_verified_read_envelope, verify_envelope,
+    VerifiedReadEnvelope, VerifiedReadEnvelopeV2, VerifiedReadRefusal,
+    decode_verified_read_envelope, decode_verified_read_envelope_v2, encode_verified_read_envelope,
+    encode_verified_read_envelope_v2, verify_envelope, verify_envelope_v2,
 };
 use fgit_wire::visibility::RefVisibility;
 
@@ -58,7 +59,7 @@ use crate::{
 const CONTENT: &[u8] = b"\0\xfforiginal verified source\r\n";
 const OWNER: PrincipalId = PrincipalId::from_bytes([0x41; 16]);
 const AGENT: PrincipalId = PrincipalId::from_bytes([0x42; 16]);
-const LAYOUT: RootLayoutVersion = RootLayoutVersion::RefStateAndObjectClosureMerkleV2;
+const LAYOUT: RootLayoutVersion = RootLayoutVersion::AuthorityBoundObjectClosureMerkleV2;
 
 struct Scratch(PathBuf);
 
@@ -213,10 +214,11 @@ fn configured_node(
     node.runtime()
         .block_on(
             node.admission_materializer
-                .stage_permitted_object_closure_in(
+                .stage_permitted_object_closure_for_layout_in(
                     &node.authority,
                     request.authority(),
                     node.repository_id(),
+                    LAYOUT,
                     PermittedObjectClosure::default(),
                 ),
         )
@@ -323,16 +325,30 @@ fn current_proof(node: &OneNode, query: VerifiedReadQuery) -> VerifiedReadEnvelo
     envelope.as_ref().clone()
 }
 
+fn current_proof_v2(node: &OneNode, query: VerifiedReadQuery) -> VerifiedReadEnvelopeV2 {
+    let served = node
+        .runtime()
+        .block_on(node.serve_current_verified_read_in(
+            &node.request_context(),
+            &RefVisibility::new(),
+            ReadLabel::current(),
+            VerifiedReadCapability::EnvelopeV2,
+            query,
+        ))
+        .unwrap();
+    let ReadResponse::VerifiedV2(envelope) = served.response() else {
+        panic!("a negotiated V2 proof cannot silently become a V1 or unproven answer");
+    };
+    envelope.as_ref().clone()
+}
+
 fn check_source_proofs(
     node: &OneNode,
     source: &Source,
     exact: &VerifiedReadConfiguration,
 ) -> VerifiedReadEnvelope {
     let head = authenticated(node).body().unwrap();
-    let pin = PinnedAuthorityHead::new_with_object_closure(
-        head.clone(),
-        object_closure_merkle_root(&source.objects).unwrap(),
-    );
+    let pin = PinnedAuthorityHead::new(head.clone());
     let absent = git_object_id(node.object_format, GitObjectKind::Blob, b"not admitted");
     assert!(!source.objects.contains(&absent));
     for (query, membership) in [
@@ -341,6 +357,23 @@ fn check_source_proofs(
             VerifiedReadQuery::Ref(RefName::try_new(b"refs/heads/missing").unwrap()),
             VerifiedMembership::RefAbsence,
         ),
+    ] {
+        let envelope = current_proof(node, query.clone());
+        assert_eq!(envelope.exact_configuration(), Some(exact));
+        let bytes = encode_verified_read_envelope(&envelope).unwrap();
+        let received = decode_verified_read_envelope(&bytes, DecodeLimits::DEFAULT).unwrap();
+        assert_eq!(received, envelope);
+        assert_eq!(verify_envelope(&pin, &received), Ok(membership));
+
+        let envelope_v2 = current_proof_v2(node, query);
+        assert_eq!(envelope_v2.exact_configuration(), Some(exact));
+        let bytes_v2 = encode_verified_read_envelope_v2(&envelope_v2).unwrap();
+        let received_v2 =
+            decode_verified_read_envelope_v2(&bytes_v2, DecodeLimits::DEFAULT).unwrap();
+        assert_eq!(received_v2, envelope_v2);
+        assert_eq!(verify_envelope_v2(&pin, &received_v2), Ok(membership));
+    }
+    for (query, membership) in [
         (
             VerifiedReadQuery::Object(source.blob),
             VerifiedMembership::Object,
@@ -350,12 +383,12 @@ fn check_source_proofs(
             VerifiedMembership::ObjectAbsence,
         ),
     ] {
-        let envelope = current_proof(node, query);
+        let envelope = current_proof_v2(node, query);
         assert_eq!(envelope.exact_configuration(), Some(exact));
-        let bytes = encode_verified_read_envelope(&envelope).unwrap();
-        let received = decode_verified_read_envelope(&bytes, DecodeLimits::DEFAULT).unwrap();
+        let bytes = encode_verified_read_envelope_v2(&envelope).unwrap();
+        let received = decode_verified_read_envelope_v2(&bytes, DecodeLimits::DEFAULT).unwrap();
         assert_eq!(received, envelope);
-        assert_eq!(verify_envelope(&pin, &received), Ok(membership));
+        assert_eq!(verify_envelope_v2(&pin, &received), Ok(membership));
     }
     let expected = authority_head_id(&head).unwrap();
     let blob = node
@@ -530,8 +563,30 @@ fn revocation_aware_native_proofs_survive_checkpoint_tail_and_cold_reopen() {
         };
         assert_eq!(envelope.as_ref(), &original_proof);
         assert_eq!(
-            verify_envelope(&PinnedAuthorityHead::new(original_body), envelope),
+            verify_envelope(&PinnedAuthorityHead::new(original_body.clone()), envelope),
             Ok(VerifiedMembership::Ref)
+        );
+
+        let snapshot_object = node
+            .runtime()
+            .block_on(node.serve_snapshot_verified_read_in(
+                &node.request_context(),
+                original.receipt(),
+                &RefVisibility::new(),
+                ReadLabel::snapshot(),
+                VerifiedReadCapability::EnvelopeV2,
+                VerifiedReadQuery::Object(source.blob),
+            ))
+            .unwrap();
+        let ReadResponse::VerifiedV2(snapshot_object_envelope) = snapshot_object.response() else {
+            panic!("snapshot V2 object proof required")
+        };
+        assert_eq!(
+            verify_envelope_v2(
+                &PinnedAuthorityHead::new(original_body),
+                snapshot_object_envelope
+            ),
+            Ok(VerifiedMembership::Object)
         );
 
         let hidden = node.runtime().block_on(node.serve_current_verified_read_in(

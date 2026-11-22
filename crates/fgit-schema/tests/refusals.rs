@@ -287,7 +287,7 @@ fn a_dangling_reference_is_refused_and_the_valid_twin_is_accepted() {
     };
     let mut structures = vec![&REAL];
     structures.extend_from_slice(registry::STRUCTURES);
-    registry::check_references_resolve_in(&[], &structures, registry::UNIONS)
+    registry::check_references_resolve_in(registry::DESCRIBED, &structures, registry::UNIONS)
         .expect("the identical shape with a resolvable name is accepted");
 }
 

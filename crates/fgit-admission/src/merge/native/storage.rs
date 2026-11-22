@@ -21,6 +21,7 @@ use crate::AdmissionError;
 pub(super) const EVENT_NAMESPACE: &[u8] = b"frankengit/admission/forge-event-batch/v1/";
 pub(super) const POSITION_NAMESPACE: &[u8] = b"frankengit/admission/forge-position-state/v1/";
 pub(super) const INVARIANT_NAMESPACE: &[u8] = b"frankengit/admission/invariant-evidence/v1/";
+pub(crate) const OBJECT_CLOSURE_NAMESPACE: &[u8] = b"frankengit/admission/object-closure/v1/";
 const MAX_BOOTSTRAP_BATCHES: usize = 4096;
 const MAX_EVENTS: usize = 65_536;
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -30,6 +31,11 @@ const EVENT_LIMITS: DecodeLimits = DecodeLimits {
 };
 const POSITION_LIMITS: DecodeLimits = DecodeLimits {
     elements: MAX_FORGE_POSITION_STATE_ENTRIES as u64,
+    ..DecodeLimits::DEFAULT
+};
+const CLOSURE_LIMITS: DecodeLimits = DecodeLimits {
+    elements: 1_048_576,
+    frame_bytes: MAX_FRAME_BYTES as u64,
     ..DecodeLimits::DEFAULT
 };
 
@@ -362,6 +368,83 @@ pub(super) async fn stage_body<S: AsyncAuthorityStore + ?Sized, B: CanonicalBody
 
 pub(super) fn root<B: CanonicalBody>(body: &B) -> Result<Digest, AdmissionError> {
     crate::evidence::evidence_root(body).map_err(unavailable)
+}
+
+/// Resolves the cumulative `PermittedObjectClosure` and its committed root
+/// carried forward by `basis` under `root_layout`.
+///
+/// Under earlier layouts (`0, 1, 2, 4, 5`), returns the empty closure and its
+/// whole-body digest without extra history reads. Under
+/// `AuthorityBoundObjectClosureMerkleV2` (`6`), returns the empty Merkle
+/// commitment at genesis (`latest_committed_rcr_id == None`) or verifies and
+/// reads the latest committed RCR's cumulative closure frame.
+pub(crate) async fn read_carried_object_closure<S: AsyncAuthorityStore + ?Sized>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    root_layout: fgit_types::layout::RootLayoutVersion,
+    is_cancelled: &(impl Fn() -> bool + Sync),
+) -> Result<(crate::PermittedObjectClosure, Digest), AdmissionError> {
+    if !root_layout.commits_authority_object_closure_merkle() {
+        let empty = crate::PermittedObjectClosure::default();
+        let digest = crate::permitted_object_closure_root(&empty).map_err(unavailable)?;
+        return Ok((empty, digest));
+    }
+    let Some(latest_rcr_id) = basis.body().latest_committed_rcr_id else {
+        let empty = crate::PermittedObjectClosure::default();
+        let digest = crate::object_closure_root(root_layout, &empty).map_err(unavailable)?;
+        return Ok((empty, digest));
+    };
+    let mut successor = basis.body().clone();
+    let mut walked = 0;
+    let selected_closure_root = loop {
+        match read_history_step_async(
+            store,
+            cx,
+            &successor,
+            &mut walked,
+            MAX_BOOTSTRAP_BATCHES,
+            is_cancelled,
+        )
+        .await
+        .map_err(history_step_refusal)?
+        {
+            HistoryStep::Genesis => return Err(unavailable(RefusalCode::EvidenceInvalid)),
+            HistoryStep::Checkpoint { predecessor, .. } => {
+                successor = predecessor.body().clone();
+            }
+            HistoryStep::Decision { predecessor, batch } => {
+                if let Some(record) = batch.committed_rcrs.last() {
+                    let record_id = fgit_chronicle::repository_commit_identity(
+                        &fgit_codec::CryptoBodyIdentity,
+                        record,
+                    )
+                    .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
+                    if record_id != latest_rcr_id {
+                        return Err(unavailable(RefusalCode::EvidenceInvalid));
+                    }
+                    break record.object_closure_root;
+                }
+                successor = predecessor.body().clone();
+            }
+        }
+    };
+    let frame = read_frame(
+        store,
+        cx,
+        basis.body().repository_id,
+        OBJECT_CLOSURE_NAMESPACE,
+        selected_closure_root,
+    )
+    .await?
+    .ok_or_else(|| unavailable(RefusalCode::EvidenceMissing))?;
+    let closure = decode_body::<crate::PermittedObjectClosure>(&frame, CLOSURE_LIMITS)
+        .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
+    let recomputed = crate::object_closure_root(root_layout, &closure).map_err(unavailable)?;
+    if recomputed != selected_closure_root {
+        return Err(unavailable(RefusalCode::EvidenceInvalid));
+    }
+    Ok((closure, selected_closure_root))
 }
 
 /// The historical empty-node sentinel, preserved byte-for-byte for old heads.

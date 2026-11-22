@@ -557,6 +557,7 @@ fn shared_preparation_accepts_the_complete_activity_prefix_but_not_unrelated_str
     let context = f.context(1);
     let resolved = NativeMergeBasis {
         refs: crate::CanonicalRefState::default(),
+        selected_closure: crate::PermittedObjectClosure::default(),
         root_layout: fgit_types::RootLayoutVersion::LegacyWholeBody,
         forge: f.forge.clone(),
         outbox: f.outbox.clone(),

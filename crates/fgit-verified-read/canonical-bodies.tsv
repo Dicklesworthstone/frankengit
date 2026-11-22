@@ -2,6 +2,8 @@
 # family<TAB>canonical payload description
 verified-blob	Authenticated ref membership envelope, exact byte path, original commit body, ordered root-to-parent tree bodies, and complete blob body for independent verification against a pinned authority head.
 verified-read-envelope	Protocol version, selected authority-head payload, optional exact repository configuration, and the tagged verified-read answer and proof.
+verified-read-envelope-v2	Protocol version 2, selected authority-head payload, optional exact repository configuration, and the tagged verified-read V2 answer carrying authority-bound commit witnesses for object membership and absence proofs.
 verified-read-merkle-proof	Canonical Merkle proof steps and commitments supplied to the shared verified-read proof verifier.
 verified-read-object-non-membership-proof	Canonical object-closure non-membership witness, including the ordered Merkle proof and queried object identity.
+verified-read-query	Protocol version, requested verified-read capability tier, and the tagged ref, outcome, or object query target.
 verified-read-ref-non-membership-proof	Canonical ref-state non-membership witness, including the ordered Merkle proof and queried ref name.

@@ -51,6 +51,7 @@ fn fixture(format: GitHashAlgorithm, before: u64, policy: bool) -> PreparedNativ
     let outbox = CanonicalOutboxState::try_new(repository, Vec::new()).unwrap();
     let resolved = NativeMergeBasis {
         refs,
+        selected_closure: crate::PermittedObjectClosure::default(),
         forge,
         outbox,
         root_layout: RootLayoutVersion::LegacyWholeBody,

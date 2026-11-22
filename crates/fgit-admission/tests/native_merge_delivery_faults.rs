@@ -606,8 +606,23 @@ impl Projection {
                 _ => RefusalCode::EvidenceInvalid,
             })
         })?;
+        let (selected_closure, _) = poll_ready(
+            fgit_admission::merge::native::read_carried_object_closure_in(
+                self.store.as_ref(),
+                &(),
+                basis,
+                configuration.root_layout,
+            ),
+        )
+        .map_err(|error| {
+            ProjectionFailure::Unavailable(match error {
+                AdmissionError::AsyncProjectionUnavailable(code) => code,
+                _ => RefusalCode::EvidenceInvalid,
+            })
+        })?;
         Ok(NativeMergeBasis {
             refs,
+            selected_closure,
             root_layout: configuration.root_layout,
             forge: delivery.forge,
             outbox: delivery.outbox,

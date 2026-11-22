@@ -586,6 +586,9 @@ where
         };
         // The fold owns its result; release the snapshot before staging awaits.
         drop(snapshot);
+        let expected_closure_root = projection
+            .expected_commit_closure_root(&basis, &closure)
+            .map_err(AdmissionError::AsyncProjectionUnavailable)?;
         let mut materialization = projection
             .materialize_commit_async(
                 store,
@@ -602,7 +605,7 @@ where
             &basis,
             admission.tx_id(),
             &attempt.request,
-            &closure,
+            expected_closure_root,
             &materialization,
         )?;
         if materialization.roots.ref_root != basis.body().ref_root

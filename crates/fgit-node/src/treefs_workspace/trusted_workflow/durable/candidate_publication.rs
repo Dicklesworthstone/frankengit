@@ -313,6 +313,13 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for CandidateCheckOwner<'_>
         self.inner
             .materialize_commit_async(store, cx, basis, request, fold, closure)
     }
+    fn expected_commit_closure_root(
+        &self,
+        basis: &PublicationBasis,
+        closure: &ValidatedClosure,
+    ) -> Result<fgit_types::Digest, ProjectionFailure> {
+        self.inner.expected_commit_closure_root(basis, closure)
+    }
     fn materialize_refusal_async<'a>(
         &'a self,
         store: &'a FsqliteAuthorityStore,

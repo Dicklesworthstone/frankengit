@@ -58,7 +58,7 @@ use fgit_admission::{
     ValidatedClosure, ValidatedReceive, ValidatedSourceImport,
     admit_basis_bound_validated_receive_async, admit_validated_receive_async,
     admit_validated_source_import_async, permitted_object_closure_root,
-    prepare_canonical_commit_reusing_closure, ref_state_root, validate_source_import,
+    prepare_canonical_commit_for_layout_reusing_closure, ref_state_root, validate_source_import,
 };
 pub use fgit_pack::full_bundle::fetch::BundleRefMapping;
 #[path = "smart_http/receive_session/bounded_intake.rs"]
@@ -875,6 +875,7 @@ struct MaterializedAdmissionState {
     cache_permit: CachePermit,
     ref_state: CanonicalRefState,
     selected_closure: Arc<AuthoritySelectedClosure>,
+    latest_committed_rcr: Option<Arc<RepositoryCommitRecord>>,
     /// Distinct closure roots in the verified prefix: individual RCR roots or
     /// an explicitly declared cumulative checkpoint plus its suffix. They are
     /// not object authority independently of `basis` and the cache permit.
@@ -978,6 +979,7 @@ pub struct MaterializedAdmission {
     basis: PublicationBasis,
     snapshot: AdmissionSnapshot,
     selected_closure: AuthoritySelectedClosure,
+    latest_committed_rcr: Option<Arc<RepositoryCommitRecord>>,
     root_layout: RootLayoutVersion,
 }
 
@@ -1004,6 +1006,13 @@ impl MaterializedAdmission {
     #[must_use]
     pub const fn selected_closure(&self) -> &AuthoritySelectedClosure {
         &self.selected_closure
+    }
+
+    /// The latest committed record resolved during selection when history walk
+    /// traversed its decision batch directly.
+    #[must_use]
+    pub(crate) fn latest_committed_rcr(&self) -> Option<&RepositoryCommitRecord> {
+        self.latest_committed_rcr.as_deref()
     }
 
     /// The authenticated configuration's ref-root layout for this snapshot.
@@ -1920,7 +1929,31 @@ impl DurableAdmissionMaterializer {
     where
         Authority: AsyncAuthorityStore + ?Sized,
     {
-        let root = permitted_object_closure_root(&closure)
+        self.stage_permitted_object_closure_for_layout_in(
+            authority,
+            cx,
+            repository_id,
+            RootLayoutVersion::LegacyWholeBody,
+            closure,
+        )
+        .await
+    }
+
+    /// Stages one immutable validated object-closure frame under the root
+    /// selected by the repository configuration that will publish it.
+    pub(crate) async fn stage_permitted_object_closure_for_layout_in<Authority>(
+        &self,
+        authority: &Authority,
+        cx: &Authority::Context,
+        repository_id: RepositoryId,
+        root_layout: RootLayoutVersion,
+        closure: PermittedObjectClosure,
+    ) -> Result<Digest, AdmissionMaterializationRefusal>
+    where
+        Authority: AsyncAuthorityStore + ?Sized,
+    {
+        require_authenticated_head_layout(root_layout)?;
+        let root = fgit_admission::object_closure_root(root_layout, &closure)
             .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?;
         let frame =
             encode_body(&closure).map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
@@ -2165,8 +2198,8 @@ impl DurableAdmissionMaterializer {
                     RefusalCode::InternalInvariantBreach,
                 ));
             }
-            let (selected_closure, closure_roots) = selection
-                .materialize_in(authority, cx, repository_id, is_cancelled)
+            let (selected_closure, closure_roots, latest_committed_rcr) = selection
+                .materialize_in(authority, cx, repository_id, root_layout, is_cancelled)
                 .await?;
             let delivery = fgit_admission::merge::native::delivery::read_in(
                 authority,
@@ -2194,6 +2227,7 @@ impl DurableAdmissionMaterializer {
                 basis: basis.clone(),
                 snapshot,
                 selected_closure: selected_closure.clone(),
+                latest_committed_rcr: latest_committed_rcr.as_ref().map(Arc::clone),
                 root_layout,
             };
             let state = MaterializedAdmissionState {
@@ -2203,6 +2237,7 @@ impl DurableAdmissionMaterializer {
                 cache_permit,
                 ref_state,
                 selected_closure: Arc::new(selected_closure),
+                latest_committed_rcr,
                 closure_roots: Arc::new(closure_roots),
                 policy_epoch: body.policy_epoch,
                 configuration_root: body.configuration_root,
@@ -2525,6 +2560,7 @@ impl AdmissionSnapshotProjection for DurableAdmissionMaterializer {
 struct AsyncMaterializedBasis {
     basis: PublicationBasis,
     ref_state: CanonicalRefState,
+    selected_closure: PermittedObjectClosure,
     root_layout: RootLayoutVersion,
     /// What a receive validator built from this basis would commit to.
     validation_authority: fgit_admission::ReceiveValidationAuthority,
@@ -2635,6 +2671,7 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
         cx: &FsqliteCx,
         basis: &PublicationBasis,
         current: CanonicalRefState,
+        inherited_closure: Option<&PermittedObjectClosure>,
         root_layout: RootLayoutVersion,
         request: &TransactionRequest,
         fold: &TransactionFoldReport,
@@ -2673,11 +2710,12 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
             .lock()
             .ok()
             .and_then(|mut cached| cached.take());
-        let mut prepared = prepare_canonical_commit_reusing_closure(
+        let mut prepared = prepare_canonical_commit_for_layout_reusing_closure(
             basis,
             request,
             fold,
             closure,
+            inherited_closure,
             current,
             root_layout,
             evidence,
@@ -2772,6 +2810,33 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
             .map(|prepared| prepared.validation_authority)
     }
 
+    fn expected_commit_closure_root(
+        &self,
+        basis: &PublicationBasis,
+        closure: &ValidatedClosure,
+    ) -> Result<Digest, RefusalCode> {
+        let guard = self
+            .prepared
+            .lock()
+            .map_err(|_| RefusalCode::InternalInvariantBreach)?;
+        let Some(prepared) = guard.as_ref().filter(|prepared| prepared.basis == *basis) else {
+            return Ok(closure.object_closure_root);
+        };
+        if prepared
+            .root_layout
+            .commits_authority_object_closure_merkle()
+        {
+            let mut united = prepared.selected_closure.objects().clone();
+            united.extend(closure.objects.iter().copied());
+            fgit_admission::object_closure_root(
+                prepared.root_layout,
+                &PermittedObjectClosure::new(united),
+            )
+        } else {
+            Ok(closure.object_closure_root)
+        }
+    }
+
     async fn snapshot_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
@@ -2803,6 +2868,7 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
                 .map_err(AsyncProjectionFailure::Unavailable)?,
                 None => CanonicalRefState::new(materialized.snapshot().refs.clone()),
             },
+            selected_closure: materialized.selected_closure().closure().clone(),
             root_layout: materialized.root_layout(),
             validation_authority: quarantine_validator::receive_validation_authority(&materialized),
         };
@@ -2825,10 +2891,10 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
         fold: &'a TransactionFoldReport,
         closure: &'a ValidatedClosure,
     ) -> Result<CommitMaterialization, AsyncProjectionFailure> {
-        // Retain only the layout selected by the authenticated snapshot. The
-        // opaque admission state owns accepted prior ref effects; no staged
-        // intermediate root is passed off as an authenticated authority head.
-        let root_layout = {
+        // Retain only the layout and basis-selected closure from the authenticated
+        // snapshot. The opaque admission state owns accepted prior ref effects;
+        // no staged intermediate root is passed off as an authenticated authority head.
+        let (root_layout, selected_closure) = {
             let prepared = self.prepared.lock().map_err(|_| {
                 AsyncProjectionFailure::Unavailable(RefusalCode::InternalInvariantBreach)
             })?;
@@ -2842,13 +2908,14 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
                     RefusalCode::AuthorityReceiptStale,
                 ));
             }
-            prepared.root_layout
+            (prepared.root_layout, prepared.selected_closure.clone())
         };
         self.stage_ref_commit(
             authority,
             cx,
             state.basis(),
             state.refs().clone(),
+            Some(&selected_closure),
             root_layout,
             request,
             fold,
@@ -2884,6 +2951,7 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
             cx,
             basis,
             prepared_basis.ref_state,
+            Some(&prepared_basis.selected_closure),
             prepared_basis.root_layout,
             request,
             fold,
@@ -3050,6 +3118,7 @@ impl fgit_admission::merge::AsyncMergeMaterializer<FsqliteAuthorityStore>
                 })?;
         let resolved = fgit_admission::merge::NativeMergeBasis {
             refs: prepared_basis.ref_state,
+            selected_closure: prepared_basis.selected_closure,
             root_layout: prepared_basis.root_layout,
             forge: delivery.forge,
             outbox: delivery.outbox,
@@ -3092,10 +3161,11 @@ impl fgit_admission::merge::AsyncMergeMaterializer<FsqliteAuthorityStore>
             .await
             .map_err(async_projection_unavailable)?;
         self.materializer
-            .stage_permitted_object_closure_in(
+            .stage_permitted_object_closure_for_layout_in(
                 authority,
                 cx,
                 context.repository_id,
+                prepared.root_layout,
                 prepared.closure,
             )
             .await
@@ -8656,10 +8726,11 @@ impl OneNode {
         };
         if let Err(staging) = node.runtime.block_on(
             node.admission_materializer
-                .stage_permitted_object_closure_in(
+                .stage_permitted_object_closure_for_layout_in(
                     &node.authority,
                     &initialization_cx,
                     repository_id,
+                    config.root_layout,
                     PermittedObjectClosure::default(),
                 ),
         ) {

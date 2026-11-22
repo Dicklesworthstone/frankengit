@@ -51,7 +51,7 @@ pub mod protection;
 pub mod pull_request;
 pub mod queue;
 pub mod settlement;
-mod storage;
+pub(crate) mod storage;
 pub mod workflow_checks;
 pub use storage::{legacy_genesis_root, load_forge_positions};
 mod workspace;
@@ -480,15 +480,34 @@ where
     })
     .await
     .map_err(|error| error.into_projection_unavailable(RefusalCode::EvidenceInvalid))?;
+    let (selected_closure, _) =
+        storage::read_carried_object_closure(store, cx, basis, root_layout, &|| {
+            projection.merge_checkpoint(cx).is_err()
+        })
+        .await
+        .map_err(|error| error.into_projection_unavailable(RefusalCode::EvidenceInvalid))?;
     projection
         .merge_checkpoint(cx)
         .map_err(ProjectionFailure::Unavailable)?;
     Ok(NativeMergeBasis {
         refs,
+        selected_closure,
         root_layout,
         forge: state.forge,
         outbox: state.outbox,
     })
+}
+
+/// Resolves the cumulative `PermittedObjectClosure` and its committed root
+/// carried forward by `basis` under `root_layout` for custom
+/// [`NativeMergeProjection`] implementations.
+pub async fn read_carried_object_closure_in<S: AsyncAuthorityStore + ?Sized>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    root_layout: fgit_types::layout::RootLayoutVersion,
+) -> Result<(crate::PermittedObjectClosure, fgit_types::Digest), AdmissionError> {
+    storage::read_carried_object_closure(store, cx, basis, root_layout, &|| false).await
 }
 
 /// Evaluate and stage the complete Ref + Forge + Outbox fold before one CAS.

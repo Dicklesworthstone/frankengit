@@ -301,6 +301,7 @@ fn default_branch_commits_real_head_delta_preserves_every_other_partition_and_re
             RootLayoutVersion::LegacyWholeBody,
             RootLayoutVersion::RefStateMerkleV2,
             RootLayoutVersion::RefStateAndObjectClosureMerkleV2,
+            RootLayoutVersion::AuthorityBoundObjectClosureMerkleV2,
         ] {
             for old in [
                 None,

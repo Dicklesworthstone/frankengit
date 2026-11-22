@@ -594,8 +594,8 @@ and 2 commit only to sorted direct refs and do not authenticate the body's
 target is absent. Historical direct-ref proofs remain verifiable under their
 original definitions. Code point 3 remains reserved for forge-position work.
 
-Codes 4 (`RefStateMerkleV2`) and 5
-(`RefStateAndObjectClosureMerkleV2`) use schema family `ref-state-merkle`,
+Codes 4 (`RefStateMerkleV2`), 5 (`RefStateAndObjectClosureMerkleV2`), and 6
+(`AuthorityBoundObjectClosureMerkleV2`) use schema family `ref-state-merkle`,
 version `2.0`, for every ref-tree leaf and interior node. Index zero is always
 the HEAD leaf. Its payload parts are discriminator `0`, option tag `0` for no
 target or `1` followed by the big-endian `u32` target-byte length and the exact
@@ -617,7 +617,12 @@ required: odd-node promotion otherwise permits relabelling a final leaf as
 the first direct ref and claiming an existing earlier ref absent.
 
 Code 4 leaves other root families unchanged from code 1. Code 5 retains the
-object-closure proof semantics of code 2. V2 direct-ref membership proofs MUST
+per-commit whole-body object-closure root of code 2 and does not bind a
+cumulative Merkle object-closure root to `RepositoryAuthorityHead`. Code 6
+(`AuthorityBoundObjectClosureMerkleV2`) retains the V2 head-aware ref-state
+Merkle layout of code 4 while binding `RepositoryCommitRecord.object_closure_root`
+to the cumulative `object_closure_merkle_root` across the repository's admitted
+object closure (§16.7). V2 direct-ref membership proofs MUST
 have an index above zero. Ordered absence uses direct neighbours beginning at
 index one; a state with no direct refs is represented by the single HEAD leaf.
 The verified-read absence tag `4` (`HeadOnly`) carries that exact optional
@@ -694,8 +699,10 @@ domain IDs retain their meanings.
 Only layouts that authenticate HEAD (§16.5) may publish this operation. Direct
 refs MUST be identical before and after it. Forge-position, policy-epoch,
 configuration, outbox and retention state remain selected from the predecessor;
-the RCR admits an empty incremental object closure while retaining the existing
-reachable closure. A same-target command is an authorized, separately audited
+under whole-body closure layouts (`0`–`5`) the RCR stages an empty incremental
+object closure while retaining the existing reachable closure, and under code 6
+(`AuthorityBoundObjectClosureMerkleV2`) the RCR carries forward the cumulative
+admitted object-closure Merkle commitment unchanged. A same-target command is an authorized, separately audited
 terminal no-op with equal ref roots. It still checks the exact target tip and
 current administrator policy. Deletion/rename protection thereafter follows the
 new canonical HEAD, and advertisements and historical reads select that same
@@ -710,6 +717,49 @@ original scoped TxId or retries the exact command and key, without refreshing
 either expectation. Reads report absent, unborn and resolved states distinctly,
 bound to one authenticated head, and authorize disclosure of both HEAD and its
 target.
+
+### 16.7 Authority-bound object-closure Merkle proofs (`RootLayoutVersion` 6 and `VerifiedReadEnvelopeV2`)
+
+Code point 6 (`AuthorityBoundObjectClosureMerkleV2`) binds object-closure
+membership and authorized non-membership proofs directly to the client's
+independently pinned `RepositoryAuthorityHeadBody`, without any caller-supplied
+or server-chosen out-of-band `object_closure_root` pin:
+
+1. **Cumulative Merkle commitment**: Under code 6, every committed
+   `RepositoryCommitRecord` sets `object_closure_root` to the canonical
+   `object_closure_merkle_root` over the cumulative union of all objects
+   admitted through that repository commit (sorted by `(algorithm_code_point,
+   raw_oid_bytes)`). Forge-only, policy-only, and default-branch transitions
+   carry forward the predecessor's cumulative object closure unchanged;
+   refusal-only and checkpoint transitions advance `RepositoryAuthorityHead`
+   while preserving `latest_committed_rcr_id`.
+2. **Envelope V2 and query wire frames**:
+   - `VerifiedReadQueryEnvelope` (`frankengit/verified-read-query/v1`, schema
+     family `verified-read-query`, version `1.0`) frames the client capability
+     tier (`VerifiedReadCapability`) alongside `Ref(RefName)`, `Outcome(TxId)`,
+     and `Object(GitOid)` queries canonically.
+   - `VerifiedReadEnvelopeV2` (`frankengit/verified-read-envelope/v2`, schema
+     family `verified-read-envelope-v2`, version `2.0`) carries version `2`,
+     `RepositoryAuthorityHeadBody`, optional exact configuration evidence, and
+     `VerifiedReadAnswerV2`. `VerifiedReadEnvelope` (`v1`) remains byte-identical
+     for ref and outcome answers and MUST refuse object-proof serving.
+3. **Authority-bound witness verification**: Object membership (`tag 3`) and
+   authorized object absence (`tag 4`) in `VerifiedReadAnswerV2` carry an
+   `ObjectClosureWitness`:
+   - `GenesisEmpty` (`tag 0`): valid iff `pinned.latest_committed_rcr_id == None`
+     and `pinned.latest_repository_sequence == None`, binding the empty
+     `object_closure_merkle_root(&[])`.
+   - `SelectedCommitRecord(RepositoryCommitRecord)` (`tag 1`): valid iff the
+     record's `repository_id` and `repository_sequence` match `pinned` and its
+     recomputed `RepositoryCommitId` equals `pinned.latest_committed_rcr_id`,
+     binding `record.object_closure_root` directly from the pinned head.
+4. **Layout and neighbour-disclosure gates**: Object-proof serving and
+   `verify_envelope_v2` MUST refuse root layouts `0, 1, 2, 4, 5` on object
+   answers. Ordered object-absence proofs (`frankengit/object-non-membership-proof/v1`,
+   schema family `object-non-membership-proof`, version `1.0`) MUST authorize
+   both the queried OID and every disclosed bracketing neighbour OID before
+   constructing the response, returning `ObjectNotFoundOrUnauthorized` on any
+   denied neighbour so neighbour existence is never leaked by refusal shape.
 
 ## 17. Object fabric and segmentation
 

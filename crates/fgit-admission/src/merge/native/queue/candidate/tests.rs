@@ -63,6 +63,7 @@ fn fixture(
                 command.merge.target_tip_before,
             ),
         ])),
+        selected_closure: crate::PermittedObjectClosure::default(),
         root_layout: RootLayoutVersion::LegacyWholeBody,
         forge: CanonicalForgePositionState::try_new(
             context.repository_id,

@@ -52,6 +52,7 @@ fn fixture(
             (command.source_ref.clone(), command.head_tip),
             (command.target_ref.clone(), command.expected_target_tip),
         ])),
+        selected_closure: crate::PermittedObjectClosure::default(),
         root_layout: RootLayoutVersion::LegacyWholeBody,
         forge: CanonicalForgePositionState::try_new(
             context.repository_id,

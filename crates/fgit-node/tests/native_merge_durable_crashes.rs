@@ -298,6 +298,15 @@ impl AsyncAdmissionProjection<CrashAuthority> for Projection<'_> {
         self.inner
             .materialize_commit_async(&authority.inner, cx, basis, request, fold, closure)
     }
+    fn expected_commit_closure_root(
+        &self,
+        basis: &PublicationBasis,
+        closure: &ValidatedClosure,
+    ) -> Result<fgit_types::Digest, ProjectionFailure> {
+        <DurableAsyncAdmissionProjection as AsyncAdmissionProjection<
+            fgit_authority::FsqliteAuthorityStore,
+        >>::expected_commit_closure_root(&self.inner, basis, closure)
+    }
     fn materialize_refusal_async<'a>(
         &'a self,
         authority: &'a CrashAuthority,
@@ -348,6 +357,7 @@ impl NativeMergeProjection<CrashAuthority> for Projection<'_> {
         Ok(NativeMergeBasis {
             refs,
             root_layout: selected.root_layout(),
+            selected_closure: selected.selected_closure().closure().clone(),
             forge: delivery.forge,
             outbox: delivery.outbox,
         })
