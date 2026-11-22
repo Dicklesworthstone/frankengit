@@ -115,6 +115,7 @@ struct Entry {
     reference: RefName,
     visibility: RefVisibility,
     clock_floor: Arc<AtomicU64>,
+    edit_profile: candidate::EditProfile,
     session: Session,
 }
 
@@ -258,9 +259,61 @@ impl OneNode {
         session: &LoopbackReceiveSession,
         reference: &RefName,
         visibility: &RefVisibility,
+        capability: TreeCapability,
+        now: u64,
+        limits: ExportLimits,
+    ) -> Result<MergeWorkspaceReceipt, NodeWorkspaceRefusal> {
+        self.open_merge_workspace_profile_in(
+            request,
+            session,
+            reference,
+            visibility,
+            capability,
+            now,
+            limits,
+            candidate::EditProfile::FilesAndSymlinks,
+        )
+        .await
+    }
+
+    /// Open the explicit gitlink editing profile. The retained owner admits
+    /// opaque add/update/delete intents alongside ordinary file and symlink
+    /// edits; it never reads a submodule target or changes a path's entry kind
+    /// between gitlink and local content. Every append retains this choice.
+    /// The original opener keeps refusing gitlink edits.
+    pub async fn open_gitlink_merge_workspace_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        reference: &RefName,
+        visibility: &RefVisibility,
+        capability: TreeCapability,
+        now: u64,
+        limits: ExportLimits,
+    ) -> Result<MergeWorkspaceReceipt, NodeWorkspaceRefusal> {
+        self.open_merge_workspace_profile_in(
+            request,
+            session,
+            reference,
+            visibility,
+            capability,
+            now,
+            limits,
+            candidate::EditProfile::Gitlinks,
+        )
+        .await
+    }
+
+    async fn open_merge_workspace_profile_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        reference: &RefName,
+        visibility: &RefVisibility,
         mut capability: TreeCapability,
         now: u64,
         limits: ExportLimits,
+        edit_profile: candidate::EditProfile,
     ) -> Result<MergeWorkspaceReceipt, NodeWorkspaceRefusal> {
         let owner = principal(session)?;
         let now = now.max(self.runtime.now().as_nanos());
@@ -323,6 +376,7 @@ impl OneNode {
                     reference: reference.clone(),
                     visibility: visibility.clone(),
                     clock_floor: Arc::new(AtomicU64::new(now)),
+                    edit_profile,
                     session,
                 },
             );
@@ -330,8 +384,9 @@ impl OneNode {
         Ok(observed)
     }
 
-    /// Append ordinary file intents and export the same evaluated overlay that
-    /// the session adopts. The expected receipt must still name this snapshot.
+    /// Append intents admitted by the opener's explicit entry profile and
+    /// export the same evaluated overlay the session adopts. The expected
+    /// receipt must still name this snapshot.
     pub async fn edit_merge_workspace_in(
         &self,
         request: &NodeRequestContext,
@@ -384,7 +439,14 @@ impl OneNode {
             return Err(NodeWorkspaceRefusal::StaleWorkspaceBase);
         }
         let limits = state.limits();
-        candidate::validate_log(append, state.capability(), now, limits)?;
+        candidate::validate_log_profile(
+            append,
+            state.capability(),
+            now,
+            limits,
+            entry.edit_profile,
+            A::DIGEST_LEN,
+        )?;
         if state
             .log()
             .len()
@@ -398,6 +460,7 @@ impl OneNode {
             let added = match intent {
                 TreeEditIntent::Write { content, .. } => content.len(),
                 TreeEditIntent::CreateSymlink { link_target, .. } => link_target.len(),
+                TreeEditIntent::UpdateSubmodule { after_oid, .. } => after_oid.len(),
                 _ => 0,
             };
             bytes = bytes
@@ -422,7 +485,7 @@ impl OneNode {
                     if current.base_commit_oid() != base.base_commit_oid() {
                         return Err(NodeWorkspaceRefusal::StaleWorkspaceBase);
                     }
-                    candidate::export_owned_from_base(
+                    candidate::export_owned_from_base_profile(
                         &base,
                         source,
                         cap,
@@ -431,6 +494,7 @@ impl OneNode {
                         now,
                         limits,
                         &|| !workspace_request_live(request),
+                        entry.edit_profile,
                     )
                 },
             )
