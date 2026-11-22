@@ -14,10 +14,14 @@
 //! a path. Every older profile keeps refusing symlink modes and source entries.
 //! `index` names are parsed and exposed as optional identity expectations;
 //! callers with an object store must check them against verified native IDs.
+//! The explicit exact-gitlink-v1 profile adds canonical full-index gitlink
+//! pointer changes alongside regular text changes. Synthetic pointer lines are
+//! not blobs; the caller binds their IDs to the selected repository hash domain.
 
 use std::collections::BTreeSet;
 
 mod binary;
+mod gitlink;
 mod rename;
 pub use binary::BinaryHunks;
 
@@ -127,6 +131,7 @@ pub struct FilePatch<'a> {
     renamed_from: Option<Vec<u8>>,
     identical_content: bool,
     allow_symlinks: bool,
+    allow_gitlinks: bool,
     change: FileChange,
     old_mode: Option<u32>,
     new_mode: Option<u32>,
@@ -144,6 +149,7 @@ enum ParseProfile {
     BinaryAndRenames,
     BinaryRenames,
     Symlinks,
+    ExactGitlinkV1,
 }
 
 impl ParseProfile {
@@ -167,6 +173,10 @@ impl ParseProfile {
 
     const fn allows_symlinks(self) -> bool {
         matches!(self, Self::Symlinks)
+    }
+
+    const fn allows_gitlinks(self) -> bool {
+        matches!(self, Self::ExactGitlinkV1)
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -216,6 +226,7 @@ const fn mode(bytes: &[u8], at: usize, profile: ParseProfile) -> Result<u32, Pat
         b"100644" => Ok(0o100644),
         b"100755" => Ok(0o100755),
         b"120000" if profile.allows_symlinks() => Ok(0o120000),
+        b"160000" if profile.allows_gitlinks() => Ok(0o160000),
         _ => Err(PatchError::Unsupported {
             line: at + 1,
             feature: "non-regular file mode",
@@ -479,6 +490,25 @@ impl<'a> UnifiedPatch<'a> {
         Self::parse_profile(input, limits, cancelled, ParseProfile::Symlinks)
     }
 
+    /// Opt into canonical full-index gitlink additions, updates and deletions
+    /// alongside ordinary exact text changes. Each gitlink explicitly declares
+    /// mode 160000 and one whole-image hunk with exact Subproject commit lines.
+    /// Its old/new index names are complete, same-width native commit pointers;
+    /// only an absent side uses zeros. The parser never hashes these virtual
+    /// lines as blob content, reads the pointed-to repository, or grants access.
+    ///
+    /// The caller MUST bind the IDs to its repository hash domain and verify
+    /// the original pointer against its selected immutable tree. Compressed
+    /// binary records, symlinks, renames, copies and gitlink type changes refuse.
+    /// Older profiles continue refusing gitlink metadata and source entries.
+    pub fn parse_with_gitlinks(
+        input: &'a [u8],
+        limits: PatchLimits,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, PatchError> {
+        Self::parse_profile(input, limits, cancelled, ParseProfile::ExactGitlinkV1)
+    }
+
     fn parse_profile(
         input: &'a [u8],
         limits: PatchLimits,
@@ -519,6 +549,7 @@ impl<'a> UnifiedPatch<'a> {
             if files.len() == limits.max_files {
                 return Err(PatchError::Budget("patch files"));
             }
+            let first_line = pos;
             let first = metadata(records[pos], pos)?;
             let paths = first
                 .strip_prefix(b"diff --git ")
@@ -538,6 +569,7 @@ impl<'a> UnifiedPatch<'a> {
                 renamed_from,
                 identical_content: similarity == Some(100),
                 allow_symlinks: profile.allows_symlinks(),
+                allow_gitlinks: profile.allows_gitlinks(),
                 change: FileChange::Modify,
                 old_mode: None,
                 new_mode: None,
@@ -765,6 +797,9 @@ impl<'a> UnifiedPatch<'a> {
             if file.binary.is_some() {
                 binary::check_index(file.index.as_ref(), file.change)?;
             }
+            if file.is_gitlink() {
+                gitlink::check(&file, &records[first_line..pos], first_line)?;
+            }
             if file.binary.is_none()
                 && file.renamed_from.is_none()
                 && file.hunks.is_empty()
@@ -812,6 +847,20 @@ impl<'a> UnifiedPatch<'a> {
     }
 }
 impl FilePatch<'_> {
+    /// Whether this file was parsed with the explicit exact-gitlink-v1 profile.
+    /// Callers still bind its native hash domain, tree identity and capability.
+    #[must_use]
+    pub const fn allows_gitlinks(&self) -> bool {
+        self.allow_gitlinks
+    }
+
+    /// Whether the patch explicitly declares a gitlink on its present side.
+    /// An omitted mode never reinterprets an ordinary patch as a gitlink.
+    #[must_use]
+    pub const fn is_gitlink(&self) -> bool {
+        matches!(self.old_mode, Some(0o160000)) || matches!(self.new_mode, Some(0o160000))
+    }
+
     /// Whether this file was parsed with the explicit inert-symlink profile.
     /// Consumers must still resolve and authorize its actual immutable source;
     /// the flag never grants path traversal or broadens a capability.
@@ -903,12 +952,16 @@ impl FilePatch<'_> {
         }
         let (old_mode, body) = source.unwrap_or((0o100644, b""));
         let source_mode_allowed = matches!(old_mode, 0o100644 | 0o100755)
-            || (self.allow_symlinks && old_mode == 0o120000);
+            || (self.allow_symlinks && old_mode == 0o120000)
+            || (self.allow_gitlinks && self.is_gitlink() && old_mode == 0o160000);
         if !source_mode_allowed || self.old_mode.is_some_and(|mode| mode != old_mode) {
             return Err(PatchError::SourceMode);
         }
         if body.len() > limits.max_file_bytes {
             return Err(PatchError::Budget("source file bytes"));
+        }
+        if self.is_gitlink() && self.change != FileChange::Create {
+            gitlink::check_source(self, body)?;
         }
         if let Some(binary) = &self.binary {
             binary.check_limits(limits)?;
@@ -1048,6 +1101,10 @@ fn append(output: &mut Vec<u8>, bytes: &[u8], limit: usize) -> Result<(), PatchE
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "patch/gitlink_tests.rs"]
+mod gitlink_tests;
 
 #[cfg(test)]
 #[path = "patch/symlink_tests.rs"]
