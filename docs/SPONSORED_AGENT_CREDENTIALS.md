@@ -4,7 +4,8 @@ This profile gives an agent its own repository-scoped principal and records its
 human or service sponsor in canonical admission evidence. It supports the native
 HTTP current-source browsing and context, separately granted source history and
 reference comparison, separately granted complete blob proofs and exact pull-request
-code comparisons, separately granted ephemeral source candidates and scoped
+code comparisons, independently granted review and check feedback,
+separately granted ephemeral source candidates and scoped
 single-parent source publication, issue and pull-request metadata and conversation,
 standalone discussion, independently granted milestone planning,
 and single-transaction outcome endpoints,
@@ -100,6 +101,7 @@ observation schema. This grants no agent source-import capability.
 | `milestones-write` | Open, edit, close and reopen native milestones at explicit versions |
 | `source-verified-read` | Complete visible-ref blob proofs at an independently supplied authority head, including original tree witnesses |
 | `pulls-diff-read` | Code comparison selected by an exact native pull-request version |
+| `pulls-feedback-read` | Bounded pull-request review pages and canonical check summaries |
 
 Scopes are independent: write does not imply read. Unknown scopes are rejected.
 Milestone scopes grant no issue text or issue mutation. Assigning or clearing an
@@ -122,7 +124,7 @@ disclosure retain the existing canonical hidden-ref and visibility checks.
 
 Git upload-pack/receive-pack, general bundle export/import,
 initial-commit/replay/rebase preparation,
-reviews, checks, merges, queue operations, notifications, policy
+review and check mutations, raw check evidence, merges, queue operations, notifications, policy
 administration, workflow and artifact access, process execution, secrets and
 external effects are outside this profile. MCP offers the closed sponsored
 source and metadata tools described below and keeps its existing trusted-local
@@ -204,6 +206,37 @@ A completed MCP response cannot authorize a later direct handler invocation.
 These new read scopes each permit only `ReadCanonicalObject`. Stored masks
 `0x0fff` and `0x1fff` gain neither operation; an immutable credential must be
 reissued with the intended additional scope.
+
+### Independently grant PR review and check feedback
+
+Use `--operations pulls-feedback-read` to let an agent inspect feedback before
+preparing its next change. This scope is independent of `pulls-read`,
+`pulls-write`, `pulls-diff-read` and every source scope. Existing credentials
+gain no feedback access; a sponsor must issue a new immutable grant.
+
+| Transport | Required host ceiling | Read entry points |
+| --- | --- | --- |
+| HTTP | `--allow-pulls` | `GET /api/v1/pulls/{number}/reviews`, `GET /api/v1/pulls/{number}/checks` |
+| MCP | `--allow-pulls` | `frankengit_pull_reviews`, `frankengit_pull_checks` |
+
+Neither entry point requires `--allow-source` or an artifact ceiling. The
+permission covers the review pages and canonical check summaries needed to
+interpret PR feedback. It does not authorize raw check evidence bodies, logs,
+artifacts, review submissions, check mutations, source reads, code comparisons,
+merges or publication. A successful read creates no review eligibility or
+reusable authority.
+
+Both transports retain the native snapshot-bound pagination contract and the
+selected PR state. Current canonical hidden-ref policy applies to both recorded
+PR branches on every request, including continuation pages. A cursor cannot
+bypass revocation, changed visibility or stale snapshot conditions.
+
+Each call authenticates the current canonical grant and keeps the original
+agent, sponsor, repository incarnation, request-run witness, deadline and
+input/output limits through native reads and response disclosure. A feedback
+request permits only `ReadCanonicalObject`. MCP handlers require the active
+verified feedback request even when invoked directly; a metadata request,
+expired reservation or completed response cannot substitute for it.
 
 ### Current-source routes and authenticated context
 
@@ -299,7 +332,8 @@ keys and leave canonical authority unchanged, including on refusals.
 Candidate authority alone cannot apply a bundle. Publishing a reviewed
 single-parent artifact requires the separate `source-publish` grant and explicit
 publication launch ceilings described below. General ref mutation, PR source
-publication, review, checks, merge and queue landing remain unavailable. MCP exposes
+publication, review decisions, check mutations and evidence, merge and queue landing
+remain unavailable. MCP exposes
 the same request-borrowed capability through `frankengit_source_candidate`, with
 regular-file `prepare_patch` (`exact-tree-v1`), explicit
 `exact-tree-binary-v1` edited binary renames, explicit `exact-symlink-v1` Git
@@ -424,9 +458,11 @@ canonical credential on every tool call. Listing a tool does not authorize it.
 A write-only launch exposes writes without read or recovery tools, and a
 credential with only a write scope cannot use a separately selected read ceiling.
 Discussion reads and writes use `--allow-discussions` and
-`--allow-discussion-writes`. No metadata grant exposes the operator profile's
-additional notification, check, review, event-feed, source, queue,
-artifact, agent-context or administration tools. An unknown or unsupported tool
+`--allow-discussion-writes`. The independent `pulls-feedback-read` scope under
+`--allow-pulls` adds the review and check-summary tools described above. Metadata
+grants do not expose the operator profile's review/check mutations, raw check
+evidence, notifications, event feeds, source, queues, artifacts, agent-context or
+administration tools. An unknown or unsupported tool
 is refused before credential or repository lookup.
 
 Milestone tools reuse the issue-service launch ceilings and independently check
@@ -589,8 +625,9 @@ new publication. This principal-kind rule is repository scoped.
 Each HTTP request derives an `IntentRun` from the authenticated authority receipt,
 credential, agent, sponsor, selected route operation, retry key and request-header
 commitment. It reserves the actual bounded HTTP input/output envelopes. Metadata
-requests permit one operation class. A `source-history-read`, `source-verified-read` or `pulls-diff-read` request
-permits only `ReadCanonicalObject`. A `source-read` request permits exactly
+requests permit one operation class. A `source-history-read`, `source-verified-read`,
+`pulls-diff-read` or `pulls-feedback-read` request permits only
+`ReadCanonicalObject`. A `source-read` request permits exactly
 `ReadCanonicalObject` and `ReadDerivedGeneration` so the same bounded run can
 read native source and its authenticated search generations.
 Those read requests grant no write, process or publication class. A
@@ -629,20 +666,23 @@ bit 7 (`0x0080`), `source-history-read` occupies bit 8 (`0x0100`),
 (`0x0400`), and `milestones-write` occupies bit 11 (`0x0800`). The existing
 `source-publish` operation retains bit 12 (`0x1000`) and its mandatory immutable
 publication scope. `source-verified-read` occupies bit 13 (`0x2000`) and
-`pulls-diff-read` occupies bit 14 (`0x4000`); the original
-seven flags retain bits 0 through 6 and their exact encodings. A stored `0x007f`
-grant still grants only the original metadata and outcome operations. A stored
+`pulls-diff-read` occupies bit 14 (`0x4000`). `pulls-feedback-read` occupies bit 15
+(`0x8000`); the original seven flags retain bits 0 through 6 and their exact
+encodings. A stored `0x007f` grant still grants only the original metadata and
+outcome operations. A stored
 `0x00ff` grant adds current-source access but grants no history operation, and
 `0x01ff` adds history without candidate authority. A stored `0x03ff` includes
 source candidates but grants neither milestone operation. Issuing any new
 capability requires an explicit new grant, and revocation must
 retain the exact original operation mask. A stored `0x1fff` mask gains neither
-complete proof disclosure nor PR code comparison. Bit 15 remains unknown and
-refuses decoding or authentication. Upgrade every repository reader before
-issuing a grant with a newly supported bit: an older reader fails closed on its
-unknown flag; it must not strip the flag or fall back to another credential
-profile. Existing grant bytes, event discriminants, request identities and
-revocation semantics are unchanged.
+complete proof disclosure nor PR code comparison. A stored `0x7fff` mask gains no
+feedback permission. All 16 bits are now assigned, so `ALL_OPERATIONS` is
+`u16::MAX`; an additional operation scope requires a versioned encoding rather
+than reinterpreting an existing bit. The empty operation mask remains invalid.
+Upgrade every repository reader before issuing a grant with a newly supported
+bit: an older reader fails closed on its unknown flag; it must not strip the flag
+or fall back to another credential profile. Existing grant bytes, event
+discriminants, request identities and revocation semantics are unchanged.
 
 The forge stream label is `agent/` plus 52 unpadded lowercase RFC 4648 base32
 characters. This preserves all 256 digest bits within the 64-byte slug bound;
@@ -699,6 +739,11 @@ completed-request custody. These test definitions require execution at the
 candidate revision; they do not themselves establish a passing gate.
 
 
+The feedback scope adds exact-bit and retained-grant refusal coverage, CLI parsing
+and receipts, and native read-only authority, binding, budget, deadline, reopen
+and revocation cases. This coverage requires compiled execution at the candidate
+revision; its presence is not a passing native result.
+
 The implementation adds canonical codec/lifecycle, authentication, policy replay,
 legacy-method downgrade, real-node restart/revocation, private-token CLI, and real
 TCP HTTP regression tests. The MCP extension adds real persisted-node tests for
@@ -715,8 +760,8 @@ HTTP and persisted MCP backends: independent read/write and issue scopes, old
 exact retries and key substitution, current revocation, rotation, restart, actor
 injection and retained original sponsor evidence. Direct MCP handler tests reject
 missing or expired active requests rather than creating a new trusted-local
-context. Codec and credential tests preserve legacy masks and reject remaining
-unknown bits. These added cases require execution at the candidate revision.
+context. Codec and credential tests preserve legacy masks and reject empty
+operation masks. These added cases require execution at the candidate revision.
 
 The sponsored MCP source tests use real persisted native source and lexical and
 symbol indexes in both Git object formats. They cover the complete ten-tool
@@ -734,7 +779,7 @@ witness exists; they are not replaced with synthetic null provenance.
 
 Source-read regressions additionally freeze the historical seven-bit grant,
 exercise source-only and combined operation masks, preserve issue/revoke codec
-round trips, reject unknown operation bits and grant changes during revocation,
+round trips, reject empty operation masks and grant changes during revocation,
 and require current lifetime and revocation evidence for source authentication.
 The native HTTP fixtures import real SHA-1 and SHA-256 repositories and build
 persisted lexical and symbol indexes. They exercise current-source reads and

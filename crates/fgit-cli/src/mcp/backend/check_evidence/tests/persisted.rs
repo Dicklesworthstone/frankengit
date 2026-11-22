@@ -311,3 +311,112 @@ fn native_failed_check_evidence_is_pinned_bounded_and_requires_both_grants_in_bo
         reopened.close().unwrap();
     }
 }
+
+#[test]
+fn sponsored_feedback_reads_actual_failed_check_summary_without_execution_output() {
+    use fgit_authority::IdempotencyKey;
+    use fgit_forge::ExpectedVersion;
+    use fgit_identity::agent::{
+        AgentCredentialAction, AgentCredentialCommand, AgentCredentialGrant,
+        PULLS_FEEDBACK_READ, SponsorKind, agent_credential_id,
+    };
+    use fgit_node::LoopbackReceiveSession;
+    use fgit_types::DecisionOutcome;
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let fixture = Fixture::new(format);
+        let administrator = NodeTools::open(fixture.options.clone()).unwrap();
+        let node = &administrator.node;
+        let bearer = fgit_node::agent_credentials::generate_agent_credential_token();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let sponsor = PrincipalId::from_bytes([0x67; 16]);
+        let command = AgentCredentialCommand {
+            id: agent_credential_id(bearer.as_bytes()).unwrap(),
+            expected_version: ExpectedVersion::NewStream,
+            action: AgentCredentialAction::Issue(AgentCredentialGrant {
+                agent: PrincipalId::from_bytes([0x68; 16]),
+                sponsor,
+                sponsor_kind: SponsorKind::Human,
+                tenant: fixture.options.tenant,
+                repository: fixture.options.repository,
+                incarnation: node.repository_incarnation_id(),
+                issued_at: now - 1,
+                expires_at: now + 3600,
+                operations: PULLS_FEEDBACK_READ,
+            }),
+        };
+        let (_, terminal) = node
+            .runtime()
+            .block_on(node.admit_agent_credential_durable_in(
+                &node.request_context(),
+                &LoopbackReceiveSession::authenticated(
+                    sponsor,
+                    IdempotencyKey::new(b"issue-feedback-check-reader".to_vec()).unwrap(),
+                ),
+                &command,
+                Default::default(),
+            ))
+            .unwrap();
+        assert!(matches!(terminal.outcome, DecisionOutcome::Committed { .. }));
+        administrator.close().unwrap();
+        let token_file = fixture.root.join("feedback.token");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&token_file)
+            .unwrap();
+        writeln!(file, "{bearer}").unwrap();
+        drop(file);
+
+        let mut options = fixture.options.clone();
+        options.agent_token_file = Some(token_file);
+        options.artifacts = false;
+        options.artifact_root = None;
+        let mut backend = NodeTools::open(options).unwrap();
+        let before = head(&backend);
+        let (page, selection) = listed_selection(&mut backend);
+        assert_eq!(page.object().unwrap()["merge_permission"], Value::Null);
+        let wire = page.encode(64 * 1024).unwrap();
+        assert!(!wire.contains("MCP-CHECK-FAILED"));
+        assert!(!wire.contains("MCP-CHECK-ERROR"));
+        assert!(!wire.contains(&bearer));
+        assert!(!backend.tools().iter().any(|tool| tool.name == NAME));
+        assert_eq!(
+            backend.call(NAME, &selection).unwrap_err().code,
+            "tool_not_granted"
+        );
+        assert_eq!(
+            call(&backend, &selection).unwrap_err().code,
+            "tool_not_granted"
+        );
+        assert_eq!(head(&backend), before);
+
+        fixture.advance_source(&backend);
+        let current = backend
+            .call("frankengit_pull_checks", &args([("number", text("7"))]))
+            .unwrap();
+        assert_eq!(current.object().unwrap()["source_current"], Value::Bool(false));
+        assert_eq!(current.object().unwrap()["checks"], Value::Array(Vec::new()));
+        let retained = backend
+            .call(
+                "frankengit_pull_checks",
+                &args([
+                    ("number", text("7")),
+                    ("limit", json::number(1)),
+                    (
+                        "expected_head",
+                        page.object().unwrap()["snapshot_token"].clone(),
+                    ),
+                ]),
+            )
+            .unwrap();
+        assert_eq!(retained, page);
+        backend.close().unwrap();
+    }
+}

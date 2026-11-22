@@ -4,8 +4,8 @@ use fgit_authority::TerminalOutcome;
 use fgit_identity::agent::{
     AgentCredentialCommand, AgentCredentialGrant, AgentCredentialId, DISCUSSIONS_READ,
     DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, MILESTONES_READ, MILESTONES_WRITE, OUTCOMES_READ,
-    PULLS_DIFF_READ, PULLS_READ, PULLS_WRITE, SOURCE_CANDIDATES, SOURCE_HISTORY_READ,
-    SOURCE_PUBLISH, SOURCE_READ, SOURCE_VERIFIED_READ, SourcePublicationScope,
+    PULLS_DIFF_READ, PULLS_FEEDBACK_READ, PULLS_READ, PULLS_WRITE, SOURCE_CANDIDATES,
+    SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ, SOURCE_VERIFIED_READ, SourcePublicationScope,
 };
 use fgit_types::{DecisionOutcome, TxId};
 
@@ -26,6 +26,7 @@ fn grant(value: &AgentCredentialGrant) -> String {
         (SOURCE_PUBLISH, "source-publish"),
         (SOURCE_VERIFIED_READ, "source-verified-read"),
         (PULLS_DIFF_READ, "pulls-diff-read"),
+        (PULLS_FEEDBACK_READ, "pulls-feedback-read"),
     ]
     .into_iter()
     .filter(|(bit, _)| value.permits(*bit))
@@ -195,6 +196,11 @@ mod tests {
             (SOURCE_PUBLISH, "\"operations\":[\"source-publish\"]"),
             (MILESTONES_READ, "\"operations\":[\"milestones-read\"]"),
             (MILESTONES_WRITE, "\"operations\":[\"milestones-write\"]"),
+            (PULLS_FEEDBACK_READ, "\"operations\":[\"pulls-feedback-read\"]"),
+            (
+                PULLS_DIFF_READ | PULLS_FEEDBACK_READ,
+                "\"operations\":[\"pulls-diff-read\",\"pulls-feedback-read\"]",
+            ),
             (
                 MILESTONES_READ | MILESTONES_WRITE,
                 "\"operations\":[\"milestones-read\",\"milestones-write\"]",
@@ -208,6 +214,13 @@ mod tests {
                 .contains(expected)
             );
         }
+        assert!(
+            !grant(&AgentCredentialGrant {
+                operations: 0x7fff,
+                ..value
+            })
+            .contains("pulls-feedback-read")
+        );
         assert!(
             !grant(&AgentCredentialGrant {
                 operations: 0x0fff,

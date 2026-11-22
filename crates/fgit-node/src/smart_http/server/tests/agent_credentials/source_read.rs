@@ -5,6 +5,7 @@ mod candidates;
 mod commit;
 mod history;
 mod pull_diff;
+mod pull_feedback;
 mod verified_blob;
 
 use super::*;

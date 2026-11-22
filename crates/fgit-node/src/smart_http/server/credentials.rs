@@ -90,6 +90,7 @@ enum Scope {
     DefaultBranchWrite,
     SourceVerifiedRead,
     PullsDiffRead,
+    PullsFeedbackRead,
 }
 
 impl Scope {
@@ -155,8 +156,8 @@ impl Grant {
     pub(super) fn agent(request: &crate::agent_credentials::AgentRequest) -> Self {
         use fgit_identity::agent::{
             DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, MILESTONES_READ,
-            MILESTONES_WRITE, OUTCOMES_READ, PULLS_DIFF_READ, PULLS_READ, PULLS_WRITE,
-            SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ,
+            MILESTONES_WRITE, OUTCOMES_READ, PULLS_DIFF_READ, PULLS_FEEDBACK_READ, PULLS_READ,
+            PULLS_WRITE, SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ,
             SOURCE_VERIFIED_READ,
         };
         let mut scopes = Scopes::default();
@@ -178,6 +179,7 @@ impl Grant {
             SOURCE_PUBLISH => Scope::SourcePublish,
             SOURCE_VERIFIED_READ => Scope::SourceVerifiedRead,
             PULLS_DIFF_READ => Scope::PullsDiffRead,
+            PULLS_FEEDBACK_READ => Scope::PullsFeedbackRead,
             _ => unreachable!("node authenticated a closed operation"),
         };
         scopes.insert(scope);
@@ -216,6 +218,11 @@ impl Grant {
     /// continue through their independently checked source and PR read grants.
     pub const fn permits_pull_diff_read(&self) -> bool {
         self.scopes.contains(Scope::PullsDiffRead)
+    }
+    /// Sponsored review pages and check summaries, without general PR reads,
+    /// review writes, execution-output disclosure or merge authority.
+    pub const fn permits_pull_feedback_read(&self) -> bool {
+        self.scopes.contains(Scope::PullsFeedbackRead)
     }
     /// Candidate preparation and inspection disclose source through a separate
     /// sponsored scope. They confer neither current-source APIs nor publication.

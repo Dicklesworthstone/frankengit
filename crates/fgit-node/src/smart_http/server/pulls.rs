@@ -115,13 +115,18 @@ impl<'a> Request<'a> {
     }
 
     pub(super) const fn preserves_deadline(&self) -> bool {
-        matches!(self, Self::Labels(_) | Self::Metadata(_) | Self::Diff(_))
+        matches!(
+            self,
+            Self::Labels(_) | Self::Metadata(_) | Self::Diff(_) | Self::Checks(_)
+        ) || matches!(self, Self::Collaboration(request) if !request.is_mutation())
     }
 
     pub(super) fn agent_operation(&self) -> Option<u16> {
-        use fgit_identity::agent::{PULLS_DIFF_READ, PULLS_READ, PULLS_WRITE};
+        use fgit_identity::agent::{PULLS_DIFF_READ, PULLS_FEEDBACK_READ, PULLS_READ, PULLS_WRITE};
         match self {
             Self::Diff(_) => Some(PULLS_DIFF_READ),
+            Self::Checks(request) if request.evidence.is_none() => Some(PULLS_FEEDBACK_READ),
+            Self::Collaboration(request) if !request.is_mutation() => Some(PULLS_FEEDBACK_READ),
             Self::Metadata(_) | Self::Conversation(_) | Self::Labels(_) => {
                 Some(if self.is_mutation() {
                     PULLS_WRITE
@@ -278,7 +283,7 @@ pub(super) fn execute(
         )
         .map(Reply::Json),
         Request::Checks(request) => {
-            checks::execute(node, request, session, maximum_response).map(Reply::Json)
+            checks::execute(node, request, session, maximum_response, deadline).map(Reply::Json)
         }
         Request::Diff(request) => diff::execute(
             node,
@@ -319,6 +324,7 @@ pub(super) fn execute(
             reader,
             limits,
             maximum_response,
+            deadline,
         )
         .map(Reply::Json),
         Request::FastForward(request) => fast_forward::execute(

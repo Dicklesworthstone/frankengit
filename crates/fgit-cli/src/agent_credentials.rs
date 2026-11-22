@@ -33,12 +33,14 @@ usage: fg agent-credential show <storage-root> <tenant-id> <repository-id>
 Scopes: issues-read, issues-write, pulls-read, pulls-write,
         discussions-read, discussions-write, outcomes-read, source-read,
         source-history-read, source-candidates, milestones-read, milestones-write,
-        source-publish, source-verified-read, pulls-diff-read.
+        source-publish, source-verified-read, pulls-diff-read, pulls-feedback-read.
 source-read permits current source browsing, ref/tag discovery, search and context.
 source-history-read permits bounded history, blame, historical files and reference diffs.
 source-candidates permits bounded HTTP exact-patch preparation and bundle inspection.
 source-verified-read permits complete ref-anchored blob proofs including original tree witnesses.
 pulls-diff-read permits exact versioned pull-request code comparisons, without review approval.
+pulls-feedback-read permits bounded review pages and canonical check summaries.
+Check evidence bodies, logs and artifacts require separate authority.
 milestones-read permits milestone metadata, history and same-snapshot issue counts.
 milestones-write permits opening, editing, closing and reopening milestones.
 Issue milestone assignments still require issues-write.
@@ -48,7 +50,7 @@ exact:<lowercase-native-ref-hex> or prefix:<slash-terminated-namespace-hex>, com
 Path selectors are repeatable lowercase native path hex; src covers src and src/*,
 not src-other. A sole --source-path-hex '' explicitly permits the whole tree.
 Every scope is independent. This profile cannot grant arbitrary Git transport,
-reviews, merges, policy administration, secrets or external effects.
+review decisions, merges, policy administration, secrets or external effects.
 Canonical credentials authenticate an agent and its explicitly attested sponsor;
 the request host must additionally enforce a bounded sponsored IntentRun.
 Without an installed administrator policy, issuance/revocation trusts the explicit

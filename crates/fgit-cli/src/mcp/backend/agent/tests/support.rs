@@ -3,7 +3,7 @@ use fgit_authority::{ExpectedOld, ProposedNew, RefCommand, TerminalOutcome};
 use fgit_forge::ExpectedVersion;
 use fgit_forge::preparation::MergeMetadata;
 use fgit_identity::agent::{
-    ALL_OPERATIONS, AgentCredentialAction, AgentCredentialCommand, AgentCredentialGrant,
+    AgentCredentialAction, AgentCredentialCommand, AgentCredentialGrant,
     AgentCredentialId, SponsorKind, agent_credential_id,
 };
 use fgit_node::{NodeConfig, OneNode};
@@ -228,7 +228,7 @@ impl Fixture {
             &token(0xaa),
             grant(
                 &node,
-                ALL_OPERATIONS & !fgit_identity::agent::SOURCE_PUBLISH,
+                !fgit_identity::agent::SOURCE_PUBLISH,
             ),
             "issue-primary",
         );

@@ -236,6 +236,8 @@ fn sponsored_pull_diff_requires_its_new_grant_and_both_launch_ceilings() {
     let mut backend = NodeTools::open(fixture.options.clone()).unwrap();
     for name in [
         "frankengit_pull_show",
+        "frankengit_pull_reviews",
+        "frankengit_pull_checks",
         "frankengit_source_blob",
         review::COMPARE,
     ] {
@@ -245,7 +247,7 @@ fn sponsored_pull_diff_requires_its_new_grant_and_both_launch_ceilings() {
         );
     }
     for name in [
-        "frankengit_pull_reviews",
+        "frankengit_pull_review",
         "frankengit_pull_merge",
         "frankengit_source_publish",
     ] {

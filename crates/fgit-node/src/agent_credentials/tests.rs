@@ -9,8 +9,8 @@ use fgit_forge::event::protection::{ProtectionCommand, ReviewProtection};
 use fgit_forge::{AggregateVersion, ExpectedVersion, IssueNumber};
 use fgit_identity::agent::{
     AgentCredentialAction, AgentCredentialGrant, ISSUES_READ, ISSUES_WRITE, OUTCOMES_READ,
-    PULLS_WRITE, SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_READ, SponsorKind,
-    agent_credential_id,
+    PULLS_FEEDBACK_READ, PULLS_WRITE, SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_READ,
+    SponsorKind, agent_credential_id,
 };
 use fgit_types::{
     DecisionOutcome, GitHashAlgorithm, HeadGeneration, PrincipalId, RepositoryId,
@@ -954,5 +954,126 @@ fn mcp_source_bridge_keeps_verified_scope_namespace_sponsorship_and_deadline() {
                 if matches!(*error, AdmissionError::AsyncProjectionUnavailable(RefusalCode::CapabilityExpired))
         ));
         node.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn feedback_requests_preserve_explicit_read_authority_across_reopen_and_revocation() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let node = scratch.node(format);
+        let token = bearer('e');
+        let original = AgentCredentialGrant {
+            operations: PULLS_FEEDBACK_READ,
+            ..grant(&node)
+        };
+        let command = issue_command(&token, original);
+        committed(credential(&node, &command, actor(1), "issue-feedback"));
+
+        // Retain every pre-feedback scope except publication, which requires
+        // its own extended source ceiling. No upgrade grants feedback to it.
+        let old_token = bearer('d');
+        let old = AgentCredentialGrant {
+            operations: 0x6fff,
+            ..original
+        };
+        committed(credential(
+            &node,
+            &issue_command(&old_token, old),
+            actor(1),
+            "issue-retained-scopes",
+        ));
+        assert!(matches!(
+            node.runtime().block_on(node.authenticate_agent_request_in(
+                &node.request_context(),
+                old_token.as_bytes(),
+                &key("old-feedback-denied"),
+                PULLS_FEEDBACK_READ,
+                [1; 32],
+                4096,
+                8192,
+            )),
+            Err(NodeReceiveTransportRefusal::Admission(error))
+                if matches!(*error, AdmissionError::AsyncProjectionUnavailable(RefusalCode::CapabilityScopeViolation))
+        ));
+
+        let mut feedback = authentication(&node, &token, "read-feedback", PULLS_FEEDBACK_READ);
+        for class in OperationClass::ALL {
+            assert_eq!(
+                feedback.run.allowed_operation_classes().contains(class),
+                class == OperationClass::ReadCanonicalObject,
+                "feedback requests must not acquire {class:?}"
+            );
+        }
+        feedback.check_operation(&node, PULLS_FEEDBACK_READ).unwrap();
+        for operation in (0..15).map(|bit| 1u16 << bit) {
+            assert!(feedback.check_operation(&node, operation).is_err());
+        }
+        assert!(feedback.mcp_source_read_context(&node).is_err());
+        assert!(feedback.source_candidates(&node).is_err());
+        feedback.check(4096, 8192).unwrap();
+        assert!(feedback.check(4097, 8192).is_err());
+        assert!(feedback.check(4096, 8193).is_err());
+        let namespace = feedback.namespace;
+        feedback.namespace.incarnation = RepositoryIncarnationId::from_bytes([0xff; 16]);
+        assert!(feedback.check_operation(&node, PULLS_FEEDBACK_READ).is_err());
+        feedback.namespace = namespace;
+        for operation in [0, PULLS_FEEDBACK_READ | ISSUES_READ] {
+            assert!(matches!(
+                node.runtime().block_on(node.authenticate_agent_request_in(
+                    &node.request_context(),
+                    token.as_bytes(),
+                    &key("invalid-feedback-operation"),
+                    operation,
+                    [2; 32],
+                    4096,
+                    8192,
+                )),
+                Err(NodeReceiveTransportRefusal::Unauthenticated)
+            ));
+        }
+        feedback.constrain_deadline(Instant::now() - std::time::Duration::from_secs(1));
+        assert!(!feedback.context(&node).is_live());
+        assert!(feedback.check_operation(&node, PULLS_FEEDBACK_READ).is_err());
+        node.shutdown().unwrap();
+
+        let mut reopened = OneNode::open_existing(scratch.config(format)).unwrap();
+        reopened.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let stored = reopened
+            .runtime()
+            .block_on(reopened.read_agent_credential_in(&reopened.request_context(), command.id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.grant, original);
+        assert!(stored.source_scope.is_none());
+        assert!(!stored.revoked);
+        authentication(&reopened, &token, "reopened-feedback", PULLS_FEEDBACK_READ)
+            .check_operation(&reopened, PULLS_FEEDBACK_READ)
+            .unwrap();
+        committed(credential(
+            &reopened,
+            &AgentCredentialCommand {
+                id: command.id,
+                expected_version: ExpectedVersion::Exactly(AggregateVersion::FIRST),
+                action: AgentCredentialAction::Revoke(original),
+            },
+            actor(1),
+            "revoke-feedback",
+        ));
+        assert!(matches!(
+            reopened
+                .runtime()
+                .block_on(reopened.authenticate_agent_request_in(
+                    &reopened.request_context(),
+                    token.as_bytes(),
+                    &key("revoked-feedback"),
+                    PULLS_FEEDBACK_READ,
+                    [3; 32],
+                    4096,
+                    8192,
+                )),
+            Err(NodeReceiveTransportRefusal::Unauthenticated)
+        ));
+        reopened.shutdown().unwrap();
     }
 }

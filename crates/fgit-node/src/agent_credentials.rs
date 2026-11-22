@@ -2,7 +2,7 @@
 //!
 //! Issuance is an explicit trusted-local administration operation. Credential
 //! holders receive finite metadata, source reads, explicit candidate scopes and
-//! independently scoped single-parent publication. Review, merge, arbitrary Git
+//! independently scoped single-parent publication. Review decisions, merge, arbitrary Git
 //! transport, process execution and administration remain separate authorities.
 
 mod source_publication;
@@ -19,7 +19,7 @@ use fgit_agent::{AuthorityReadReceipt, ClassSet, IntentRun, LogicalTime, Operati
 use fgit_authority::{IdempotencyKey, OutcomeLookup, TerminalOutcome};
 use fgit_crypto::sha256_digest;
 use fgit_graph::lexical::LexicalNamespace;
-use fgit_identity::agent::{ALL_OPERATIONS, AgentCredentialCommand, AgentCredentialId};
+use fgit_identity::agent::{AgentCredentialCommand, AgentCredentialId};
 use fgit_resource::{ResourceVector, algebra::Grade};
 use fgit_types::{RefusalCode, TxId};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -202,10 +202,9 @@ impl OneNode {
             DISCUSSIONS_WRITE, ISSUES_WRITE, MILESTONES_WRITE, PULLS_WRITE, SOURCE_CANDIDATES,
             SOURCE_PUBLISH, SOURCE_READ, agent_credential_id, authenticate_agent_credential,
         };
-        if !valid_agent_credential_token(bearer)
-            || operation.count_ones() != 1
-            || operation & !ALL_OPERATIONS != 0
-        {
+        // All u16 flags are assigned; one request still selects exactly one
+        // independently granted operation and cannot combine authorities.
+        if !valid_agent_credential_token(bearer) || operation.count_ones() != 1 {
             return Err(NodeReceiveTransportRefusal::Unauthenticated);
         }
         if input_limit > MAX_REQUEST_BYTES || output_limit == 0 || output_limit > MAX_REQUEST_BYTES

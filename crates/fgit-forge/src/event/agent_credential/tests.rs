@@ -163,7 +163,13 @@ fn grants_have_finite_lifetimes_explicit_scopes_and_nonzero_distinct_identities(
     assert!(valid.validate().is_ok());
     assert!(valid.permits(ISSUES_READ | ISSUES_WRITE));
     assert!(valid.permits(PULLS_WRITE));
-    for denied in [0, PULLS_READ, DISCUSSIONS_WRITE, OUTCOMES_READ, 1 << 15] {
+    for denied in [
+        0,
+        PULLS_READ,
+        DISCUSSIONS_WRITE,
+        OUTCOMES_READ,
+        PULLS_FEEDBACK_READ,
+    ] {
         assert!(!valid.permits(denied));
     }
     let maximum = AgentCredentialGrant {
@@ -216,10 +222,6 @@ fn grants_have_finite_lifetimes_explicit_scopes_and_nonzero_distinct_identities(
             operations: 0,
             ..valid
         },
-        AgentCredentialGrant {
-            operations: ALL_OPERATIONS | (1 << 15),
-            ..valid
-        },
     ] {
         assert!(invalid.validate().is_err(), "{invalid:?}");
     }
@@ -249,7 +251,7 @@ fn grants_have_finite_lifetimes_explicit_scopes_and_nonzero_distinct_identities(
 }
 
 #[test]
-fn source_reads_are_independent_of_legacy_metadata_scopes_and_unknown_flags() {
+fn source_reads_are_independent_of_legacy_metadata_and_feedback_scopes() {
     // Freeze the original seven-bit mask rather than giving historical grants
     // whatever future operations ALL_OPERATIONS might come to contain.
     let legacy = AgentCredentialGrant {
@@ -283,16 +285,14 @@ fn source_reads_are_independent_of_legacy_metadata_scopes_and_unknown_flags() {
         assert!(explicit.validate().is_ok());
         assert!(explicit.permits(SOURCE_READ | metadata));
     }
-    for unknown in (15..16).map(|bit| 1u16 << bit) {
-        let invalid = AgentCredentialGrant {
-            operations: SOURCE_READ | unknown,
-            ..grant()
-        };
-        assert!(invalid.validate().is_err());
-        assert!(!invalid.permits(SOURCE_READ));
-        assert!(!source.permits(unknown));
-        assert!(!source.permits(SOURCE_READ | unknown));
-    }
+    let feedback = AgentCredentialGrant {
+        operations: SOURCE_READ | PULLS_FEEDBACK_READ,
+        ..source
+    };
+    assert!(feedback.validate().is_ok());
+    assert!(feedback.permits(SOURCE_READ | PULLS_FEEDBACK_READ));
+    assert!(!source.permits(PULLS_FEEDBACK_READ));
+    assert!(!source.permits(SOURCE_READ | PULLS_FEEDBACK_READ));
     assert!(!source.permits(0));
 }
 
@@ -317,6 +317,11 @@ fn expanded_grant_issue_and_revocation_round_trip_without_widening_legacy_grants
         SOURCE_VERIFIED_READ,
         PULLS_DIFF_READ,
         SOURCE_VERIFIED_READ | PULLS_DIFF_READ | SOURCE_READ,
+        0x6fff,
+        PULLS_FEEDBACK_READ,
+        PULLS_FEEDBACK_READ | PULLS_READ,
+        PULLS_FEEDBACK_READ | PULLS_DIFF_READ,
+        0xefff,
     ] {
         let grant = AgentCredentialGrant {
             operations,
@@ -335,10 +340,11 @@ fn expanded_grant_issue_and_revocation_round_trip_without_widening_legacy_grants
         // meaning; granting the new bit does not reinterpret any older byte.
         assert_eq!(payload.as_bytes().len(), 178);
         assert_eq!(&payload.as_bytes()[176..178], &operations.to_be_bytes());
-        let mut unknown = payload.into_bytes();
-        unknown[176..178].copy_from_slice(&(operations | (1 << 15)).to_be_bytes());
+        // All sixteen bits are assigned. The empty mask remains invalid.
+        let mut invalid = payload.into_bytes();
+        invalid[176..178].fill(0);
         assert!(
-            ForgeEvent::read_payload(&mut Decoder::new(&unknown, DecodeLimits::DEFAULT)).is_err()
+            ForgeEvent::read_payload(&mut Decoder::new(&invalid, DecodeLimits::DEFAULT)).is_err()
         );
         let original = apply_event(None, &issued).unwrap();
         let revoked = revoke(&original);
@@ -371,6 +377,10 @@ fn expanded_grant_issue_and_revocation_round_trip_without_widening_legacy_grants
         assert_eq!(
             original.grant.permits(MILESTONES_WRITE),
             operations & MILESTONES_WRITE != 0
+        );
+        assert_eq!(
+            original.grant.permits(PULLS_FEEDBACK_READ),
+            operations & PULLS_FEEDBACK_READ != 0
         );
         let mut substituted = revoked;
         let ForgeEventPayload::AgentCredentialChangedNative(change) = &mut substituted.payload
@@ -416,15 +426,14 @@ fn history_access_is_independent_of_every_preexisting_operation() {
         assert!(combined.validate().is_ok());
         assert!(combined.permits(SOURCE_HISTORY_READ | other));
     }
-    for unknown in (15..16).map(|bit| 1u16 << bit) {
-        let invalid = AgentCredentialGrant {
-            operations: SOURCE_HISTORY_READ | unknown,
-            ..history
-        };
-        assert!(invalid.validate().is_err());
-        assert!(!invalid.permits(SOURCE_HISTORY_READ));
-        assert!(!history.permits(unknown));
-    }
+    let feedback = AgentCredentialGrant {
+        operations: SOURCE_HISTORY_READ | PULLS_FEEDBACK_READ,
+        ..history
+    };
+    assert!(feedback.validate().is_ok());
+    assert!(feedback.permits(SOURCE_HISTORY_READ | PULLS_FEEDBACK_READ));
+    assert!(!history.permits(PULLS_FEEDBACK_READ));
+    assert!(!history.permits(SOURCE_HISTORY_READ | PULLS_FEEDBACK_READ));
 }
 
 #[test]
@@ -452,14 +461,14 @@ fn candidate_work_requires_a_new_explicit_grant_without_widening_old_masks() {
         assert!(combined.validate().is_ok());
         assert!(combined.permits(SOURCE_CANDIDATES | other));
     }
-    for unknown in (15..16).map(|bit| 1u16 << bit) {
-        let invalid = AgentCredentialGrant {
-            operations: SOURCE_CANDIDATES | unknown,
-            ..candidate
-        };
-        assert!(invalid.validate().is_err());
-        assert!(!invalid.permits(SOURCE_CANDIDATES));
-    }
+    let feedback = AgentCredentialGrant {
+        operations: SOURCE_CANDIDATES | PULLS_FEEDBACK_READ,
+        ..candidate
+    };
+    assert!(feedback.validate().is_ok());
+    assert!(feedback.permits(SOURCE_CANDIDATES | PULLS_FEEDBACK_READ));
+    assert!(!candidate.permits(PULLS_FEEDBACK_READ));
+    assert!(!candidate.permits(SOURCE_CANDIDATES | PULLS_FEEDBACK_READ));
 }
 
 #[test]
@@ -488,15 +497,14 @@ fn milestone_scopes_are_independent_and_do_not_expand_any_retained_grant() {
             assert!(combined.validate().is_ok());
             assert!(combined.permits(scope | other));
         }
-        for unknown in (15..16).map(|bit| 1u16 << bit) {
-            let invalid = AgentCredentialGrant {
-                operations: scope | unknown,
-                ..milestone
-            };
-            assert!(invalid.validate().is_err());
-            assert!(!invalid.permits(scope));
-            assert!(!milestone.permits(unknown));
-        }
+        let feedback = AgentCredentialGrant {
+            operations: scope | PULLS_FEEDBACK_READ,
+            ..milestone
+        };
+        assert!(feedback.validate().is_ok());
+        assert!(feedback.permits(scope | PULLS_FEEDBACK_READ));
+        assert!(!milestone.permits(PULLS_FEEDBACK_READ));
+        assert!(!milestone.permits(scope | PULLS_FEEDBACK_READ));
     }
 }
 
@@ -745,6 +753,78 @@ fn proof_and_pull_diff_grants_preserve_prior_operation_bits_and_are_independent(
             assert!(!selected.permits(other));
             assert!(!selected.permits(operation | other));
         }
-        assert!(!selected.permits(1 << 15));
+        assert!(!selected.permits(PULLS_FEEDBACK_READ));
+    }
+}
+
+#[test]
+fn feedback_uses_the_last_bit_without_widening_any_retained_grant() {
+    assert_eq!(PULLS_FEEDBACK_READ, 0x8000);
+    assert_eq!(ALL_OPERATIONS, u16::MAX);
+    let old = AgentCredentialGrant {
+        operations: 0x7fff,
+        ..grant()
+    };
+    let feedback = AgentCredentialGrant {
+        operations: PULLS_FEEDBACK_READ,
+        ..grant()
+    };
+    assert!(old.validate().is_ok());
+    assert!(!old.permits(PULLS_FEEDBACK_READ));
+    assert!(feedback.validate().is_ok());
+    assert!(feedback.permits(PULLS_FEEDBACK_READ));
+    assert!(!feedback.permits(0));
+    for operation in (0..15).map(|bit| 1u16 << bit) {
+        assert!(old.permits(operation));
+        assert!(!old.permits(operation | PULLS_FEEDBACK_READ));
+        assert!(!feedback.permits(operation));
+        assert!(!feedback.permits(operation | PULLS_FEEDBACK_READ));
+        let explicit = AgentCredentialGrant {
+            operations: operation | PULLS_FEEDBACK_READ,
+            ..feedback
+        };
+        assert!(explicit.validate().is_ok());
+        assert!(explicit.permits(operation | PULLS_FEEDBACK_READ));
+    }
+}
+
+#[test]
+fn complete_masks_preserve_their_wire_bits_and_source_publication_ceiling() {
+    for operations in [0x7fff, ALL_OPERATIONS] {
+        let grant = AgentCredentialGrant {
+            operations,
+            ..grant()
+        };
+        assert!(grant.validate().is_ok());
+        assert_eq!(grant.permits(PULLS_FEEDBACK_READ), operations == u16::MAX);
+        let command = AgentCredentialCommand {
+            id: AgentCredentialId::try_new([9; 32]).unwrap(),
+            expected_version: ExpectedVersion::NewStream,
+            action: AgentCredentialAction::Issue(grant),
+        };
+        // Feedback does not relax the separate publication attenuation.
+        assert_eq!(
+            command.proposed_event(grant.sponsor),
+            Err(RefusalCode::EvidenceInvalid)
+        );
+        let scope = source_scope(&[b"src"]);
+        let issued = AgentCredentialCommand {
+            action: AgentCredentialAction::IssueSource {
+                grant,
+                scope: scope.clone(),
+            },
+            ..command
+        }
+        .proposed_event(grant.sponsor)
+        .unwrap();
+        let mut payload = Encoder::new();
+        issued.write_payload(&mut payload).unwrap();
+        assert_eq!(&payload.as_bytes()[176..178], &operations.to_be_bytes());
+        let bytes = encode_body(&issued).unwrap();
+        let decoded = decode_body::<ForgeEvent>(&bytes, DecodeLimits::DEFAULT).unwrap();
+        assert_eq!(encode_body(&decoded).unwrap(), bytes);
+        let retained = apply_event(None, &decoded).unwrap();
+        assert_eq!(retained.grant, grant);
+        assert_eq!(retained.source_scope, Some(scope));
     }
 }

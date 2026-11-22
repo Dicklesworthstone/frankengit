@@ -57,7 +57,7 @@ fn bearer_authentication_retains_agent_sponsor_and_exact_independent_ceiling() {
         MILESTONES_READ,
         MILESTONES_WRITE,
         SOURCE_PUBLISH,
-        1 << 15,
+        PULLS_FEEDBACK_READ,
     ] {
         assert_eq!(
             authenticated.authorize(operation),
@@ -203,7 +203,7 @@ fn explicit_source_read_authentication_preserves_scope_lifetime_and_revocation()
         SOURCE_READ | ISSUES_READ,
         SOURCE_HISTORY_READ,
         SOURCE_CANDIDATES,
-        SOURCE_READ | (1 << 15),
+        SOURCE_READ | PULLS_FEEDBACK_READ,
     ] {
         assert_eq!(
             authenticated.authorize(denied),
@@ -433,7 +433,7 @@ fn wrong_secret_unbounded_input_and_malformed_grant_are_refused_without_secret_d
             ..grant
         },
         AgentCredentialGrant {
-            operations: ALL_OPERATIONS | (1 << 15),
+            issued_at: 0,
             ..grant
         },
         AgentCredentialGrant {
@@ -466,4 +466,79 @@ fn wrong_secret_unbounded_input_and_malformed_grant_are_refused_without_secret_d
                 .contains(std::str::from_utf8(BEARER).unwrap())
         );
     }
+}
+
+#[test]
+fn feedback_authentication_requires_its_explicit_bit_and_live_bound_evidence() {
+    let feedback = AgentCredentialGrant {
+        operations: PULLS_FEEDBACK_READ,
+        ..grant()
+    };
+    let authenticated = authenticate(&feedback, BEARER, 100, RevocationEvidence::Live).unwrap();
+    assert_eq!(authenticated.grant(), &feedback);
+    assert_eq!(authenticated.principal(), feedback.agent);
+    assert_eq!(authenticated.sponsor(), feedback.sponsor);
+    assert_eq!(authenticated.authorize(PULLS_FEEDBACK_READ), Ok(()));
+    assert_eq!(
+        authenticated.authorize(0),
+        Err(AgentCredentialRefusal::OperationNotGranted)
+    );
+    for operation in (0..15).map(|bit| 1u16 << bit) {
+        assert_eq!(
+            authenticated.authorize(operation),
+            Err(AgentCredentialRefusal::OperationNotGranted)
+        );
+        assert_eq!(
+            authenticated.authorize(operation | PULLS_FEEDBACK_READ),
+            Err(AgentCredentialRefusal::OperationNotGranted)
+        );
+    }
+    // Keep the exact pre-feedback mask; ALL_OPERATIONS now includes bit 15.
+    let old = AgentCredentialGrant {
+        operations: 0x7fff,
+        ..feedback
+    };
+    assert_eq!(
+        authenticate(&old, BEARER, 100, RevocationEvidence::Live)
+            .unwrap()
+            .authorize(PULLS_FEEDBACK_READ),
+        Err(AgentCredentialRefusal::OperationNotGranted)
+    );
+    for (now, revocation, expected) in [
+        (
+            99,
+            RevocationEvidence::Live,
+            AgentCredentialRefusal::NotYetValid,
+        ),
+        (
+            200,
+            RevocationEvidence::Live,
+            AgentCredentialRefusal::Expired,
+        ),
+        (
+            100,
+            RevocationEvidence::Revoked,
+            AgentCredentialRefusal::Revoked,
+        ),
+        (
+            100,
+            RevocationEvidence::NotChecked,
+            AgentCredentialRefusal::RevocationEvidenceRequired,
+        ),
+    ] {
+        assert_eq!(authenticate(&feedback, BEARER, now, revocation), Err(expected));
+    }
+    assert_eq!(
+        authenticate_agent_credential(
+            agent_credential_id(BEARER).unwrap(),
+            &feedback,
+            BEARER,
+            feedback.tenant,
+            feedback.repository,
+            RepositoryIncarnationId::from_bytes([8; 16]),
+            100,
+            RevocationEvidence::Live,
+        ),
+        Err(AgentCredentialRefusal::BindingMismatch)
+    );
 }

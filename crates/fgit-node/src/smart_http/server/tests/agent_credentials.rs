@@ -10,7 +10,7 @@ use crate::LoopbackReceiveSession;
 use fgit_authority::IdempotencyKey;
 use fgit_forge::{AggregateVersion, ExpectedVersion};
 use fgit_identity::agent::{
-    ALL_OPERATIONS, AgentCredentialAction, AgentCredentialCommand, AgentCredentialGrant,
+    AgentCredentialAction, AgentCredentialCommand, AgentCredentialGrant,
     ISSUES_READ, ISSUES_WRITE, SponsorKind, agent_credential_id,
 };
 use fgit_types::{DecisionOutcome, GitHashAlgorithm, HeadGeneration};
@@ -224,10 +224,11 @@ fn canonical_agent_http_metadata_scope_revocation_and_original_outcome_provenanc
         incarnation: node.repository_incarnation_id(),
         issued_at: now - 1,
         expires_at: now + 3600,
-        operations: ALL_OPERATIONS & !fgit_identity::agent::SOURCE_PUBLISH,
+        // Frozen pre-feedback grant: upgrades must not broaden old disclosures.
+        operations: 0x6fff,
     };
     for (token, operations, key) in [
-        (original.as_str(), ALL_OPERATIONS & !fgit_identity::agent::SOURCE_PUBLISH, "issue-http-original"),
+        (original.as_str(), 0x6fff, "issue-http-original"),
         (read_only.as_str(), ISSUES_READ, "issue-http-read-only"),
         (write_only.as_str(), ISSUES_WRITE, "issue-http-write-only"),
     ] {

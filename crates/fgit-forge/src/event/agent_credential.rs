@@ -2,7 +2,7 @@
 //!
 //! These immutable grants identify an agent and its operator-attested sponsor.
 //! Source publication additionally requires an explicit immutable ref/path
-//! ceiling. Grants never authorize reviews, merges, administration, or an agent
+//! ceiling. Grants never authorize review decisions, merges, administration, or an agent
 //! run by themselves.
 //! A host must additionally establish and enforce its sponsored IntentRun before
 //! using any granted operation. Issuance and revocation become authoritative
@@ -54,7 +54,14 @@ pub const SOURCE_VERIFIED_READ: u16 = 1 << 13;
 /// independently grants its necessary PR/source disclosure, not general PR or
 /// source APIs, review approval, candidate work or code publication.
 pub const PULLS_DIFF_READ: u16 = 1 << 14;
-pub const ALL_OPERATIONS: u16 = (1 << 15) - 1;
+/// Read bounded pull-request review pages and canonical check summaries. This
+/// independently grants their necessary PR feedback disclosure, not review or
+/// check writes, evidence bodies, logs, artifacts, code diffs or publication.
+pub const PULLS_FEEDBACK_READ: u16 = 1 << 15;
+/// Every bit in the original u16 representation is now assigned. Further
+/// operation scopes require a versioned encoding, never reinterpretation of
+/// existing bits or implicit expansion of retained grants.
+pub const ALL_OPERATIONS: u16 = u16::MAX;
 /// A grant cannot survive indefinitely without a new sponsor decision.
 pub const MAX_LIFETIME_SECONDS: u64 = 30 * 24 * 60 * 60;
 const LABEL_ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
@@ -204,19 +211,16 @@ impl AgentCredentialGrant {
         {
             return Err(invalid_native("agent_credential.lifetime"));
         }
-        if self.operations == 0 || self.operations & !ALL_OPERATIONS != 0 {
+        if self.operations == 0 {
             return Err(invalid_native("agent_credential.operations"));
         }
         Ok(())
     }
 
-    /// Every requested flag must be explicit and known. Zero grants nothing.
+    /// Every requested flag must be explicit. Zero grants nothing.
     #[must_use]
     pub const fn permits(&self, operation: u16) -> bool {
-        operation != 0
-            && operation & !ALL_OPERATIONS == 0
-            && self.operations & !ALL_OPERATIONS == 0
-            && self.operations & operation == operation
+        operation != 0 && self.operations & operation == operation
     }
 
     fn write(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
