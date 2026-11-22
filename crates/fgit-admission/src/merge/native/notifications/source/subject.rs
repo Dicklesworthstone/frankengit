@@ -5,6 +5,7 @@ use fgit_forge::event::notification::NotificationTarget;
 use fgit_forge::event::pull_request::{NativePullRequestEvent, PullRequestAction, PullRequestData};
 use fgit_forge::{AggregateVersion, ForgeEvent, ForgeEventPayload};
 use fgit_types::{PrincipalId, RefName, RefusalCode};
+use std::collections::BTreeSet;
 
 /// One native PR's state and append-stable activity prefix. The activity
 /// counter is derived from canonical RCR/event order, not a writable stream
@@ -19,6 +20,9 @@ pub struct PullRequestNotificationSnapshot {
     pub state: PullRequestNotificationState,
     pub(super) last_action: PullRequestAction,
     pub(super) last_metadata_actor: PrincipalId,
+    /// Current policy must cover every branch that contributed to this exact
+    /// activity prefix, including targets retained across a retarget.
+    pub(super) disclosure_refs: BTreeSet<RefName>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -84,12 +88,21 @@ impl NotificationSubjectSnapshot {
             Self::PullRequest(pull) if pull.state == PullRequestNotificationState::Merged
         )
     }
-    /// Current disclosure policy must permit BOTH refs before a PR thread is
-    /// returned or its preferences are mutated. These names are never grants.
+    /// The current PR's branch coordinates. Disclosure additionally covers
+    /// historical coordinates through `permits_disclosure`.
     pub fn pull_request_refs(&self) -> Option<(&RefName, &RefName)> {
         match self {
             Self::PullRequest(pull) => Some((&pull.data.source_ref, &pull.data.target_ref)),
             _ => None,
+        }
+    }
+    /// A retarget does not erase the disclosure coordinates of earlier
+    /// activity. Check this exact prefix against CURRENT visibility before
+    /// returning a notification or changing its preferences.
+    pub fn permits_disclosure(&self, visible: impl Fn(&RefName) -> bool) -> bool {
+        match self {
+            Self::PullRequest(pull) => pull.disclosure_refs.iter().all(visible),
+            Self::Issue(_) | Self::Discussion(_) => true,
         }
     }
     pub fn opened_by(&self) -> PrincipalId {

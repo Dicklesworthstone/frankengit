@@ -15,6 +15,7 @@ mod pull_diff;
 mod pull_feedback;
 mod pull_labels;
 mod pull_reopen;
+mod pull_retarget;
 mod source;
 mod source_branches;
 mod source_publication;
@@ -39,7 +40,7 @@ fn sponsored_profile_lists_only_exact_tools_even_with_operator_flags_planted() {
     options.writes.merges = true;
     options.principal = Some(SPONSOR);
     let tools = super::super::tools_for_options(&options);
-    assert_eq!(tools.len(), 69);
+    assert_eq!(tools.len(), 70);
     assert!(
         tools
             .iter()

@@ -63,14 +63,14 @@ export function command(action, fields) {
   if (action === 'comment') return commentCommand(fields);
   if (action === 'append-comment') return appendCommentCommand(fields);
   if (action === 'fast-forward') return fastForwardCommand(fields);
-  return ['open', 'update', 'close', 'reopen'].includes(action) ? metadataCommand(action, fields) : collaborationCommand(action, fields);
+  return ['open', 'update', 'close', 'reopen', 'retarget'].includes(action) ? metadataCommand(action, fields) : collaborationCommand(action, fields);
 }
 export function requestPath(number, action) {
   integer(number, 'PR number', 1);
   if (action === 'set-labels') return `pulls/${number}/labels`;
   if (action === 'comment') return `pulls/${number}/comments`;
   if (action === 'append-comment') return `pulls/${number}/comments/append`;
-  if (!['open', 'update', 'close', 'reopen', 'approve', 'request-changes', 'withdraw', 'merge', 'fast-forward'].includes(action)) fail('Unknown action.');
+  if (!['open', 'update', 'close', 'reopen', 'retarget', 'approve', 'request-changes', 'withdraw', 'merge', 'fast-forward'].includes(action)) fail('Unknown action.');
   return `pulls/${number}/${['approve', 'request-changes', 'withdraw'].includes(action) ? `reviews/${action}` : action}`;
 }
 export function requestBody(action, fields, bundle, nonce) {
@@ -101,7 +101,7 @@ export function publication(reply, pending, status) {
   binding(reply, pending.scope); principal(reply.principal_id); opaque(reply.tx_id);
   integer(reply.decision_sequence, 'decision sequence', 1);
   if (!['committed', 'refused'].includes(reply.outcome) || status !== (reply.outcome === 'committed' ? 200 : 409) || reply.delivery_acknowledged !== null || reply.action !== pending.action) fail('HTTP status is not a matching terminal decision.');
-  const metadata = ['open', 'update', 'close', 'reopen'].includes(pending.action);
+  const metadata = ['open', 'update', 'close', 'reopen', 'retarget'].includes(pending.action);
   if (metadata) {
     if (reply.type !== 'pull_request_publication' || reply.number !== pending.number || reply.expected_version !== pending.fields.expected_version) fail('Wrong terminal PR command.');
   } else if (pending.action === 'set-labels') {

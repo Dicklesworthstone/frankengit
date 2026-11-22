@@ -26,11 +26,11 @@ use super::publication_support::{describe, write_terminal_receipt};
 use options::{Mutation, Operation, Options};
 
 const USAGE: &str = "\
-usage: fg pr <open|update|close|reopen> <storage-root> <tenant-id> <repository-id> <number>
+usage: fg pr <open|update|close|reopen|retarget> <storage-root> <tenant-id> <repository-id> <number>
   --trusted-local --principal <id> --idempotency-key <key>
   (--source-ref <branch> | --source-ref-hex <bytes>) --expected-source <oid>
   (--target-ref <branch> | --target-ref-hex <bytes>) --expected-target <oid>
-  --expected-version <0 for open; positive for update/close/reopen> --title <text>
+  --expected-version <0 for open; positive for update/close/reopen/retarget> --title <text>
   (--body <text> | --body-file <path>) [--object-format sha1|sha256]
 
 usage: fg pr list <storage-root> <tenant-id> <repository-id> --trusted-local
@@ -114,7 +114,7 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
             && arguments[1] == "--help"
             && matches!(
                 arguments[0].as_str(),
-                "open" | "update" | "close" | "reopen" | "list" | "show"
+                "open" | "update" | "close" | "reopen" | "retarget" | "list" | "show"
             ))
     {
         return write_read_report(&mut std::io::stdout().lock(), USAGE).map(|()| 0);
@@ -300,3 +300,6 @@ pub(crate) fn read_body_file(path: &Path) -> Result<String, String> {
 
 #[cfg(test)]
 mod reopen_tests;
+
+#[cfg(test)]
+mod retarget_tests;

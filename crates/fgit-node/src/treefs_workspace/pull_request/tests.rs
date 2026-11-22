@@ -21,6 +21,7 @@ mod append_comments;
 mod labels;
 mod notifications;
 mod outbox_history;
+mod retarget;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Scratch(PathBuf);

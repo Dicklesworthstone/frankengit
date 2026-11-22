@@ -102,6 +102,7 @@ pub(super) fn operation(options: &Options, name: &str) -> Option<u32> {
         | "frankengit_pull_update"
         | "frankengit_pull_close"
         | "frankengit_pull_reopen"
+        | "frankengit_pull_retarget"
         | "frankengit_pull_comment"
         | "frankengit_pull_append_comment"
         | "frankengit_pull_set_labels"

@@ -18,6 +18,7 @@ mod notifications;
 mod pull_append;
 mod pull_labels;
 mod pull_reopen;
+mod pull_retarget;
 mod pull_search;
 mod queues;
 mod rebase;
@@ -125,6 +126,7 @@ const ADDITIONS: &[McpToolEntry] = &[
     check_evidence::READ,
     pull_labels::READ,
     pull_reopen::ENTRY,
+    pull_retarget::ENTRY,
     pull_search::ENTRY,
     pull_labels::WRITE,
     queues::DEQUEUE,

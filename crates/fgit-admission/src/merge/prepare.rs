@@ -513,7 +513,7 @@ pub fn prepare_event(
                 }
             }
             // Closing preserves already recorded coordinates even after a
-            // branch is deleted. Opening/updating must name both current tips.
+            // branch is deleted. Other lifecycle actions must name both current tips.
             if change.action != PullRequestAction::Close
                 && (resolved.refs.refs().get(&change.data.source_ref)
                     != Some(&change.data.source_tip)
@@ -527,15 +527,15 @@ pub fn prepare_event(
                     pull_request: entity,
                     target: change.data.target_ref.clone(),
                 },
-                // A reopen changes lifecycle state on the SAME branches without
-                // moving a ref; the sealed batch carries the exact action, and
-                // `validate_transition` admits it only from a closed stream.
-                PullRequestAction::Update | PullRequestAction::Reopen => {
-                    ForgeEventKind::PullRequestUpdated {
-                        pull_request: entity,
-                        target: change.data.target_ref.clone(),
-                    }
-                }
+                // The sealed batch retains the exact lifecycle action. Reopen
+                // and Retarget are explicit, independently validated metadata
+                // transitions; none moves a Git ref.
+                PullRequestAction::Update
+                | PullRequestAction::Reopen
+                | PullRequestAction::Retarget => ForgeEventKind::PullRequestUpdated {
+                    pull_request: entity,
+                    target: change.data.target_ref.clone(),
+                },
                 PullRequestAction::Close => ForgeEventKind::PullRequestClosed {
                     pull_request: entity,
                 },

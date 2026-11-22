@@ -41,7 +41,7 @@ for (const algorithm of ['sha1', 'sha256']) for (const action of PULL_ACTIONS) f
   });
 }
 test('all metadata operations require complete coordinates, including close and reopen', () => {
-  for (const action of ['open', 'update', 'close', 'reopen']) {
+  for (const action of ['open', 'update', 'close', 'reopen', 'retarget']) {
     const value = input('https://forge.test/repo.git', action);
     for (const field of Object.keys(value.fields)) {
       const bad = structuredClone(value); delete bad.fields[field];

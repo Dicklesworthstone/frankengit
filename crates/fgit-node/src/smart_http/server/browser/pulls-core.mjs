@@ -324,7 +324,7 @@ export function form(fields) {
   return body;
 }
 export function metadataCommand(action, fields) {
-  if (!['open', 'update', 'close', 'reopen'].includes(action)) fail('Unsupported PR metadata action.');
+  if (!['open', 'update', 'close', 'reopen', 'retarget'].includes(action)) fail('Unsupported PR metadata action.');
   keys(fields, ['expected_version', 'object_format', 'source_ref', 'target_ref', 'source_tip', 'target_tip', 'title', 'body']);
   const version = integer(fields.expected_version, 'expected PR version', 0, Number.MAX_SAFE_INTEGER - 1);
   if ((action === 'open') !== (version === 0)) fail('Only a new PR uses expected version zero.');
@@ -394,7 +394,7 @@ export function apiError(status) {
 // a key, resubmit a body during outcome lookup, or turn a read into a write.
 function requirePublicationEnvelope(path, method, body, key, read) {
   const route = path.split('?', 1)[0];
-  const publication = /^pulls\/[1-9][0-9]*\/(?:open|update|close|reopen|merge|fast-forward|reviews\/(?:approve|request-changes|withdraw))$/.test(route) ||
+  const publication = /^pulls\/[1-9][0-9]*\/(?:open|update|close|reopen|retarget|merge|fast-forward|reviews\/(?:approve|request-changes|withdraw))$/.test(route) ||
     /^queues\/[1-9][0-9]*\/(?:enqueue|dequeue|reorder|land|land-candidate)$/.test(route) ||
     (method !== 'GET' && /^pulls\/[1-9][0-9]*\/(?:comments(?:\/append)?|labels)$/.test(route)) ||
     /^source\/(?:apply|initial\/apply|rebase\/apply|branches\/(?:create|update|delete|rename|transaction)|bundle\/(?:import|fetch)|tags\/(?:lightweight|annotated|delete))$/.test(route);
@@ -651,7 +651,7 @@ export class Transport {
       ? /^(?:source\/initial\/(?:prepare|apply)|outcomes)$/.test(path)
       : this.#source
       ? /^(?:source\/(?:tree|blob|prepare|inspect|apply)|outcomes)$/.test(path)
-      : /^(pulls(?:\/search|\/[1-9][0-9]*(?:\/(?:open|update|close|reopen|diff|checks|labels|comments(?:\/append)?|prepare|prepare-rebase|resolve|resolve-rebase|inspect|inspect-rebase|merge|fast-forward|reviews(?:\/(?:approve|request-changes|withdraw))?))?)?(?:\?[^#]*)?|outcomes)$/.test(path);
+      : /^(pulls(?:\/search|\/[1-9][0-9]*(?:\/(?:open|update|close|reopen|retarget|diff|checks|labels|comments(?:\/append)?|prepare|prepare-rebase|resolve|resolve-rebase|inspect|inspect-rebase|merge|fast-forward|reviews(?:\/(?:approve|request-changes|withdraw))?))?)?(?:\?[^#]*)?|outcomes)$/.test(path);
     if (!allowed || url.origin !== this.root.origin || !url.pathname.startsWith(`${this.root.route}/api/v1/`)) fail('Invalid API route.');
     requirePublicationEnvelope(path, method, body, key, read);
     const epoch = this.#epoch, controller = new AbortController(); this.#all.add(controller); if (read) this.#reads.add(controller);

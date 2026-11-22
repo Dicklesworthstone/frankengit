@@ -234,3 +234,15 @@ authority, exact-version conflicts, retained pages, authentication/refusal befor
 body intake, lost responses, restart and recovery after write revocation. Test
 presence does not establish a passing execution. Record actual toolchain,
 revision and results before making a build, compatibility or deployment claim.
+
+## Explicit target switching
+
+An open native PR can change its target branch through the explicit `retarget`
+action, preserving the source branch and requiring a different target, exact
+positive PR version and current source/new-target tips. HTTP exposes
+`POST /REPOSITORY_ROUTE/api/v1/pulls/NUMBER/retarget`; MCP exposes
+`frankengit_pull_retarget` under the independent PR-write grant; the browser's
+metadata form offers **Change target branch**. Existing Update/Reopen actions
+still cannot change branch identities. Conversation and labels remain; old
+reviews become stale. See [the complete retarget contract](PULL_REQUEST_RETARGET.md)
+for exact input, current visibility, original-key recovery and reader upgrades.

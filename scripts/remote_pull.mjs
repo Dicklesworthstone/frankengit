@@ -22,7 +22,7 @@ send/recover: [--known PRIVATE_RECORD] [--timeout-ms 1..300000] [--ca-file PRIVA
 
 Input: endpoint, scope {tenant_id, repository_id, repository_incarnation,
 principal_id, object_format}, number, action, fields. Native numbers/versions
-are decimal strings. open/update/close/reopen require full PR metadata and
+are decimal strings. open/update/close/reopen/retarget require full PR metadata and
 expected_version; comment requires body and separate discussion expected_version;
 append-comment requires only body and rejects expected_version. It retains the
 exact request while the native service assigns the conversation position.

@@ -3,8 +3,8 @@
   "$id": "https://frankengit.invalid/schemas/mcp_tools.json",
   "title": "FrankenGit MCP tool registry",
   "description": "Single-source registry of all FrankenGit MCP tools, resources, and prompts with capability requirements and budget boundaries.",
-  "total_count": 105,
-  "active_count": 101,
+  "total_count": 106,
+  "active_count": 102,
   "unsupported_count": 4,
   "tools": [
     {
@@ -1882,6 +1882,34 @@
       "refusal_codes": ["tool_not_granted", "principal_not_bound", "required_argument_missing", "expected_string", "unknown_argument", "invalid_decimal_string", "positive_pull_number_required", "invalid_idempotency_key", "body_required", "invalid_bounded_text", "exactly_one_branch_encoding_required", "full_branch_required", "invalid_branch", "invalid_native_oid", "invalid_pull_request_data", "invalid_pull_request_command", "mutation_outcome_unknown"],
       "cli_command": "fg pr reopen",
       "rest_api_path": "POST /{repository}/api/v1/pulls/{number}/reopen"
+    },
+    {
+      "name": "frankengit_pull_retarget",
+      "version": 1,
+      "kind": "tool",
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "description": "Retarget an open native PR to a different target branch at an exact positive predecessor version. The source branch stays fixed; full metadata and explicit current source/new-target tips are required. Keeps PR identity and conversation, invalidates old review subjects, and changes no refs. Retry only the identical command and original durable key.",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "principal": "operator_bound",
+      "idempotency": "required_durable_key",
+      "authority_root": "exact_predecessor_version",
+      "budget": {
+        "max_input_bytes": 65536,
+        "max_output_bytes": 32768,
+        "max_depth": 16,
+        "max_items": 64,
+        "max_fan_out": 4,
+        "max_duration_ms": 60000
+      },
+      "pagination": "unpaginated",
+      "disclosure": "untrusted_content_data",
+      "receipt": "canonical_decision_digest",
+      "cancellation": "non_preemptive_terminal_commit",
+      "refusal_codes": ["tool_not_granted", "principal_not_bound", "required_argument_missing", "expected_string", "unknown_argument", "invalid_decimal_string", "positive_pull_number_required", "invalid_idempotency_key", "body_required", "invalid_bounded_text", "exactly_one_branch_encoding_required", "full_branch_required", "invalid_branch", "invalid_native_oid", "invalid_pull_request_data", "invalid_pull_request_command", "mutation_outcome_unknown"],
+      "cli_command": "fg pr retarget",
+      "rest_api_path": "POST /{repository}/api/v1/pulls/{number}/retarget"
     },
     {
       "name": "frankengit_pull_review",

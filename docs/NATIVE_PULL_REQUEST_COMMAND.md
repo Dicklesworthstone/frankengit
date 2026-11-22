@@ -10,7 +10,7 @@ or publish a merge. `fg merge prepare` and `fg merge apply` remain separate.
 Rust compilation and native execution were not available in this editing
 environment; this guide is not a passing build or production-conformance report.
 
-## Open, update, close and reopen
+## Open, update, close, reopen and retarget
 
 For an existing imported node, with independently selected source/target tips:
 
@@ -26,14 +26,14 @@ fg pr open "$STORAGE_ROOT" "$TENANT_ID" "$REPOSITORY_ID" 7 \
   --body-file ./pr-body.md
 ```
 
-The action is `open`, `update`, `close` or `reopen`. All four supply complete desired
-metadata. Open requires expected version **0**; update, close and reopen require a
+The action is `open`, `update`, `close`, `reopen` or `retarget`. All supply complete desired
+metadata. Open requires expected version **0**; the other actions require a
 positive exact prior aggregate version. There is no automatic number allocation,
 latest-version substitution, implicit branch-tip refresh or metadata merge.
 
 Use a distinct key for each deliberately new command. To update the PR opened
 above, use `update`, expected version `1`, a new key and the complete desired
-title/body/tips. Branch identities cannot change. Opening and updating require
+title/body/tips. Update cannot change branch identities. Opening and updating require
 both supplied tips to match current authority. To close that updated PR, use
 `close`, expected version `2`, a new key and its exact currently recorded data.
 Closing does not silently edit metadata and can preserve recorded tips after a
@@ -48,6 +48,12 @@ Reopen refuses missing branches, stale versions/tips, already-open PRs and
 merged PRs. It changes no branch and preserves the original opener. The same
 command is available as MCP `frankengit_pull_reopen` under the independent PR
 write grant, including canonical sponsored `pulls-write` credentials.
+
+Use `retarget` to change an open PR's target branch while retaining its number,
+opener and conversation. Keep the source branch and supply a different target,
+current source/new-target tips and exact positive PR version. Existing reviews
+become stale. See [the retarget workflow](PULL_REQUEST_RETARGET.md) for its
+visibility, recovery and reader-upgrade contract.
 
 Exactly one of `--body <text>` and `--body-file <path>` is required. An explicit
 `--body ''` means an empty body, not an omitted field. File bytes are read once,

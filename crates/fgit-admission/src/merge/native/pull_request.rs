@@ -143,6 +143,19 @@ where
     ) -> Result<ValidatedClosure, PreparationFailure> {
         let command = self.0;
         let previous = frontier_event(store, cx, &resolved.forge, command.number).await?;
+        // Retargeting must not make a currently hidden PR writable by choosing
+        // a visible replacement target. The submitted source/new target were
+        // checked by precheck; retain disclosure policy on its old branch pair.
+        if command.action == PullRequestAction::Retarget
+            && let Some(ForgeEvent {
+                payload: ForgeEventPayload::PullRequestChangedNative(old),
+                ..
+            }) = &previous
+            && (snapshot.hidden_refs.hides(old.data.source_ref.as_bytes())
+                || snapshot.hidden_refs.hides(old.data.target_ref.as_bytes()))
+        {
+            return Err(ProjectionFailure::Refuse(RefusalCode::HiddenRefUnauthorized).into());
+        }
         validate_transition(previous.as_ref(), event).map_err(ProjectionFailure::Refuse)?;
         if command.action != PullRequestAction::Close
             && (snapshot.refs.get(&command.data.source_ref) != Some(&command.data.source_tip)

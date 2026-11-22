@@ -675,3 +675,6 @@ fn a_cross_origin_pr_post_is_refused_and_its_same_origin_twin_commits() {
     assert_eq!(generation(&node), before + 1);
     node.shutdown().unwrap();
 }
+
+#[path = "pull_request_http/retarget.rs"]
+mod retarget;

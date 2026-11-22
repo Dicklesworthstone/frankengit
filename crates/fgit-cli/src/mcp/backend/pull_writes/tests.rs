@@ -113,7 +113,7 @@ fn unknown_authority_and_ambiguous_coordinates_refuse_before_admission() {
 }
 #[test]
 fn update_close_and_reopen_require_full_metadata_and_never_refresh_the_version() {
-    for name in [UPDATE, CLOSE, REOPEN] {
+    for name in [UPDATE, CLOSE, REOPEN, RETARGET] {
         let format = GitHashAlgorithm::Sha256;
         for version in ["0", "-1", "1.0", "18446744073709551615"] {
             assert!(parse(name, &args(format, version), format).is_err());
@@ -201,4 +201,42 @@ fn schema_exposes_exact_keys_and_byte_alternatives_and_bounds() {
         assert!(tool.schema.encode(16384).is_ok());
     }
     assert!(!is_tool("frankengit_pull_merge"));
+}
+
+#[test]
+fn retarget_is_a_distinct_exact_command_in_both_native_domains() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let original = args(format, "2");
+        let retarget = parse(RETARGET, &original, format).unwrap();
+        assert_eq!(retarget.action, PullRequestAction::Retarget);
+        let actor = PrincipalId::from_bytes([7; 16]);
+        let event = retarget.proposed_event(actor, format).unwrap();
+        assert_eq!(event.version.get(), 3);
+        let bytes = fgit_codec::encode_body(&event).unwrap();
+        for action in [UPDATE, CLOSE] {
+            let other = parse(action, &original, format).unwrap();
+            assert_eq!(retarget.data, other.data);
+            assert_ne!(
+                bytes,
+                fgit_codec::encode_body(&other.proposed_event(actor, format).unwrap()).unwrap()
+            );
+        }
+        let tool = tools()
+            .into_iter()
+            .find(|tool| tool.name == RETARGET)
+            .unwrap();
+        let contract = fgit_schema::mcp::find_tool(RETARGET).unwrap();
+        let declared: std::collections::BTreeSet<_> = contract
+            .input_fields
+            .iter()
+            .map(|field| field.name)
+            .collect();
+        let served: std::collections::BTreeSet<_> = tool.schema.object().unwrap()["properties"]
+            .object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(declared, served);
+    }
 }

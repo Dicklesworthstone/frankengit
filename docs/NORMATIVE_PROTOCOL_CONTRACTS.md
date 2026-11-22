@@ -1001,6 +1001,34 @@ publication basis. Existing seals and recorded outcomes retain their identity
 and retry semantics. See [the native PR rebase workflow](NATIVE_PULL_REQUEST_REBASE.md)
 for the bounded client and unsupported-surface contract.
 
+#### 20.1.4 Explicit native PR retargeting
+
+`Retarget` changes the target branch of an existing open native PR at its exact
+positive predecessor version. It MUST preserve the source branch and MUST name
+a different target branch. The complete desired metadata, explicit current
+source/new-target tips, authenticated actor and action form the existing sealed
+metadata request. Admission MUST verify both submitted live tips and current
+disclosure policy for the source, original target and replacement target. A
+missing original target does not prevent retargeting; a missing source or new
+target does. Retargeting MUST NOT move or recreate any Git ref.
+
+The canonical owner is `fgit-forge/src/event/pull_request.rs`. Retarget uses
+required action code **5** in `PullRequestChangedNative`; codes 1 through 4 keep
+their original bytes and semantics. Update and Reopen still cannot change either
+branch identity. Closed, merged and legacy-only streams cannot be retargeted.
+Readers MUST support code 5 before writers activate it; unknown required actions
+refuse rather than being reinterpreted as Update.
+
+Publication advances the PR content version and coupled outbox through the
+ordinary single authority-head CAS, preserving PR number, original opener and
+independent conversation/labels streams. Previous reviews remain bound to their
+original exact subject and cannot authorize the new target, even if target tips
+or candidate bytes happen to match. Original source-comment anchors remain
+historical coordinates, never silently retargeted. Existing original-outcome
+recovery precedes fresh-state evaluation: repeating the same command/key after
+later target changes or closure returns its original decision without publishing
+another event. See [the retarget workflow](PULL_REQUEST_RETARGET.md).
+
 ### 20.2 Native issue assignment deltas
 
 The native issue stream uses the same aggregate version for opening, field

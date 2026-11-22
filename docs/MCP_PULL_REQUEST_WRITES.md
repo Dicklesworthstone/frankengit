@@ -132,3 +132,15 @@ Run `cargo test --locked -p fgit-cli --bin fg-mcp` on the pinned toolchain.
 Rust/Cargo are unavailable in the session introducing this implementation;
 these Rust tests have been written, not executed. No full FG-096, hosted
 multi-principal, CI-check or merge-publication acceptance is claimed.
+
+## Explicit target switching
+
+An open native PR can change its target branch through the explicit `retarget`
+action, preserving the source branch and requiring a different target, exact
+positive PR version and current source/new-target tips. HTTP exposes
+`POST /REPOSITORY_ROUTE/api/v1/pulls/NUMBER/retarget`; MCP exposes
+`frankengit_pull_retarget` under the independent PR-write grant; the browser's
+metadata form offers **Change target branch**. Existing Update/Reopen actions
+still cannot change branch identities. Conversation and labels remain; old
+reviews become stale. See [the complete retarget contract](PULL_REQUEST_RETARGET.md)
+for exact input, current visibility, original-key recovery and reader upgrades.

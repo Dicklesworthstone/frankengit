@@ -127,6 +127,121 @@ fn independent_labels_count_activity_without_changing_the_reviewed_content_subje
 }
 
 #[test]
+fn retarget_replays_exact_historical_withdrawal_and_preserves_its_disclosure_refs() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut f = Fixture::new();
+        let approval = review(format, 3, 1, 1);
+        let mut changed = lifecycle(format, 2, 1, PullRequestAction::Retarget);
+        let release = RefName::try_new(b"refs/heads/release").unwrap();
+        let ForgeEventPayload::PullRequestChangedNative(change) = &mut changed.payload else {
+            unreachable!();
+        };
+        change.data.target_ref = release.clone();
+        let mut withdrawal = approval.clone();
+        withdrawal.version = version(2);
+        let ForgeEventPayload::PullRequestReviewedNative(withdrawn) = &mut withdrawal.payload
+        else {
+            unreachable!();
+        };
+        withdrawn.decision = ReviewDecision::Withdraw;
+        withdrawn.reason = "Retract the original target review".into();
+        for (event, who) in [
+            (lifecycle(format, 1, 1, PullRequestAction::Open), 1),
+            (approval, 3),
+            (changed, 1),
+            (withdrawal, 3),
+        ] {
+            f.append(vec![event], who);
+        }
+        let thread = f.source(1).unwrap().remove(0);
+        assert_eq!(thread.subject.version(), version(4));
+        assert_eq!(pull(&thread).unwrap().lifecycle_version, version(2));
+        assert_eq!(pull(&thread).unwrap().data.target_ref, release);
+        assert_eq!(thread.latest_other_version, Some(version(4)));
+        assert!(f.source(3).unwrap()[0].participated);
+        assert!(thread.subject.permits_disclosure(|_| true));
+        let mark = preference(1, 0, NotificationAction::SetReadThrough(Some(version(4))));
+        for hidden in [data(format).source_ref, data(format).target_ref, release] {
+            assert!(
+                !thread
+                    .subject
+                    .permits_disclosure(|reference| reference != &hidden)
+            );
+            let mut policy = crate::AdmissionSnapshot::default();
+            policy
+                .hidden_refs
+                .push_rule(hidden.as_bytes(), &fgit_wire::WireLimits::default())
+                .unwrap();
+            assert_eq!(
+                super::super::super::validate_current_thread_disclosure(
+                    Some(&thread),
+                    &policy,
+                    &mark
+                ),
+                Err(RefusalCode::HiddenRefUnauthorized)
+            );
+        }
+        assert_eq!(
+            super::super::super::validate_current_thread_disclosure(
+                Some(&thread),
+                &crate::AdmissionSnapshot::default(),
+                &mark
+            ),
+            Ok(())
+        );
+    }
+}
+
+#[test]
+fn retarget_does_not_relax_exact_withdrawal_subject_candidate_or_reviewer_predecessor() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for mismatch in ["target", "candidate", "no-predecessor", "already-withdrawn"] {
+            let mut f = Fixture::new();
+            f.append(vec![lifecycle(format, 1, 1, PullRequestAction::Open)], 1);
+            let mut approval = review(format, 3, 1, 1);
+            let ForgeEventPayload::PullRequestReviewedNative(vote) = &mut approval.payload else {
+                unreachable!();
+            };
+            vote.candidate = Some(fgit_forge::event::review::CandidateBinding {
+                merge_base: vote.subject.target_tip,
+                commit: vote.subject.source_tip,
+            });
+            if mismatch != "no-predecessor" {
+                f.append(vec![approval.clone()], 3);
+            }
+            let mut changed = lifecycle(format, 2, 1, PullRequestAction::Retarget);
+            let ForgeEventPayload::PullRequestChangedNative(change) = &mut changed.payload else {
+                unreachable!();
+            };
+            change.data.target_ref = RefName::try_new(b"refs/heads/release").unwrap();
+            f.append(vec![changed], 1);
+            let mut withdrawal = approval;
+            withdrawal.version = version(if mismatch == "no-predecessor" { 1 } else { 2 });
+            let ForgeEventPayload::PullRequestReviewedNative(withdrawn) = &mut withdrawal.payload
+            else {
+                unreachable!();
+            };
+            withdrawn.decision = ReviewDecision::Withdraw;
+            withdrawn.reason = "Retract original review".into();
+            match mismatch {
+                "target" => {
+                    withdrawn.subject.target_ref = RefName::try_new(b"refs/heads/release").unwrap()
+                }
+                "candidate" => withdrawn.candidate = None,
+                "already-withdrawn" => {
+                    f.append(vec![withdrawal.clone()], 3);
+                    assert_eq!(f.source(1).unwrap()[0].subject.version(), version(4));
+                    withdrawal.version = version(3);
+                }
+                _ => {}
+            }
+            f.append(vec![withdrawal], 3);
+            assert!(f.source(1).is_err(), "{format:?}: {mismatch}");
+        }
+    }
+}
+
+#[test]
 fn independent_streams_form_one_append_stable_activity_prefix_in_repository_order() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let mut f = Fixture::new();

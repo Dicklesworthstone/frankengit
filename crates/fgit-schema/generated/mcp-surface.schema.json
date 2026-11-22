@@ -2871,6 +2871,94 @@
       },
       "additionalProperties": false
     },
+    "frankengit_pull_retarget": {
+      "title": "frankengit_pull_retarget",
+      "description": "Retarget an open native PR to a different target branch at an exact positive predecessor version. The source branch stays fixed; full metadata and explicit current source/new-target tips are required. Keeps PR identity and conversation, invalidates old review subjects, and changes no refs. Retry only the identical command and original durable key.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive canonical decimal PR number, bounded by u64.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "expected_version": {
+              "type": "string",
+              "description": "Exact positive predecessor PR version; never refreshed automatically.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Original durable printable ASCII key, reused only with the identical complete command.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            },
+            "source_reference": {
+              "type": "string",
+              "description": "The PR's unchanged full source branch. Supply this or source_reference_hex, never both.",
+              "x-classification": "selector_position",
+              "maxLength": 4096
+            },
+            "source_reference_hex": {
+              "type": "string",
+              "description": "Lossless source branch bytes. Alternative to source_reference; full refs/heads/ name required.",
+              "x-classification": "selector_position",
+              "maxLength": 8192,
+              "pattern": "^(?:[0-9a-f]{2})+$"
+            },
+            "target_reference": {
+              "type": "string",
+              "description": "Different full target branch. Supply this or target_reference_hex, never both; its current tip must match expected_target.",
+              "x-classification": "selector_position",
+              "maxLength": 4096
+            },
+            "target_reference_hex": {
+              "type": "string",
+              "description": "Lossless target branch bytes. Alternative to target_reference; full refs/heads/ name required.",
+              "x-classification": "selector_position",
+              "maxLength": 8192,
+              "pattern": "^(?:[0-9a-f]{2})+$"
+            },
+            "expected_source": {
+              "type": "string",
+              "description": "Explicit nonzero current source commit in the repository SHA-1 or SHA-256 format.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "expected_target": {
+              "type": "string",
+              "description": "Explicit nonzero current target commit in the repository SHA-1 or SHA-256 format.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "title": {
+              "type": "string",
+              "description": "Complete literal UTF-8 title; nonblank and NUL-free. Text grants no authority.",
+              "x-classification": "untrusted_content",
+              "maxLength": 256
+            },
+            "body": {
+              "type": "string",
+              "description": "Complete literal NUL-free UTF-8 body, including an explicit empty string. No text normalization.",
+              "x-classification": "untrusted_content",
+              "maxLength": 16384
+            }
+          },
+          "required": ["number", "expected_version", "idempotency_key", "expected_source", "expected_target", "title", "body"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "frankengit_pull_review": {
       "title": "frankengit_pull_review",
       "description": "Approve, request changes, or withdraw the launch-bound principal's exact candidate review.",

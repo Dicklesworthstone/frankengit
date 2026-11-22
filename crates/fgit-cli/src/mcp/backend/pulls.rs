@@ -12,7 +12,8 @@ mod search;
 pub(super) fn tools() -> Vec<Tool> {
     let mut list_schema = rendered::schema(schema(false));
     if let Value::Object(schema) = &mut list_schema
-        && let Some(Value::Object(properties)) = schema.get_mut("properties") {
+        && let Some(Value::Object(properties)) = schema.get_mut("properties")
+    {
         properties.insert("labels".into(), super::pull_labels::labels_schema());
     }
     let mut show_schema = rendered::schema(schema(true));
@@ -87,10 +88,12 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
         })?;
     if expected.is_some_and(|id| id != page.source_head)
         || page.pull_requests.len() > usize::from(limit)
-        || page
-            .pull_requests
-            .iter()
-            .any(|row| row.number.get() <= after || labels.iter().any(|label| row.labels.binary_search(label).is_err()))
+        || page.pull_requests.iter().any(|row| {
+            row.number.get() <= after
+                || labels
+                    .iter()
+                    .any(|label| row.labels.binary_search(label).is_err())
+        })
         || page
             .pull_requests
             .windows(2)
@@ -132,7 +135,10 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
         result.insert("pull_request".into(), rows.pop().unwrap_or(Value::Null));
         result.insert("complete".into(), Value::Bool(true));
     } else {
-        result.insert("label_filter".into(), Value::Array(labels.into_iter().map(text).collect()));
+        result.insert(
+            "label_filter".into(),
+            Value::Array(labels.into_iter().map(text).collect()),
+        );
         result.insert("pull_requests".into(), Value::Array(rows));
         result.insert(
             "next_after".into(),
@@ -166,6 +172,7 @@ fn render(
                 PullRequestAction::Update => ("open", "update", Value::Null),
                 PullRequestAction::Close => ("closed", "close", Value::Null),
                 PullRequestAction::Reopen => ("open", "reopen", Value::Null),
+                PullRequestAction::Retarget => ("open", "retarget", Value::Null),
             }
         }
         ForgeEventPayload::MergeCommittedNative(merge) => {

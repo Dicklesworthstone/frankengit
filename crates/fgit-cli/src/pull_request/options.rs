@@ -2,11 +2,11 @@
 
 use crate::publication_support::parse_oid;
 use fgit_authority::IdempotencyKey;
-use fgit_forge::event::pull_request_labels::{MAX_LABELS, validate_labels};
 use fgit_forge::aggregate::{AggregateVersion, ExpectedVersion, PullRequestNumber};
 use fgit_forge::event::pull_request::{
     MAX_BODY_BYTES, PullRequestAction, PullRequestCommand, PullRequestData,
 };
+use fgit_forge::event::pull_request_labels::{MAX_LABELS, validate_labels};
 use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, GitHashAlgorithm, PrincipalId, RefName, RepositoryAuthorityHeadId,
@@ -72,7 +72,7 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
     {
         return Err("PR arguments exceed the bounded local profile".to_owned());
     }
-    let mutation = matches!(action, "open" | "update" | "close" | "reopen");
+    let mutation = matches!(action, "open" | "update" | "close" | "reopen" | "retarget");
     if !mutation && !matches!(action, "list" | "show") {
         return Err(super::USAGE.to_owned());
     }
@@ -138,7 +138,9 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
             .ok_or_else(|| format!("missing value for {supplied}"))?;
         cursor += 1;
         if flag == "--label" {
-            if labels.len() == MAX_LABELS { return Err("too many PR label filters".into()); }
+            if labels.len() == MAX_LABELS {
+                return Err("too many PR label filters".into());
+            }
             labels.push(value.clone());
             continue;
         }
@@ -175,7 +177,7 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
         let version = decimal(required(&flags, "--expected-version")?)?;
         if (action == "open") != (version == 0) {
             return Err(
-                "open requires version 0; update, close and reopen require a positive exact version"
+                "open requires version 0; update, close, reopen and retarget require a positive exact version"
                     .to_owned(),
             );
         }
@@ -201,6 +203,7 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
                 "open" => PullRequestAction::Open,
                 "update" => PullRequestAction::Update,
                 "reopen" => PullRequestAction::Reopen,
+                "retarget" => PullRequestAction::Retarget,
                 _ => PullRequestAction::Close,
             },
             data: PullRequestData {
@@ -277,7 +280,11 @@ fn required<'a>(flags: &BTreeMap<&str, &'a str>, flag: &str) -> Result<&'a str, 
         .copied()
         .ok_or_else(|| format!("{flag} is required"))
 }
-pub(super) fn reference(flags: &BTreeMap<&str, &str>, plain: &str, encoded: &str) -> Result<RefName, String> {
+pub(super) fn reference(
+    flags: &BTreeMap<&str, &str>,
+    plain: &str,
+    encoded: &str,
+) -> Result<RefName, String> {
     let bytes = match (flags.get(plain), flags.get(encoded)) {
         (Some(value), None) if value.len() <= 4096 => value.as_bytes().to_vec(),
         (None, Some(value)) => unhex(value, 4096)?,
