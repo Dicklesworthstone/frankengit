@@ -204,8 +204,9 @@ export async function expandSourceWorkspace(root, workspaceHash, additionalBytes
     unselected_local_files_copied: false, atomic_filesystem_snapshot: false };
   return publishWorkspace(output, merged.packageBytes, merged.expected, loaded, time, carried, snapshot.recheck, expansion);
 }
-// A refresh deliberately selects another independently pinned commit. Only the
-// existing selected paths move; it is not a pull, ancestry proof or Git rebase.
+// A refresh deliberately selects another independently pinned commit, retaining
+// all existing selections and permitting independently verified additions.
+// It is not a pull, ancestry proof or Git rebase.
 // Whole-file byte equality resolves content. Mode and content are independent,
 // so a content edit can survive an upstream chmod (and the converse).
 function refreshImage(file) {
@@ -233,22 +234,34 @@ async function prepareWorkspaceRefresh(root, workspaceHash, next, time, mergePro
   if (next.expected.format !== baseline.expected.format) fail('source_workspace_refresh_format');
   if (next.expected.commit === baseline.expected.commit) fail('source_workspace_refresh_same_commit');
   const paths = selectedPaths(next.expected.files.map(f => f.pathHex));
-  if (paths.length !== baseline.expected.files.length || paths.some((p, i) => p !== baseline.expected.files[i].pathHex)) fail('source_workspace_refresh_selection');
+  const selectedPathsSet = new Set(paths);
+  // Missing source proof is not evidence of an upstream deletion. Every old
+  // selection must remain explicit, even when its local file was deleted.
+  if (baseline.expected.files.some(f => !selectedPathsSet.has(f.pathHex))) fail('source_workspace_refresh_selection');
   const loaded = await readSourcePackage(next.bytes, next.expected, webcrypto, time.check); time.check();
   // Apply the host's individual/logical source limits before decoding bodies or
   // touching mutable files. Package limits and independent pins still apply.
   const nextManifest = manifest(next.bytes, next.expected, loaded.verified);
+  const oldFiles = new Map(baseline.manifest.files.map(f => [f.path_hex, f]));
+  const nextFiles = new Map(nextManifest.files.map(f => [f.path_hex, f]));
   const snapshot = await readWorkspaceFiles(root, paths, { check: time.check, timeoutMs: time.remaining() });
+  // Newly selected paths may contain untracked user work. Even identical local
+  // bytes are not consent to adopt it. The snapshot also owns absent ancestors
+  // and rejects unsafe or occupied non-directory ancestors before publication.
+  if (paths.some(path => !oldFiles.has(path) && snapshot.files.get(path) !== null)) fail('source_workspace_refresh_expansion_occupied');
   const oldBodies = new Map(JSON.parse(baseline.packageBytes.toString('utf8')).blobs.map(b => [b.oid, b.bytesHex]));
   const nextBodies = new Map(loaded.package.blobs.map(b => [b.oid, b.bytesHex]));
   const carried = new Map(), conflicting = new Map(), entries = []; let resultBytes = 0, conflicts = 0;
-  for (const [i, path] of paths.entries()) {
+  for (const path of paths) {
     time.check();
-    const oldFile = baseline.manifest.files[i], newFile = nextManifest.files[i];
-    if (oldFile.path_hex !== path || newFile.path_hex !== path) fail('source_workspace_refresh_selection');
-    const before = { bytes: Buffer.from(oldBodies.get(oldFile.blob), 'hex'), executable: oldFile.executable };
+    const oldFile = oldFiles.get(path), newFile = nextFiles.get(path);
+    if (!newFile) fail('source_workspace_refresh_selection');
+    // A null original image on an added selection means previously unselected,
+    // not proven absent from the original source tree.
+    const before = oldFile ? { bytes: Buffer.from(oldBodies.get(oldFile.blob), 'hex'), executable: oldFile.executable } : null;
     const selected = { bytes: Buffer.from(nextBodies.get(newFile.blob), 'hex'), executable: newFile.executable };
-    const local = snapshot.files.get(path); let result = reconcileRefreshFile(before, local, selected);
+    const local = snapshot.files.get(path);
+    let result = oldFile ? reconcileRefreshFile(before, local, selected) : { disposition: 'added', file: selected };
     if (textMerger && result.conflict === 'content_changed_both') {
       const { bytes, ...diagnostic } = textMerger.merge(before.bytes, local.bytes, selected.bytes);
       result = diagnostic.status === 'merged'

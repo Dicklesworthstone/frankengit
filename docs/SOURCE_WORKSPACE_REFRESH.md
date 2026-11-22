@@ -4,14 +4,18 @@
 materialization to another independently selected commit. This addresses the
 working-copy gap between same-commit expansion and exact-draft replay: clean
 selected files can update while non-conflicting local content, modes and
-selected deletions survive. Related work: FG-026 and the TreeFS/agent bridge.
+selected deletions survive. The same refresh can add independently selected
+files, including dependencies introduced in the new source, without first
+obtaining another package for the old commit. Related work: FG-026 and the
+TreeFS/agent bridge.
 This external trusted-local adapter does not complete native TreeFS.
 
 ## Review, then create a refreshed workspace
 
 Obtain another selected-source package and an independent expectation using the
-existing source package workflow. Select the SAME regular-file paths as the
-original workspace, in the same native hash domain, at a different commit.
+existing source package workflow. Retain ALL regular-file paths selected in the
+original workspace, in the same native hash domain, at a different commit. The
+new expectation may also select additional regular files at that commit.
 The next expectation is never inferred from the package. Keep all inputs and
 parent directories owner-private, as in `SOURCE_EDITING_WORKSPACES.md`.
 
@@ -23,6 +27,10 @@ node scripts/fg_source_workspace.mjs refresh-preview \
 
 Review the returned plan, especially the old/local/selected/result byte hashes,
 lengths and executable modes for each path. Retain `refresh_sha256` independently.
+Newly selected paths have disposition `added`, a null `before` image and a null
+`local` image. The null `before` means the path was not selected in the original
+workspace; it does not claim that the path was absent from the original Git tree.
+The null `local` records checked absence in the original editing directory.
 Preview performs no writes and creates no output slot. A conflicting preview
 returns exit 1 and lists every conflicting selected file in byte-path order.
 There is no automatic choice of a conflict side or insertion of conflict markers.
@@ -35,15 +43,26 @@ node scripts/fg_source_workspace.mjs refresh \
   --output /srv/refreshed-editing
 ```
 
-Refresh re-verifies both source selections and re-reads the original selected
-local paths. The complete plan must match the approved hash BEFORE output is
+Refresh re-verifies both source selections and re-reads every selected local
+path, including absence checks for newly selected paths and their ancestors.
+The complete plan must match the approved hash BEFORE output is
 created. A different source package, commit, local content, mode or deletion
 requires a new preview. The new directory must be absent and disjoint from the
 original. The original workspace is never overwritten or removed.
 
+A newly selected path already occupied locally refuses, even when its bytes
+match the new source. A file or symlink in a required ancestor position also
+refuses. Existing private directories may hold newly selected files; unrelated
+local siblings remain only in the original workspace. File/directory conflicts
+within the combined selection refuse before local content is read. These
+observations are rechecked before output ownership and before the final manifest.
+
 ## Default exact reconciliation, not a text merge
 
 - A locally unchanged file takes the selected source version.
+- A newly selected file with checked local absence takes its independently
+  verified source version. It is not a three-way merge or an adoption of an
+  untracked local file.
 - A selected source file unchanged from the old baseline keeps the local edit
   or local deletion.
 - Identical local and source results converge to the selected version.
@@ -75,11 +94,12 @@ then publishes `manifest.json` last. It rechecks the original observations befor
 ownership and again before completion. These are non-atomic filesystem checks,
 not protection against a hostile same-UID process or hardware power loss.
 
-Only originally selected paths are read and copied. UNSELECTED LOCAL FILES REMAIN
+Only the explicitly selected paths are read and copied. UNSELECTED LOCAL FILES REMAIN
 IN THE ORIGINAL WORKSPACE; do not delete it assuming this is a complete checkout
-migration. Upstream deletion or addition of selected paths is not supported by
-this profile: changing the selected population refuses rather than interpreting
-omitted proof as absence. No directory walk or automatic source fetch occurs.
+migration. Removing any originally selected path remains unsupported, including
+upstream deletion: omitted proof is never interpreted as source absence. A
+locally deleted selected file must still be included in the new source
+expectation. No directory walk or automatic source fetch occurs.
 
 Bounds remain 32 files, 1 MiB/file, 8 MiB logical source/local/output bytes,
 32 KiB path bytes, 64 components and 255 bytes/component. The combined result
@@ -94,7 +114,15 @@ return 2, or 3 for cancellation before output; successful completion returns 0.
 ## Focused validation
 
 Run `bash scripts/verify_source_workspace_refresh.sh`.
-The suite executes the complete production workspace and command bodies and the
+The expansion suite imports the complete production workspace and shared
+commit/tree/blob membership verifier. Independently framed SHA-1 and SHA-256
+packages exercise additional selections, retained local edits and deletions,
+local collisions, path topology, stale approvals, interrupted publication and
+resource limits. It uses actual private POSIX files and does not substitute the
+verification or publication functions. It does not invoke a native server or
+establish repository authority.
+
+The existing reconciliation suites execute the complete production workspace and command bodies and the
 unchanged POSIX custody helper with actual private files, child processes, modes,
 links, racing creators and interruptions. Its pre-existing source/codec imports
 are explicit contract fixtures: these tests DO NOT execute the native membership

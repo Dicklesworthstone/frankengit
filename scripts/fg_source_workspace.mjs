@@ -30,7 +30,9 @@ workspace_sha256 independently. Expand verifies additional source at the SAME co
 preserves originally selected edits/deletions/modes and creates a new workspace.
 It never changes the original or copies unselected local files. Occupied newly
 selected paths refuse. Keep the NEW workspace hash; this is not a branch refresh.
-Refresh previews the SAME selected paths at another independently chosen commit.
+Refresh retains ALL original selected paths at another independently chosen commit
+and may add independently selected files. Newly selected paths must be absent
+locally; occupied files or unsafe ancestors refuse without overwriting them.
 Unchanged files update; local edits/deletions carry only without content conflicts.
 Refresh requires the reviewed plan hash, refuses unresolved overlaps, and creates
 a NEW workspace without changing the original. No unselected files are copied.
