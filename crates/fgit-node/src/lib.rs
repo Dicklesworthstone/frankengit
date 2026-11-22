@@ -491,6 +491,18 @@ impl UploadPackRepository for AdmissionUploadPackRepository {
         self.contains_want(oid)
     }
 
+    fn negotiation_checkpoint(&self) -> Result<(), WireError> {
+        if self
+            .ref_in_want_deadline
+            .as_ref()
+            .is_some_and(GitDaemonSessionDeadline::expired)
+        {
+            Err(WireError::PackSourceRefused)
+        } else {
+            Ok(())
+        }
+    }
+
     fn supports_ref_in_want(&self) -> bool {
         self.ref_in_want_deadline.is_some()
     }
@@ -6618,13 +6630,11 @@ impl GitDaemonSessionReceipt {
     }
 }
 
-/// Evidence that a client received the complete advertisement for an empty
-/// repository.
+/// Evidence that a client completed upload-pack without requesting a pack.
 ///
-/// Empty repositories have no reachable objects to negotiate, so a flush after
-/// the standard zero-identity advertisement is the complete upload-pack
-/// response.  Recording this separately prevents callers from claiming a pack
-/// was emitted when no pack was required.
+/// This includes empty-repository advertisements and v2 metadata or have-only
+/// negotiation sessions. It does not attest that the repository has no refs.
+/// Recording this separately prevents claiming a pack was emitted.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitDaemonAdvertisementReceipt {
     request: GitDaemonRequest,
@@ -6658,8 +6668,8 @@ impl GitDaemonReceiveReceipt {
 /// The complete observable result of one legacy git-daemon session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GitDaemonSessionOutcome {
-    /// The repository was canonically empty, so advertisement plus EOF was
-    /// the complete fetch response and no pack builder was called.
+    /// Upload-pack completed without a pack. The historical variant name also
+    /// covers v2 metadata and negotiation-only sessions on nonempty repositories.
     EmptyRepository(GitDaemonAdvertisementReceipt),
     /// Negotiation selected a request and a canonical pack payload was emitted.
     Pack(GitDaemonSessionReceipt),
@@ -7015,10 +7025,9 @@ where
 /// The server capability advertisement is built here rather than reusing the
 /// legacy capability set because protocol v2 advertises command names and
 /// feature values (`ls-refs`, `fetch`, `object-format`) instead of the v0/v1
-/// keyword set. Each v2 command request is a complete machine run: after
-/// `ls-refs` completes the loop installs a fresh machine so the same
-/// connection can carry the follow-up `fetch`; after `fetch` emits its pack
-/// the session is done.
+/// keyword set. Metadata and acknowledgment-only commands reset their request
+/// fields so the same connection can carry another independent v2 command.
+/// A pack-producing fetch terminates the session.
 fn serve_v2_upload_pack_after_greeting<R, W, BuildPack, Payload, PackError>(
     reader: &mut R,
     writer: &mut W,
@@ -7083,9 +7092,11 @@ where
             machine.finish().map_err(|error| {
                 GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error))
             })?;
-            if metadata_completed && machine.is_awaiting_command() {
-                // A completed metadata-only session needs no pack. This also
-                // covers ls-refs on an empty or already-current repository.
+            if (metadata_completed || machine.has_completed_negotiation())
+                && machine.is_awaiting_command()
+            {
+                // Completed metadata and have-only negotiation sessions need
+                // no pack. A partially received next command still refuses.
                 return Ok(GitDaemonSessionOutcome::EmptyRepository(
                     GitDaemonAdvertisementReceipt { request },
                 ));
@@ -7548,6 +7559,7 @@ fn v2_fetch_capability(repository: &impl UploadPackRepository, supports_filter: 
         (repository.supports_shallow(), b"shallow".as_slice()),
         (supports_filter, b"filter".as_slice()),
         (repository.supports_ref_in_want(), b"ref-in-want".as_slice()),
+        (true, b"wait-for-done".as_slice()),
     ] {
         if enabled {
             line.push(if line.len() == 5 { b'=' } else { b' ' });

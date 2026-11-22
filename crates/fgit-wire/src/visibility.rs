@@ -276,6 +276,10 @@ impl<R: ?Sized + UploadPackRepository> UploadPackRepository for VisibleUploadPac
         self.disclosable(oid) && self.inner.is_common(oid)
     }
 
+    fn negotiation_checkpoint(&self) -> Result<(), WireError> {
+        self.inner.negotiation_checkpoint()
+    }
+
     fn supports_ref_in_want(&self) -> bool {
         self.inner.supports_ref_in_want()
     }

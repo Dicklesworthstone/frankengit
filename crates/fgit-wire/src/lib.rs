@@ -1325,6 +1325,12 @@ pub trait UploadPackRepository {
     fn contains_want(&self, oid: AnyGitOid) -> bool;
     /// Whether a client `have` is already common with the advertised closure.
     fn is_common(&self, oid: AnyGitOid) -> bool;
+    /// Check the live request before negotiation-only work or disclosure.
+    /// Called for absent/hidden haves and empty rounds too. Static repository
+    /// views need no deadline; live adapters preserve their original scope.
+    fn negotiation_checkpoint(&self) -> Result<(), WireError> {
+        Ok(())
+    }
     /// Whether this view supplies exact visible refs from one authenticated
     /// snapshot. Parser support alone must not advertise `ref-in-want`.
     fn supports_ref_in_want(&self) -> bool {
@@ -1838,9 +1844,9 @@ fn oid_hex(oid: AnyGitOid) -> String {
     }
 }
 
-/// Request-body framing of one upload-pack machine. Only a stateless HTTP
-/// request can end a negotiation round with acknowledgments and no pack, so
-/// "round complete" exists only inside that variant.
+/// Request-body framing of one upload-pack machine. HTTP owns one negotiation
+/// round per request. Connection-framed v2 commands can also finish with only
+/// acknowledgments, then reset their arguments for another command.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RequestFraming {
     /// One connection carries every negotiation round (git://, SSH, file).
@@ -2620,6 +2626,7 @@ pub struct V2UploadPack {
     automatic_shallow_updates: bool,
     framing: RequestFraming,
     wait_for_done: bool,
+    completed_negotiation: bool,
     object_info: object_info::ObjectInfoRequest,
 }
 
@@ -2674,8 +2681,17 @@ impl V2UploadPack {
             automatic_shallow_updates: false,
             framing: RequestFraming::Connection,
             wait_for_done: false,
+            completed_negotiation: false,
             object_info: object_info::ObjectInfoRequest::default(),
         })
+    }
+
+    /// Whether this machine has completed an acknowledgment-only fetch round.
+    /// A connection may then end cleanly or carry a new independent command.
+    /// Pair with `is_awaiting_command` and `finish` before accepting EOF.
+    #[must_use]
+    pub const fn has_completed_negotiation(&self) -> bool {
+        self.completed_negotiation
     }
 
     /// Whether no command is in progress. Pair with `finish` to detect a
@@ -2919,9 +2935,10 @@ impl V2UploadPack {
             return Ok(Transition::empty());
         }
         if let Some(rest) = line.strip_prefix(b"have ") {
-            if self.wants.is_empty() {
-                return Err(WireError::MissingWant);
-            }
+            // V2 arguments are not ordered: a negotiation-only request may
+            // name its haves before wait-for-done. Validate the complete
+            // no-want shape at the flush, before any ACK can escape.
+            repository.negotiation_checkpoint()?;
             let oid = parse_object_id(rest, repository.object_format())?;
             self.haves.insert("have", oid, self.limits.max_haves)?;
             return Ok(Transition::empty());
@@ -3003,8 +3020,9 @@ impl V2UploadPack {
         ) {
             return Ok(Transition::empty());
         }
-        if line == b"wait-for-done" && self.framing.is_stateless_http() {
+        if line == b"wait-for-done" {
             self.require_fetch_feature(b"wait-for-done")?;
+            repository.negotiation_checkpoint()?;
             if self.wait_for_done {
                 return Err(WireError::MalformedRequestLine {
                     line: line.to_vec(),
@@ -3173,9 +3191,12 @@ impl V2UploadPack {
         &mut self,
         repository: &impl UploadPackRepository,
     ) -> Result<Transition, WireError> {
-        if self.wants.is_empty() {
+        // Have-only negotiation is an explicit wait-for-done operation. A
+        // pack-producing request still requires at least one authorized want.
+        if self.wants.is_empty() && (!self.wait_for_done || self.done) {
             return Err(WireError::MissingWant);
         }
+        repository.negotiation_checkpoint()?;
         let request = PackRequest {
             version: UploadPackVersion::V2,
             wants: self.wants.as_slice().to_vec(),
@@ -3201,6 +3222,7 @@ impl V2UploadPack {
             )?;
             let mut any_common = false;
             for &have in self.haves.as_slice() {
+                repository.negotiation_checkpoint()?;
                 if repository.is_common(have) {
                     let line = format!("ACK {}\n", oid_hex(have)).into_bytes();
                     let count = line.len() + 4;
@@ -3226,9 +3248,10 @@ impl V2UploadPack {
             // Without an ancestry oracle, only exact wanted common tips prove
             // a sufficient cut. Conservatively ask for another round otherwise;
             // the client's explicit `done` can always terminate negotiation.
-            let ready = if self.framing.is_stateless_http() {
-                !self.wait_for_done
-                    && any_common
+            let ready = if self.wait_for_done {
+                false
+            } else if self.framing.is_stateless_http() {
+                any_common
                     && self.shallows.is_empty()
                     && self.deepen.is_none()
                     && self.deepen_since.is_none()
@@ -3243,8 +3266,15 @@ impl V2UploadPack {
             };
             if !ready {
                 add_output_packet(&mut output, Packet::Flush, 4, &mut used_bytes, &self.limits)?;
-                self.framing.complete_round();
-                self.state = V2State::Complete;
+                validate_response_packet_sizes(&output, &self.limits)?;
+                repository.negotiation_checkpoint()?;
+                self.completed_negotiation = true;
+                if self.framing.is_stateless_http() {
+                    self.framing.complete_round();
+                    self.state = V2State::Complete;
+                } else {
+                    self.reset_fetch_command();
+                }
                 return Ok(Transition {
                     output,
                     events: Vec::new(),
@@ -3285,24 +3315,50 @@ impl V2UploadPack {
         )?;
         // Keep the complete-prefix packet ceiling without allocating a second
         // encoded copy of ACKs, shallow data and wanted-ref receipts.
-        for packet in &output {
-            let bytes = match packet {
-                Packet::Data(line) => line.len() + 4,
-                _ => 4,
-            };
-            if bytes > self.limits.max_packet_bytes {
-                return Err(WireError::PacketTooLarge {
-                    declared: bytes,
-                    limit: self.limits.max_packet_bytes,
-                });
-            }
-        }
+        validate_response_packet_sizes(&output, &self.limits)?;
+        repository.negotiation_checkpoint()?;
         self.state = V2State::Complete;
         Ok(Transition {
             output,
             events: vec![WireEvent::PackRequested(request)],
         })
     }
+
+    /// V2 negotiation rounds are independent requests on every transport.
+    /// Preserve the packet decoder: it can already own a partial next command.
+    /// No have, want-ref, filter, shallow or pack option may leak into it.
+    fn reset_fetch_command(&mut self) {
+        self.request_capabilities = Capabilities::default();
+        self.wants = RequestObjectIds::default();
+        self.explicit_wants = RequestObjectIds::default();
+        self.wanted_refs = wanted_refs::WantedRefs::default();
+        self.haves = RequestObjectIds::default();
+        self.shallows = RequestObjectIds::default();
+        self.deepen = None;
+        self.deepen_since = None;
+        self.deepen_not = RequestObjectIds::default();
+        self.filter = None;
+        self.options = PackOptions::NONE;
+        self.done = false;
+        self.wait_for_done = false;
+        self.state = V2State::AwaitCommand;
+    }
+}
+
+fn validate_response_packet_sizes(output: &[Packet], limits: &WireLimits) -> Result<(), WireError> {
+    for packet in output {
+        let bytes = match packet {
+            Packet::Data(line) => line.len() + 4,
+            _ => 4,
+        };
+        if bytes > limits.max_packet_bytes {
+            return Err(WireError::PacketTooLarge {
+                declared: bytes,
+                limit: limits.max_packet_bytes,
+            });
+        }
+    }
+    Ok(())
 }
 
 const fn command_name(command: V2Command) -> &'static [u8] {

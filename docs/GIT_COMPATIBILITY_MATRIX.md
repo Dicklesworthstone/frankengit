@@ -63,6 +63,16 @@ adapter; native tests cover persisted visibility, restart and actual pack
 construction. This capability does not expand the historical stock-client
 campaign totals below or imply a completed cross-transport qualification.
 
+## Negotiation-only fetches with protocol v2
+
+Native upload-pack advertises `wait-for-done` through the shared Git/SSH and
+HTTP capability renderer. Have-only requests return bounded ACK/NAK responses
+without selecting a pack, and persistent sessions can carry successive rounds
+or a fresh normal fetch. The [negotiation-only profile](GIT_NEGOTIATION_ONLY.md)
+describes visibility, request reset, resource and cancellation boundaries.
+Authored wire/native regressions remain unexecuted for this change; historical
+stock-client and Tier A totals below are unchanged.
+
 ## Executed stock-client rows: partial clone, notes, gitlinks, atomic push, push options
 
 Current implementation supports `sparse:oid=<exact visible blob OID>` and

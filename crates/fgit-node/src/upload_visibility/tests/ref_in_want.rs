@@ -8,6 +8,8 @@ use fgit_wire::smart_http::rpc::RpcError;
 use fgit_wire::smart_http::{BodyDecoder, BodyFraming, HttpLimits, parse_head};
 use std::io::Cursor;
 
+mod negotiation;
+
 fn fetch_body(format: GitHashAlgorithm, names: &[&[u8]], controls: &[&[u8]]) -> Vec<u8> {
     let mut packets = vec![
         Packet::Data(b"command=fetch\n".to_vec()),
@@ -226,8 +228,8 @@ fn raw_fetch_by_ref_serves_exact_objects_and_refuses_retained_history_after_reop
             );
             assert!(
                 response
-                    .windows(b"fetch=shallow filter ref-in-want\n".len())
-                    .any(|bytes| bytes == b"fetch=shallow filter ref-in-want\n")
+                    .windows(b"fetch=shallow filter ref-in-want wait-for-done\n".len())
+                    .any(|bytes| bytes == b"fetch=shallow filter ref-in-want wait-for-done\n")
             );
             assert_ref_section(&response, &[(public, b"refs/heads/public")]);
             let pack = fgit_pack::read_verified_pack(
