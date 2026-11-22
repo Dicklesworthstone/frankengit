@@ -93,8 +93,10 @@ clock, expected-old refresh or force flag is inferred.
 
 Optional `patch_profile` selects an explicit native grammar. Omit it or select
 `exact-tree-v1` for the existing regular-file behavior. Select
-`exact-tree-binary-v1` for verified edited binary renames, or `exact-symlink-v1`
-to create, edit, delete or rename inert Git symlink blobs. Sponsored
+`exact-tree-binary-v1` for verified edited binary renames, `exact-symlink-v1`
+to create, edit, delete or rename inert Git symlink blobs, or `exact-gitlink-v1`
+for opaque submodule-pointer creation, update and deletion alongside ordinary
+text changes such as `.gitmodules`. Sponsored
 `source-candidates` requests and ordinary source readers use these same choices.
 The profile is echoed in response metadata when supplied; it never grants
 publication rights. Unknown or duplicate profiles refuse, and `inspect` and
@@ -122,7 +124,11 @@ exact target blob, including absolute paths and `..` components as source bytes.
 It never follows targets, writes a host link or reads a target from the host.
 The other profiles continue to refuse symlink edits. Repository entry paths
 still reject traversal, and both endpoints of a rename must pass the same
-native path checks. Fuzzy application, gitlinks, rename guessing, copies,
+native path checks. Gitlink edits require the explicit `exact-gitlink-v1`
+[full-index pointer grammar](NATIVE_EXACT_PATCH.md#explicit-opaque-gitlink-profile).
+Their foreign commit targets are never read, imported or traversed. The gitlink
+profile refuses binary/symlink sections, renames and entry-type conversions;
+every older profile retains its gitlink refusal. Fuzzy application, rename guessing, copies,
 external drivers and arbitrary object writes remain unsupported. Every file
 must succeed before a candidate is returned. Unchanged siblings are preserved
 by the existing native exporter.
@@ -133,7 +139,10 @@ A successful response is multipart/mixed: JSON `metadata`, then the native binar
 type is `source_preparation`. It contains source_commit, source_rcr,
 candidate_commit, root_tree, patch_sha256, object_count, bundle byte length and
 SHA-256 transport checksum, and path receipts with old/new blob IDs, mode and
-hunk count. Paths use byte-exact `path_hex`.
+hunk count. Paths use byte-exact `path_hex`. For `exact-gitlink-v1`, all path
+receipts instead use `old_object` and `new_object`; mode `57344` (octal `160000`)
+identifies a gitlink. A deletion has a null new identity and mode. Older profiles
+retain the existing `old_blob` and `new_blob` keys.
 Preparation, inspection and publication replies include authoritative lowercase
 `ref_hex` for exact native reference bytes; `ref` retains UTF-8 text or is null
 when those bytes are not UTF-8.

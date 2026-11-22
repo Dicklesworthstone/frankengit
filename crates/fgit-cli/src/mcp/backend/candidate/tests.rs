@@ -56,6 +56,7 @@ fn patch_profile_selection_is_explicit_and_cannot_expand_the_transport_envelope(
                 prepare::PatchProfile::BinaryRefactor,
             ),
             ("exact-symlink-v1", prepare::PatchProfile::Symlinks),
+            ("exact-gitlink-v1", prepare::PatchProfile::Gitlinks),
         ] {
             input.insert("profile".into(), text(name));
             assert_eq!(prepare::parse(&input, format).unwrap().profile, profile);
@@ -94,6 +95,7 @@ fn patch_profile_selection_is_explicit_and_cannot_expand_the_transport_envelope(
             text("exact-tree-v1"),
             text("exact-tree-binary-v1"),
             text("exact-symlink-v1"),
+            text("exact-gitlink-v1"),
         ])
     );
     let agent_schema = prepare::agent_schema();
@@ -106,6 +108,7 @@ fn patch_profile_selection_is_explicit_and_cannot_expand_the_transport_envelope(
             text("exact-tree-v1"),
             text("exact-tree-binary-v1"),
             text("exact-symlink-v1"),
+            text("exact-gitlink-v1"),
         ])
     );
 }

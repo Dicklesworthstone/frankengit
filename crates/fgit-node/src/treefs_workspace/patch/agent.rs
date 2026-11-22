@@ -60,6 +60,28 @@ impl OneNode {
         .await
     }
 
+    /// Opt into opaque gitlink pointer patches under the original verified
+    /// sponsored request. Parent source disclosure grants no submodule access.
+    pub async fn prepare_agent_source_gitlink_patch_in(
+        &self,
+        candidate_request: &SourceCandidateRequest<'_>,
+        reference: &RefName,
+        expected_commit: GitOid,
+        patch_bytes: &[u8],
+        metadata: &MergeMetadata,
+    ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
+        let context = candidate_request.context(self)?;
+        self.prepare_agent_source_gitlink_patch_with_context_in(
+            &context,
+            candidate_request,
+            reference,
+            expected_commit,
+            patch_bytes,
+            metadata,
+        )
+        .await
+    }
+
     /// Continue under the exact context already owned and driven by HTTP.
     /// Its caller binds this context to the authenticated transport deadline;
     /// this adapter retains its cancellation/poll/cost ledger rather than
@@ -107,6 +129,27 @@ impl OneNode {
             patch_bytes,
             metadata,
             PatchProfile::Symlinks,
+        )
+        .await
+    }
+
+    pub(crate) async fn prepare_agent_source_gitlink_patch_with_context_in(
+        &self,
+        context: &NodeRequestContext,
+        candidate_request: &SourceCandidateRequest<'_>,
+        reference: &RefName,
+        expected_commit: GitOid,
+        patch_bytes: &[u8],
+        metadata: &MergeMetadata,
+    ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
+        self.prepare_agent_source_patch_profile_with_context_in(
+            context,
+            candidate_request,
+            reference,
+            expected_commit,
+            patch_bytes,
+            metadata,
+            PatchProfile::Gitlinks,
         )
         .await
     }

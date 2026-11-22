@@ -168,6 +168,82 @@ def campaign(binary, fmt):
         assert run(link_apply, stdin=b"reviewed-symlink-key\n", receipt=True) == link_terminal
         print(f"PATCH_SYMLINK_CLI format={fmt} candidate={linked['candidate_commit']} mode=120000 inert_bytes=true old_profiles_refuse=true")
 
+        # A gitlink names a foreign commit, not a blob in this repository. These
+        # identities are deliberately never written to the source object store.
+        first_pointer = oid(fmt, "commit", b"foreign submodule first\n")
+        second_pointer = oid(fmt, "commit", b"foreign submodule second\n")
+        absent = "0" * len(first_pointer)
+        current = linked["candidate_commit"]
+        previous_config = b""
+        for phase, before, after, config_body in [
+            ("create", absent, first_pointer, b'[submodule "module"]\n\tpath = module\n\turl = https://example.invalid/first\n'),
+            ("update", first_pointer, second_pointer, b'[submodule "module"]\n\tpath = module\n\turl = https://example.invalid/second\n'),
+            ("delete", second_pointer, absent, b""),
+        ]:
+            prefix = "diff --git a/module b/module\n"
+            if phase == "create":
+                pointer_diff = f"{prefix}new file mode 160000\nindex {before}..{after}\n--- /dev/null\n+++ b/module\n@@ -0,0 +1 @@\n+Subproject commit {after}\n"
+                config_headers = "new file mode 100644\n--- /dev/null\n+++ b/.gitmodules\n@@ -0,0 +1,3 @@\n"
+            elif phase == "update":
+                pointer_diff = f"{prefix}index {before}..{after} 160000\n--- a/module\n+++ b/module\n@@ -1 +1 @@\n-Subproject commit {before}\n+Subproject commit {after}\n"
+                config_headers = "--- a/.gitmodules\n+++ b/.gitmodules\n@@ -1,3 +1,3 @@\n"
+            else:
+                pointer_diff = f"{prefix}deleted file mode 160000\nindex {before}..{after}\n--- a/module\n+++ /dev/null\n@@ -1 +0,0 @@\n-Subproject commit {before}\n"
+                config_headers = "deleted file mode 100644\n--- a/.gitmodules\n+++ /dev/null\n@@ -1,3 +0,0 @@\n"
+            config_diff = b"diff --git a/.gitmodules b/.gitmodules\n" + config_headers.encode()
+            config_diff += b"".join(b"-" + line for line in previous_config.splitlines(keepends=True))
+            config_diff += b"".join(b"+" + line for line in config_body.splitlines(keepends=True))
+            pointer_patch = root / f"gitlink-{phase}.patch"
+            pointer_patch.write_bytes(pointer_diff.encode() + config_diff)
+            pointer_bundle = root / f"gitlink-{phase}.bundle"
+            pointer_prepare = prepare.copy()
+            pointer_prepare[6], pointer_prepare[7] = pointer_patch, pointer_bundle
+            pointer_prepare[profile_at] = "exact-gitlink-v1"
+            pointer_prepare[pointer_prepare.index("--expected-base") + 1] = current
+            if phase == "create":
+                for legacy in ("exact-v1", "exact-binary-v1", "exact-tree-v1", "exact-tree-binary-v1", "exact-symlink-v1"):
+                    denied = pointer_prepare.copy()
+                    denied[profile_at], denied[7] = legacy, root / f"{legacy}-gitlink-refused.bundle"
+                    run(denied, code=2)
+                    assert not denied[7].exists()
+            prepared_pointer = run(pointer_prepare, receipt=True)
+            assert prepared_pointer["profile"] == "exact-gitlink-v1"
+            assert prepared_pointer["published_to_repository"] is False and prepared_pointer["node_closed"] is True
+            entries = [("edit.txt", "100755", new), ("keep.txt", "100644", keep), ("link", "120000", link_blob)]
+            if phase != "delete":
+                entries += [(".gitmodules", "100644", oid(fmt, "blob", config_body)), ("module", "160000", after)]
+            expected_tree_body = tree(entries)
+            expected_tree = oid(fmt, "tree", expected_tree_body)
+            assert prepared_pointer["root_tree"] == expected_tree
+            pointer_candidate = prepared_pointer["candidate_commit"]
+            objects = bundle_objects(pointer_bundle.read_bytes(), fmt, current, pointer_candidate)
+            # Deletion restores an unchanged ancestor tree: the exporter may
+            # reuse that verified object rather than redundantly packing it.
+            if expected_tree in objects:
+                assert objects[expected_tree] == ("tree", expected_tree_body)
+            assert first_pointer not in objects and second_pointer not in objects
+            for pointer in (first_pointer, second_pointer):
+                assert oid(fmt, "blob", f"Subproject commit {pointer}\n".encode()) not in objects
+            if config_body:
+                assert objects[oid(fmt, "blob", config_body)] == ("blob", config_body)
+            receipts = {bytes.fromhex(item["path_hex"]): item for item in prepared_pointer["paths"]}
+            assert set(receipts) == {b".gitmodules", b"module"}
+            assert all("old_blob" not in item and "new_blob" not in item for item in receipts.values())
+            pointer_receipt = receipts[b"module"]
+            assert pointer_receipt["old_object"] == (None if phase == "create" else before)
+            assert pointer_receipt["new_object"] == (None if phase == "delete" else after)
+            assert pointer_receipt["new_mode"] == (None if phase == "delete" else "160000")
+            pointer_apply = apply.copy()
+            pointer_apply[6] = pointer_bundle
+            pointer_apply[pointer_apply.index("--expected-base") + 1] = current
+            pointer_apply[-1] = pointer_candidate
+            key = f"reviewed-gitlink-{phase}\n".encode()
+            pointer_terminal = run(pointer_apply, stdin=key, receipt=True)
+            assert pointer_terminal["outcome"] == "committed" and pointer_terminal["published_to_repository"] is True
+            assert run(pointer_apply, stdin=key, receipt=True) == pointer_terminal
+            current, previous_config = pointer_candidate, config_body
+            print(f"PATCH_GITLINK_CLI format={fmt} operation={phase} candidate={current} mode=160000 opaque_target=true replay_identical=true")
+
 
 def main():
     parser = argparse.ArgumentParser()

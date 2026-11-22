@@ -10,6 +10,7 @@ use fgit_node::NodeWorkspaceRefusal;
 use fgit_types::{GitOid, RefName};
 
 mod binary_refactor;
+mod gitlinks;
 mod symlinks;
 
 const NAME: &str = "frankengit_source_candidate";
@@ -331,6 +332,7 @@ fn sponsored_discovery_and_dispatch_exclude_every_other_candidate_engine() {
         "exact-tree-v1",
         "exact-tree-binary-v1",
         "exact-symlink-v1",
+        "exact-gitlink-v1",
     ] {
         assert!(schema.contains(allowed));
     }

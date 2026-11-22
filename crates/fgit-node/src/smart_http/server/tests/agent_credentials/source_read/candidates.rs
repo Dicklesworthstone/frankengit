@@ -4,6 +4,7 @@ use crate::smart_http::server::source;
 use fgit_identity::agent::SOURCE_CANDIDATES;
 use fgit_wire::smart_http::{BodyFraming, HttpLimits, HttpVersion, head};
 
+mod gitlinks;
 mod publication;
 mod symlinks;
 

@@ -15,6 +15,7 @@ pub(super) enum PatchProfile {
     Regular,
     BinaryRefactor,
     Symlinks,
+    Gitlinks,
 }
 
 impl PatchProfile {
@@ -23,6 +24,7 @@ impl PatchProfile {
             Self::Regular => "exact-tree-v1",
             Self::BinaryRefactor => "exact-tree-binary-v1",
             Self::Symlinks => "exact-symlink-v1",
+            Self::Gitlinks => "exact-gitlink-v1",
         }
     }
 }
@@ -60,6 +62,7 @@ pub(super) fn parse(args: &Object, format: GitHashAlgorithm) -> Result<Input, To
         None | Some("exact-tree-v1") => PatchProfile::Regular,
         Some("exact-tree-binary-v1") => PatchProfile::BinaryRefactor,
         Some("exact-symlink-v1") => PatchProfile::Symlinks,
+        Some("exact-gitlink-v1") => PatchProfile::Gitlinks,
         Some(_) => return Err(ToolError::invalid("unsupported_patch_profile")),
     };
     let base = oid(args, "expected_base", format)?;
@@ -123,9 +126,9 @@ fn patch_schema() -> Value {
     let mut properties = common_properties("prepare_patch");
     properties.insert("profile".into(), object([
         ("type", text("string")),
-        ("enum", Value::Array(vec![text("exact-tree-v1"), text("exact-tree-binary-v1"), text("exact-symlink-v1")])),
+        ("enum", Value::Array(vec![text("exact-tree-v1"), text("exact-tree-binary-v1"), text("exact-symlink-v1"), text("exact-gitlink-v1")])),
         ("description", text(
-            "Omit for existing regular-file behavior; exact-tree-binary-v1 explicitly permits edited binary renames with full old/new blob identities and verified forward/reverse members. exact-symlink-v1 explicitly permits inert Git symlink blobs without following targets."
+            "Omit for existing regular-file behavior; exact-tree-binary-v1 explicitly permits edited binary renames with full old/new blob identities and verified forward/reverse members. exact-symlink-v1 explicitly permits inert Git symlink blobs without following targets. exact-gitlink-v1 permits canonical submodule pointer edits and regular-file text edits with full native IDs, without fetching submodules; its path receipts use old_object/new_object."
         )),
     ]));
     payload_properties(&mut properties);
@@ -163,7 +166,18 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
     workspace.copy_from_slice(&digest[..16]);
     let candidate =
         if let Some(candidate_request) = candidate_request.as_ref() {
-            if input.profile == PatchProfile::Symlinks {
+            if input.profile == PatchProfile::Gitlinks {
+                backend
+                    .node
+                    .runtime()
+                    .block_on(backend.node.prepare_agent_source_gitlink_patch_in(
+                        candidate_request,
+                        &input.reference,
+                        input.base,
+                        &input.patch,
+                        &input.metadata,
+                    ))
+            } else if input.profile == PatchProfile::Symlinks {
                 backend
                     .node
                     .runtime()
@@ -190,6 +204,20 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
         } else {
             let request = backend.command_context();
             match input.profile {
+                PatchProfile::Gitlinks => {
+                    backend
+                        .node
+                        .runtime()
+                        .block_on(backend.node.prepare_trusted_gitlink_patch_in(
+                            &request,
+                            &input.reference,
+                            input.base,
+                            workspace,
+                            &input.patch,
+                            &input.metadata,
+                            Default::default(),
+                        ))
+                }
                 PatchProfile::Symlinks => {
                     backend
                         .node
@@ -270,6 +298,7 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
             || path.new_mode.is_some_and(|m| {
                 !matches!(m, 0o100644 | 0o100755)
                     && !(input.profile == PatchProfile::Symlinks && m == 0o120000)
+                    && !(input.profile == PatchProfile::Gitlinks && m == 0o160000)
             })
             || [path.old_blob, path.new_blob]
                 .into_iter()
@@ -281,11 +310,19 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
         paths.push(object([
             ("path_hex", text(hex(&path.path))),
             (
-                "old_blob",
+                if input.profile == PatchProfile::Gitlinks {
+                    "old_object"
+                } else {
+                    "old_blob"
+                },
                 path.old_blob.map_or(Value::Null, |id| text(raw_oid(id))),
             ),
             (
-                "new_blob",
+                if input.profile == PatchProfile::Gitlinks {
+                    "new_object"
+                } else {
+                    "new_blob"
+                },
                 path.new_blob.map_or(Value::Null, |id| text(raw_oid(id))),
             ),
             (

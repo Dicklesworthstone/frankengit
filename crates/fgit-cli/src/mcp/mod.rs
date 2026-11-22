@@ -49,7 +49,8 @@ that same canonical scope; neither launch flag grants the other tool group.
 History, blame, historical tree/blob and reference comparison tools independently
 require source-history-read. With source-candidates, --allow-source exposes only
 prepare_patch (regular-file exact-tree-v1, exact-tree-binary-v1 for edited binary
-renames, or exact-symlink-v1 for inert symlinks) and single-parent inspect operations of
+renames, exact-symlink-v1 for inert symlinks, or exact-gitlink-v1 for opaque
+submodule pointer edits) and single-parent inspect operations of
 frankengit_source_candidate. Candidate data grants no publication authority.
 The independent --allow-source-writes ceiling with canonical source-publish
 exposes frankengit_source_publish for one reviewed single-parent bundle.

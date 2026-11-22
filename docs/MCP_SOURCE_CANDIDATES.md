@@ -15,7 +15,8 @@ also needs those independent source APIs. Existing grants, including masks
 `0x007f`, `0x00ff` and `0x01ff`, gain no candidate authority after an upgrade.
 
 Sponsored discovery exposes only `prepare_patch` with omitted profile,
-`exact-tree-v1`, explicit `exact-tree-binary-v1` or `exact-symlink-v1`, and
+`exact-tree-v1`, explicit `exact-tree-binary-v1`, `exact-symlink-v1` or
+`exact-gitlink-v1`, and
 `inspect` for an uploaded single-parent candidate. Initial history, replay, rebase,
 PR and queue operations are refused before authentication or native dispatch.
 The trusted-local schema retains its existing operations.
@@ -104,6 +105,18 @@ input. Sponsored calls must borrow the original `SourceCandidateRequest`; the
 native symlink entrypoint retains its namespace, raw input reservation and
 deadline and cannot replace a stopped context with a renewed one. Existing
 saved-bundle review and independently authorized publication remain required.
+
+Both caller profiles may also select `"profile": "exact-gitlink-v1"` for
+submodule-pointer creation, update and deletion plus ordinary text edits such
+as `.gitmodules`. The [native full-index pointer grammar](NATIVE_EXACT_PATCH.md#explicit-opaque-gitlink-profile)
+binds the old pointer to the selected tree and the new pointer to the complete
+patched image. Foreign targets are never fetched, imported or traversed. This
+profile refuses binary sections, symlinks, renames and entry-type conversions;
+the old profiles continue to refuse gitlinks. Its path receipts use `old_object`
+and `new_object` for every path, with the octal mode string `"160000"` for
+gitlinks. A deletion has a null new object and mode. Older profiles keep their
+existing blob keys. The same request, independent grants and transport bounds
+apply; this selector adds no publication authority.
 
 The complete result carries source RCR/base, candidate commit/tree, exact patch
 and bundle SHA-256, changed-path blob/mode receipts and `publication_arguments`.

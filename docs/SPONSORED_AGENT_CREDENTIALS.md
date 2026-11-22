@@ -96,7 +96,7 @@ observation schema. This grants no agent source-import capability.
 | `outcomes-read` | Own principal's single-transaction recovery by original key |
 | `source-read` | Bounded current source, reference listing, tag inspection, search, context and agent-context reads |
 | `source-history-read` | Bounded visible-ref commit history, blame, historical trees/files and reference diffs |
-| `source-candidates` | HTTP exact-patch preparation and single-parent bundle inspection; MCP regular-file `prepare_patch`, explicit `exact-tree-binary-v1` edited binary renames, `exact-symlink-v1` inert symlink edits, and single-parent `inspect`, against an explicit current branch |
+| `source-candidates` | HTTP exact-patch preparation and single-parent bundle inspection; MCP regular-file `prepare_patch`, explicit `exact-tree-binary-v1` edited binary renames, `exact-symlink-v1` inert symlink edits, `exact-gitlink-v1` opaque submodule pointers, and single-parent `inspect`, against an explicit current branch |
 | `source-publish` | Apply one reviewed single-parent source bundle to an existing branch within an explicitly issued native ref/path ceiling |
 | `milestones-read` | Native milestone listing, exact lifecycle history and same-snapshot open/closed issue counts |
 | `milestones-write` | Open, edit, close and reopen native milestones at explicit versions |
@@ -384,7 +384,8 @@ remain unavailable. MCP exposes
 the same request-borrowed capability through `frankengit_source_candidate`, with
 regular-file `prepare_patch` (`exact-tree-v1`), explicit
 `exact-tree-binary-v1` edited binary renames, explicit `exact-symlink-v1` Git
-symlink edits, and single-parent `inspect`.
+symlink edits, explicit `exact-gitlink-v1` opaque submodule-pointer edits, and
+single-parent `inspect`.
 The binary profile checks both original endpoints, full native blob identities
 and forward/reverse members through the existing native planner. An omitted
 profile retains the original grammar. Binary selection does not permit symlinks,
@@ -400,6 +401,13 @@ HTTP preparation selects the same explicit symlink profile with
 `patch_profile=exact-symlink-v1` in its multipart command. It retains the original
 authenticated HTTP context and reservation through native planning and response
 framing; its resulting bundle is inspected through the existing `inspect` route.
+The gitlink profile also retains this same authenticated request and reservation.
+It accepts full native commit pointers plus ordinary text edits, verifies old
+pointers from the selected tree and never fetches their foreign objects. HTTP
+selects `patch_profile=exact-gitlink-v1`; MCP selects `profile=exact-gitlink-v1`.
+Both use the existing independent candidate/publish grants and ref/path scope.
+See [the exact pointer grammar](NATIVE_EXACT_PATCH.md#explicit-opaque-gitlink-profile)
+for supported shapes, resource accounting and object-identity receipt fields.
 The MCP discovery schema omits the other candidate engines, and dispatch rejects
 initial-history, replay/rebase/PR/queue preparation before authentication.
 MCP retains its narrower 16 KiB text-patch / 24 KiB decoded patch-or-bundle bounds,
