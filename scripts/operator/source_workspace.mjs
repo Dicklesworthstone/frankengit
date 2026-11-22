@@ -6,6 +6,7 @@ import { lstat, realpath, open, mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { webcrypto } from 'node:crypto';
 import { readSourcePackage, SOURCE_PACKAGE_BYTES } from '../../crates/fgit-node/src/smart_http/server/browser/search-context-package.mjs';
+import { verifyPathAbsence } from '../../crates/fgit-node/src/smart_http/server/browser/search-context-membership.mjs';
 import { pathBytes } from '../../crates/fgit-node/src/smart_http/server/browser/source-patch.mjs';
 import { oid } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-core.mjs';
 import { absolute, contains, directory, readPrivate, writeNew, syncDirectory } from './workflow_watch_io.mjs';
@@ -109,12 +110,16 @@ export async function createSourceWorkspace(root, inputBytes, independentExpecte
 }
 // One root-last owner for initial materialization, expansion and refresh. Overrides
 // are private owned snapshots from the predecessor, never caller-minted source.
-async function publishWorkspace(root, bytes, expected, loaded, time, carried = new Map(), beforeRoot = null, expansion = null, refresh = null) {
+async function publishWorkspace(root, bytes, expected, loaded, time, carried = new Map(), beforeRoot = null, expansion = null, refresh = null, verifiedAbsentPaths = []) {
   const value = manifest(bytes, expected, loaded.verified), encoded = canonical(value);
+  // Only the private refresh verifier supplies absent paths. Resolved local
+  // images at those paths are new local creations against the next baseline;
+  // they never enter its positive source inventory or gain source membership.
+  const paths = selectedPaths([...value.files.map(f => f.path_hex), ...verifiedAbsentPaths]);
   // This macOS sparse-directory profile cannot materialize invalid UTF-8 names.
   // Validate the original bytes without decoding/normalizing them, before any
   // destination is acquired. Linux retains its arbitrary-byte path profile.
-  hostPaths(value.files.map(f => f.path_hex));
+  hostPaths(paths);
   if (encoded.length > WORKSPACE_LIMITS.manifestBytes) fail('source_workspace_manifest_budget');
   const hash = sha256(encoded), answer = { ...receipt(root, hash, value), ...(expansion ? {
     type: 'source_workspace_expanded', expansion, original_workspace_changed: false,
@@ -128,6 +133,13 @@ async function publishWorkspace(root, bytes, expected, loaded, time, carried = n
     total += file?.bytes.length ?? 0;
     if (total > WORKSPACE_LIMITS.totalBytes) fail('source_workspace_materialization_budget');
     outputs.set(f.path_hex, file);
+  }
+  for (const path of verifiedAbsentPaths) {
+    if (outputs.has(path) || !carried.has(path)) fail('source_workspace_refresh_deletions');
+    const file = carried.get(path);
+    total += file?.bytes.length ?? 0;
+    if (total > WORKSPACE_LIMITS.totalBytes || file && file.bytes.length > WORKSPACE_LIMITS.fileBytes) fail('source_workspace_materialization_budget');
+    outputs.set(path, file);
   }
   await directory(dirname(root)); time.check();
   await beforeRoot?.(); time.check();
@@ -145,15 +157,15 @@ async function publishWorkspace(root, bytes, expected, loaded, time, carried = n
       time.check();
     }
     const dirs = new Set([null]);
-    for (const file of value.files) {
-      const raw = Buffer.from(file.path_hex, 'hex');
+    for (const path of paths) {
+      const raw = Buffer.from(path, 'hex');
       for (let at = 0; at < raw.length; at++) if (raw[at] === 47) dirs.add(raw.subarray(0, at).toString('hex'));
     }
     const ordered = [...dirs].sort((a, b) => a === b ? 0 : a === null ? -1 : b === null ? 1 : a < b ? -1 : 1);
     for (const hex of ordered) { time.check(); await mkdir(localPath(root, hex), { mode: 0o700 }); await privateDirectory(localPath(root, hex)); }
     for (const [path, f] of outputs) { time.check(); if (f) await writeFileNew(localPath(root, path), f.bytes, f.executable); }
     // Read every owned output before the last-written root marks completion.
-    const snapshot = await readWorkspaceFiles(root, value.files.map(f => f.path_hex), { check: time.check, timeoutMs: time.remaining() });
+    const snapshot = await readWorkspaceFiles(root, paths, { check: time.check, timeoutMs: time.remaining() });
     for (const [path, wanted] of outputs) {
       const actual = snapshot.files.get(path);
       if (wanted === null ? actual !== null : !actual || actual.executable !== wanted.executable ||
@@ -206,6 +218,7 @@ export async function expandSourceWorkspace(root, workspaceHash, additionalBytes
 }
 // A refresh deliberately selects another independently pinned commit, retaining
 // all existing selections and permitting independently verified additions.
+// Explicit source deletions require complete absence proof at the new commit.
 // It is not a pull, ancestry proof or Git rebase.
 // Whole-file byte equality resolves content. Mode and content are independent,
 // so a content edit can survive an upstream chmod (and the converse).
@@ -216,32 +229,39 @@ function equalRefreshFile(a, b) {
   return a === null || b === null ? a === b : a.executable === b.executable && a.bytes.equals(b.bytes);
 }
 function reconcileRefreshFile(before, local, selected) {
-  if (equalRefreshFile(local, before)) return { disposition: equalRefreshFile(selected, before) ? 'unchanged' : 'updated', file: selected };
+  if (equalRefreshFile(local, before)) return { disposition: selected === null ? 'deleted' : equalRefreshFile(selected, before) ? 'unchanged' : 'updated', file: selected };
   if (equalRefreshFile(local, selected)) return { disposition: 'converged', file: selected };
   if (equalRefreshFile(selected, before)) return { disposition: 'carried', file: local };
   if (local === null) return { disposition: 'conflict', conflict: 'local_delete_source_modify', file: null };
+  if (selected === null) return { disposition: 'conflict', conflict: 'local_modify_source_delete', file: null };
   const bytes = local.bytes.equals(before.bytes) ? selected.bytes
     : selected.bytes.equals(before.bytes) || local.bytes.equals(selected.bytes) ? local.bytes : null;
   if (bytes === null) return { disposition: 'conflict', conflict: 'content_changed_both', file: null };
   const executable = local.executable === before.executable ? selected.executable : local.executable;
   return { disposition: 'combined', file: { bytes, executable } };
 }
-async function prepareWorkspaceRefresh(root, workspaceHash, next, time, mergeProfile) {
+async function prepareWorkspaceRefresh(root, workspaceHash, next, time, mergeProfile, deletions) {
   const textMerger = mergeProfile === null ? null : createWorkspaceTextMerger({ check: time.check });
   absolute(root); pin(workspaceHash);
   const rootIdentity = await privateDirectory(root); time.check();
   const baseline = await loadSourceWorkspace(root, workspaceHash, { check: time.check, timeoutMs: time.remaining() });
   if (next.expected.format !== baseline.expected.format) fail('source_workspace_refresh_format');
   if (next.expected.commit === baseline.expected.commit) fail('source_workspace_refresh_same_commit');
-  const paths = selectedPaths(next.expected.files.map(f => f.pathHex));
-  const selectedPathsSet = new Set(paths);
-  // Missing source proof is not evidence of an upstream deletion. Every old
-  // selection must remain explicit, even when its local file was deleted.
-  if (baseline.expected.files.some(f => !selectedPathsSet.has(f.pathHex))) fail('source_workspace_refresh_selection');
+  const selectedPathsSet = new Set(next.expected.files.map(f => f.pathHex));
+  const missing = baseline.expected.files.filter(f => !selectedPathsSet.has(f.pathHex)).map(f => f.pathHex);
+  // Missing source proof is never evidence of deletion. The explicit selection
+  // must exactly cover omitted original paths, before verifying their absence.
+  if (deletions === null && missing.length) fail('source_workspace_refresh_selection');
+  if (deletions !== null && (missing.length !== deletions.paths_hex.length ||
+      missing.some((path, i) => path !== deletions.paths_hex[i]))) fail('source_workspace_refresh_deletions');
+  const paths = selectedPaths([...selectedPathsSet, ...(deletions?.paths_hex ?? [])]);
   const loaded = await readSourcePackage(next.bytes, next.expected, webcrypto, time.check); time.check();
   // Apply the host's individual/logical source limits before decoding bodies or
   // touching mutable files. Package limits and independent pins still apply.
   const nextManifest = manifest(next.bytes, next.expected, loaded.verified);
+  const absence = deletions === null ? null
+    : await verifyPathAbsence(loaded.package.membership, next.expected, deletions.paths_hex, webcrypto, time.check);
+  time.check();
   const oldFiles = new Map(baseline.manifest.files.map(f => [f.path_hex, f]));
   const nextFiles = new Map(nextManifest.files.map(f => [f.path_hex, f]));
   const snapshot = await readWorkspaceFiles(root, paths, { check: time.check, timeoutMs: time.remaining() });
@@ -255,11 +275,10 @@ async function prepareWorkspaceRefresh(root, workspaceHash, next, time, mergePro
   for (const path of paths) {
     time.check();
     const oldFile = oldFiles.get(path), newFile = nextFiles.get(path);
-    if (!newFile) fail('source_workspace_refresh_selection');
     // A null original image on an added selection means previously unselected,
     // not proven absent from the original source tree.
     const before = oldFile ? { bytes: Buffer.from(oldBodies.get(oldFile.blob), 'hex'), executable: oldFile.executable } : null;
-    const selected = { bytes: Buffer.from(nextBodies.get(newFile.blob), 'hex'), executable: newFile.executable };
+    const selected = newFile ? { bytes: Buffer.from(nextBodies.get(newFile.blob), 'hex'), executable: newFile.executable } : null;
     const local = snapshot.files.get(path);
     let result = oldFile ? reconcileRefreshFile(before, local, selected) : { disposition: 'added', file: selected };
     if (textMerger && result.conflict === 'content_changed_both') {
@@ -289,7 +308,8 @@ async function prepareWorkspaceRefresh(root, workspaceHash, next, time, mergePro
     selected_files_only: true, unselected_local_files_copied: false, original_workspace_changed: false,
     ancestry_verified: false, semantic_compatibility_verified: false, authority_verified: false,
     freshness_verified: false, repository_changed: false, source_material_untrusted: true,
-    ...(textMerger ? { merge_profile: mergeProfile, text_merge: textMerger.witness() } : {}) };
+    ...(textMerger ? { merge_profile: mergeProfile, text_merge: textMerger.witness() } : {}),
+    ...(deletions === null ? {} : { deletions, deletion_absence: absence }) };
   const encoded = canonical(plan);
   if (encoded.length > WORKSPACE_LIMITS.manifestBytes) fail('source_workspace_manifest_budget');
   const recheck = async () => {
@@ -302,17 +322,28 @@ async function prepareWorkspaceRefresh(root, workspaceHash, next, time, mergePro
     time.check();
   };
   await recheck();
-  return { plan, refresh_sha256: sha256(encoded), loaded, carried, conflicting, recheck };
+  return { plan, refresh_sha256: sha256(encoded), loaded, carried, conflicting, recheck,
+    verifiedAbsentPaths: absence?.paths.map(row => row.pathHex) ?? [] };
 }
 // Explicit whole-file conflict choices are separate from automatic reconciliation.
 // They name the original conflict plan and never grant publication authority.
 export const WORKSPACE_REFRESH_RESOLUTIONS = 'frankengit-workspace-refresh-resolutions-v1';
+export const WORKSPACE_REFRESH_DELETIONS = 'frankengit-workspace-refresh-deletions-v1';
+function refreshDeletions(value) {
+  if (value === undefined) return null;
+  fields(value, ['schema', 'paths_hex']);
+  if (value.schema !== WORKSPACE_REFRESH_DELETIONS) fail('source_workspace_refresh_deletions');
+  const paths = selectedPaths(value.paths_hex);
+  if (paths.some((path, i) => path !== value.paths_hex[i])) fail('source_workspace_refresh_deletions');
+  return { schema: WORKSPACE_REFRESH_DELETIONS, paths_hex: paths };
+}
 function refreshOptions(options) {
-  fields(options, ['signal', 'timeoutMs', 'check', 'resolutions', 'mergeProfile'], []);
-  const { resolutions, mergeProfile: selectedProfile, ...operation } = options, time = lifetime(operation);
+  fields(options, ['signal', 'timeoutMs', 'check', 'resolutions', 'mergeProfile', 'deletions'], []);
+  const { resolutions, mergeProfile: selectedProfile, deletions: selectedDeletions, ...operation } = options, time = lifetime(operation);
+  const deletions = refreshDeletions(selectedDeletions);
   if (Object.hasOwn(options, 'mergeProfile') && selectedProfile !== WORKSPACE_TEXT_MERGE_PROFILE) fail('source_workspace_refresh_merge_profile');
   const mergeProfile = selectedProfile ?? null;
-  if (resolutions === undefined) return { time, resolutions: null, mergeProfile };
+  if (resolutions === undefined) return { time, resolutions: null, mergeProfile, deletions };
   fields(resolutions, ['schema', 'plan_sha256', 'choices']);
   if (resolutions.schema !== WORKSPACE_REFRESH_RESOLUTIONS) fail('source_workspace_refresh_resolutions');
   const originalHash = pin(resolutions.plan_sha256);
@@ -324,7 +355,7 @@ function refreshOptions(options) {
   });
   selectedPaths(choices.map(row => row.path_hex));
   choices.sort((a, b) => a.path_hex < b.path_hex ? -1 : 1);
-  return { time, mergeProfile, resolutions: { schema: WORKSPACE_REFRESH_RESOLUTIONS, plan_sha256: originalHash, choices } };
+  return { time, mergeProfile, deletions, resolutions: { schema: WORKSPACE_REFRESH_RESOLUTIONS, plan_sha256: originalHash, choices } };
 }
 function resolveWorkspaceRefresh(prepared, resolutions, time) {
   if (resolutions === null) return prepared;
@@ -353,25 +384,25 @@ function resolveWorkspaceRefresh(prepared, resolutions, time) {
   return { ...prepared, plan, refresh_sha256: sha256(encoded) };
 }
 export async function previewSourceWorkspaceRefresh(root, workspaceHash, nextBytes, nextExpected, options = {}) {
-  const { time, resolutions, mergeProfile } = refreshOptions(options);
+  const { time, resolutions, mergeProfile, deletions } = refreshOptions(options);
   // Own both bytes and independent expectations before the first await.
   const next = ownSelectedSourceInput(nextBytes, nextExpected);
-  const prepared = resolveWorkspaceRefresh(await prepareWorkspaceRefresh(root, workspaceHash, next, time, mergeProfile), resolutions, time);
+  const prepared = resolveWorkspaceRefresh(await prepareWorkspaceRefresh(root, workspaceHash, next, time, mergeProfile, deletions), resolutions, time);
   return { ...prepared.plan, refresh_sha256: prepared.refresh_sha256 };
 }
 export async function refreshSourceWorkspace(root, workspaceHash, nextBytes, nextExpected, output, approvedRefreshHash, options = {}) {
-  const { time, resolutions, mergeProfile } = refreshOptions(options); absolute(root); absolute(output); pin(workspaceHash); pin(approvedRefreshHash);
+  const { time, resolutions, mergeProfile, deletions } = refreshOptions(options); absolute(root); absolute(output); pin(workspaceHash); pin(approvedRefreshHash);
   if (contains(root, output) || contains(output, root)) fail('source_workspace_overlapping_output');
   const next = ownSelectedSourceInput(nextBytes, nextExpected);
   await directory(dirname(output)); time.check();
   try { await lstat(output); fail('source_workspace_output_exists'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
-  const prepared = resolveWorkspaceRefresh(await prepareWorkspaceRefresh(root, workspaceHash, next, time, mergeProfile), resolutions, time);
+  const prepared = resolveWorkspaceRefresh(await prepareWorkspaceRefresh(root, workspaceHash, next, time, mergeProfile, deletions), resolutions, time);
   if (prepared.refresh_sha256 !== approvedRefreshHash) fail('source_workspace_refresh_review_changed');
   if (!prepared.plan.ready) fail('source_workspace_refresh_conflict');
   // The SAME root-last publisher owns creation, expansion and refresh. All
   // copied bytes are owned observations; no mutable input is read into output.
   return publishWorkspace(output, next.bytes, next.expected, prepared.loaded, time,
-    prepared.carried, prepared.recheck, null, prepared.plan);
+    prepared.carried, prepared.recheck, null, prepared.plan, prepared.verifiedAbsentPaths);
 }
 export async function loadSourceWorkspace(root, expectedHash, options = {}) {
   const time = lifetime(options); absolute(root); pin(expectedHash);

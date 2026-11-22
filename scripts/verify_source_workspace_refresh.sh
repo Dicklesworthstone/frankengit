@@ -8,6 +8,7 @@ node --check scripts/operator/source_workspace.mjs
 node --check scripts/fg_source_workspace.mjs
 node --test --test-concurrency=1 tests/operator/source_workspace_refresh.test.mjs \
   tests/operator/source_workspace_refresh_expansion.test.mjs \
+  tests/operator/source_workspace_refresh_deletion.test.mjs \
   tests/operator/source_workspace_refresh_command.test.mjs \
   tests/operator/source_workspace_refresh_resolution.test.mjs \
   tests/operator/source_workspace_merge.test.mjs \

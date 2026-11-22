@@ -13,8 +13,9 @@ This external trusted-local adapter does not complete native TreeFS.
 ## Review, then create a refreshed workspace
 
 Obtain another selected-source package and an independent expectation using the
-existing source package workflow. Retain ALL regular-file paths selected in the
-original workspace, in the same native hash domain, at a different commit. The
+existing source package workflow. Retain all regular-file paths selected in the
+original workspace, unless explicitly selecting and proving their source deletion
+as described below, in the same native hash domain, at a different commit. The
 new expectation may also select additional regular files at that commit.
 The next expectation is never inferred from the package. Keep all inputs and
 parent directories owner-private, as in `SOURCE_EDITING_WORKSPACES.md`.
@@ -57,6 +58,73 @@ local siblings remain only in the original workspace. File/directory conflicts
 within the combined selection refuse before local content is read. These
 observations are rechecked before output ownership and before the final manifest.
 
+## Refresh when the new source deletes a selected file
+
+Use `--deletions PRIVATE_SELECTION` on both refresh commands to name source
+deletions deliberately. The private JSON file has this closed format:
+
+```json
+{
+  "schema": "frankengit-workspace-refresh-deletions-v1",
+  "paths_hex": ["7372632f6f6c642e7273"]
+}
+```
+
+The example path is `src/old.rs`. List byte paths in ascending hex order, without
+duplicates. The list must contain **every originally selected path omitted from
+the next expectation, and only those paths**. A locally deleted file still
+present in the new source belongs in the positive expectation, not this list.
+Omitting `--deletions` retains the existing requirement to select every original
+file and preserves existing refresh-plan bytes.
+
+```sh
+node scripts/fg_source_workspace.mjs refresh-preview \
+  --workspace /srv/editing --sha256 "$ORIGINAL_WORKSPACE_SHA256" \
+  --package /srv/review/next-source.json --expect /srv/review/next-expectation.json \
+  --deletions /srv/review/deletions.json
+
+node scripts/fg_source_workspace.mjs refresh \
+  --workspace /srv/editing --sha256 "$ORIGINAL_WORKSPACE_SHA256" \
+  --package /srv/review/next-source.json --expect /srv/review/next-expectation.json \
+  --deletions /srv/review/deletions.json \
+  --approve-refresh-sha256 "$REVIEWED_REFRESH_SHA256" \
+  --output /srv/refreshed-editing
+```
+
+The next package must prove each deletion from its complete, hash-verified parent
+trees at the independently selected new commit. A missing package entry, missing
+tree proof or HTTP error does not prove absence. If a parent directory survives,
+each directory needed to reach the deleted path must already be authenticated by
+the package's positively selected files. Select a surviving sibling in that
+directory as an anchor. If an earlier ancestor itself is absent, its authenticated
+parent can prove the entire missing path without inventing a subtree. An opaque
+surviving directory refuses; this option does not broaden the package grammar or
+fetch additional source automatically.
+
+**At least one positive successor file is required.** An empty successor package
+or a completely empty repository remains outside the existing selected-source
+package profile. The combined positive-file and deletion selections share the
+32-path and path-byte limits. File/ancestor collisions across the two selections
+refuse, including replacement of a deleted file with a directory in the same
+refresh.
+
+An unchanged local file takes the verified deletion (`deleted`); a file already
+deleted locally converges (`converged`). Local content or executable-mode changes
+against source deletion produce `local_modify_source_delete`, even with the text
+merge profile. Use the existing explicit resolutions to choose `selected` for
+deletion or `local` to preserve the complete local bytes and mode. Preview and
+approve the resolved plan with the same `--deletions` and `--resolutions` files.
+The reviewed plan binds the deletion selection and each concrete absence witness,
+along with the original, local and resulting images.
+
+A preserved local file is a new local creation against the new source baseline.
+It is absent from the immutable positive-file manifest, so ordinary `status`
+does not list it. Select its path explicitly with `capture` (or use the opt-in
+workspace scan) to create a new source draft; capture re-verifies its absence
+from the retained next package. The result remains an ordinary v1 workspace and
+its capture can be inspected offline. These extra local files share the same
+file-size, aggregate output and filesystem recheck limits as all other outputs.
+
 ## Default exact reconciliation, not a text merge
 
 - A locally unchanged file takes the selected source version.
@@ -96,10 +164,10 @@ not protection against a hostile same-UID process or hardware power loss.
 
 Only the explicitly selected paths are read and copied. UNSELECTED LOCAL FILES REMAIN
 IN THE ORIGINAL WORKSPACE; do not delete it assuming this is a complete checkout
-migration. Removing any originally selected path remains unsupported, including
-upstream deletion: omitted proof is never interpreted as source absence. A
-locally deleted selected file must still be included in the new source
-expectation. No directory walk or automatic source fetch occurs.
+migration. Removing an originally selected path requires the explicit deletion
+selection and verified source absence described above. A locally deleted file
+still present upstream must remain in the positive source expectation.
+No directory walk or automatic source fetch occurs.
 
 Bounds remain 32 files, 1 MiB/file, 8 MiB logical source/local/output bytes,
 32 KiB path bytes, 64 components and 255 bytes/component. The combined result
@@ -121,6 +189,14 @@ local collisions, path topology, stale approvals, interrupted publication and
 resource limits. It uses actual private POSIX files and does not substitute the
 verification or publication functions. It does not invoke a native server or
 establish repository authority.
+
+The deletion suite also imports the production verifier and capture engine. Real
+SHA-1 and SHA-256 packages cover deletion and convergence, local edit/mode
+conflicts, preserved local recreations with offline capture inspection, nested
+absence witnesses, extant-file and opaque-parent refusals, caller-owned input
+mutation, stale reviews, combined limits, deadlines and late filesystem changes.
+The production CLI is exercised with deletion, resolution, merge-profile and
+timeout options together, including private-file enforcement.
 
 The existing reconciliation suites execute the complete production workspace and command bodies and the
 unchanged POSIX custody helper with actual private files, child processes, modes,
