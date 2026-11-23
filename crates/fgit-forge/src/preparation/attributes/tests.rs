@@ -39,7 +39,7 @@ impl Source {
         }
     }
 
-    fn blob(&mut self, bytes: &[u8]) -> GitOid {
+    fn add_blob(&mut self, bytes: &[u8]) -> GitOid {
         let oid = git_object_id(self.format, GitObjectKind::Blob, bytes);
         self.blobs.insert(oid, bytes.to_vec());
         oid
@@ -62,7 +62,7 @@ impl Source {
                     } else {
                         0o100644
                     },
-                    oid: self.blob(bytes),
+                    oid: self.add_blob(bytes),
                 });
             }
         }
@@ -90,7 +90,7 @@ impl Source {
         oid
     }
 
-    fn commit(&mut self, tree: GitOid, parent: Option<GitOid>, message: &str) -> GitOid {
+    fn add_commit(&mut self, tree: GitOid, parent: Option<GitOid>, message: &str) -> GitOid {
         let mut bytes = format!("tree {tree}\n");
         if let Some(parent) = parent {
             bytes.push_str(&format!("parent {parent}\n"));
@@ -116,11 +116,11 @@ impl Source {
         theirs: &[FileInput<'_>],
     ) -> [GitOid; 2] {
         let tree = self.snapshot(base);
-        let base = self.commit(tree, None, "base");
+        let base = self.add_commit(tree, None, "base");
         let tree = self.snapshot(ours);
-        let ours = self.commit(tree, Some(base), "ours");
+        let ours = self.add_commit(tree, Some(base), "ours");
         let tree = self.snapshot(theirs);
-        let theirs = self.commit(tree, Some(base), "theirs");
+        let theirs = self.add_commit(tree, Some(base), "theirs");
         [ours, theirs]
     }
 }
@@ -640,7 +640,7 @@ fn a_queue_prefix_shares_attribute_matching_work_across_all_candidates() {
     let (mut source, pair) = changed(GitHashAlgorithm::Sha1, &[attributes], &name);
     let base = source.commits[&pair[0]].parents[0];
     let tree = source.snapshot(&[attributes, (&name, b"one\ntwo\nTHREE\nfour\nfive\n")]);
-    let second = source.commit(tree, Some(base), "second queued source");
+    let second = source.add_commit(tree, Some(base), "second queued source");
     let metadata = metadata();
     let inputs = [
         PrefixInput {
@@ -709,7 +709,7 @@ fn attribute_cache_limits_and_full_preparation_cancellation_never_return_partial
         for index in 0..count {
             let mut bytes = format!("# {index:04} ").into_bytes();
             bytes.resize(bytes_per_file, b'x');
-            ids.push(source.blob(&bytes));
+            ids.push(source.add_blob(&bytes));
         }
         let planner = Planner::new(&source, source.format, PreparationLimits::default());
         let mut state = State::default();
