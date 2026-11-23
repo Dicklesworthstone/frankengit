@@ -1,5 +1,4 @@
-//! Coordinator regressions. Fixtures test metadata/control flow; the separately
-//! named Linux test uses real trusted direct children, not a hostile sandbox.
+//! Coordinator regressions for admission, terminal facts, and containment refusals.
 use super::*;
 use crate::{CheckRunConclusion, CoordinatorLimits, ObligationSummary, RunOutcome, TriggerContext};
 use crate::{LogRedactor, ResourceUsage, SandboxPlan, SubstrateObservation, SubstrateRefusal};
@@ -421,13 +420,8 @@ fn check_fact_binds_actual_terminal_evidence_not_just_input_capsule() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn real_trusted_process_runs_declared_command_and_preserves_nonzero_exit() {
-    // This is a trusted direct-child test, not namespace/cgroup containment.
-    for (command, outcome) in [
-        ("/bin/true", CheckOutcome::Succeeded),
-        ("/bin/false", CheckOutcome::Failed),
-        ("/bin/echo building", CheckOutcome::Succeeded),
-    ] {
+fn command_only_jobs_require_isolation_even_for_benign_host_programs() {
+    for command in ["/bin/true", "/bin/false", "/bin/echo building"] {
         let mut c = coordinator();
         let run = enqueue(&mut c, graph(command)).unwrap();
         let receipt = c
@@ -441,11 +435,25 @@ fn real_trusted_process_runs_declared_command_and_preserves_nonzero_exit() {
                 "host-tools",
             )
             .unwrap();
-        assert_eq!(receipt.outcome(), outcome);
+        assert_eq!(
+            receipt.outcome(),
+            CheckOutcome::SubstrateRefused {
+                refusal: crate::SubstrateRefusal::TrustedHostOnly,
+            }
+        );
         assert_eq!(receipt.command(), &lowered(command).unwrap());
-        assert_eq!(receipt.reaped().processes_reaped, 1);
+        assert_eq!(receipt.reaped().processes_reaped, 0);
         receipt.verify_evidence().unwrap();
-        c.drain_check_facts();
+        let facts = c.drain_check_facts();
+        let terminal = facts
+            .iter()
+            .find(|fact| fact.status == CheckRunStatus::Completed)
+            .unwrap();
+        assert_eq!(terminal.conclusion, Some(CheckRunConclusion::Failure));
+        assert_eq!(
+            terminal.receipt_commitment,
+            Some(Commitment::of_bytes(receipt.evidence().frame()))
+        );
         c.verify_quiescence().unwrap();
     }
 }

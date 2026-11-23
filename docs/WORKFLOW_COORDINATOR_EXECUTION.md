@@ -10,6 +10,13 @@ service, a durable coordinator journal, or canonical forge publication.
 runner control-plane boundary. It accepts one exactly representable argv
 command per job; it does not approximate scripts or multi-step workflows.
 
+The command-only path requests process isolation and denied egress for each
+job. A cooperative host selected via `ProcessSubstrate` returns the
+`trusted_host_only` refusal before starting the command. The terminal receipt
+binds this refusal and reports zero reaped processes. The control plane
+revokes reserved secret leases and returns the slot. Executing a trusted job
+requires selecting the trusted job-scoped path explicitly.
+
 ## Trusted job-scoped path
 
 Compile source with `fgit_runner::workflow::WorkflowPlan::compile`, then pass
