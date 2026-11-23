@@ -120,6 +120,13 @@ impl SshServerSession {
                     reader.read_string()?;
                 }
             }
+            msg::GLOBAL_REQUEST => {
+                let name = reader.read_string()?;
+                reader.read_bool()?;
+                if name != b"keepalive@openssh.com" {
+                    return Ok(()); // Refused requests may have opaque request-specific fields.
+                }
+            }
             msg::CHANNEL_OPEN => {
                 let channel_type = reader.read_utf8()?;
                 reader.read_u32()?; // sender's channel, not our local channel

@@ -7,12 +7,11 @@
 //! - SANS-I/O session state machine mapped to Asupersync blocking threads
 
 use std::borrow::Borrow;
-use std::cell::RefCell;
 use std::fmt::{self, Display, Formatter};
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::time::Duration;
 
 use fgit_admission::evidence::AdmissionAuthentication;
@@ -36,6 +35,7 @@ mod deadline;
 mod deploy_keys;
 mod lifetime;
 mod routing;
+mod work_control;
 
 pub use deploy_keys::{FileDeployKeyAuthorizer, FileDeployKeyRefusal};
 pub use routing::{MAX_SSH_REPOSITORY_ROUTES, SshRepositoryRoute};
@@ -169,20 +169,16 @@ struct SshConnectionState {
     deadline: GitDaemonSessionDeadline,
     read_buf: Vec<u8>,
     read_pos: usize,
+    work_output: io::Cursor<Vec<u8>>,
 }
 
 impl SshConnectionState {
-    /// Whether the client's TCP connection is still open, without consuming
-    /// or waiting for anything. A non-blocking peek sees an orderly close as a
-    /// zero-length read and a reset as an error; pending bytes and "would
-    /// block" both mean the peer is still there. OpenSSH signals EOF inside
-    /// the channel, so a closed socket means the client itself is gone.
-    fn peer_connected(&self) -> bool {
-        crate::tcp_peer_connected(&self.stream)
-    }
-
     fn flush_outgoing(&mut self) -> io::Result<()> {
         self.deadline.remaining_write()?;
+        let mut pending = std::mem::take(&mut self.work_output);
+        if !pending.fill_buf()?.is_empty() {
+            deadline::write_all(&mut self.stream, &self.deadline, pending.fill_buf()?)?;
+        }
         let out = self.session.take_outgoing_bytes();
         deadline::write_all(&mut self.stream, &self.deadline, &out)
     }
@@ -304,23 +300,32 @@ impl SshConnectionState {
     }
 }
 
-struct SshReader<'a>(&'a RefCell<SshConnectionState>);
+struct SshReader<'a>(&'a Mutex<SshConnectionState>);
 
-struct SshWriter<'a>(&'a RefCell<SshConnectionState>);
+struct SshWriter<'a>(&'a Mutex<SshConnectionState>);
 
 impl Read for SshReader<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.0.borrow_mut().read_channel(buf)
+        self.0
+            .lock()
+            .map_err(|_| io::Error::other("SSH session interrupted"))?
+            .read_channel(buf)
     }
 }
 
 impl Write for SshWriter<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.borrow_mut().write_channel(buf)
+        self.0
+            .lock()
+            .map_err(|_| io::Error::other("SSH session interrupted"))?
+            .write_channel(buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.0.borrow_mut().flush_outgoing()
+        self.0
+            .lock()
+            .map_err(|_| io::Error::other("SSH session interrupted"))?
+            .flush_outgoing()
     }
 }
 
@@ -328,7 +333,9 @@ impl ReceiveResponseWriter for SshWriter<'_> {
     fn restart_deadline(&mut self, deadline: GitDaemonSessionDeadline) {
         // The native coordinator restarts only after a terminal result exists.
         // Its response may still require SSH window-adjust packets to arrive.
-        self.0.borrow_mut().deadline = deadline;
+        if let Ok(mut state) = self.0.lock() {
+            state.deadline = deadline;
+        }
     }
 }
 
@@ -790,12 +797,13 @@ impl OneNode {
         // Authenticated Git may be quiet while the client compresses a pack.
         // Use the full remaining session budget here; the 60-second idle cap
         // applies only before a command is authorized.
-        let state_cell = RefCell::new(SshConnectionState {
+        let state_cell = Mutex::new(SshConnectionState {
             session,
             stream,
             deadline: deadline.clone(),
             read_buf: Vec::new(),
             read_pos: 0,
+            work_output: io::Cursor::default(),
         });
 
         // Keep the leased node outside both unwind guards so every refusal,
@@ -805,18 +813,18 @@ impl OneNode {
                 SshGitService::UploadPack => {
                     let mut reader = SshReader(&state_cell);
                     let mut writer = SshWriter(&state_cell);
-                    let client = crate::ClientLiveness::new(|| {
-                        state_cell
-                            .try_borrow()
-                            .ok()
-                            .map(|state| state.peer_connected())
-                    });
+                    let client =
+                        Mutex::new(crate::ClientLiveness::new(|| match state_cell.try_lock() {
+                            Ok(mut state) => Some(state.poll_upload_connection()),
+                            Err(TryLockError::WouldBlock) => None,
+                            Err(TryLockError::Poisoned(_)) => Some(false),
+                        }));
                     child_node
                         .serve_ssh_upload_pack(
                             &mut reader,
                             &mut writer,
                             &git_protocol,
-                            &|| client.alive(),
+                            &|| client.lock().is_ok_and(|client| client.alive()),
                             &deadline,
                         )
                         .inspect_err(|error| eprintln!("ssh session failed: upload-pack: {error}"))
@@ -846,13 +854,12 @@ impl OneNode {
 
         let exit_code = u32::from(!served);
         let delivered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut final_state = state_cell.into_inner();
+            let mut final_state = state_cell
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             final_state.session.send_channel_eof();
             final_state.session.send_channel_exit_and_close(exit_code);
-            let final_out = final_state.session.take_outgoing_bytes();
-            let delivered =
-                deadline::write_all(&mut final_state.stream, &final_state.deadline, &final_out)
-                    .is_ok();
+            let delivered = final_state.flush_outgoing().is_ok();
             close_gracefully(&mut final_state.session, &mut final_state.stream);
             delivered
         }))
@@ -878,7 +885,7 @@ impl OneNode {
         reader: &mut R,
         writer: &mut W,
         git_protocol: &[u8],
-        peer_alive: &dyn Fn() -> bool,
+        peer_alive: &(dyn Fn() -> bool + Sync),
         deadline: &GitDaemonSessionDeadline,
     ) -> Result<GitDaemonSessionOutcome, NodeGitDaemonServeRefusal> {
         let service =
@@ -895,7 +902,7 @@ impl OneNode {
                 admission_deadline_expired.store(true, Ordering::Relaxed);
                 return false;
             }
-            true
+            peer_alive()
         };
         let admission = self
             .runtime
@@ -916,13 +923,17 @@ impl OneNode {
             service,
         };
 
-        let disclosure = self.prepare_visible_upload_pack_or_report(
-            &request,
-            &materialized,
-            &limits,
-            deadline,
-            writer,
-        )?;
+        let disclosure = self
+            .prepare_visible_upload_pack_while(
+                &request,
+                &materialized,
+                &limits,
+                deadline,
+                peer_alive,
+            )
+            .inspect_err(|refusal| {
+                self.report_upload_preflight_refusal(refusal, writer, &limits, deadline)
+            })?;
         let repository = disclosure.repository();
         let advertised_capabilities =
             crate::git_daemon_capabilities(self.object_format, repository.symref_target(b"HEAD"));
@@ -951,14 +962,14 @@ impl OneNode {
                             session_deadline_expired.set(true);
                             false
                         } else {
-                            true
+                            peer_alive()
                         }
                     };
                     let mut is_live = || {
                         if stopped {
                             return false;
                         }
-                        if !session_is_live() || !peer_alive() {
+                        if !session_is_live() {
                             stopped = true;
                             return false;
                         }

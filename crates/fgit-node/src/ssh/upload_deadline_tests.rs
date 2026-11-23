@@ -213,7 +213,7 @@ fn active_channel() -> (SshServerSession, Peer) {
 }
 
 struct Connection {
-    state: RefCell<SshConnectionState>,
+    state: Mutex<SshConnectionState>,
     peer: Peer,
     client: TcpStream,
     work: GitDaemonSessionDeadline,
@@ -239,12 +239,13 @@ fn connected(timeout: Duration) -> Connection {
         .and_then(|instant| instant.checked_sub(Duration::from_secs(1)))
         .expect("test clock supports the expired work deadline");
     Connection {
-        state: RefCell::new(SshConnectionState {
+        state: Mutex::new(SshConnectionState {
             session,
             stream,
             deadline: work.clone(),
             read_buf: Vec::new(),
             read_pos: 0,
+            work_output: io::Cursor::default(),
         }),
         peer,
         client,
@@ -311,7 +312,7 @@ fn terminal_err_waits_for_encrypted_window_adjust_without_admitting_git_input() 
             .load(Ordering::Relaxed),
         0
     );
-    let mut state = connection.state.borrow_mut();
+    let mut state = connection.state.lock().unwrap();
     assert_eq!(state.session.client_window(), 0);
     assert_eq!(state.session.take_channel_input(), pending_git);
     assert!(state.read_buf.is_empty());
@@ -332,7 +333,7 @@ fn peer_close_stops_a_terminal_fatal_while_its_channel_window_is_empty() {
     assert_eq!(packet.read_u8().unwrap(), msg::CHANNEL_CLOSE);
     assert_eq!(packet.read_u32().unwrap(), PEER_CHANNEL);
     assert_eq!(packet.remaining(), 0);
-    assert!(connection.state.borrow().session.is_channel_closed());
+    assert!(connection.state.lock().unwrap().session.is_channel_closed());
     assert!(connection.work.expired());
     assert_eq!(
         connection
@@ -352,7 +353,7 @@ fn a_silent_encrypted_channel_cannot_hold_terminal_output_past_its_allowance() {
     let error = SshWriter(&connection.state).write_all(REPORT).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     assert!(started.elapsed() < Duration::from_secs(3));
-    assert_eq!(connection.state.borrow().session.client_window(), 0);
+    assert_eq!(connection.state.lock().unwrap().session.client_window(), 0);
     assert!(connection.work.expired());
     assert_eq!(
         connection
@@ -362,4 +363,143 @@ fn a_silent_encrypted_channel_cannot_hold_terminal_output_past_its_allowance() {
             .load(Ordering::Relaxed),
         0
     );
+}
+
+#[test]
+fn upload_checkpoints_reply_to_keepalive_without_consuming_git_input_or_work_time() {
+    let mut connection = connected(Duration::from_secs(5));
+    let mut state = connection.state.lock().unwrap();
+    state.deadline.started = Instant::now();
+    let mut data = channel_packet(msg::CHANNEL_DATA);
+    let git = b"0009done\n";
+    data.write_string(git);
+    let mut global = WireWriter::new();
+    global.write_u8(msg::GLOBAL_REQUEST);
+    global.write_utf8("keepalive@openssh.com");
+    global.write_bool(true);
+    let mut adjust = channel_packet(msg::CHANNEL_WINDOW_ADJUST);
+    adjust.write_u32(8);
+    let mut wire = Vec::new();
+    for packet in [
+        data.into_bytes(),
+        adjust.into_bytes(),
+        global.into_bytes(),
+        channel_packet(msg::CHANNEL_EOF).into_bytes(),
+    ] {
+        wire.extend(connection.peer.outbound.encrypt_packet(&packet, &[0; 16]));
+    }
+    // A checkpoint with a partial packet must return immediately, preserving
+    // framing and sequence state across the next checkpoint.
+    connection.client.write_all(&wire[..3]).unwrap();
+    assert!(state.poll_upload_connection());
+    connection.client.write_all(&wire[3..]).unwrap();
+    while !state.session.is_channel_eof_received() {
+        assert!(state.poll_upload_connection());
+    }
+    assert_eq!(
+        connection.peer.receive(&mut connection.client),
+        [msg::REQUEST_SUCCESS]
+    );
+    assert_eq!(state.session.client_window(), 8);
+    assert_eq!(
+        state.deadline.shared.admitted_bytes.load(Ordering::Relaxed),
+        0
+    );
+    let mut delivered = [0u8; 32];
+    let n = state.read_channel(&mut delivered).unwrap();
+    assert_eq!(&delivered[..n], git);
+    assert_eq!(state.read_channel(&mut delivered).unwrap(), 0);
+    assert_eq!(
+        state.deadline.shared.admitted_bytes.load(Ordering::Relaxed),
+        git.len() as u64
+    );
+    connection.peer.send(
+        &mut connection.client,
+        &channel_packet(msg::CHANNEL_CLOSE).into_bytes(),
+    );
+    while state.poll_upload_connection() {}
+    assert!(state.session.is_channel_closed());
+}
+
+#[test]
+fn expired_ssh_upload_checkpoint_does_not_service_control_or_restart_work() {
+    let mut connection = connected(Duration::from_secs(5));
+    let mut state = connection.state.lock().unwrap();
+    let mut global = WireWriter::new();
+    global.write_u8(msg::GLOBAL_REQUEST);
+    global.write_utf8("keepalive@openssh.com");
+    global.write_bool(true);
+    connection
+        .peer
+        .send(&mut connection.client, &global.into_bytes());
+    assert!(!state.poll_upload_connection());
+    assert!(state.deadline.expired());
+    assert!(state.deadline.shared.terminal_response.get().is_none());
+    assert_eq!(
+        state.deadline.shared.admitted_bytes.load(Ordering::Relaxed),
+        0
+    );
+}
+
+#[test]
+fn partial_encrypted_reply_precedes_later_control_and_terminal_packets() {
+    for another_probe in [false, true] {
+        let mut connection = connected(Duration::from_secs(5));
+        let mut state = connection.state.lock().unwrap();
+        state.deadline.started = Instant::now();
+        let mut request = WireWriter::new();
+        request.write_u8(msg::GLOBAL_REQUEST);
+        request.write_utf8("keepalive@openssh.com");
+        request.write_bool(true);
+        let request = request.into_bytes();
+        state
+            .session
+            .handle_incoming_bytes(&connection.peer.outbound.encrypt_packet(&request, &[0; 16]))
+            .unwrap();
+        let reply = state.session.take_outgoing_bytes();
+        // A socket accepted the header and one byte of ciphertext. Begin
+        // precisely where the nonblocking writer would resume in this case.
+        state.stream.write_all(&reply[..5]).unwrap();
+        state.work_output = io::Cursor::new(reply);
+        state.work_output.set_position(5);
+
+        if another_probe {
+            connection.peer.send(&mut connection.client, &request);
+            connection.peer.send(
+                &mut connection.client,
+                &channel_packet(msg::CHANNEL_EOF).into_bytes(),
+            );
+            while !state.session.is_channel_eof_received() {
+                assert!(state.poll_upload_connection());
+            }
+        }
+        state.session.send_channel_eof();
+        state.session.send_channel_exit_and_close(0);
+        state.flush_outgoing().unwrap();
+        let peer = &mut connection.peer;
+        let client = &mut connection.client;
+        assert_eq!(peer.receive(client), [msg::REQUEST_SUCCESS]);
+        if another_probe {
+            assert_eq!(peer.receive(client), [msg::REQUEST_SUCCESS]);
+        }
+        let eof = peer.receive(client);
+        let mut eof = WireReader::new(&eof);
+        assert_eq!(eof.read_u8().unwrap(), msg::CHANNEL_EOF);
+        assert_eq!(eof.read_u32().unwrap(), PEER_CHANNEL);
+        let exit = peer.receive(client);
+        let mut exit = WireReader::new(&exit);
+        assert_eq!(exit.read_u8().unwrap(), msg::CHANNEL_REQUEST);
+        assert_eq!(exit.read_u32().unwrap(), PEER_CHANNEL);
+        assert_eq!(exit.read_utf8().unwrap(), "exit-status");
+        assert!(!exit.read_bool().unwrap());
+        assert_eq!(exit.read_u32().unwrap(), 0);
+        let close = peer.receive(client);
+        let mut close = WireReader::new(&close);
+        assert_eq!(close.read_u8().unwrap(), msg::CHANNEL_CLOSE);
+        assert_eq!(close.read_u32().unwrap(), PEER_CHANNEL);
+        assert_eq!(
+            state.deadline.shared.admitted_bytes.load(Ordering::Relaxed),
+            0
+        );
+    }
 }

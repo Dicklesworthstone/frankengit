@@ -355,6 +355,21 @@ fn git_and_ssh_prepare_or_report_resource_limits_before_any_pack_prefix() {
 
 #[test]
 fn ssh_work_expiry_uses_one_bounded_err_without_reopening_work() {
+    // Discovery also observes the connection. Expire only after Git reads
+    // negotiation input so this still exercises selected-pack reporting.
+    struct Negotiation<'a> {
+        request: Cursor<Vec<u8>>,
+        read: &'a AtomicBool,
+    }
+    impl Read for Negotiation<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let count = self.request.read(buf)?;
+            if count != 0 {
+                self.read.store(true, Ordering::Relaxed);
+            }
+            Ok(count)
+        }
+    }
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let (_scratch, config, commit, _) = seeded(format);
         let node = reopen(config);
@@ -371,12 +386,18 @@ fn ssh_work_expiry_uses_one_bounded_err_without_reopening_work() {
             // Remove the earned allowance at the first actual pack-work peer
             // checkpoint. This deterministically expires the production work
             // path without sleeping or changing its selected content.
+            let negotiated = AtomicBool::new(false);
             let result = node.serve_ssh_upload_pack(
-                &mut Cursor::new(request(commit, version, sideband)),
+                &mut Negotiation {
+                    request: Cursor::new(request(commit, version, sideband)),
+                    read: &negotiated,
+                },
                 &mut output,
                 &protocol(version),
                 &|| {
-                    deadline.shared.admitted_bytes.store(0, Ordering::Relaxed);
+                    if negotiated.load(Ordering::Relaxed) {
+                        deadline.shared.admitted_bytes.store(0, Ordering::Relaxed);
+                    }
                     true
                 },
                 &deadline,

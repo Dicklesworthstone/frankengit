@@ -76,6 +76,9 @@ pub mod msg {
     pub const USERAUTH_FAILURE: u8 = 51;
     pub const USERAUTH_SUCCESS: u8 = 52;
     pub const USERAUTH_PK_OK: u8 = 60;
+    pub const GLOBAL_REQUEST: u8 = 80;
+    pub const REQUEST_SUCCESS: u8 = 81;
+    pub const REQUEST_FAILURE: u8 = 82;
     pub const CHANNEL_OPEN: u8 = 90;
     pub const CHANNEL_OPEN_CONFIRMATION: u8 = 91;
     pub const CHANNEL_OPEN_FAILURE: u8 = 92;
@@ -787,6 +790,17 @@ impl SshServerSession {
                     }
                 } else {
                     self.send_auth_failure();
+                }
+            }
+            msg::GLOBAL_REQUEST => {
+                let name = reader.read_string()?;
+                if reader.read_bool()? {
+                    let reply = if name == b"keepalive@openssh.com" {
+                        msg::REQUEST_SUCCESS
+                    } else {
+                        msg::REQUEST_FAILURE
+                    };
+                    self.send_packet(&[reply]);
                 }
             }
             msg::CHANNEL_OPEN => {

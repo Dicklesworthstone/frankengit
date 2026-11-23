@@ -429,6 +429,17 @@ impl OneNode {
         limits: &WireLimits,
         deadline: &GitDaemonSessionDeadline,
     ) -> Result<VisibleUploadPack, NodeGitDaemonServeRefusal> {
+        self.prepare_visible_upload_pack_while(request, materialized, limits, deadline, &|| true)
+    }
+
+    pub(super) fn prepare_visible_upload_pack_while(
+        &self,
+        request: &NodeRequestContext,
+        materialized: &MaterializedAdmission,
+        limits: &WireLimits,
+        deadline: &GitDaemonSessionDeadline,
+        peer_alive: &dyn Fn() -> bool,
+    ) -> Result<VisibleUploadPack, NodeGitDaemonServeRefusal> {
         deadline.check(DISCLOSURE_OPERATION)?;
         let repository = AdmissionUploadPackRepository::from_snapshot(
             materialized.snapshot(),
@@ -437,7 +448,7 @@ impl OneNode {
         )
         .map_err(NodeAdmissionViewRefusal::from)?;
         let exhaustion = Cell::new(None);
-        let live = || !deadline.expired();
+        let live = || !deadline.expired() && peer_alive();
         let maximum_object_bytes = self
             .selected_pack_limits
             .max_object_bytes

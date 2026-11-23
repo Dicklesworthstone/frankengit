@@ -261,12 +261,13 @@ fn buffered_git_reads_and_window_waits_keep_the_budget_but_native_response_resta
     expired.started = Instant::now()
         .checked_sub(Duration::from_secs(1))
         .expect("test clock supports a past deadline");
-    let state = RefCell::new(SshConnectionState {
+    let state = Mutex::new(SshConnectionState {
         session,
         stream,
         deadline: expired,
         read_buf: b"git".to_vec(),
         read_pos: 0,
+        work_output: io::Cursor::default(),
     });
     let mut reader = SshReader(&state);
     let mut writer = SshWriter(&state);
@@ -293,7 +294,7 @@ fn buffered_git_reads_and_window_waits_keep_the_budget_but_native_response_resta
     assert_eq!(&identification, b"SSH-");
     assert_eq!(reader.read(&mut bytes).unwrap(), 3);
     assert_eq!(&bytes, b"git");
-    let state = state.borrow();
+    let state = state.lock().unwrap();
     assert_eq!(state.deadline.started, response_started);
     assert_eq!(
         state.deadline.shared.admitted_bytes.load(Ordering::Relaxed),
@@ -322,12 +323,13 @@ fn terminal_write_allowance_flushes_without_restarting_buffered_git_reads() {
     work.started = Instant::now()
         .checked_sub(Duration::from_secs(10))
         .expect("test clock supports a past deadline");
-    let state = RefCell::new(SshConnectionState {
+    let state = Mutex::new(SshConnectionState {
         session,
         stream,
         deadline: work.clone(),
         read_buf: b"git".to_vec(),
         read_pos: 0,
+        work_output: io::Cursor::default(),
     });
     let mut reader = SshReader(&state);
     let mut writer = SshWriter(&state);
@@ -344,7 +346,7 @@ fn terminal_write_allowance_flushes_without_restarting_buffered_git_reads() {
         reader.read(&mut [0u8; 3]).unwrap_err().kind(),
         io::ErrorKind::TimedOut
     );
-    let state = state.borrow();
+    let state = state.lock().unwrap();
     assert_eq!(
         state.read_pos, 0,
         "terminal output did not admit more Git input"

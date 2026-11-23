@@ -475,3 +475,36 @@ fn unsolicited_newkeys_and_rekey_do_not_reset_an_authenticated_session() {
         .expect("pending initial NEWKEYS");
     authenticate(&mut session, &mut peer);
 }
+
+#[test]
+fn global_keepalive_is_authenticated_and_never_grants_a_channel_or_forward() {
+    fn global(name: &str, want_reply: bool) -> Vec<u8> {
+        let mut w = WireWriter::new();
+        w.write_u8(msg::GLOBAL_REQUEST);
+        w.write_utf8(name);
+        w.write_bool(want_reply);
+        w.into_bytes()
+    }
+
+    let probe = global("keepalive@openssh.com", true);
+    let (mut session, mut peer) = transport();
+    assert_protocol_refusal(peer.send(&mut session, &probe));
+    assert!(peer.receive(&mut session).is_empty());
+    let (mut session, mut peer) = transport();
+    authenticate(&mut session, &mut peer);
+    peer.send(&mut session, &probe).unwrap();
+    assert_eq!(peer.receive(&mut session), [vec![msg::REQUEST_SUCCESS]]);
+    peer.send(&mut session, &global("keepalive@openssh.com", false))
+        .unwrap();
+    assert!(peer.receive(&mut session).is_empty());
+    let mut unsupported = global("tcpip-forward", true);
+    unsupported.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 80]);
+    peer.send(&mut session, &unsupported).unwrap();
+    assert_eq!(peer.receive(&mut session), [vec![msg::REQUEST_FAILURE]]);
+    assert!(session.authenticated_grant().is_none());
+    assert_eq!(session.phase(), &SessionPhase::ChannelReady);
+    let mut malformed = probe;
+    malformed.push(0);
+    assert_protocol_refusal(peer.send(&mut session, &malformed));
+    assert!(peer.receive(&mut session).is_empty());
+}
