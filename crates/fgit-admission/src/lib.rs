@@ -1427,6 +1427,16 @@ impl PreparedCanonicalCommit {
         &self.next_ref_state
     }
 
+    /// Encode the exact successor body already bound by [`Self::ref_root`].
+    ///
+    /// Durable owners can stage this opaque preparation without cloning the
+    /// complete ref map or recomputing its layout-selected commitment. This
+    /// returns canonical bytes only; the selected store must still accept the
+    /// immutable write before the materialization can be published.
+    pub fn ref_state_frame(&self) -> Result<Vec<u8>, CodecRefusal> {
+        encode_body(&self.next_ref_state)
+    }
+
     /// Immutable closure body whose root is bound by the RCR.
     #[must_use]
     pub const fn object_closure(&self) -> &PermittedObjectClosure {
