@@ -436,13 +436,16 @@ fn scoped_http_publication_reserves_real_bundle_bytes_beyond_metadata_forms() {
     let publisher = issue_publisher(&mut fixture, "f9", b"refs/heads/main", &[b"large.txt"]);
     // Deterministic high-entropy source keeps the actual compressed bundle
     // larger than the metadata-only form ceiling, not just the incoming patch.
-    let mut patch = String::from(
-        "diff --git a/large.txt b/large.txt\nnew file mode 100644\n--- /dev/null\n+++ b/large.txt\n@@ -0,0 +2048 @@\n",
+    const BYTES_PER_LINE: usize = 128;
+    let added_lines =
+        (2 * crate::smart_http::server::issues::MAX_FORM_BYTES).div_ceil(BYTES_PER_LINE);
+    let mut patch = format!(
+        "diff --git a/large.txt b/large.txt\nnew file mode 100644\n--- /dev/null\n+++ b/large.txt\n@@ -0,0 +1,{added_lines} @@\n",
     );
     let mut random = 0x6a09_e667_f3bc_c909_u64;
-    for _ in 0..2048 {
+    for _ in 0..added_lines {
         patch.push('+');
-        for _ in 0..100 {
+        for _ in 0..BYTES_PER_LINE {
             random ^= random << 13;
             random ^= random >> 7;
             random ^= random << 17;

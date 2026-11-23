@@ -397,7 +397,7 @@ fn sponsored_candidate_uploads_exceed_metadata_forms_but_retain_intake_and_outpu
     let form = preparation(fixture.commit);
     let patch = format!(
         "diff --git a/large.txt b/large.txt\nnew file mode 100644\n--- /dev/null\n+++ b/large.txt\n@@ -0,0 +1 @@\n+{}\n",
-        "x".repeat(70 * 1024)
+        "x".repeat(crate::smart_http::server::issues::MAX_FORM_BYTES)
     );
     assert!(patch.len() > crate::smart_http::server::issues::MAX_FORM_BYTES);
     extract(
