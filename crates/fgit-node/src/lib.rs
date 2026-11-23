@@ -7726,8 +7726,8 @@ fn envelope_size(bytes: usize) -> String {
 
 impl OneNode {
     /// [`Self::prepare_visible_upload_pack`], telling the client in one `ERR`
-    /// packet when the refusal is the selected-pack envelope, before any
-    /// advertisement. The typed refusal stays the outcome; a client that is
+    /// packet before advertisement when the session expires or the selected
+    /// pack exceeds the envelope. The typed refusal stays the outcome; a client that is
     /// already gone changes nothing about it.
     pub(crate) fn prepare_visible_upload_pack_or_report(
         &self,
@@ -7743,12 +7743,18 @@ impl OneNode {
                     .selected_pack_limits
                     .max_object_bytes
                     .min(usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX));
-                if let Some(line) = upload_envelope_error(
-                    refusal,
-                    self.selected_pack_limits.max_total_expanded_bytes,
-                    object_bytes,
-                ) {
-                    let _ = write_packet_group(writer, &[Packet::Data(line)], limits);
+                let line = match refusal {
+                    NodeGitDaemonServeRefusal::Transport(error) => {
+                        upload_refusal::transport_line(error)
+                    }
+                    _ => upload_envelope_error(
+                        refusal,
+                        self.selected_pack_limits.max_total_expanded_bytes,
+                        object_bytes,
+                    ),
+                };
+                if let Some(line) = line {
+                    let _ = emit_terminal_upload_error(writer, line, limits, Some(deadline));
                 }
             })
     }

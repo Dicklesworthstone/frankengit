@@ -111,6 +111,46 @@ fn terminal_upload_report_never_revives_work_and_is_only_armed_once() {
 }
 
 #[test]
+fn expired_visibility_discovery_reports_a_terminal_error_before_advertisement() {
+    let scratch = ScratchDirectory::new();
+    let (node, _) = OneNode::init(test_config(scratch.path().to_path_buf())).unwrap();
+    let request = node.request_context();
+    let head = node
+        .runtime()
+        .block_on(node.materialize_admission_in(&request))
+        .unwrap();
+    let limits = WireLimits::default();
+    let mut deadline = session_deadline();
+    let mut output = Vec::new();
+    node.prepare_visible_upload_pack_or_report(&request, &head, &limits, &deadline, &mut output)
+        .expect("a live discovery can proceed to advertisement");
+    assert!(output.is_empty());
+    deadline.started -= Duration::from_secs(11);
+    let result = node.prepare_visible_upload_pack_or_report(
+        &request,
+        &head,
+        &limits,
+        &deadline,
+        &mut output,
+    );
+    assert!(
+        matches!(result, Err(NodeGitDaemonServeRefusal::Transport(error))
+        if matches!(*error, GitDaemonTransportRefusal::SessionDeadlineExceeded { .. }))
+    );
+    assert!(deadline.expired());
+    assert!(deadline.remaining_write().is_ok());
+    let (prefix, message) = output.split_at(4);
+    assert_eq!(
+        usize::from_str_radix(std::str::from_utf8(prefix).unwrap(), 16).unwrap(),
+        output.len()
+    );
+    let message = std::str::from_utf8(message).unwrap();
+    assert!(message.starts_with("ERR "));
+    assert!(message.contains("--session-timeout-secs"));
+    node.shutdown().unwrap();
+}
+
+#[test]
 fn raw_upload_timeout_writes_an_actionable_err_after_its_work_clock_expires() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let mut peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
