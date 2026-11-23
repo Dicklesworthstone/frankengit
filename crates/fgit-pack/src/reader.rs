@@ -1,4 +1,4 @@
-use fgit_deflate::{CancellationProbe, InflateLimits, Inflater, StreamProgress};
+use fgit_deflate::{BoundedStreamProgress, CancellationProbe, InflateLimits, Inflater};
 use std::{fmt, sync::Arc};
 
 use crate::{
@@ -328,29 +328,36 @@ fn inflate_one_member(
             requested: declared_size,
         })?;
     let mut inflater =
-        Inflater::new(inflate_limits(limits, declared_size)).map_err(PackError::Inflate)?;
-    for (index, byte) in input.iter().enumerate() {
+        Inflater::new_framed(inflate_limits(limits, declared_size)).map_err(PackError::Inflate)?;
+    // A framed inflater stops at the verified member trailer even when the
+    // supplied slice also contains the next entry. Limit read-ahead for the
+    // many short tree and delta programs in an ordinary Git pack.
+    let chunk_size = declared_size.clamp(64, 8 * 1024);
+    for chunk in input.chunks(chunk_size) {
         checkpoint(deadline)?;
-        let progress = {
-            let mut control = DeadlineProbe(deadline);
-            inflater
-                .push_with_control(std::slice::from_ref(byte), &mut control)
-                .map_err(PackError::Inflate)?
-        };
-        append_inflated(&mut output, inflater.take_output(), declared_size)?;
-        if progress == StreamProgress::Finished {
-            inflater.finish().map_err(PackError::Inflate)?;
+        let mut supplied = chunk;
+        loop {
+            let progress = inflater
+                .push_with_bounded_output(
+                    supplied,
+                    crate::STREAM_PACK_CHUNK_BYTES,
+                    &mut DeadlineProbe(deadline),
+                )
+                .map_err(PackError::Inflate)?;
             append_inflated(&mut output, inflater.take_output(), declared_size)?;
-            if output.len() != declared_size {
-                return Err(PackError::InflatedEntrySizeMismatch {
-                    declared: declared_size,
-                    actual: output.len(),
-                });
+            match progress {
+                BoundedStreamProgress::Finished => {
+                    if output.len() != declared_size {
+                        return Err(PackError::InflatedEntrySizeMismatch {
+                            declared: declared_size,
+                            actual: output.len(),
+                        });
+                    }
+                    return Ok((output, inflater.consumed_input_bytes()));
+                }
+                BoundedStreamProgress::NeedInput => break,
+                BoundedStreamProgress::OutputReady => supplied = &[],
             }
-            let consumed = index.checked_add(1).ok_or(PackError::IntegerOverflow {
-                context: "pack zlib member length",
-            })?;
-            return Ok((output, consumed));
         }
     }
     inflater.finish().map_err(PackError::Inflate)?;
@@ -362,12 +369,8 @@ fn inflate_one_member(
 pub fn inflate_limits(limits: &PackLimits, declared_size: usize) -> InflateLimits {
     InflateLimits {
         max_input_bytes: limits.max_input_bytes,
-        // `inflate_one_member` supplies one byte at a time so it can return the
-        // exact pack boundary. The decoder may nevertheless need to retain a
-        // complete zlib or dynamic-Huffman header before it can consume any
-        // input. The pack-wide input ceiling is therefore also the bounded
-        // retained-input ceiling; `Inflater` grows this buffer incrementally
-        // and fallibly rather than preallocating it.
+        // The decoder may retain an incomplete dynamic-Huffman header across
+        // input chunks. Its input buffer grows fallibly within the pack limit.
         max_pending_input_bytes: limits.max_input_bytes,
         max_output_bytes: declared_size.max(1),
         max_expansion_ratio: Some(
@@ -514,6 +517,45 @@ mod tests {
         .expect("hand-built stored pack");
         assert_eq!(parsed.entries()[0].header.kind, EntryKind::Blob);
         assert_eq!(parsed.entries()[0].inflated, b"blob");
+    }
+
+    #[test]
+    fn buffered_member_stops_at_its_trailer_across_input_and_output_chunks() {
+        let payload: Vec<u8> = (0..50_000).map(|i| (i % 251) as u8).collect();
+        let mut members = zlib_stored(&payload);
+        let boundary = members.len();
+        members.extend(zlib_stored(b"next"));
+        let limits = PackLimits {
+            max_input_bytes: members.len(),
+            max_inflate_work: 1_000_000,
+            ..limits()
+        };
+        let (body, consumed) =
+            inflate_one_member(&members, payload.len(), &limits, &mut always).unwrap();
+        assert_eq!(body, payload);
+        assert_eq!(consumed, boundary);
+        let (next, used) =
+            inflate_one_member(&members[consumed..], 4, &limits, &mut always).unwrap();
+        assert_eq!(next, b"next");
+        assert_eq!(consumed + used, members.len());
+        assert_eq!(
+            inflate_one_member(
+                &members[..boundary - 1],
+                payload.len(),
+                &limits,
+                &mut always
+            ),
+            Err(PackError::Inflate(
+                fgit_deflate::InflateRefusal::UnexpectedEnd
+            ))
+        );
+        members[boundary - 1] ^= 1;
+        assert!(matches!(
+            inflate_one_member(&members, payload.len(), &limits, &mut always),
+            Err(PackError::Inflate(
+                fgit_deflate::InflateRefusal::Adler32Mismatch { .. }
+            ))
+        ));
     }
 
     #[test]
