@@ -274,6 +274,34 @@ Neither builds or refreshes indexes. `scripts/e2e/suites/search/initial_retrieva
 builds both indexes with `fg index` / `fg symbol-index` and checks the
 complete, truncated, ranked, raw-path and refusal cases through the binary.
 
+## Progressive ranked context
+
+Use `fg search --progressive` for a trusted-local read, or send an authenticated
+form to `POST {repository-route}/api/v1/source/search-progressive`. Both take
+the exact-generation context fields and select `context-weighted-rrf-q16-v1`.
+For example, to search the indexed SHA-256 branch for `Thing`, run
+
+```sh
+fg search --progressive "$storage" "$tenant" "$repository" --trusted-local \
+  --object-format sha256 ref=refs/heads/main term_hex=5468696e67
+```
+
+Read one JSON object per line. The first has `phase: "Initial"` and an `answer`
+containing the authorized hits, their spans, and the immutable generation vector.
+The service flushes this record before reading the selected source files. A
+`Refined` record carries the ranked context, its excerpts and the same original
+rows. A `RefinementFailed` record carries the refusal code. In that case the
+Initial answer is still usable. EOF after just one record means delivery ended
+before the client received the refinement outcome.
+
+HTTP requires the source-read grant. A failure before Initial uses its ordinary
+HTTP status. Once Initial starts a successful `application/x-ndjson` response,
+read the terminal record to determine the outcome. Both phases share one
+deadline and response-body allowance. The CLI exits 0 for complete ranked
+context, 3 for partial coverage and 2 for a refusal. This profile ranks the
+returned lexical, path and symbol rows. Semantic models and history expansion
+remain outside its scope.
+
 ## Verification and scope
 
 Verification uses production-native imports, patch admission, indexes, source
