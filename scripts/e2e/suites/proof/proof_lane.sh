@@ -160,7 +160,7 @@ fge_step claims-registry-demotion-drill
 # The rank axis is the one the checker CAN catch mechanically. It cannot catch a
 # row whose evidence is misdescribed at the right rank; that judgement stays
 # human, and the bead comment records it.
-if ! command -v cargo >/dev/null 2>&1; then
+if [[ -z ${FGIT_REGISTRY_CHECK_BIN:-} ]] && ! command -v cargo >/dev/null 2>&1; then
   fge_field registry_checker_available 0
   fge_skip fg041-registry-demotion 'cargo is unavailable; the registry checker cannot be exercised here'
 else
@@ -189,8 +189,11 @@ else
      "$PRF_REPO/tools/registry-check/src/main.rs" "$prf_sb/tools/registry-check/src/"
 
   prf_check_sandbox() {
-    ( cd "$PRF_REPO" && RCH_CARGO_WRAPPER_BYPASS=1 \
-        cargo run -q -p fgit-registry-check -- --root "$prf_sb" claims ) 2>&1
+    if [[ -n ${FGIT_REGISTRY_CHECK_BIN:-} ]]; then
+      "$FGIT_REGISTRY_CHECK_BIN" --root "$prf_sb" claims 2>&1
+    else
+      (cd "$PRF_REPO" && cargo run --locked -q -p fgit-registry-check -- --root "$prf_sb" claims) 2>&1
+    fi
   }
 
   # Baseline. A drill whose starting state already fails proves nothing about
@@ -340,16 +343,19 @@ else
   # would prove something true about a corpus that no longer exists.
   prf_gate_log=$(fge_artifact_path fg041-vectors-gate.log)
   prf_gate_exit=0
-  ( cd "$PRF_REPO" && RCH_CARGO_WRAPPER_BYPASS=1 \
-      cargo run -q -p fgit-proof-bridge --bin fgit-proof-bridge-gen -- check ) \
-    >"$prf_gate_log" 2>&1 || prf_gate_exit=$?
+  if [[ -n ${FGIT_PROOF_BRIDGE_BIN:-} ]]; then
+    (cd "$PRF_REPO" && "$FGIT_PROOF_BRIDGE_BIN" check) >"$prf_gate_log" 2>&1 || prf_gate_exit=$?
+  else
+    (cd "$PRF_REPO" && cargo run --locked -q -p fgit-proof-bridge --bin fgit-proof-bridge-gen -- check) \
+      >"$prf_gate_log" 2>&1 || prf_gate_exit=$?
+  fi
   fge_field vectors_gate_exit "$prf_gate_exit"
   fge_assert_eq fg041-vectors-are-current 0 "$prf_gate_exit" \
     'the committed Lean vectors match what the golden corpus renders today'
 
   prf_dpor_log=$(fge_artifact_path fg041-dpor.log)
   prf_dpor_exit=0
-  bash "$PRF_CHECK" --dpor >"$prf_dpor_log" 2>&1 || prf_dpor_exit=$?
+  bash "$PRF_REPO/proofs/fg041/check_dpor.sh" >"$prf_dpor_log" 2>&1 || prf_dpor_exit=$?
   fge_field dpor_replay_exit "$prf_dpor_exit"
   fge_assert_eq fg041-dpor-refinement 0 "$prf_dpor_exit" \
     'the kernel replays the reference model for both orders of the competing head updates'

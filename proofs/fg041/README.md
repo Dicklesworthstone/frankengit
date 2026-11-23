@@ -6,7 +6,7 @@ Run the local, fail-closed checker with:
 bash proofs/fg041/check.sh
 ```
 
-The proof E2E lane also runs `bash proofs/fg041/check.sh --dpor`.
+The proof E2E lane also runs `bash proofs/fg041/check_dpor.sh`.
 It replays the recorded `cas_loss_retry.fgtrace` seed, then lets the
 concurrency lab schedule its two competing staged batches at the common head.
 For each order the reference model executes both conditional updates. Exactly
