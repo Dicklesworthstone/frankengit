@@ -137,8 +137,8 @@ def main():
             status, denied = query(endpoint, restricted, fmt, b"NextThing")
             assert status == 403 and b"authorization_label" not in denied
             second = current(endpoint, reader, fmt, b"NextThing", updated)
-            def progressive(token, **limits):
-                return query(endpoint, token, fmt, b"NextThing", route="search-progressive", **limits)
+            def progressive(token, word=b"NextThing", **limits):
+                return query(endpoint, token, fmt, word, route="search-progressive", **limits)
             status, ranked_body = progressive(reader)
             assert status == 200, (status, ranked_body)
             initial, refined = map(json.loads, ranked_body.splitlines())
@@ -146,8 +146,17 @@ def main():
             assert refined["phase"] == "Refined" and refined["answer"]["retrieval"] == second
             status, limited_body = progressive(reader, context_max_source_bytes=1)
             assert status == 200
-            kept, failed = map(json.loads, limited_body.splitlines())
-            assert kept == initial and failed == {"phase": "RefinementFailed", "code": "resource_limit"}
+            kept, partial = map(json.loads, limited_body.splitlines())
+            assert kept == initial and partial["phase"] == "Refined"
+            assert partial["answer"]["complete"] is False and partial["answer"]["retrieval"] == second
+            # One selected file receives a one-byte share and is oversized.
+            # Across multiple selected files the same total yields no usable share.
+            original_hits = current(endpoint, reader, fmt, b"Thing", updated)
+            status, exhausted_body = progressive(reader, b"Thing", context_max_source_bytes=1)
+            assert status == 200
+            original, failed = map(json.loads, exhausted_body.splitlines())
+            assert original == {"phase": "Initial", "answer": original_hits}
+            assert failed == {"phase": "RefinementFailed", "code": "resource_limit"}
             denied_status, denied_body = progressive(restricted)
             early_status, early_body = progressive(reader, max_work=32)
             assert denied_status == 403 and early_status == 413
