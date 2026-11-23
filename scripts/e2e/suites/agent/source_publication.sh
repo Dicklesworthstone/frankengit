@@ -9,7 +9,10 @@ fge_context suite sponsored-source-publication
 fge_context fg_digest "$(fge_digest_file "$FG_BIN")"
 WORK="$(fge_tempdir agent-source-publication)"
 fge_phase action
-fge_run_timeout 480 AGENT-SOURCE-001 python3 "$E2E_ROOT/helpers/agent_source_publication.py" "$FG_BIN" "$WORK"
+campaign_exit=0
+fge_run_timeout 480 AGENT-SOURCE-001 python3 "$E2E_ROOT/helpers/agent_source_publication.py" "$FG_BIN" "$WORK" || campaign_exit=$?
 fge_phase assert
-fge_assert_exit AGENT-SOURCE-002 0 "$FGE_LAST_EXIT"
-fge_artifact "$WORK/results.json" native_agent_source_publication_results
+fge_assert_exit AGENT-SOURCE-002 0 "$campaign_exit"
+if [[ "$campaign_exit" -eq 0 ]]; then
+    fge_artifact "$WORK/results.json" native_agent_source_publication_results
+fi
