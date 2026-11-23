@@ -1,6 +1,7 @@
 //! Label replacement through production sealing/CAS with deterministic model faults.
 use super::*;
 use fgit_admission::merge::native::pull_request::{self as native, labels};
+use fgit_forge::ForgeEventPayload;
 use fgit_forge::event::pull_request_labels::PullRequestLabelsCommand;
 
 fn command(previous: u64, values: &[&str]) -> PullRequestLabelsCommand {
