@@ -97,9 +97,6 @@ pub(super) fn command_fields(
         .validate()
         .map_err(|_| ApiError::bad("invalid_context_limits"))?;
     let initial = super::command_fields(initial, format)?;
-    if ranked && initial.index_source == IndexSource::Current {
-        return Err(ApiError::bad("unsupported_context_selection"));
-    }
     Ok(ContextCommand {
         initial,
         limits,
@@ -156,32 +153,62 @@ fn run_context(
     let request = read.request_context(node, deadline);
     let mut live = || !deadline.expired() && read.is_live();
     if command.initial.index_source == IndexSource::Current {
-        if command.ranked {
-            return Err(ApiError::bad("unsupported_context_selection"));
+        let report = drive_request_while(
+            node,
+            &request,
+            node.search_source_initial_revalidated_local_in(
+                &request,
+                read,
+                &command.initial.selection.reference,
+                command.initial.selection.expected_head,
+                command.initial.selection.expected_commit,
+                &command.initial.checkpoints,
+                &command.initial.query,
+                command.initial.limits,
+            ),
+            &mut live,
+        )
+        .map_err(failure)?;
+        if let Some(progress) = progress {
+            let document = super::render_view(
+                node,
+                read,
+                &command.initial,
+                super::view::InitialView::Current(&report),
+                report.authorization(),
+                maximum,
+                &mut live,
+            )?;
+            maximum = progress.initial(&document)?;
         }
-        let context = drive_request_while(
+        // Revalidation selects one current source and retains the original
+        // index receipts. Flush those exact rows before moving the same owned
+        // report into hydration; neither phase retries a moved source.
+        let (context, ranking) = drive_request_while(
             node,
             &request,
             async {
-                let initial = node
-                    .search_source_initial_revalidated_local_in(
+                if command.ranked {
+                    let selected = node
+                        .hydrate_source_initial_revalidated_ranked_local_in(
+                            &request,
+                            read,
+                            report,
+                            command.limits,
+                        )
+                        .await?;
+                    let (context, ranking) = selected.into_parts();
+                    Ok((context, Some(ranking)))
+                } else {
+                    node.hydrate_source_initial_revalidated_local_in(
                         &request,
                         read,
-                        &command.initial.selection.reference,
-                        command.initial.selection.expected_head,
-                        command.initial.selection.expected_commit,
-                        &command.initial.checkpoints,
-                        &command.initial.query,
-                        command.initial.limits,
+                        report,
+                        command.limits,
                     )
-                    .await?;
-                node.hydrate_source_initial_revalidated_local_in(
-                    &request,
-                    read,
-                    initial,
-                    command.limits,
-                )
-                .await
+                    .await
+                    .map(|context| (context, None))
+                }
             },
             &mut live,
         )
@@ -191,7 +218,7 @@ fn run_context(
             read,
             command,
             ContextView::Current(&context),
-            None,
+            ranking.as_ref(),
             maximum,
             &mut live,
         )
@@ -452,8 +479,7 @@ fn render_view(
     }
     append(&mut out, "]", maximum)?;
     if let Some(ranking) = ranking {
-        let exact = context.exact().ok_or_else(ApiError::unavailable)?;
-        append_ranking(&mut out, exact, ranking, maximum, live)?;
+        append_ranking(&mut out, context, ranking, maximum, live)?;
     }
     append(&mut out, "}", maximum)?;
     check(live)?;
@@ -467,7 +493,7 @@ mod tests;
 /// Validate its identity join and arithmetic before the buffered response is sent.
 fn append_ranking(
     out: &mut String,
-    context: &InitialContext,
+    context: ContextView<'_>,
     ranking: &ContextRanking,
     maximum: usize,
     live: &mut impl FnMut() -> bool,

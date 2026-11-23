@@ -48,8 +48,9 @@ Base status values used below are `required-v1`, `planned`, `experimental-v1`, `
 
 ## Exact-name fetches with protocol v2
 
-Authenticated upload-pack views advertise `fetch=... ref-in-want` over raw
-Git, SSH's shared Git command path and smart HTTP. A request may name visible
+With `--enable-ref-in-want`, authenticated upload-pack views advertise
+`fetch=... ref-in-want` over raw Git, SSH's shared Git command path and smart
+HTTP. The extension is omitted by default. A request may name visible
 refs with `want-ref`, alongside ordinary OID wants. Resolution and pack
 selection use the same immutable request snapshot; earlier `ls-refs` output
 is not treated as the current tip. The response includes the exact requested
@@ -283,6 +284,24 @@ exact-head visible-graph proof:
 
 Every other capability `fg` advertises must also be advertised by pinned Git,
 and the Tier A capability subset must match exactly.
+
+Protocol-v2 `ref-in-want` and `object-info` now follow the upstream default:
+both are omitted unless explicitly selected. `--enable-ref-in-want` on `serve`,
+`serve-ssh` or `serve-http` corresponds to Git's `uploadpack.allowRefInWant=true`;
+`--enable-object-info` corresponds to `transfer.advertiseObjectInfo=true`.
+The two choices are independent and apply to the authenticated command parser
+as well as advertisement. An unadvertised `want-ref` argument or `object-info`
+command refuses before a result or pack can be emitted. An enabled feature
+still uses the exact visible graph and all existing resource/visibility bounds.
+Node embeddings select the same flags through `with_upload_pack_ref_in_want`
+and `with_upload_pack_object_info` on `NodeConfig`.
+
+The earlier November 23 differential run's 28 default-advertisement failures
+are retained in the [bridge plan](REALITY_CHECK_AND_BRIDGE_PLAN.md). This change
+does not relabel that historical run or claim a new Tier A result. The default
+and independent opt-in regressions live in
+`crates/fgit-node/src/upload_visibility/tests/optional_extensions.rs`, alongside
+the existing enabled-feature visibility, bounds and cancellation suites.
 
 Upload-pack's visible-object boundary has an additional deliberate divergence:
 

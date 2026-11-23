@@ -335,6 +335,8 @@ pub struct AdmissionUploadPackRepository {
     shallow_proof: Option<upload_visibility::shallow::ShallowProof>,
     object_info_proof: Option<upload_visibility::object_info::ObjectInfoProof>,
     ref_in_want_deadline: Option<GitDaemonSessionDeadline>,
+    ref_in_want_enabled: bool,
+    object_info_enabled: bool,
 }
 
 impl AdmissionUploadPackRepository {
@@ -422,6 +424,8 @@ impl AdmissionUploadPackRepository {
             shallow_proof: None,
             object_info_proof: None,
             ref_in_want_deadline: None,
+            ref_in_want_enabled: false,
+            object_info_enabled: false,
         })
     }
 
@@ -504,10 +508,13 @@ impl UploadPackRepository for AdmissionUploadPackRepository {
     }
 
     fn supports_ref_in_want(&self) -> bool {
-        self.ref_in_want_deadline.is_some()
+        self.ref_in_want_enabled && self.ref_in_want_deadline.is_some()
     }
 
     fn ref_in_want_checkpoint(&self) -> Result<(), WireError> {
+        if !self.ref_in_want_enabled {
+            return Err(WireError::PackSourceRefused);
+        }
         match &self.ref_in_want_deadline {
             Some(deadline) if !deadline.expired() => Ok(()),
             _ => Err(WireError::PackSourceRefused),
@@ -515,10 +522,13 @@ impl UploadPackRepository for AdmissionUploadPackRepository {
     }
 
     fn supports_object_info(&self) -> bool {
-        self.object_info_proof.is_some()
+        self.object_info_enabled && self.object_info_proof.is_some()
     }
 
     fn object_info_checkpoint(&self) -> Result<(), WireError> {
+        if !self.object_info_enabled {
+            return Err(WireError::PackSourceRefused);
+        }
         self.object_info_proof
             .as_ref()
             .ok_or(WireError::PackSourceRefused)?
@@ -526,6 +536,9 @@ impl UploadPackRepository for AdmissionUploadPackRepository {
     }
 
     fn object_info_size(&self, oid: AnyGitOid) -> Result<Option<u64>, WireError> {
+        if !self.object_info_enabled {
+            return Err(WireError::PackSourceRefused);
+        }
         let proof = self
             .object_info_proof
             .as_ref()
@@ -4351,7 +4364,7 @@ impl<'n> FabricReadCeiling<'n> {
     /// than the one it holds, before anything checkpoints the expiring one.
     ///
     /// Only the wall clock grows: the replacement carries the remaining poll
-    /// and cost quotas of the context it replaces. A context already stopped
+    /// and cost quotas and priority of the context it replaces. A context already stopped
     /// is never revived, and a deadline already in the past is never granted.
     fn rearm(&self, context: &FsqliteCx) {
         let bytes = self.session.map_or_else(
@@ -4376,17 +4389,13 @@ impl<'n> FabricReadCeiling<'n> {
         if native.is_cancel_requested() {
             return;
         }
-        let left = native.budget().remaining(self.node.runtime.now());
-        let floors = self
-            .node
-            .service_config
-            .runtime_budgets
-            .limits_for(AUTHORITY_CONTEXT_BUDGET_CLASS);
+        let budget = native.budget();
+        let left = budget.remaining(self.node.runtime.now());
         let limits = ClassLimits {
             timeout: Some(earned - now),
             poll_quota: left.polls.unwrap_or(u32::MAX),
             cost_quota: left.cost,
-            priority: floors.priority,
+            priority: budget.priority,
         };
         context.set_native_cx(
             self.node
@@ -8064,6 +8073,11 @@ pub struct NodeConfig {
     /// The last visible upload-pack projection, shared across service children
     /// and reused only at its exact authority basis (frankengit-8g42).
     upload_visibility_cache: Arc<upload_visibility::VisibleProjectionCache>,
+    /// Optional protocol-v2 upload-pack extensions. Like upstream Git's
+    /// uploadpack.allowRefInWant and transfer.advertiseObjectInfo settings,
+    /// these default off. They do not authorize additional refs or objects.
+    upload_pack_ref_in_want: bool,
+    upload_pack_object_info: bool,
     git_daemon_session_timeout: GitDaemonSessionTimeout,
     git_daemon_receive_processing_timeout: GitDaemonReceiveProcessingTimeout,
     /// Work-proportional extension of the git-daemon session envelope: the
@@ -8173,6 +8187,8 @@ impl NodeConfig {
             )),
             admission_closure_cache: Arc::new(closure_selection::AdmissionClosureCache::default()),
             upload_visibility_cache: Arc::default(),
+            upload_pack_ref_in_want: false,
+            upload_pack_object_info: false,
             git_daemon_session_timeout: GitDaemonSessionTimeout::DEFAULT,
             git_daemon_receive_processing_timeout: GitDaemonReceiveProcessingTimeout::DEFAULT,
             git_daemon_session_work_scaling: GitDaemonSessionWorkScaling::DEFAULT,
@@ -8248,6 +8264,42 @@ impl NodeConfig {
     pub const fn with_object_format(mut self, object_format: GitHashAlgorithm) -> Self {
         self.object_format = Some(object_format);
         self
+    }
+
+    /// Enables or disables protocol-v2 `ref-in-want` on Git, SSH and HTTP.
+    ///
+    /// The compatibility default is disabled. Enabling this runtime-only
+    /// service option still requires the exact authorized visible-ref proof;
+    /// it never widens ref visibility or changes canonical repository state.
+    /// Reopened children inherit the selection through this configuration.
+    #[must_use]
+    pub const fn with_upload_pack_ref_in_want(mut self, enabled: bool) -> Self {
+        self.upload_pack_ref_in_want = enabled;
+        self
+    }
+
+    /// Whether protocol-v2 `ref-in-want` was explicitly enabled.
+    #[must_use]
+    pub const fn upload_pack_ref_in_want_enabled(&self) -> bool {
+        self.upload_pack_ref_in_want
+    }
+
+    /// Enables or disables protocol-v2 `object-info` on Git, SSH and HTTP.
+    ///
+    /// The compatibility default is disabled. Size queries continue to use
+    /// the request's authenticated visible graph, finite work budget and
+    /// deadline; stored-but-hidden objects remain indistinguishable from
+    /// absent objects. This runtime-only setting publishes no authority.
+    #[must_use]
+    pub const fn with_upload_pack_object_info(mut self, enabled: bool) -> Self {
+        self.upload_pack_object_info = enabled;
+        self
+    }
+
+    /// Whether protocol-v2 `object-info` was explicitly enabled.
+    #[must_use]
+    pub const fn upload_pack_object_info_enabled(&self) -> bool {
+        self.upload_pack_object_info
     }
 
     /// Selects the authenticated root layout for a newly created repository.

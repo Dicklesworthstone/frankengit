@@ -67,10 +67,35 @@ not the current production capability set. The strict no-capability refusal
 remains covered in wire tests. Current visibility and historical-retention
 boundaries are unchanged.
 
+## Optional protocol-v2 extensions
+
+`serve`, `serve-ssh` and `serve-http` omit `ref-in-want` and `object-info` by
+default, matching the default Git 2.54.0 advertisement. Operators can select
+either extension independently:
+
+| Service flag | Enabled protocol surface | Upstream Git setting |
+| --- | --- | --- |
+| `--enable-ref-in-want` | `fetch=... ref-in-want ...` and `want-ref` arguments | `uploadpack.allowRefInWant=true` |
+| `--enable-object-info` | `object-info` command and size queries | `transfer.advertiseObjectInfo=true` |
+
+Embedded callers use `NodeConfig::with_upload_pack_ref_in_want(true)` and
+`NodeConfig::with_upload_pack_object_info(true)`. Passing `false` disables the
+corresponding extension again. These are runtime service selections, inherited
+by reopened request children; no repository format or authority state changes.
+The same flags apply to repositories served through HTTP and SSH catalogs.
+
+An unadvertised `want-ref` argument or `object-info` command is refused before
+its result or pack is produced. Ordinary object-ID wants, shallow and filtered
+fetches retain their existing behavior. Enabling an extension still requires
+the request's exact authenticated visible graph and original finite deadline.
+Shared immutable projection caches never enable a disabled command, and
+disabling the extensions does not remove ordinary negotiation deadline checks.
+
 ## Protocol-v2 object-size queries
 
-`serve`, `serve-ssh` and `serve-http` advertise `object-info` after preparing
-their exact authorized visible graph. A v2 client can send
+With `--enable-object-info`, `serve`, `serve-ssh` and `serve-http` advertise
+`object-info` after preparing their exact authorized visible graph. A v2 client
+can send
 `command=object-info`, the capability/argument delimiter, `size`, one or more
 `oid <full-native-id>` arguments, and the request flush. It receives the size
 attribute, one size row for each requested identity, and a response flush.

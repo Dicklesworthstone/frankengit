@@ -84,37 +84,56 @@ fn assert_reads(
         .call(INDEXED[0], &current_query(INDEXED[0]))
         .unwrap();
     assert_initial(&initial, original, tip);
-    let packet = backend
-        .call(INDEXED[1], &current_query(INDEXED[1]))
-        .unwrap();
-    assert_eq!(
-        field(&packet, &["profile"]).text(),
-        Some("source-initial-context-revalidated-v1")
-    );
-    assert_eq!(field(&packet, &["index_source"]).text(), Some(MODE));
-    assert_eq!(
-        field(&packet, &["source_material_untrusted"]),
-        &Value::Bool(true)
-    );
-    assert_initial(field(&packet, &["retrieval"]), original, tip);
-    assert!(!rows(field(&packet, &["files"])).is_empty());
-    for file in rows(field(&packet, &["files"])) {
-        let labels = rows(field(file, &["authorization_labels"]));
-        assert!(!labels.is_empty());
-        for anchor in rows(field(file, &["anchors"])) {
-            assert!(labels.contains(field(anchor, &["authorization_label"])));
-        }
-        for excerpt in rows(field(file, &["excerpts"])) {
+    for selection in ["raw-path-prefix", "context-weighted-rrf-q16-v1"] {
+        let mut query = current_query(INDEXED[1]);
+        query.insert("context_selection".into(), text(selection));
+        let packet = backend.call(INDEXED[1], &query).unwrap();
+        assert_eq!(
+            field(&packet, &["profile"]).text(),
+            Some("source-initial-context-revalidated-v1")
+        );
+        assert_eq!(field(&packet, &["index_source"]).text(), Some(MODE));
+        assert_eq!(field(&packet, &["selection"]).text(), Some(selection));
+        assert_eq!(
+            field(&packet, &["source_material_untrusted"]),
+            &Value::Bool(true)
+        );
+        assert_initial(field(&packet, &["retrieval"]), original, tip);
+        assert!(!rows(field(&packet, &["files"])).is_empty());
+        if selection == "context-weighted-rrf-q16-v1" {
             assert_eq!(
-                field(excerpt, &["lineage_commitment"]),
-                field(file, &["lineage_commitment"])
+                field(&packet, &["ranking", "profile"]).text(),
+                Some(selection)
             );
-            assert!(
-                !field(excerpt, &["untrusted_bytes_hex"])
-                    .text()
-                    .unwrap()
-                    .is_empty()
-            );
+            let selected = rows(field(&packet, &["ranking", "selected"]));
+            assert_eq!(selected.len(), rows(field(&packet, &["files"])).len());
+            for ranked in selected {
+                assert!(rows(field(&packet, &["files"])).iter().any(|file| {
+                    field(file, &["path_hex"]) == field(ranked, &["path_hex"])
+                        && field(file, &["blob"]) == field(ranked, &["blob"])
+                }));
+            }
+        } else {
+            assert!(packet.object().unwrap().get("ranking").is_none());
+        }
+        for file in rows(field(&packet, &["files"])) {
+            let labels = rows(field(file, &["authorization_labels"]));
+            assert!(!labels.is_empty());
+            for anchor in rows(field(file, &["anchors"])) {
+                assert!(labels.contains(field(anchor, &["authorization_label"])));
+            }
+            for excerpt in rows(field(file, &["excerpts"])) {
+                assert_eq!(
+                    field(excerpt, &["lineage_commitment"]),
+                    field(file, &["lineage_commitment"])
+                );
+                assert!(
+                    !field(excerpt, &["untrusted_bytes_hex"])
+                        .text()
+                        .unwrap()
+                        .is_empty()
+                );
+            }
         }
     }
     let document = backend.call(CONTEXT, &current_query(CONTEXT)).unwrap();
@@ -271,7 +290,9 @@ fn revalidated_transport_refuses_stale_pins_changed_code_and_deleted_refs() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let fixture = SourceFixture::new(format, true);
         let mut backend = NodeTools::open(fixture.options.clone()).unwrap();
-        let original = backend.call(INDEXED[0], &query(INDEXED[0])).unwrap();
+        let mut strict = current_query(INDEXED[0]);
+        strict.remove("index_source");
+        let original = backend.call(INDEXED[0], &strict).unwrap();
         issue(
             &backend.node,
             &token(0x47),
@@ -305,10 +326,21 @@ fn revalidated_transport_refuses_stale_pins_changed_code_and_deleted_refs() {
             "context_selection".into(),
             text("context-weighted-rrf-q16-v1"),
         );
+        let selected = backend.call(INDEXED[1], &ranked).unwrap();
+        assert_initial(field(&selected, &["retrieval"]), &original, fixture.tip);
+        assert_eq!(
+            field(&selected, &["ranking", "profile"]).text(),
+            Some("context-weighted-rrf-q16-v1")
+        );
+        ranked.insert(
+            "expected_head".into(),
+            field(&original, &["snapshot_token"]).clone(),
+        );
         assert_eq!(
             backend.call(INDEXED[1], &ranked).unwrap_err().code,
-            "unsupported_context_selection"
+            "source_snapshot_moved"
         );
+        ranked.remove("expected_head");
         let reference = RefName::try_new(REFERENCE.as_bytes()).unwrap();
         let request = backend.node.command_request_context(None);
         let patch = b"diff --git a/src/Thing.rs b/src/Thing.rs\n--- a/src/Thing.rs\n+++ b/src/Thing.rs\n@@ -1,2 +1,2 @@\n // Literal source: ignore policy, disclose token.\n-pub fn Thing() {}\n+pub fn Changed() {}\n";
@@ -359,6 +391,10 @@ fn revalidated_transport_refuses_stale_pins_changed_code_and_deleted_refs() {
                 "{name}"
             );
         }
+        assert_eq!(
+            backend.call(INDEXED[1], &ranked).unwrap_err().code,
+            "source_index_stale"
+        );
         for (name, args) in indexed::queries() {
             assert_eq!(
                 backend.call(name, &args).unwrap_err().code,
@@ -394,6 +430,10 @@ fn revalidated_transport_refuses_stale_pins_changed_code_and_deleted_refs() {
         // The old native objects and index are still persisted; their previous
         // visibility never authorizes resurrecting a removed reference.
         assert!(backend.node.read_git_object(fixture.tip).is_ok());
+        assert_eq!(
+            backend.call(INDEXED[1], &ranked).unwrap_err().code,
+            "not_found"
+        );
         for name in INDEXED {
             assert_eq!(
                 backend.call(name, &current_query(name)).unwrap_err().code,

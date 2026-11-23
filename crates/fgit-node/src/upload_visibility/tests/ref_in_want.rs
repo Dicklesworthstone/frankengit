@@ -10,7 +10,13 @@ use std::io::Cursor;
 
 mod negotiation;
 
-fn fetch_body(format: GitHashAlgorithm, names: &[&[u8]], controls: &[&[u8]]) -> Vec<u8> {
+fn fixture(format: GitHashAlgorithm) -> Fixture {
+    super::fixture_with_configuration(format, b"current public content".to_vec(), |config| {
+        config.with_upload_pack_ref_in_want(true)
+    })
+}
+
+pub(super) fn fetch_body(format: GitHashAlgorithm, names: &[&[u8]], controls: &[&[u8]]) -> Vec<u8> {
     let mut packets = vec![
         Packet::Data(b"command=fetch\n".to_vec()),
         Packet::Data(format!("object-format={}\n", format.as_str()).into_bytes()),
@@ -66,7 +72,7 @@ fn unknown_ref(name: &[u8]) -> Vec<u8> {
     encode_packets(&[Packet::Data(line)], &WireLimits::default()).unwrap()
 }
 
-fn raw_fetch(
+pub(super) fn raw_fetch(
     node: OneNode,
     body: &[u8],
 ) -> (
@@ -109,7 +115,7 @@ fn raw_fetch(
     (node, result, response)
 }
 
-fn http_fetch(
+pub(super) fn http_fetch(
     node: &OneNode,
     body: &[u8],
     streamed: bool,
@@ -150,7 +156,7 @@ fn http_fetch(
     (result, response)
 }
 
-fn http_body(response: &[u8]) -> Vec<u8> {
+pub(super) fn http_body(response: &[u8]) -> Vec<u8> {
     let offset = response
         .windows(4)
         .position(|bytes| bytes == b"\r\n\r\n")

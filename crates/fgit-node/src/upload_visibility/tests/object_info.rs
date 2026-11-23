@@ -3,6 +3,16 @@
 
 use super::*;
 
+fn fixture(format: GitHashAlgorithm) -> Fixture {
+    fixture_with_public_body(format, b"current public content".to_vec())
+}
+
+fn fixture_with_public_body(format: GitHashAlgorithm, body: Vec<u8>) -> Fixture {
+    super::fixture_with_configuration(format, body, |config| {
+        config.with_upload_pack_object_info(true)
+    })
+}
+
 fn query_sizes(node: OneNode, objects: &[GitOid]) -> (OneNode, Vec<u8>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();

@@ -547,6 +547,11 @@ impl OneNode {
             deadline.clone(),
         ));
         repository.ref_in_want_deadline = Some(deadline.clone());
+        // The graph proof and ordinary negotiation deadline exist regardless
+        // of optional command enablement. Apply this service's ceilings only
+        // to its request-local adapter, after any shared projection lookup.
+        repository.ref_in_want_enabled = self.service_config.upload_pack_ref_in_want_enabled();
+        repository.object_info_enabled = self.service_config.upload_pack_object_info_enabled();
         Ok(VisibleUploadPack {
             basis: materialized.basis().clone(),
             closure,

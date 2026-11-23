@@ -265,7 +265,7 @@ pub(super) fn input_schema(context: bool) -> Value {
         object([
             ("type", text("string")),
             ("enum", Value::Array(vec![text("current-native-v1")])),
-            ("description", text("Omit for the strict authority-head index contract; current-native-v1 revalidates unchanged native source while preserving original index provenance. Context uses raw-path-prefix selection only in this mode.")),
+            ("description", text("Omit for the strict authority-head index contract; current-native-v1 revalidates unchanged native source while preserving original index provenance. Context supports raw-path-prefix and ranked weighted-fusion selection in either mode.")),
         ]),
     );
     let limits: &[&str] = if context {
