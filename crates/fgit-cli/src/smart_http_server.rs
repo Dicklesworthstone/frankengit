@@ -1661,9 +1661,14 @@ mod tests {
             "0".into(),
         ]);
         let configured = parse(&args).unwrap().config;
-        let flat = baseline
-            .with_git_daemon_session_work_scaling(fgit_node::GitDaemonSessionWorkScaling::FLAT);
-        assert_eq!(format!("{configured:?}"), format!("{flat:?}"));
+        assert_eq!(
+            baseline.git_daemon_session_work_scaling(),
+            fgit_node::GitDaemonSessionWorkScaling::DEFAULT
+        );
+        assert_eq!(
+            configured.git_daemon_session_work_scaling(),
+            fgit_node::GitDaemonSessionWorkScaling::FLAT
+        );
         *args.last_mut().unwrap() = "1".into();
         assert_eq!(
             parse(&args).err().as_deref(),

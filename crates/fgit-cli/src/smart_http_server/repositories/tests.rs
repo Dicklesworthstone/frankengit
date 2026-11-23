@@ -349,7 +349,7 @@ fn explicit_local_options_keep_existing_http_defaults_and_lifetime_bounds() {
         vec!["--allow-queue-landings"],
         vec!["--index-state", "init"],
         vec!["--workflow-trusted-local"],
-        vec!["--session-secs-per-mib", "1"],
+        vec!["--session-secs-per-mib", "1", "--session-secs-per-mib", "1"],
         vec!["--unknown", "value"],
     ] {
         assert!(parse(&arguments(&extra)).is_err(), "{extra:?}");
@@ -397,8 +397,13 @@ fn argument_and_numeric_limits_refuse_before_open() {
 #[test]
 fn routed_http_uses_the_configured_work_extension_for_each_repository() {
     let record = record();
-    let defaults = arguments(&[]);
-    let base = configuration(&record, &parse(&defaults).unwrap(), 2).unwrap();
+    for args in [arguments(&[]), arguments(&["--session-secs-per-mib", "1"])] {
+        let config = configuration(&record, &parse(&args).unwrap(), 2).unwrap();
+        assert_eq!(
+            config.git_daemon_session_work_scaling(),
+            fgit_node::GitDaemonSessionWorkScaling::DEFAULT
+        );
+    }
     let args = arguments(&[
         "--session-secs-per-mib",
         "2",
@@ -411,8 +416,7 @@ fn routed_http_uses_the_configured_work_extension_for_each_repository() {
         Duration::from_secs(17),
     )
     .unwrap();
-    let expected = base.with_git_daemon_session_work_scaling(scaling);
-    assert_eq!(format!("{configured:?}"), format!("{expected:?}"));
+    assert_eq!(configured.git_daemon_session_work_scaling(), scaling);
     let invalid = arguments(&[
         "--session-secs-per-mib",
         "0",

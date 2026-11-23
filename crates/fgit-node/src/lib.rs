@@ -8486,6 +8486,12 @@ impl NodeConfig {
         self
     }
 
+    /// Returns the configured work-based extension of a Git session deadline.
+    #[must_use]
+    pub const fn git_daemon_session_work_scaling(&self) -> GitDaemonSessionWorkScaling {
+        self.git_daemon_session_work_scaling
+    }
+
     /// Selects the receive-pack size envelope in bytes: the pushed pack's
     /// input ceiling and the unique expanded content ceiling it may resolve
     /// to. The quarantine retention bound tracks the input ceiling and the
