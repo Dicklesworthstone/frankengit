@@ -118,4 +118,16 @@ PY
     "$FG_BIN" "$WORK/service" "$format" "$run/work/bare" "$tip" "$next_tip" || true
   fge_assert_exit "SEARCH-INITIAL-015$suffix" 0 "$FGE_LAST_EXIT" \
     'a scoped reader gets both maintained indexes at the new tip after restart and a pulls-only reader is refused'
+  other=sha256
+  if [[ "$format" == sha256 ]]; then other=sha1; fi
+  for mode in initial context; do
+    duplicate_exit=0
+    "$FG_BIN" search "--$mode" "$NODE" "$TENANT" "$REPOSITORY" --trusted-local \
+      --object-format "$other" --object-format "$format" ref=refs/heads/main term_hex=5468696e67 \
+      >"$WORK/$mode-duplicate.out" 2>"$WORK/$mode-duplicate.err" || duplicate_exit=$?
+    fge_assert_exit "SEARCH-INITIAL-016-$mode$suffix" 2 "$duplicate_exit" \
+      'conflicting hash domains refuse even when the last flag matches the stored repository'
+    fge_assert_contains "SEARCH-INITIAL-017-$mode$suffix" "$(cat "$WORK/$mode-duplicate.err")" \
+      'duplicate --object-format' 'the refusal identifies the conflicting option'
+  done
 done

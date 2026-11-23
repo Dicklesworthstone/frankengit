@@ -1,7 +1,7 @@
 //! `fg search --initial` / `--context`: the node's shared Initial retrieval and
 //! context-packet read (the HTTP search-initial/context-initial grammar) for a
 //! trusted local operator. Persisted indexes are read, never built.
-use super::write_report;
+use super::{set_once, write_report};
 use fgit_node::{NodeConfig, OneNode};
 use fgit_types::{GitHashAlgorithm, HeadGeneration, RepositoryId, TenantId};
 
@@ -35,7 +35,7 @@ pub(super) fn run(arguments: &[String], context: bool) -> Result<u8, String> {
     let tenant = TenantId::from_hex(&arguments[1]).map_err(|_| "invalid tenant ID")?;
     let repository = RepositoryId::from_hex(&arguments[2]).map_err(|_| "invalid repository ID")?;
     let mut trusted = false;
-    let mut format = GitHashAlgorithm::Sha1;
+    let mut format = None;
     let mut fields = Vec::new();
     let mut at = 3;
     while at < arguments.len() {
@@ -44,11 +44,12 @@ pub(super) fn run(arguments: &[String], context: bool) -> Result<u8, String> {
         match argument {
             "--trusted-local" if !trusted => trusted = true,
             "--object-format" => {
-                format = match arguments.get(at).map(String::as_str) {
+                let value = match arguments.get(at).map(String::as_str) {
                     Some("sha1") => GitHashAlgorithm::Sha1,
                     Some("sha256") => GitHashAlgorithm::Sha256,
                     _ => return Err("object format must be sha1 or sha256".into()),
                 };
+                set_once(&mut format, value, "--object-format")?;
                 at += 1;
             }
             _ => {
@@ -64,7 +65,8 @@ pub(super) fn run(arguments: &[String], context: bool) -> Result<u8, String> {
         return Err("--trusted-local is required for a local retrieval read".into());
     }
     let mut node = OneNode::open_existing(
-        NodeConfig::new(arguments[0].clone().into(), tenant, repository).with_object_format(format),
+        NodeConfig::new(arguments[0].clone().into(), tenant, repository)
+            .with_object_format(format.unwrap_or(GitHashAlgorithm::Sha1)),
     )
     .map_err(|error| error.to_string())?;
     let operation = node
@@ -116,6 +118,23 @@ mod tests {
 
     #[test]
     fn malformed_invocations_refuse_before_opening_storage() {
+        for context in [false, true] {
+            for repeated in ["sha1", "sha256"] {
+                let arguments = args(&[
+                    "--trusted-local",
+                    "--object-format",
+                    "sha1",
+                    "--object-format",
+                    repeated,
+                    "ref=refs/heads/main",
+                    "term_hex=74",
+                ]);
+                assert_eq!(
+                    run(&arguments, context),
+                    Err("duplicate --object-format".into())
+                );
+            }
+        }
         for extra in [
             vec!["ref=refs/heads/main"],
             vec!["--trusted-local", "term_hex"],
