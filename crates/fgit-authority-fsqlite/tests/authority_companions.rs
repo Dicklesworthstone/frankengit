@@ -91,6 +91,30 @@ fn native_wal_checkpoint_and_fec_files_belong_to_the_closed_authority_image() {
         store.close(&cx).await.unwrap();
     });
     companions::validate_closed_image(&scratch.0).unwrap();
+    // The Linux WAL/FEC profile leaves these files after its final reopen and close.
+    // An engine upgrade that drops or renames an expected file must also be reviewed.
+    #[cfg(target_os = "linux")]
+    {
+        let mut observed: Vec<_> = fs::read_dir(&scratch.0)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        observed.sort();
+        let expected = [
+            "authority.fsqlite",
+            "authority.fsqlite-fsqlite-ns-gate",
+            "authority.fsqlite-fsqlite-ns-use",
+            "authority.fsqlite-shm",
+            "authority.fsqlite-wal",
+            "authority.fsqlite-wal-cert",
+            "authority.fsqlite-wal-cert-head",
+            "authority.fsqlite-wal-fec",
+            "authority.fsqlite-wal-fec.lock",
+            "authority.fsqlite.fsqlite-migration-state",
+        ]
+        .map(std::ffi::OsString::from);
+        assert_eq!(observed, expected);
+    }
     let foreign = scratch.0.join("authority.fsqlite-unreviewed");
     fs::write(&foreign, b"preserve").unwrap();
     let refusal = companions::validate_closed_image(&scratch.0).unwrap_err();
