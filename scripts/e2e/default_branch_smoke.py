@@ -210,8 +210,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fg", required=True, type=Path)
     arguments = parser.parse_args()
-    for algorithm, layout in [("sha1", "legacy"), ("sha256", "ref-merkle-v2")]:
-        run_format(arguments.fg.resolve(), algorithm, layout)
+    binary = arguments.fg.resolve()
+    for algorithm in ("sha1", "sha256"):
+        for layout in ("legacy", "ref-merkle-v2"):
+            run_format(binary, algorithm, layout)
 
 
 if __name__ == "__main__":
