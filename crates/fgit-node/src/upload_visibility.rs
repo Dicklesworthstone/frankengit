@@ -566,6 +566,10 @@ const fn disclosure_refusal(code: RefusalCode) -> NodePackMaterializationRefusal
 /// The production implementation always returns native-verified immutable
 /// bodies. The narrow seam allows budget and read-set assertions in tests.
 trait VisibilitySource {
+    /// A served walk earns Database time from verified bodies, never blob headers.
+    fn prioritize_verified_bodies(&self) -> bool {
+        false
+    }
     fn format(&self) -> GitHashAlgorithm;
     fn parse_limits(&self) -> ParseLimits;
     fn checkpoint(&self) -> Result<(), NodePackMaterializationRefusal>;
@@ -610,6 +614,10 @@ impl VisibilitySource for VerifiedFabricPackSource<'_> {
 }
 
 impl VisibilitySource for CeiledFabricSource<'_, '_> {
+    fn prioritize_verified_bodies(&self) -> bool {
+        self.ceiling.is_some()
+    }
+
     fn format(&self) -> GitHashAlgorithm {
         self.inner.format()
     }
@@ -769,7 +777,7 @@ fn walk_within_edge_budget_and_root_blobs(
     source.checkpoint()?;
     let maximum = usize::try_from(limits.max_entries).unwrap_or(usize::MAX);
     let mut required = BTreeMap::<GitOid, Option<ObjectType>>::new();
-    let mut pending = BTreeSet::new();
+    let mut pending = PendingObjects::new(source.prioritize_verified_bodies());
     let mut known = BTreeMap::<GitOid, ObjectType>::new();
     let mut tag_targets = BTreeMap::new();
     let mut objects = BTreeMap::new();
@@ -993,7 +1001,7 @@ fn visit_edges(
     known: &mut BTreeMap<GitOid, ObjectType>,
     tag_targets: &mut BTreeMap<GitOid, GitOid>,
     required: &mut BTreeMap<GitOid, Option<ObjectType>>,
-    pending: &mut BTreeSet<GitOid>,
+    pending: &mut PendingObjects,
 ) -> Result<(), NodePackMaterializationRefusal> {
     if kind == ObjectType::Tag {
         let [(target, _)] = edges else {
@@ -1083,6 +1091,39 @@ fn tree_path_facts(
     Ok((hints, names))
 }
 
+/// Both sets contain only authenticated, reachable IDs. Process structural
+/// bodies before terminal typed headers on a served request: the former
+/// discover the graph and earn finite Database time at verified EOF. A leaf
+/// never discovers another edge and its full header check still precedes
+/// every advertisement. Each set retains native-ID order.
+struct PendingObjects {
+    bodies: BTreeSet<GitOid>,
+    headers: BTreeSet<GitOid>,
+    prioritize_bodies: bool,
+}
+
+impl PendingObjects {
+    fn new(prioritize_bodies: bool) -> Self {
+        Self {
+            bodies: BTreeSet::new(),
+            headers: BTreeSet::new(),
+            prioritize_bodies,
+        }
+    }
+
+    fn insert(&mut self, id: GitOid, expected: Option<ObjectType>) {
+        if self.prioritize_bodies && expected == Some(ObjectType::Blob) {
+            self.headers.insert(id);
+        } else {
+            self.bodies.insert(id);
+        }
+    }
+
+    fn pop_first(&mut self) -> Option<GitOid> {
+        self.bodies.pop_first().or_else(|| self.headers.pop_first())
+    }
+}
+
 fn enqueue(
     format: GitHashAlgorithm,
     admitted: &PermittedObjectClosure,
@@ -1090,7 +1131,7 @@ fn enqueue(
     expected: Option<ObjectType>,
     maximum: usize,
     required: &mut BTreeMap<GitOid, Option<ObjectType>>,
-    pending: &mut BTreeSet<GitOid>,
+    pending: &mut PendingObjects,
 ) -> Result<(), NodePackMaterializationRefusal> {
     if id.is_zero() || id.algorithm() != format {
         return Err(disclosure_refusal(RefusalCode::ObjectHeaderInvalid));
@@ -1104,6 +1145,14 @@ fn enqueue(
         }
         if previous.is_none() {
             *previous = expected;
+            // A ref root can subsequently be reached by a typed tree edge.
+            // Move only a still-pending root; never requeue a completed read.
+            if pending.prioritize_bodies
+                && expected == Some(ObjectType::Blob)
+                && pending.bodies.remove(&id)
+            {
+                pending.headers.insert(id);
+            }
         }
         return Ok(());
     }
@@ -1113,7 +1162,7 @@ fn enqueue(
         return Err(disclosure_refusal(RefusalCode::ResourceBudgetExceeded));
     }
     required.insert(id, expected);
-    pending.insert(id);
+    pending.insert(id, expected);
     Ok(())
 }
 
