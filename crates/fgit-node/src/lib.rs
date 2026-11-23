@@ -9603,6 +9603,12 @@ impl OneNode {
         self.session_request_context_with_timeout(deadline.budget())
     }
 
+    /// Upload admission, disclosure and pack reads share the remaining
+    /// transport time, including time already spent reading the greeting.
+    fn upload_request_context(&self, deadline: &GitDaemonSessionDeadline) -> NodeRequestContext {
+        self.session_request_context_with_timeout(deadline.remaining().unwrap_or_default())
+    }
+
     /// Carry a verified request's authority ceiling into awaited database work.
     /// A fresh HTTP phase cannot extend an agent run, and a rich witness without
     /// its verifier-owned monotonic deadline supplies no live request authority.
@@ -11357,7 +11363,11 @@ impl OneNode {
             return Err(NodeGitDaemonServeRefusal::RepositoryPathMismatch);
         }
 
-        let request = self.request_context();
+        let request = if greeting.service() == GitDaemonService::ReceivePack {
+            self.request_context()
+        } else {
+            self.upload_request_context(&deadline)
+        };
         deadline
             .check("materialize authenticated admission")
             .map_err(NodeGitDaemonServeRefusal::from)?;
