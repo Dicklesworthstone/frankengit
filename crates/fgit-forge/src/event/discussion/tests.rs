@@ -449,23 +449,39 @@ fn wire_aggregate_zero_and_mismatched_payloads_are_rejected_on_decode() {
     let mut bytes = out.as_bytes().to_vec();
     bytes[8..12].copy_from_slice(&4u32.to_be_bytes());
     assert!(super::super::read_event(&mut Decoder::new(&bytes, DecodeLimits::DEFAULT)).is_err());
+    // Tag 13 now selects a credential aggregate; the discussion bytes are
+    // still malformed when decoded using that aggregate's longer identity.
     bytes[8..12].copy_from_slice(&13u32.to_be_bytes());
+    assert!(matches!(
+        super::super::read_event(&mut Decoder::new(&bytes, DecodeLimits::DEFAULT)),
+        Err(CodecRefusal::InputTruncated { .. })
+    ));
+    bytes[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
     assert!(matches!(
         super::super::read_event(&mut Decoder::new(&bytes, DecodeLimits::DEFAULT)),
         Err(CodecRefusal::VariantUnknown {
             field: "aggregate.kind",
-            observed: 13,
-            ..
+            observed: u32::MAX,
+            offset: 8
         })
     ));
     bytes[8..12].copy_from_slice(&11u32.to_be_bytes());
+    // Tag 25 selects a credential change; a discussion payload cannot supply its grant.
     bytes[28..32].copy_from_slice(&25u32.to_be_bytes());
+    assert!(matches!(
+        super::super::read_event(&mut Decoder::new(&bytes, DecodeLimits::DEFAULT)),
+        Err(CodecRefusal::InputTruncated {
+            field: "agent_credential.sponsor",
+            ..
+        })
+    ));
+    bytes[28..32].copy_from_slice(&u32::MAX.to_be_bytes());
     assert!(matches!(
         super::super::read_event(&mut Decoder::new(&bytes, DecodeLimits::DEFAULT)),
         Err(CodecRefusal::VariantUnknown {
             field: "kind",
-            observed: 25,
-            ..
+            observed: u32::MAX,
+            offset: 28
         })
     ));
 }
