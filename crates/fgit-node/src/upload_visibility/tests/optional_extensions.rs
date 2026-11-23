@@ -2,6 +2,7 @@
 //! immutable graph reuse. Parser support and a valid graph are insufficient.
 
 use super::*;
+use crate::GitDaemonTransportRefusal;
 use fgit_wire::smart_http::rpc::RpcError;
 
 fn object_info_body(format: GitHashAlgorithm, oid: GitOid) -> Vec<u8> {
