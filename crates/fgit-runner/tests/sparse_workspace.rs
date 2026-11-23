@@ -745,17 +745,15 @@ fn live_lease_wrong_plan_and_dropped_workspace_are_not_successful_reopens() {
         },
     )
     .unwrap();
-    assert!(matches!(
-        SparseWorkspace::reopen(
-            wrong.clone(),
-            scratch.parent(),
-            path(b"lease"),
-            reserve(&obligations, &wrong),
-            &capability(),
-            0
-        ),
-        Err(HostRefusal::IdentityMismatch)
-    ));
+    let mismatch = SparseWorkspace::reopen(
+        wrong.clone(),
+        scratch.parent(),
+        path(b"lease"),
+        reserve(&obligations, &wrong),
+        &capability(),
+        0,
+    );
+    assert_eq!(mismatch.unwrap_err(), HostRefusal::IdentityMismatch);
     let mut recovered = SparseWorkspace::reopen(
         workspace_plan.clone(),
         scratch.parent(),
