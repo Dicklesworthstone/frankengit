@@ -290,19 +290,20 @@ fn sponsored_source_tools_read_real_objects_and_indexes_in_both_formats() {
                     "frankengit_source_historical_tree",
                     "frankengit_source_historical_blob",
                     "frankengit_source_compare",
+                    "frankengit_source_verified_blob",
                 ])
                 .collect()
         );
         for name in names {
             assert!(!backend.is_mutation(name), "{name}");
         }
-        assert_eq!(
-            backend
-                .call("frankengit_source_log", &Object::new())
-                .unwrap_err()
-                .code,
-            "agent_operation_not_granted"
-        );
+        for name in ["frankengit_source_log", "frankengit_source_verified_blob"] {
+            assert_eq!(
+                backend.call(name, &Object::new()).unwrap_err().code,
+                "agent_operation_not_granted",
+                "{name}"
+            );
+        }
         let tree = backend
             .call(SOURCE_TOOLS[0], &query(SOURCE_TOOLS[0]))
             .unwrap();

@@ -15,8 +15,9 @@ ASCII alphanumeric/underscore words are indexed; A-Z is folded. High bytes and
 punctuation are separators, never Unicode normalization. Content and path are
 separate channels. The first original byte span for each term/document is kept
 in equally sized, sorted document-ID and offset columns. Source contents are
-not retained in the index. A 129-byte word refuses the entire build rather than
-silently omitting part of the document. Binary files are not silently excluded.
+not retained in the index. The scanner skips a whole word longer than 128
+bytes and indexes the surrounding words at their original byte offsets. A long
+word contributes no prefix match. The same rules apply to binary files.
 
 `LexicalQuery` ANDs 1–32 whole tokens, normalized, sorted and deduplicated. It is
 not substring, phrase, regex, symbol or fuzzy search. The rarest posting list is
