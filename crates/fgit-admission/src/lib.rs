@@ -2309,12 +2309,6 @@ pub fn prepare_canonical_commit_reusing_closure(
 /// bypassed on any layout. On `AuthorityBoundObjectClosureMerkleV2`, a
 /// non-genesis `basis` (`latest_committed_rcr_id.is_some()`) requires
 /// `inherited_closure` to be `Some` and fails closed otherwise.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "pure preparation binds basis, request, fold, incoming closure, \
-              current refs, layout, inherited cumulative closure, evidence, \
-              and optional cached encoding without hidden side state"
-)]
 pub fn prepare_canonical_commit_for_layout_reusing_closure(
     basis: &PublicationBasis,
     request: &TransactionRequest,
@@ -4924,12 +4918,6 @@ where
 /// validated and sealed by the shared [`prepare_commit_publication`], so a
 /// materialization the blocking surface rejects is rejected here for the same
 /// reason.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "mirrors the blocking sibling's parameters exactly, plus the \
-              runtime context; diverging the two signatures would make the \
-              pair harder to compare than the extra parameter costs"
-)]
 pub(crate) async fn publish_commit_async<S>(
     store: &S,
     cx: &S::Context,
@@ -4971,12 +4959,6 @@ where
 /// The asynchronous sibling of [`publish_refusal`], with the same ordering: the
 /// refusal record is staged before the head moves, so a reader that observes
 /// the decision can always resolve the record it names.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "mirrors the blocking sibling's parameters exactly, plus the \
-              runtime context; diverging the two signatures would make the \
-              pair harder to compare than the extra parameter costs"
-)]
 pub(crate) async fn publish_refusal_async<S, Projection>(
     store: &S,
     cx: &S::Context,
