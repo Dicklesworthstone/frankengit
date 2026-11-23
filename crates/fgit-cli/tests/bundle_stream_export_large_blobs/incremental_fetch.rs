@@ -3,6 +3,7 @@
 //! test peer, or synthetic success receipt stands in for either receiving node.
 
 use super::*;
+use fgit_schema::json;
 
 const STORAGE: &str = "incremental-fetcher";
 const TRACKING: &str = "refs/remotes/upstream/main";
@@ -292,7 +293,38 @@ impl Fixture {
             refusal.contains("\"refusal_code\":\"ExpectedOldRefMismatch\""),
             "{refusal}",
         );
-        assert_eq!(self.refs_at(STORAGE), committed);
+        // The terminal refusal publishes a decision. Only the page's head and
+        // continuation token may change, including when a mapping would add a ref.
+        let after_refusal = self.refs_at(STORAGE);
+        let before = json::parse(committed.as_bytes()).unwrap();
+        let after = json::parse(after_refusal.as_bytes()).unwrap();
+        let mut expected = before.object().unwrap().clone();
+        let actual = after.object().unwrap();
+        for key in ["source_head", "snapshot_token"] {
+            assert_ne!(expected[key].text().unwrap(), actual[key].text().unwrap());
+            expected.insert(key.to_owned(), actual[key].clone());
+        }
+        assert_eq!(&expected, actual);
+
+        let pinned = |page: &json::Value| {
+            let token = page.object().unwrap()["snapshot_token"].text().unwrap();
+            self.run(&args(&[
+                "refs",
+                STORAGE,
+                TENANT,
+                REPOSITORY,
+                "--trusted-local",
+                "--object-format",
+                self.format.as_str(),
+                "--expected-head",
+                token,
+            ]))
+        };
+        let moved = pinned(&before);
+        assert_eq!(moved.status.code(), Some(2));
+        assert!(moved.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&moved.stderr).contains("reference snapshot moved"));
+        assert_eq!(success(pinned(&after)), after_refusal);
         self.assert_incremental_fetch_staging_empty();
         let replay = self.fetch_at(
             STORAGE,
@@ -304,6 +336,7 @@ impl Fixture {
         );
         assert_eq!(replay.status.code(), Some(3));
         assert_eq!(String::from_utf8(replay.stdout).unwrap(), refusal);
+        assert_eq!(self.refs_at(STORAGE), after_refusal);
 
         self.assert_incremental_original_fetch(full_bundle, &mut expected_refs);
         self.assert_incremental_fetch_staging_empty();
