@@ -203,7 +203,14 @@ impl Custody {
     /// between the no-replace link and its removal. Only an alias proven to be
     /// the published file is removed; a different file is retained and refused.
     pub(super) fn settle_publication(&self) -> Result<(), String> {
-        let alias = self.root.join(QUARANTINE).join(DATABASE);
+        let quarantine = self.root.join(QUARANTINE);
+        if !exists(&quarantine, true)? {
+            return Ok(());
+        }
+        // Recovery can arrive here directly after the public link became visible.
+        // Validate the whole staging directory before removing even that alias.
+        companions::validate_closed_image(&quarantine).map_err(|e| e.to_string())?;
+        let alias = quarantine.join(DATABASE);
         if !exists(&alias, false)? {
             return Ok(());
         }
@@ -216,7 +223,7 @@ impl Custody {
         fs::remove_file(&alias).map_err(|e| {
             format!("final authority is visible; quarantine alias removal failed: {e}")
         })?;
-        sync_directory(&self.root.join(QUARANTINE))
+        sync_directory(&quarantine)
             .map_err(|e| format!("final authority is visible; quarantine sync failed: {e}"))
     }
 

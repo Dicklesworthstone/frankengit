@@ -204,6 +204,16 @@ fn cleanup_never_erases_unknown_files_and_missing_both_images_cannot_reinitializ
     custody.publish(|| Ok(())).unwrap();
     fs::write(quarantine.join("unrecognized-evidence"), b"retain").unwrap();
     fs::write(quarantine.join(SHM), b"known sibling").unwrap();
+    let alias = quarantine.join(DATABASE);
+    let published = scratch.root().join(DATABASE);
+    fs::hard_link(&published, &alias).unwrap();
+    assert!(
+        custody
+            .settle_publication()
+            .unwrap_err()
+            .contains("unrecognized-evidence")
+    );
+    assert!(same_file(&alias, &published).unwrap());
     assert!(custody.cleanup().is_err());
     assert_eq!(fs::read(quarantine.join(SHM)).unwrap(), b"known sibling");
     assert_eq!(
@@ -211,6 +221,8 @@ fn cleanup_never_erases_unknown_files_and_missing_both_images_cannot_reinitializ
         b"retain"
     );
     fs::remove_file(quarantine.join("unrecognized-evidence")).unwrap();
+    custody.settle_publication().unwrap();
+    assert!(!alias.exists());
     custody.cleanup().unwrap();
     // Losing a finished public database must not make its old intent look new.
     fs::remove_file(scratch.root().join(DATABASE)).unwrap();

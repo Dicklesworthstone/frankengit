@@ -37,6 +37,8 @@ for format in sha1 sha256; do
     mkdir "$quarantine"
     unknown="$quarantine/authority.fsqlite-future-format"
     known="$quarantine/authority.fsqlite-shm"
+    alias="$quarantine/authority.fsqlite"
+    ln "$root/dest/authority.fsqlite" "$alias"
     printf 'retain unknown bytes' > "$unknown"
     printf 'retain known bytes until cleanup' > "$known"
     unknown_hash=$(fge_digest_file "$unknown")
@@ -45,6 +47,9 @@ for format in sha1 sha256; do
     fge_assert_contains "$id-names-file" "$FGE_LAST_STDERR" 'authority.fsqlite-future-format'
     fge_assert_eq "$id-unknown-preserved" "$unknown_hash" "$(fge_digest_file "$unknown" || echo missing)"
     fge_assert_eq "$id-known-preserved" "$known_hash" "$(fge_digest_file "$known" || echo missing)"
+    alias_exit=0
+    fge_capture "$id-alias-preserved" test "$root/dest/authority.fsqlite" -ef "$alias" || alias_exit=$?
+    fge_assert_exit "$id-alias-preserved" 0 "$alias_exit"
     rm -- "$unknown"
     expect_exit "$id-resume" 0 "${restore[@]}" --resume
     expect_exit "$id-cleanup" 0 test ! -e "$quarantine"
