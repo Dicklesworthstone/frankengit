@@ -38,19 +38,11 @@ def source_tree(fixture, oid):
 
 
 class QueueFixture(Fixture):
-    def __init__(self, fmt, label, conflict=False):
+    def __init__(self, fmt, label, conflict=False, stage_refresh=False):
+        self.stage_refresh = stage_refresh
         super().__init__(fmt, "merge-commit", "queue-" + label, conflict=conflict)
-        # A distinct native commit on a second branch proves selection follows
-        # canonical queue order rather than the first PR or a configured source.
-        second = put(self, "commit", commit(
-            source_tree(self, self.incoming), [self.incoming], "second incoming\n",
-        ))
-        (self.source / SECOND).write_text(second + "\n", encoding="ascii")
-        invoke("import-second-queue-source", [
-            "import", *self.scope, OWNER, "queue-second-fixture", self.source,
-        ])
-        self.open_pr(8, SECOND, second)
-        self.tips = {7: self.incoming, 8: second}
+        self.open_pr(8, SECOND, self.second_tip)
+        self.tips = {7: self.incoming, 8: self.second_tip}
         self.sources = {7: SOURCE, 8: SECOND}
         self.queue_version = 0
         self.enqueue(7, 1, 0, "queue-first")
@@ -58,6 +50,18 @@ class QueueFixture(Fixture):
         self.watch[self.watch.index(SOURCE)] = TARGET
         self.watch[self.watch.index("--pull-request")] = "--merge-queue"
         self.watch[self.watch.index("--merge-queue") + 1] = "1"
+
+    def initial_refs(self):
+        refs = super().initial_refs()
+        tree_oid = source_tree(self, self.incoming)
+        self.second_tip = put(self, "commit", commit(tree_oid, [self.incoming], "second incoming\n"))
+        refs[SECOND] = self.second_tip
+        if self.stage_refresh:
+            self.updated_tip = put(self, "commit", commit(
+                tree_oid, [self.second_tip], "explicit source refresh\n",
+            ))
+            refs["refs/heads/staged-refresh"] = self.updated_tip
+        return refs
 
     def queue_base(self, operation):
         return [
@@ -236,11 +240,15 @@ def success(fmt):
 
 
 def source_refresh(fmt):
-    f = QueueFixture(fmt, "source-refresh")
+    f = QueueFixture(fmt, "source-refresh", stage_refresh=True)
     old = f.tips[8]
-    updated = put(f, "commit", commit(source_tree(f, old), [old], "explicit source refresh\n"))
-    (f.source / SECOND).write_text(updated + "\n", encoding="ascii")
-    invoke("advance-queued-source", ["import", *f.scope, OWNER, "queue-source-advanced", f.source])
+    updated = f.updated_tip
+    moved = json.loads(invoke("advance-queued-source", [
+        "branch", "update", *f.scope, "--trusted-local", "--object-format", fmt,
+        "--principal", OWNER, "--idempotency-key", "queue-source-advanced",
+        "--ref", SECOND, "--expected-tip", old, "--target", updated,
+    ]))
+    assert moved["outcome"] == "committed" and f.refs()[1][SECOND] == updated, moved
     f.tips[8] = updated
     before, _ = f.refs()
     stale = poll(invoke("queued-source-is-stale", f.watch, 1))

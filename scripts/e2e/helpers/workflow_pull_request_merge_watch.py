@@ -146,7 +146,7 @@ class Fixture:
             source_tree(b"conflicting\n" if conflict else b"base\n", b"source\n"),
             [self.base], "source\n",
         ))
-        for reference, oid in [(TARGET, self.target), (SOURCE, self.incoming)]:
+        for reference, oid in self.initial_refs().items():
             (self.source / reference).write_text(oid + "\n", encoding="ascii")
         self.merged_tree = identity(fmt, "tree", tree([
             (b"ci", b"40000", ci),
@@ -173,6 +173,9 @@ class Fixture:
             "--merge-timestamp", str(TIMESTAMP), "--merge-message", MESSAGE,
             "--merge-profile", "path", "--merge-method", method,
         ]
+
+    def initial_refs(self):
+        return {TARGET: self.target, SOURCE: self.incoming}
 
     def open_pr(self, number, source_ref, tip):
         return invoke("open-pr", [
