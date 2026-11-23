@@ -1019,6 +1019,48 @@ a 128 MiB budget, and charge retained label bytes against the 32 MiB page budget
 Cancellation or exhaustion refuses the whole read rather than returning a
 complete-looking partial result.
 
+##### 20.1.2.1 Explicit additive pull-request label intent
+
+`PullRequestLabelsIntent` binds the PR number and a nonempty exact set of labels
+to add, without a caller-selected label predecessor. Its labels obey the same
+32-label, 64-byte, canonical-order and text rules as replacement. It uses the
+separate `forge` request scope `pull-request.add-labels.v1`. The scope commits a
+single-event batch whose label aggregate has version one and required event
+kind **29**. This commitment template is not a claim about the publication
+version or the current labels. Exact replacement kind 27 and its original
+request scope retain their existing semantics and bytes.
+
+Required kind 29 encodes the 16-byte actor, then the original additions, then
+the complete resulting label set. Each set uses the same bounded `u32` count
+and length-prefixed UTF-8 strings as kind 27. The additions MUST be nonempty
+and a subset of the complete set. The independent label aggregate and normal
+form marker 15 are shared with replacement; unfamiliar required kinds refuse.
+
+Only the explicit `AddPullRequestLabelsV1` CALM profile permits replanning this
+intent. On each authenticated CAS basis, admission derives the next label
+version and the sorted union of the selected labels and the original additions.
+The validator independently checks that exact union and the 32-label limit,
+after checking current PR visibility and sponsored `PULLS_WRITE` authority.
+It does not silently drop old labels, trim additions, or reuse a prior basis's
+permission decision. Overlapping additions remain valid and every accepted
+request emits one event at one new label version. Strict replacements remain
+exact-predecessor operations, including when racing an additive intent.
+
+The original actor, PR, additions, scope, idempotency key and transaction identity
+MUST remain unchanged across every CAS loss. Final preparation reconstructs
+the original version-one commitment from the emitted additions and verifies
+the complete seal independently. A concurrent replacement may remove old
+labels; a losing new addition unions only its original additions into that
+replacement's resulting set. A known terminal retry returns its historical
+outcome without re-adding labels that a later replacement removed. Resource
+exhaustion refuses; unavailable evidence and cancellation stay undecided.
+
+Both event kinds carry complete bounded frontiers, so selected-head list,
+detail, filter, notification and authorized event-feed reads retain the same
+bounded behavior and disclosure policy after arbitrarily many additions.
+The additive operation preserves native PR content, lifecycle, review subjects,
+Git refs, policy and atomic delivery obligations exactly as replacement does.
+
 #### 20.1.3 Native pull-request rebase-and-merge
 
 The explicit `rebase/v1` native merge method applies only to an existing open

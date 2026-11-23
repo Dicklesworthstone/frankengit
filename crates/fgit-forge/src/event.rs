@@ -60,6 +60,7 @@ const KIND_NATIVE_AGENT_CREDENTIAL_CHANGED: u32 = 25;
 const KIND_PATH_REVIEW_PROTECTION_CHANGED: u32 = 26;
 const KIND_NATIVE_PULL_REQUEST_LABELS_CHANGED: u32 = 27;
 const KIND_REPOSITORY_PRINCIPAL_KIND_REF_POLICY_CHANGED: u32 = 28;
+const KIND_NATIVE_PULL_REQUEST_LABELS_ADDED: u32 = 29;
 
 /// Complete native coordinates of one merge. The resulting target is always
 /// `merge_commit`; there is no independently writable, contradictory after-tip.
@@ -192,6 +193,8 @@ pub enum ForgeEventPayload {
     PullRequestCommentedNative(pull_request_comment::NativePullRequestComment),
     /// Full current labels in a disjoint PR aggregate, required wire kind 27.
     PullRequestLabelsChangedNative(pull_request_labels::NativePullRequestLabelsEvent),
+    /// Sealed additions and the complete validated after-set, required kind 29.
+    PullRequestLabelsAddedNative(pull_request_labels::NativePullRequestLabelsAddedEvent),
 }
 
 impl ForgeEventPayload {
@@ -206,6 +209,7 @@ impl ForgeEventPayload {
             Self::MergeCommittedNative(_) => KIND_NATIVE_MERGE_COMMITTED,
             Self::PullRequestChangedNative(_) => KIND_NATIVE_PULL_REQUEST_CHANGED,
             Self::PullRequestLabelsChangedNative(_) => KIND_NATIVE_PULL_REQUEST_LABELS_CHANGED,
+            Self::PullRequestLabelsAddedNative(_) => KIND_NATIVE_PULL_REQUEST_LABELS_ADDED,
             Self::PullRequestReviewedNative(_) => KIND_NATIVE_PULL_REQUEST_REVIEWED,
             Self::IssueChangedNative(_) => KIND_NATIVE_ISSUE_CHANGED,
             Self::MilestoneChangedNative(_) => KIND_NATIVE_MILESTONE_CHANGED,
@@ -601,6 +605,7 @@ fn write_event(out: &mut Encoder, event: &ForgeEvent) -> Result<(), CodecRefusal
         ForgeEventPayload::CandidateWorkflowCheckObservedNative(change) => change.write(out)?,
         ForgeEventPayload::PullRequestCommentedNative(comment) => comment.write(out)?,
         ForgeEventPayload::PullRequestLabelsChangedNative(change) => change.write(out)?,
+        ForgeEventPayload::PullRequestLabelsAddedNative(change) => change.write(out)?,
     }
     Ok(())
 }
@@ -646,6 +651,9 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
                 pull_request_labels::NativePullRequestLabelsEvent::read(input)?,
             )
         }
+        KIND_NATIVE_PULL_REQUEST_LABELS_ADDED => ForgeEventPayload::PullRequestLabelsAddedNative(
+            pull_request_labels::NativePullRequestLabelsAddedEvent::read(input)?,
+        ),
         KIND_NATIVE_PULL_REQUEST_REVIEWED => {
             ForgeEventPayload::PullRequestReviewedNative(NativeReviewEvent::read(input)?)
         }

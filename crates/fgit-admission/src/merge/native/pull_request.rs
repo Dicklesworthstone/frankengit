@@ -333,11 +333,10 @@ where
                     .checked_add(loaded)
                     .filter(|total| *total <= MAX_SCAN_BYTES)
                     .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
-                let ForgeEventPayload::PullRequestLabelsChangedNative(change) = event.payload
-                else {
-                    return Err(unavailable(RefusalCode::EvidenceInvalid));
-                };
-                (change.labels, Some(event.version), Some(change.actor))
+                let (actor, labels) =
+                    fgit_forge::event::pull_request_labels::selected_labels(&event.payload)
+                        .ok_or_else(|| unavailable(RefusalCode::EvidenceInvalid))?;
+                (labels.to_vec(), Some(event.version), Some(actor))
             }
             None => (Vec::new(), None, None),
         };

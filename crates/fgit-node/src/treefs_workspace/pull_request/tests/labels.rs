@@ -1,6 +1,6 @@
 //! Label publication and pinned filtering over real imported native objects.
 use super::*;
-use fgit_forge::event::pull_request_labels::PullRequestLabelsCommand;
+use fgit_forge::event::pull_request_labels::{PullRequestLabelsCommand, PullRequestLabelsIntent};
 
 fn labels(number: u64, previous: u64, values: &[&str]) -> PullRequestLabelsCommand {
     PullRequestLabelsCommand {
@@ -20,6 +20,19 @@ fn set(
             &node.request_context(),
             &session(key),
             command,
+            AdmissionLimits::default(),
+        ))
+}
+fn add(
+    node: &OneNode,
+    intent: &PullRequestLabelsIntent,
+    key: &str,
+) -> Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal> {
+    node.runtime()
+        .block_on(node.admit_pull_request_add_labels_durable_in(
+            &node.request_context(),
+            &session(key),
+            intent,
             AdmissionLimits::default(),
         ))
 }
@@ -196,5 +209,100 @@ fn labels_keep_native_visibility_scope_cancellation_and_historical_outcomes() {
         );
         assert_eq!(snapshot(&node).basis(), after.basis());
         node.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn additive_labels_survive_reopen_and_recover_before_visibility_quota_or_cell_readiness() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let mut node = node(&scratch, format);
+        let fixture = fixture(&node, &scratch, format);
+        accepted(apply(&node, &command(&fixture, 1), "add-labels-open"));
+        accepted(set(&node, &labels(1, 0, &["bug"]), "add-labels-initial"));
+        let original = PullRequestLabelsIntent {
+            number: PullRequestNumber::FIRST,
+            labels: vec!["bug".into(), "urgent".into()],
+        };
+        let before = snapshot(&node);
+        let before_row = page(&node, 0, 1, None).unwrap().pull_requests.remove(0);
+        let cancelled = node.request_context();
+        cancelled.cancel();
+        assert!(
+            node.runtime()
+                .block_on(node.admit_pull_request_add_labels_durable_in(
+                    &cancelled,
+                    &session("add-labels-original"),
+                    &original,
+                    AdmissionLimits::default(),
+                ))
+                .is_err()
+        );
+        assert_eq!(snapshot(&node).basis(), before.basis());
+        let result = accepted(add(&node, &original, "add-labels-original"));
+        unchanged_code(&before, &snapshot(&node));
+        let after = filtered(&node, 0, None, &["bug", "urgent"]);
+        let row = &after.pull_requests[0];
+        assert_eq!(row.labels, original.labels);
+        assert_eq!(row.labels_version.unwrap().get(), 2);
+        assert_eq!(row.labels_actor, Some(principal()));
+        assert_eq!(row.event, before_row.event);
+        assert_eq!(row.data, before_row.data);
+        accepted(set(&node, &labels(1, 2, &[]), "add-labels-clear"));
+        assert!(
+            filtered(&node, 0, None, &["urgent"])
+                .pull_requests
+                .is_empty()
+        );
+        assert_eq!(
+            filtered(&node, 0, Some(after.source_head), &["urgent"]).pull_requests[0].labels,
+            original.labels
+        );
+        assert_eq!(
+            add(&node, &original, "add-labels-original").unwrap(),
+            result
+        );
+        assert!(
+            add(
+                &node,
+                &PullRequestLabelsIntent {
+                    number: original.number,
+                    labels: vec!["changed".into()],
+                },
+                "add-labels-original"
+            )
+            .is_err()
+        );
+        super::notifications::hide(&node, &source_ref());
+        assert!(matches!(
+            add(&node, &original, "add-labels-hidden")
+                .unwrap()
+                .1
+                .outcome,
+            DecisionOutcome::Refused {
+                code: RefusalCode::HiddenRefUnauthorized,
+                ..
+            }
+        ));
+        node.push_quota.limit.max_events = 0;
+        let historical = snapshot(&node);
+        assert_eq!(
+            add(&node, &original, "add-labels-original").unwrap(),
+            result
+        );
+        assert_eq!(snapshot(&node).basis(), historical.basis());
+        node.shutdown().unwrap();
+        let mut reopened = OneNode::open_existing(scratch.config(format)).unwrap();
+        assert_eq!(
+            add(&reopened, &original, "add-labels-original").unwrap(),
+            result
+        );
+        reopened.bring_into_service(HeadGeneration::FIRST).unwrap();
+        assert!(
+            filtered(&reopened, 0, None, &["urgent"])
+                .pull_requests
+                .is_empty()
+        );
+        reopened.shutdown().unwrap();
     }
 }

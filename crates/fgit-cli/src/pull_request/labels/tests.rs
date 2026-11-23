@@ -12,6 +12,13 @@ fn replace(args: &mut [String], flag: &str, value: &str) {
     let at = args.iter().position(|arg| arg == flag).unwrap();
     args[at + 1] = value.into();
 }
+fn addition_args() -> Vec<String> {
+    let mut input = args(true);
+    input[0] = "add-labels".into();
+    let at = input.iter().position(|arg| arg == "--expected-version").unwrap();
+    input.drain(at..at + 2);
+    input
+}
 fn digest(seed: u8) -> DigestBytes { DigestBytes::try_new(&[seed; 32]).unwrap() }
 fn algorithm() -> DigestAlgorithmId { DigestAlgorithmId::try_new(1).unwrap() }
 fn head() -> RepositoryAuthorityHeadId { RepositoryAuthorityHeadId::from_digest(algorithm(), CANONICAL_CODEC_VERSION, digest(7)) }
@@ -118,4 +125,54 @@ struct Broken;
 impl Write for Broken {
     fn write(&mut self, _: &[u8]) -> std::io::Result<usize> { Err(std::io::ErrorKind::BrokenPipe.into()) }
     fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+
+#[test]
+fn additions_have_an_explicit_nonempty_profile_without_replacement_controls() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut input = addition_args();
+        input.extend(["--object-format".into(), format.as_str().into()]);
+        let options = parse(&input).unwrap();
+        assert_eq!(options.format, format);
+        let Operation::Add { intent, key, .. } = options.operation else { panic!("addition") };
+        assert_eq!(intent.number.get(), 7);
+        assert_eq!(intent.labels, [" bug ", "é"]);
+        assert_eq!(key, b"original-private-key");
+    }
+    for extra in [vec!["--expected-version", "0"], vec!["--expected-head", "latest"], vec!["--clear-labels"], vec!["--force"], vec!["--label", "é"]] {
+        let mut input = addition_args();
+        input.extend(extra.into_iter().map(str::to_owned));
+        assert!(parse(&input).is_err());
+    }
+    let mut empty = addition_args();
+    empty.truncate(10);
+    assert!(parse(&empty).is_err());
+    let mut boundary = empty;
+    for n in (0..32).rev() { boundary.extend(["--label".into(), format!("label-{n:02}")]); }
+    assert!(parse(&boundary).is_ok());
+    boundary.extend(["--label".into(), "extra".into()]);
+    assert!(parse(&boundary).is_err());
+    for value in ["", " ", "a\nb", "a\0b"] {
+        let mut input = addition_args(); replace(&mut input, "--label", value);
+        assert!(parse(&input).is_err());
+    }
+}
+
+#[test]
+fn addition_receipts_keep_original_additions_without_inventing_a_current_version() {
+    let options = parse(&addition_args()).unwrap();
+    let tx = TxId::from_digest(algorithm(), CANONICAL_CODEC_VERSION, digest(1));
+    for committed in [false, true] {
+        let terminal = TerminalOutcome { decision_sequence: DecisionSequence::FIRST, outcome: if committed {
+            DecisionOutcome::Committed { repository_commit_id: RepositoryCommitId::from_digest(algorithm(), CANONICAL_CODEC_VERSION, digest(2)) }
+        } else { DecisionOutcome::Refused { code: RefusalCode::ResourceBudgetExceeded, refusal_record_id: RefusalRecordId::from_digest(algorithm(), CANONICAL_CODEC_VERSION, digest(3)) } } };
+        let report = mutation_report(&options, "incarnation", tx, &terminal, None).unwrap();
+        for field in ["\"action\":\"add-labels\"", "\"command_profile\":\"pull-request.add-labels.v1\"", "\"expected_version\":null", "\"labels_version\":null", "\"labels\":[\" bug \",\"é\"]", "\"historical_outcome\":true", "\"pull_request_version_changed\":false"] {
+            assert!(report.contains(field), "{report}");
+        }
+        assert!(!report.contains("original-private-key"));
+        let error = write_terminal_receipt(&mut Broken, &report, tx, &terminal).unwrap_err();
+        assert!(error.contains(&tx.to_string()));
+        assert!(error.contains(if committed { "committed" } else { "refused" }));
+    }
 }

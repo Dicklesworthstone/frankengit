@@ -45,6 +45,7 @@ pub enum ForgeOperation {
     PullRequestComment,
     PullRequestAppendComment,
     PullRequestLabelsChange,
+    PullRequestAddLabels,
     Unknown,
 }
 
@@ -67,7 +68,7 @@ pub struct ForgeAdmissionRule {
 
 /// The single semantic table for canonical forge replan eligibility.
 ///
-/// Explicit comment append and issue assignee/label addition profiles have
+/// Explicit comment append and issue/PR set addition profiles have
 /// version-independent intents. A PR source anchor retains its exact metadata basis.
 /// Legacy comments, replacement sets, edits, reviews and unknown operations
 /// preserve their submitted preconditions. Every row retains head-CAS authority,
@@ -79,7 +80,8 @@ pub const fn forge_admission_rule(operation: ForgeOperation) -> ForgeAdmissionRu
         | ForgeOperation::IssueAddAssignees
         | ForgeOperation::IssueAddLabels
         | ForgeOperation::DiscussionAppendComment
-        | ForgeOperation::PullRequestAppendComment => ForgeReplanPolicy::RevalidateAppend,
+        | ForgeOperation::PullRequestAppendComment
+        | ForgeOperation::PullRequestAddLabels => ForgeReplanPolicy::RevalidateAppend,
         ForgeOperation::PullRequestOpen
         | ForgeOperation::PullRequestHeadAdvance
         | ForgeOperation::PullRequestMerge
@@ -171,6 +173,7 @@ mod tests {
             ForgeOperation::IssueAddLabels,
             ForgeOperation::DiscussionAppendComment,
             ForgeOperation::PullRequestAppendComment,
+            ForgeOperation::PullRequestAddLabels,
         ] {
             let rule = forge_admission_rule(operation);
             assert_eq!(rule.replan, ForgeReplanPolicy::RevalidateAppend);
