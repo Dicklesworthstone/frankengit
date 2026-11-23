@@ -35,7 +35,9 @@ connection, retry, shutdown and verification obligations are in
 
 ## Current one-node integration boundary
 
-On November 22 the native CLI failed to compile at `6194cf96` and `72db4b11`. At repair revision `5019dfd9`, both the CLI and node passed their all-target Cargo checks on the pinned nightly. Same-revision runtime qualification is still open. The [dated reality check and bridge plan](docs/REALITY_CHECK_AND_BRIDGE_PLAN.md) identifies the tests needed for team use, sponsored writes, recovery and release.
+As of November 23, a stock Git push can feed an existing pull request, and a protected fast-forward can require a successful check for the exact refreshed tip. Two Linux machines exercised this workflow in both Git hash formats. A signed repository backup restored the original Git files and issue history on a second machine. Supported team deployment, independent whole-installation recovery and release qualification remain open. The [dated reality check and bridge plan](docs/REALITY_CHECK_AND_BRIDGE_PLAN.md) records revisions, failures and remaining work.
+
+For source search, `fg search --progressive` and the authenticated HTTP endpoint stream authorized lexical, path and symbol matches first, followed by ranked excerpts from the same snapshot. Clients retain the initial matches when refinement exhausts its budget. See [progressive source context](docs/SOURCE_CONTEXT.md#progressive-ranked-context) for the command, endpoint and response format.
 
 The checked-in `fgit-cli` library contains a narrow, configuration-free one-node
 surface for exercising the same authority, admission, and object-selection
