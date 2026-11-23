@@ -1,7 +1,9 @@
 // Native PR client. Views are immutable observations, never merge permission.
-import { Transport, integer, principal, snapshot, listReply, showReply, reviewsReply, copy, fail, keys, text, utf8,
-  hex, form, subject, SUBJECT_FIELDS, oid, binding, pinned, record } from './pulls-core.mjs';
+import { Transport, integer, principal, snapshot, listReply, pullSearchQuery, pullSearchParameters, pullSearchReply, showReply, reviewsReply, copy, fail, keys, text, utf8,
+  hex, form, subject, SUBJECT_FIELDS, oid, binding, pinned, record, pullLabels, pullLabelState, pullLabelsReply } from './pulls-core.mjs';
 import { checkedBundle, digest, makeBoundary, multipart, preparationCommand, preparationReply, inspectionReply, comparisonEntries, candidateMethod, mergeMethod, PREPARATION_LIMIT } from './pulls-candidate.mjs';
+import { rebasePreparationCommand, rebasePreparationReply, rebaseInspectionReply } from './pulls-rebase.mjs';
+import { rebaseResolutionUpload, verifyRebaseResolutions } from './pulls-rebase-resolution.mjs';
 import { resolutionUpload, verifyResolutionResult } from './pulls-resolution.mjs';
 import { checkId, checksReply } from './pulls-checks.mjs';
 import { commentsReply } from './pulls-comments.mjs';
@@ -130,14 +132,28 @@ export class PullClient {
   }
   invalidateCandidate() { this.#candidateSerial += 1; this.#artifact = null; this.#conflict = null; }
   cancelReads() { this.#transport.cancelReads(); }
-  async list({ after = 0, limit = 20, head = null } = {}) {
+  async list({ after = 0, limit = 20, head = null, labels = [] } = {}) {
     this.#ordinary();
     integer(after, 'PR cursor'); integer(limit, 'page size', 1, 100);
     if (head !== null) snapshot(head); if (after && !head) fail('Continuation requires its original snapshot.');
     const query = new URLSearchParams({ after: String(after), limit: String(limit) });
+    const wanted = pullLabels(labels);
+    for (const label of wanted) query.append('label', label);
     if (head) query.set('expected_head', head);
     const raw = await this.#transport.request(`pulls?${query}`);
-    const checked = listReply(raw.value, { after, limit, head, scope: this.#scope });
+    const checked = listReply(raw.value, { after, limit, head, scope: this.#scope, labels: wanted });
+    this.#scope = checked.binding; return checked;
+  }
+  async search(input = {}, options = {}) {
+    this.#ordinary();
+    const filters = pullSearchQuery(input), parameters = pullSearchParameters(options);
+    const { after, limit, maxScan, head, render } = parameters;
+    const query = new URLSearchParams({ after: String(after), limit: String(limit), max_scan: String(maxScan) });
+    for (const [name, value] of Object.entries(filters)) if (value !== null) query.set(name, String(value));
+    if (head !== null) query.set('expected_head', head);
+    if (render) query.set('render', 'html_safe');
+    const raw = await this.#transport.request(`pulls/search?${query}`);
+    const checked = pullSearchReply(raw.value, filters, { ...parameters, scope: this.#scope });
     this.#scope = checked.binding; return checked;
   }
   async show(number, head = null, { render = false } = {}) {
@@ -150,6 +166,22 @@ export class PullClient {
     const checked = showReply(raw.value, number, { head, scope: this.#scope });
     if (checked.reply.found !== (raw.status === 200)) fail('PR presence and HTTP status disagree.');
     this.#scope = checked.binding; return checked;
+  }
+  // The labels stream has its own version. Its read must still describe the
+  // exact selected PR and authority snapshot, never an implicit refreshed tip.
+  async labels(number, observed) {
+    const scope = this.#selected(), epoch = this.#transport.epoch;
+    integer(number, 'PR number', 1);
+    const saved = copy(observed);
+    snapshot(saved.head);
+    const selected = showReply(saved.reply, number, { head: saved.head, scope });
+    if (!selected.reply.pull_request?.data) fail('Select a native PR with recorded metadata before loading its labels.');
+    const query = new URLSearchParams({ expected_head: selected.head });
+    const raw = await this.#transport.request(`pulls/${number}/labels?${query}`, { statuses: [200, 404], maximum: 32 * 1024 });
+    this.#check(epoch);
+    const checked = pullLabelsReply(raw.value, number, selected, scope);
+    if (checked.reply.found !== (raw.status === 200)) fail('PR labels presence and HTTP status disagree.');
+    return checked;
   }
   async reviews(number, { after = null, limit = 20, head = null } = {}) {
     this.#ordinary();
@@ -223,21 +255,42 @@ export class PullClient {
   #check(epoch, serial = null) {
     if (!this.connected || epoch !== this.#transport.epoch || (serial !== null && serial !== this.#candidateSerial)) fail('Operation superseded; stale work was not selected.');
   }
-  async prepareAndInspect(number, fields, metadata, method = 'merge-commit') {
+  async prepareAndInspect(number, fields, metadata, method = 'merge-commit', profile = 'path-merge-v1') {
     const scope = this.#selected(); integer(number, 'PR number', 1);
-    const normalized = preparationCommand(fields, metadata, method), selected = subject(fields);
+    const normalized = preparationCommand(fields, metadata, method, profile), selected = subject(fields);
     if (scope.format !== selected.object_format) fail('Candidate hash domain differs from the repository.');
     this.invalidateCandidate(); const serial = this.#candidateSerial, epoch = this.#transport.epoch;
     const response = await this.#transport.request(`pulls/${number}/prepare`, {
       method: 'POST', body: form(normalized), statuses: [200, 409], binary: true, maximum: PREPARATION_LIMIT,
     });
-    const result = await preparationReply(response, number, selected, scope, this.#transport.crypto, false, method);
+    const result = await preparationReply(response, number, selected, scope, this.#transport.crypto, false, method, profile);
     this.#check(epoch, serial);
     if (!result.artifact) {
-      if (result.metadata.state === 'conflicted') {
+      if (result.metadata.state === 'conflicted' && profile === 'path-merge-v1') {
         const commitMetadata = Object.fromEntries(['author', 'committer', 'timestamp', 'message'].map(name => [name, normalized[name]]));
         this.#conflict = { number, scope, method, fields: selected, metadata: commitMetadata, report: copy(result.metadata) };
       }
+      return { metadata: result.metadata, inspection: null };
+    }
+    const inspected = await this.#inspect(result.artifact, epoch, serial);
+    return { metadata: result.metadata, inspection: inspected.reply };
+  }
+  async prepareRebaseAndInspect(number, fields, metadata) {
+    const scope = this.#selected(); integer(number, 'PR number', 1);
+    const command = rebasePreparationCommand(fields, metadata);
+    if (scope.format !== command.object_format) fail('Rebase hash domain differs from the repository.');
+    this.invalidateCandidate(); const serial = this.#candidateSerial, epoch = this.#transport.epoch;
+    const response = await this.#transport.request(`pulls/${number}/prepare-rebase`, {
+      method: 'POST', body: form(command), statuses: [200, 409], binary: true, maximum: PREPARATION_LIMIT,
+    });
+    const result = await rebasePreparationReply(response, number, command, scope, this.#transport.crypto);
+    this.#check(epoch, serial);
+    verifyRebaseResolutions(result.metadata, [], scope.format);
+    if (!result.artifact) {
+      if (result.metadata.state === 'conflicted') this.#conflict = {
+        number, scope, method: 'rebase', command, head: pinned(result.metadata, scope).head,
+        recipes: [], report: copy(result.metadata),
+      };
       return { metadata: result.metadata, inspection: null };
     }
     const inspected = await this.#inspect(result.artifact, epoch, serial);
@@ -248,6 +301,26 @@ export class PullClient {
     if (!conflict || Object.keys(scope).some(key => scope[key] !== conflict.scope[key])) fail('Prepare conflicts in this repository before resolving them.');
     this.#artifact = null;
     const serial = ++this.#candidateSerial, epoch = this.#transport.epoch;
+    if (conflict.method === 'rebase') {
+      const upload = await rebaseResolutionUpload(conflict.report, conflict.command, conflict.head, conflict.recipes,
+        choices, this.#transport.crypto, () => this.#check(epoch, serial));
+      this.#check(epoch, serial);
+      const response = await this.#transport.request('pulls/' + conflict.number + '/resolve-rebase', {
+        method: 'POST', body: new Blob([upload.bytes]), contentType: upload.contentType,
+        statuses: [200, 409], binary: true, maximum: PREPARATION_LIMIT,
+      });
+      const result = await rebasePreparationReply(response, conflict.number, conflict.command, scope, this.#transport.crypto, conflict.head);
+      this.#check(epoch, serial);
+      verifyRebaseResolutions(result.metadata, upload.recipes, scope.format);
+      if (!result.artifact) {
+        this.#conflict = result.metadata.state === 'conflicted'
+          ? { ...conflict, recipes: upload.recipes, report: copy(result.metadata) } : null;
+        return { metadata: result.metadata, inspection: null };
+      }
+      const inspected = await this.#inspect(result.artifact, epoch, serial);
+      this.#check(epoch, serial); this.#conflict = null;
+      return { metadata: result.metadata, inspection: inspected.reply };
+    }
     const upload = await resolutionUpload(conflict.report, conflict.fields, conflict.metadata, choices, this.#transport.crypto, conflict.method);
     this.#check(epoch, serial);
     const response = await this.#transport.request(`pulls/${conflict.number}/resolve`, {
@@ -273,10 +346,11 @@ export class PullClient {
     this.#check(epoch, serial);
     const command = form(artifact.fields);
     const upload = multipart(command, artifact.bundle, makeBoundary(command, artifact.bundle, this.#transport.crypto));
-    const response = await this.#transport.request(`pulls/${artifact.number}/inspect`, {
+    const rebase = candidateMethod(artifact) === 'rebase';
+    const response = await this.#transport.request(`pulls/${artifact.number}/${rebase ? 'inspect-rebase' : 'inspect'}`, {
       method: 'POST', body: new Blob([upload.bytes]), contentType: upload.contentType,
     });
-    const checked = await inspectionReply(response.value, artifact, this.#transport.crypto);
+    const checked = await (rebase ? rebaseInspectionReply : inspectionReply)(response.value, artifact, this.#transport.crypto);
     this.#check(epoch, serial);
     this.#artifact = { ...artifact, inspection: copy(checked.reply) };
     return checked;
@@ -303,6 +377,19 @@ export class PullClient {
     return this.inspect(number, fields, bytes, Object.hasOwn(receipt, 'method') ? mergeMethod(receipt.method) : undefined);
   }
   async stageMetadata(number, action, fields) { return this.#stage(number, action, fields, null); }
+  async stageLabels(number, observed, labels) {
+    const scope = this.#selected(), saved = copy(observed);
+    const selected = pinned(saved.reply, scope, saved.head);
+    const reply = saved.reply;
+    if (reply.type !== 'pull_request_labels' || reply.number !== number || reply.found !== true ||
+        reply.read_only !== true || reply.transaction_created !== false) fail('Load the selected PR labels before preparing a replacement.');
+    integer(reply.pull_request_version, 'PR version', 1);
+    // Reuse the canonical row validator without inventing a metadata version.
+    pullLabelState(reply);
+    integer(reply.labels_version, 'PR labels version', 0, Number.MAX_SAFE_INTEGER - 1);
+    return this.#stage(number, 'set-labels', { object_format: selected.binding.format,
+      expected_version: reply.labels_version, labels }, null);
+  }
   async stageComment(number, version, body, anchor = undefined) {
     return this.#stage(number, 'comment', { object_format: this.#selected().format, expected_version: version, body,
       ...(anchor === undefined ? {} : { anchor }) }, null);
@@ -314,7 +401,9 @@ export class PullClient {
   async stageReview(action, version, reason) {
     if (!['approve', 'request-changes', 'withdraw'].includes(action) || !this.connected || !this.#artifact) fail('Inspect the exact candidate before preparing a review.');
     const { number, fields, bundle } = this.#artifact;
-    return this.#stage(number, action, { ...fields, expected_version: version, reason }, action === 'withdraw' ? null : bundle);
+    const method = candidateMethod(this.#artifact);
+    return this.#stage(number, action, { ...fields, expected_version: version, reason,
+      ...(method === 'rebase' ? { method } : {}) }, action === 'withdraw' ? null : bundle);
   }
   async stageMerge(requiredReviewers) {
     if (!this.connected || !this.#artifact) fail('Inspect the exact candidate before preparing a merge.');
@@ -323,7 +412,8 @@ export class PullClient {
     if (method === 'fast-forward-only') fail('An existing source-tip candidate requires explicit fast-forward publication.');
     // Caller-selected reviewers are explicit requirements, not inferred votes.
     // The node independently enforces opener/submitter and current-policy gates.
-    return this.#stage(number, 'merge', { ...fields, required_reviewer: requiredReviewers, ...(method === 'squash' ? { method } : {}) }, bundle);
+    return this.#stage(number, 'merge', { ...fields, required_reviewer: requiredReviewers,
+      ...(method === 'squash' || method === 'rebase' ? { method } : {}) }, bundle);
   }
   async stageInspectedFastForward() {
     if (!this.connected || !this.#artifact) fail('Inspect the exact source-tip candidate before preparing a fast-forward.');
@@ -414,8 +504,9 @@ export class PullClient {
       });
       const result = publication(response.value, p, response.status);
       this.#pending = null;
-      if (!['comment', 'append-comment'].includes(p.action)) this.invalidateCandidate();
-      return ['comment', 'append-comment'].includes(p.action) ? { ...result, action: p.action } : result;
+      if (!['comment', 'append-comment', 'set-labels'].includes(p.action)) this.invalidateCandidate();
+      return p.action === 'set-labels' ? { ...result, action: p.action, number: p.number }
+        : ['comment', 'append-comment'].includes(p.action) ? { ...result, action: p.action } : result;
     } catch (error) { error.outcomeUnknown = true; throw error; }
     finally { this.#busy = false; }
   }
@@ -425,9 +516,10 @@ export class PullClient {
     try {
       const response = await this.#transport.request('outcomes', { method: 'POST', key: p.key, read: false, maximum: 32 * 1024 });
       const result = recovery(response.value, p);
-      if (result.terminal) { this.#pending = null; if (!['comment', 'append-comment'].includes(p.action)) this.invalidateCandidate(); }
+      if (result.terminal) { this.#pending = null; if (!['comment', 'append-comment', 'set-labels'].includes(p.action)) this.invalidateCandidate(); }
       else { p.observedTx = result.tx; p.observedPrincipal = result.principal; if (result.tx) p.sent = true; }
-      return ['comment', 'append-comment'].includes(p.action) ? { ...result, action: p.action } : result;
+      return p.action === 'set-labels' ? { ...result, action: p.action, number: p.number }
+        : ['comment', 'append-comment'].includes(p.action) ? { ...result, action: p.action } : result;
     } finally { this.#busy = false; }
   }
 }

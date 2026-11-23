@@ -2,8 +2,8 @@
 //! The executor is a control-flow fixture, not a hostile-code isolation test.
 use super::*;
 use crate::workflow::{
-    StepLimits, StepObservation, StepOutcome, WorkerFailure, WorkflowExecutor, WorkflowLimits,
-    WorkflowPlan,
+    StepContext, StepLimits, StepObservation, StepOutcome, StepShell, WorkerFailure,
+    WorkflowExecutor, WorkflowLimits, WorkflowPlan,
 };
 use crate::{CoordinatorLimits, ResourceCeilings, TriggerContext, WorkflowCoordinator};
 use std::cell::Cell;
@@ -16,6 +16,23 @@ struct Worker {
     closes: usize,
 }
 impl WorkflowExecutor for Worker {
+    fn supports_step_context(&self) -> bool {
+        true
+    }
+    fn supports_step_shell(&self) -> bool {
+        true
+    }
+    fn execute_step_with_context(
+        &mut self,
+        index: usize,
+        script: &str,
+        _: &StepContext,
+        limits: StepLimits,
+        live: &dyn Fn() -> bool,
+    ) -> Result<StepObservation, WorkerFailure> {
+        // This fixture exercises report production, not interpreter behavior.
+        self.execute_step(index, script, limits, live)
+    }
     fn begin_job(
         &mut self,
         _: usize,
@@ -51,6 +68,14 @@ pub(super) fn produce(
     format: bool,
     outcome: StepOutcome,
 ) -> (CheckDeliveryBatch, TrustedWorkflowReceipt) {
+    produce_source(format, outcome, SOURCE)
+}
+
+fn produce_source(
+    format: bool,
+    outcome: StepOutcome,
+    workflow_source: &str,
+) -> (CheckDeliveryBatch, TrustedWorkflowReceipt) {
     let mut c = WorkflowCoordinator::new(
         CoordinatorLimits::default(),
         ResourceCeilings::new(
@@ -81,7 +106,7 @@ pub(super) fn produce(
             RepositoryId::from_bytes([2; 16]),
             Commitment::of_bytes(b"head"),
             source,
-            WorkflowPlan::compile(SOURCE).unwrap(),
+            WorkflowPlan::compile(workflow_source).unwrap(),
             limits,
             TriggerContext::trusted_push("fixture"),
             1,
@@ -196,6 +221,192 @@ fn production_reports_and_each_job_round_trip_in_both_hash_domains() {
             }
         }
     }
+}
+
+const SHELL_SOURCE: &str = "name: shell observations\non: push\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: legacy\n      - shell: sh\n        run: explicit sh\n      - shell: bash\n        run: explicit bash\n  legacy:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: unchanged\n";
+
+const TOLERATED_SOURCE: &str = "name: optional check\non: push\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: optional\n        continue-on-error: true\n  legacy:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: unchanged\n  explicit:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: explicit\n        shell: sh\n";
+
+#[test]
+fn tolerated_failure_observations_recover_exactly_and_preserve_legacy_job_versions() {
+    for sha256 in [false, true] {
+        for outcome in [StepOutcome::Succeeded, StepOutcome::Failed] {
+            let (batch, receipt) = produce_source(sha256, outcome, TOLERATED_SOURCE);
+            assert!(
+                receipt
+                    .report()
+                    .to_json()
+                    .starts_with("{\"schema_version\":3,")
+            );
+            let job = receipt
+                .report()
+                .jobs
+                .iter()
+                .find(|job| job.id == "build")
+                .unwrap();
+            assert_eq!(job.outcome, JobOutcome::Succeeded);
+            assert_eq!(job.steps[0].observation.outcome, outcome);
+            assert!(job.steps[0].continue_on_error);
+            assert_eq!(
+                job.steps[0].outcome_tolerated,
+                outcome == StepOutcome::Failed
+            );
+            let decoded = decode(&receipt.frame()).unwrap();
+            assert_eq!(decoded.report(), receipt.report());
+            assert_eq!(decoded.receipt.frame(), receipt.frame());
+            for (index, fact) in batch.facts().iter().enumerate() {
+                if fact.status != CheckRunStatus::Completed {
+                    continue;
+                }
+                let bytes = receipt.job_frame(&fact.job_id).unwrap();
+                let observation =
+                    verify_trusted_job(&batch, index, &bytes, MAX_OBSERVATION_BYTES, &|| true)
+                        .unwrap();
+                let version = match fact.job_id.as_str() {
+                    "build" => 3,
+                    "explicit" => 2,
+                    _ => 1,
+                };
+                assert!(
+                    observation
+                        .report_json()
+                        .starts_with(&format!("{{\"schema_version\":{version},"))
+                );
+                assert_eq!(observation.evidence(), fact.receipt_commitment.unwrap());
+            }
+        }
+    }
+}
+
+#[test]
+fn tolerated_failure_metadata_cannot_hide_interruption_or_change_report_versions() {
+    let (_, receipt) = produce_source(false, StepOutcome::Failed, TOLERATED_SOURCE);
+    for change in 0..10 {
+        let mut changed = receipt.clone();
+        let step = &mut changed
+            .report
+            .jobs
+            .iter_mut()
+            .find(|job| job.id == "build")
+            .unwrap()
+            .steps[0];
+        match change {
+            0 => step.continue_on_error = false,
+            1 => step.outcome_tolerated = false,
+            2 => step.observation.exit_code = Some(0),
+            3 => step.observation.exit_code = None,
+            4 => step.observation.output_complete = false,
+            5 => step.observation.retain_workspace = true,
+            6 => step.observation.outcome = StepOutcome::Cancelled,
+            7 => step.observation.outcome = StepOutcome::TimedOut,
+            8 => step.observation.outcome = StepOutcome::OutputLimit,
+            _ => step.observation.outcome = StepOutcome::ContainmentFailure,
+        }
+        assert!(
+            decode(&changed.frame()).is_err(),
+            "accepted forged tolerance {change}"
+        );
+    }
+    for (old, new) in [
+        ("\"schema_version\":3", "\"schema_version\":2"),
+        ("\"schema_version\":3", "\"schema_version\":1"),
+        ("\"continue_on_error\":true,", ""),
+        ("\"outcome_tolerated\":true,", ""),
+        ("\"continue_on_error\":true", "\"continue_on_error\":1"),
+    ] {
+        let changed = change_json(&receipt, |text| text.replacen(old, new, 1));
+        assert!(decode(&changed).is_err(), "accepted {old} -> {new}");
+    }
+    let (_, succeeded) = produce_source(false, StepOutcome::Succeeded, TOLERATED_SOURCE);
+    let noncanonical = change_json(&succeeded, |text| {
+        text.replace("\"continue_on_error\":true", "\"continue_on_error\":false")
+    });
+    assert!(
+        decode(&noncanonical).is_err(),
+        "schema three requires an observed configured policy"
+    );
+}
+
+#[test]
+fn mixed_shell_observations_recover_exactly_and_keep_legacy_job_frames() {
+    for sha256 in [false, true] {
+        let (batch, receipt) = produce_source(sha256, StepOutcome::Succeeded, SHELL_SOURCE);
+        let json = receipt.report().to_json();
+        assert!(json.starts_with("{\"schema_version\":2,"));
+        assert!(json.contains("\"shell\":null,\"shell_flags\":null"));
+        assert_eq!(
+            receipt.report().jobs[0]
+                .steps
+                .iter()
+                .map(|step| step.shell)
+                .collect::<Vec<_>>(),
+            [None, Some(StepShell::Sh), Some(StepShell::Bash)]
+        );
+        let decoded = decode(&receipt.frame()).unwrap();
+        assert_eq!(decoded.report(), receipt.report());
+        assert_eq!(decoded.receipt.frame(), receipt.frame());
+        for (index, fact) in batch.facts().iter().enumerate() {
+            if fact.status != CheckRunStatus::Completed {
+                continue;
+            }
+            let bytes = receipt.job_frame(&fact.job_id).unwrap();
+            let observation =
+                verify_trusted_job(&batch, index, &bytes, MAX_OBSERVATION_BYTES, &|| true).unwrap();
+            let version = if fact.job_id == "legacy" { 1 } else { 2 };
+            assert!(
+                observation
+                    .report_json()
+                    .starts_with(&format!("{{\"schema_version\":{version},"))
+            );
+            assert_eq!(observation.evidence(), fact.receipt_commitment.unwrap());
+        }
+        assert_ne!(
+            receipt.report().graph,
+            WorkflowPlan::compile(&SHELL_SOURCE.replace("shell: bash", "shell: sh"))
+                .unwrap()
+                .graph_commitment()
+        );
+    }
+}
+
+#[test]
+fn shell_report_versions_and_exact_interpreter_arguments_cannot_be_substituted() {
+    let (_, receipt) = produce_source(false, StepOutcome::Succeeded, SHELL_SOURCE);
+    for (old, new) in [
+        ("\"schema_version\":2", "\"schema_version\":1"),
+        ("\"schema_version\":2", "\"schema_version\":3"),
+        ("\"shell\":null", "\"shell\":\"/bin/bash\""),
+        ("\"shell_flags\":null", "\"shell_flags\":[]"),
+        ("/bin/bash", "/usr/local/bin/bash"),
+        ("\"-o\",\"pipefail\",", ""),
+        ("\"--norc\"", "\"--login\""),
+        ("\"--norc\"", "\"--norc\",\"-u\""),
+        ("\"shell\":\"/bin/sh\",\"shell_flags\":[\"-e\",\"-c\"],", ""),
+        (
+            "\"shell_flags\":[\"-e\",\"-c\"]",
+            "\"shell_flags\":[\"-e\",\"-c\"],\"shell\":\"/bin/bash\"",
+        ),
+    ] {
+        let changed = change_json(&receipt, |text| {
+            assert!(text.contains(old), "missing test mutation: {old}");
+            text.replacen(old, new, 1)
+        });
+        assert!(decode(&changed).is_err(), "accepted {old} -> {new}");
+    }
+    let changed = change_json(&receipt, |text| {
+        text.replace(
+            &crate::workflow::shell_fields(Some(StepShell::Sh)),
+            &crate::workflow::shell_fields(None),
+        )
+        .replace(
+            &crate::workflow::shell_fields(Some(StepShell::Bash)),
+            &crate::workflow::shell_fields(None),
+        )
+    });
+    assert!(
+        decode(&changed).is_err(),
+        "v2 without any explicit shell is noncanonical"
+    );
 }
 
 #[test]

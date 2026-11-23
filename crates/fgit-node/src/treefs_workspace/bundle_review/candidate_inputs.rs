@@ -11,12 +11,30 @@ use super::{
     validate_merge_objects_above, validate_squash_objects_above, validate_workspace_objects_above,
 };
 use crate::ClosureSelectionSource;
+use fgit_admission::merge::native::objects::{
+    validate_commit_closure_above, validate_rebase_objects_above,
+};
 use fgit_crypto::{GitHashAlgorithm as Hash, NativeObjectIdentity};
 use fgit_forge::preparation::MergeCommitStyle;
 use fgit_treefs::{
     BaseView, ObjectSource, ObjectSourceError, PathPolicy, ReadGrant, SparseCandidateManifest,
     SparseLimits, TreeCapability, WorkspaceId,
 };
+
+#[derive(Clone, Copy)]
+enum CandidateProfile<'a> {
+    Single,
+    Merge(&'a NativeMerge, MergeCommitStyle),
+    Rebase(&'a NativeMerge),
+}
+impl<'a> CandidateProfile<'a> {
+    const fn merge(self) -> Option<&'a NativeMerge> {
+        match self {
+            Self::Single => None,
+            Self::Merge(merge, _) | Self::Rebase(merge) => Some(merge),
+        }
+    }
+}
 
 impl OneNode {
     /// Build single-parent candidate inputs at one authenticated base snapshot.
@@ -47,7 +65,7 @@ impl OneNode {
             reference,
             expected_base,
             candidate,
-            None,
+            CandidateProfile::Single,
             input,
             visibility,
             expected_head,
@@ -140,7 +158,63 @@ impl OneNode {
             &merge.target_ref,
             merge.target_tip_before,
             merge.merge_commit,
-            Some((merge, style)),
+            CandidateProfile::Merge(merge, style),
+            input,
+            visibility,
+            expected_head,
+            capability,
+            now,
+            sparse,
+        )
+        .await
+    }
+
+    /// Verify the complete original and rewritten linear series before exposing
+    /// the candidate's actual tree as trusted execution inputs. The artifact
+    /// names the target and has only its tip as a prerequisite; source-only
+    /// objects never satisfy uploaded edges or external delta bases. Both branch
+    /// pins and disclosure rules are selected at one authenticated head.
+    ///
+    /// No PR version, approval, check or publication authority is asserted here.
+    /// Use the separate candidate-check admission path for a current exact PR.
+    pub async fn sparse_rebase_candidate_manifest_in<A: Hash>(
+        &self,
+        request: &NodeRequestContext,
+        merge: &NativeMerge,
+        input: &[u8],
+        visibility: &RefVisibility,
+        expected_head: Option<RepositoryAuthorityHeadId>,
+        capability: &mut TreeCapability,
+        now: u64,
+        sparse: SparseLimits,
+    ) -> Result<
+        (
+            RepositoryAuthorityHeadId,
+            SparseCandidateManifest<A>,
+            [u8; 32],
+        ),
+        BundleInspectionRefusal,
+    > {
+        merge
+            .validate()
+            .map_err(|_| invalid("invalid rebase input coordinates"))?;
+        if merge.source_ref == merge.target_ref
+            || [&merge.source_ref, &merge.target_ref].iter().any(|name| {
+                !name.as_bytes().starts_with(b"refs/heads/") || name.as_bytes().len() > 4096
+            })
+            || merge.base_tip == merge.source_tip
+            || merge.merge_commit == merge.target_tip_before
+        {
+            return Err(invalid(
+                "rebase inputs require distinct branches and nonempty series",
+            ));
+        }
+        self.sparse_bound_candidate_in(
+            request,
+            &merge.target_ref,
+            merge.target_tip_before,
+            merge.merge_commit,
+            CandidateProfile::Rebase(merge),
             input,
             visibility,
             expected_head,
@@ -157,7 +231,7 @@ impl OneNode {
         reference: &RefName,
         expected_base: GitOid,
         candidate: GitOid,
-        merge: Option<(&NativeMerge, MergeCommitStyle)>,
+        profile: CandidateProfile<'_>,
         input: &[u8],
         visibility: &RefVisibility,
         expected_head: Option<RepositoryAuthorityHeadId>,
@@ -187,21 +261,28 @@ impl OneNode {
         capability
             .authorize_root(now)
             .map_err(|_| invalid("candidate input capability refused"))?;
-        let envelope = CandidateEnvelope::parse_bounded(input, if merge.is_some() { 2 } else { 1 })
-            .map_err(|e| BundleInspectionRefusal::Envelope(Box::new(e)))?;
+        let envelope = CandidateEnvelope::parse_bounded(
+            input,
+            if matches!(profile, CandidateProfile::Merge(_, _)) {
+                2
+            } else {
+                1
+            },
+        )
+        .map_err(|e| BundleInspectionRefusal::Envelope(Box::new(e)))?;
         envelope
             .bind(self.object_format, reference, expected_base, candidate)
             .map_err(|e| BundleInspectionRefusal::Envelope(Box::new(e)))?;
-        if merge.is_some_and(|(m, _)| {
+        if matches!(profile, CandidateProfile::Merge(m, _) if
             envelope.prerequisites.len() != 2 || !envelope.prerequisites.contains(&m.source_tip)
-        }) {
+        ) {
             return Err(invalid(
                 "merge inputs require exact target and source prerequisites",
             ));
         }
         admits_read(self.cell_state(), ReadMode::Current).map_err(BundleInspectionRefusal::Cell)?;
         let mut selections = vec![(reference, expected_base)];
-        if let Some((m, _)) = merge {
+        if let Some(m) = profile.merge() {
             selections.push((&m.source_ref, m.source_tip));
         }
         if selections
@@ -258,7 +339,11 @@ impl OneNode {
             max_reused_blob_bytes: self.reused_merge_blob_limit(),
             ..Default::default()
         };
-        let parents: Vec<_> = selections.iter().map(|(_, parent)| *parent).collect();
+        let parents: Vec<_> = if matches!(profile, CandidateProfile::Rebase(_)) {
+            vec![expected_base]
+        } else {
+            selections.iter().map(|(_, parent)| *parent).collect()
+        };
         let original = OriginalSource::with_parents(
             VerifiedFabricPackSource {
                 fabric: &self.fabric,
@@ -301,8 +386,28 @@ impl OneNode {
                 ..Default::default()
             },
         };
-        let verified = match merge {
-            Some((m, MergeCommitStyle::TwoParent)) => validate_merge_objects_above(
+        let rebase_commits = if matches!(profile, CandidateProfile::Rebase(_)) {
+            super::rebase::inspect_chain(&source, candidate, expected_base)?
+                .into_iter()
+                .map(|commit| commit.id)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let verified = match profile {
+            CandidateProfile::Merge(m, MergeCommitStyle::TwoParent) => {
+                validate_merge_objects_above(
+                    &source,
+                    m,
+                    ObjectFrontier::with_headers(
+                        selected.selected_closure().closure().objects(),
+                        &source,
+                    ),
+                    limits,
+                    &mut || original.live().is_ok(),
+                )
+            }
+            CandidateProfile::Merge(m, MergeCommitStyle::Squash) => validate_squash_objects_above(
                 &source,
                 m,
                 ObjectFrontier::with_headers(
@@ -312,17 +417,7 @@ impl OneNode {
                 limits,
                 &mut || original.live().is_ok(),
             ),
-            Some((m, MergeCommitStyle::Squash)) => validate_squash_objects_above(
-                &source,
-                m,
-                ObjectFrontier::with_headers(
-                    selected.selected_closure().closure().objects(),
-                    &source,
-                ),
-                limits,
-                &mut || original.live().is_ok(),
-            ),
-            None => validate_workspace_objects_above(
+            CandidateProfile::Single => validate_workspace_objects_above(
                 &source,
                 candidate,
                 expected_base,
@@ -333,10 +428,50 @@ impl OneNode {
                 limits,
                 &mut || original.live().is_ok(),
             ),
+            CandidateProfile::Rebase(_) => validate_commit_closure_above(
+                &source,
+                candidate,
+                ObjectFrontier::with_headers(original.allowed, &source),
+                limits,
+                &mut || original.live().is_ok(),
+            ),
         };
         original.live().map_err(BundleInspectionRefusal::Source)?;
         let verified = verified.map_err(BundleInspectionRefusal::Validation)?;
         unpacked.check_frontier_coverage(&verified.objects, &original, limits)?;
+        if let CandidateProfile::Rebase(merge) = profile {
+            // Broader source history becomes available only after the upload
+            // has independently proved every edge from the target alone.
+            let history = OriginalSource::with_parents(
+                VerifiedFabricPackSource {
+                    fabric: &self.fabric,
+                    object_format: self.object_format,
+                    maximum_object_bytes: maximum,
+                    database_context: request.authority(),
+                    database_exhaustion: &exhaustion,
+                    session_is_live: None,
+                },
+                selected.selected_closure().closure().objects(),
+                &budget,
+                &[expected_base, merge.source_tip],
+                limits,
+            )
+            .map_err(BundleInspectionRefusal::Source)?;
+            let history_source = InspectionSource {
+                original: &history,
+                objects: &unpacked.objects,
+                parse_limits: source.parse_limits.clone(),
+            };
+            let validation = validate_rebase_objects_above(
+                &history_source,
+                merge,
+                ObjectFrontier::with_headers(history.allowed, &history_source),
+                limits,
+                &mut || history.live().is_ok(),
+            );
+            history.live().map_err(BundleInspectionRefusal::Source)?;
+            validation.map_err(BundleInspectionRefusal::Validation)?;
+        }
         let base_commit = source
             .commit(expected_base)
             .map_err(BundleInspectionRefusal::Source)?;
@@ -355,21 +490,38 @@ impl OneNode {
             source: &source,
             workspace: capability.workspace_id(),
         };
-        let manifest = match merge {
-            Some((m, MergeCommitStyle::TwoParent)) => SparseCandidateManifest::build_merge(
+        let manifest = match profile {
+            CandidateProfile::Merge(m, MergeCommitStyle::TwoParent) => {
+                SparseCandidateManifest::build_merge(
+                    &base_view,
+                    &tree_source,
+                    typed(candidate)?,
+                    typed(m.source_tip)?,
+                    capability,
+                    now,
+                    source.parse_limits.clone(),
+                    sparse,
+                )
+            }
+            CandidateProfile::Single | CandidateProfile::Merge(_, MergeCommitStyle::Squash) => {
+                SparseCandidateManifest::build(
+                    &base_view,
+                    &tree_source,
+                    typed(candidate)?,
+                    capability,
+                    now,
+                    source.parse_limits.clone(),
+                    sparse,
+                )
+            }
+            CandidateProfile::Rebase(_) => SparseCandidateManifest::build_rebase(
                 &base_view,
                 &tree_source,
-                typed(candidate)?,
-                typed(m.source_tip)?,
-                capability,
-                now,
-                source.parse_limits.clone(),
-                sparse,
-            ),
-            None | Some((_, MergeCommitStyle::Squash)) => SparseCandidateManifest::build(
-                &base_view,
-                &tree_source,
-                typed(candidate)?,
+                &rebase_commits
+                    .iter()
+                    .copied()
+                    .map(typed)
+                    .collect::<Result<Vec<_>, _>>()?,
                 capability,
                 now,
                 source.parse_limits.clone(),

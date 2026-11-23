@@ -1,6 +1,7 @@
 //! Bounded native source files, refs, and source-kind validation.
-#[cfg(test)]
-use super::Read;
+use std::io::Read;
+
+use super::refs::SourceRef;
 use super::{
     BTreeMap, GitHashAlgorithm, GitOid, ImportControl, InflateLimits, LooseGitImportRefusal,
     MAX_IMPORT_COMPRESSED_OBJECT_BYTES, MAX_IMPORT_COMPRESSED_OBJECT_BYTES_USIZE,
@@ -249,15 +250,21 @@ pub(super) fn packed_refs_input_limit(object_format: GitHashAlgorithm, max_refs:
     u64::try_from(total).unwrap_or(u64::MAX)
 }
 
-pub(super) fn read_direct_refs(
+pub(super) fn read_source_refs(
     git_directory: &Path,
     object_format: GitHashAlgorithm,
     max_refs: usize,
     shared_only: bool,
     control: &ImportControl<'_>,
-) -> Result<BTreeMap<RefName, GitOid>, LooseGitImportRefusal> {
+) -> Result<BTreeMap<RefName, SourceRef>, LooseGitImportRefusal> {
     control.checkpoint()?;
-    let mut refs = read_packed_refs(git_directory, object_format, max_refs, shared_only, control)?;
+    let mut refs = BTreeMap::new();
+    for (name, identity) in
+        read_packed_refs(git_directory, object_format, max_refs, shared_only, control)?
+    {
+        control.checkpoint()?;
+        refs.insert(name, SourceRef::Direct(identity));
+    }
     let loose_root = git_directory.join("refs");
     let Some(metadata) = path_metadata(&loose_root, "inspect loose refs directory", control)?
     else {
@@ -310,7 +317,7 @@ pub(super) fn read_worktree_refs(
     git_directory: &Path,
     object_format: GitHashAlgorithm,
     max_refs: usize,
-    refs: &mut BTreeMap<RefName, GitOid>,
+    refs: &mut BTreeMap<RefName, SourceRef>,
     control: &ImportControl<'_>,
 ) -> Result<(), LooseGitImportRefusal> {
     let root = git_directory.join("refs");
@@ -479,7 +486,7 @@ pub(super) fn collect_loose_refs(
     object_format: GitHashAlgorithm,
     depth: usize,
     max_refs: usize,
-    refs: &mut BTreeMap<RefName, GitOid>,
+    refs: &mut BTreeMap<RefName, SourceRef>,
     shared_only: bool,
     control: &ImportControl<'_>,
 ) -> Result<(), LooseGitImportRefusal> {
@@ -529,16 +536,8 @@ pub(super) fn collect_loose_refs(
             });
         }
         let name = ref_name_from_path(root, &path)?;
-        let bytes = read_regular_bounded(
-            &path,
-            "read loose ref",
-            "loose ref file",
-            direct_ref_input_limit(object_format),
-            BoundedInputClass::RefControl,
-            control,
-        )?;
-        let identity = parse_direct_ref(&path, &bytes, object_format)?;
-        refs.insert(name, identity);
+        let bytes = read_loose_ref(&path, object_format, control)?;
+        refs.insert(name, parse_source_ref(&path, &bytes, object_format)?);
         if refs.len() > max_refs {
             return Err(LooseGitImportRefusal::RefLimitExceeded {
                 observed: refs.len(),
@@ -572,18 +571,83 @@ pub(super) fn ref_name_from_path(
     })
 }
 
-pub(super) fn parse_direct_ref(
+/// Inspect the five-byte symbolic prefix before selecting the content bound.
+/// Direct refs retain their native-hex envelope; aliases use the existing HEAD
+/// name envelope. One opened handle supplies both prefix and bounded remainder.
+fn read_loose_ref(
+    path: &Path,
+    object_format: GitHashAlgorithm,
+    control: &ImportControl<'_>,
+) -> Result<Vec<u8>, LooseGitImportRefusal> {
+    let operation = "read loose ref";
+    let maximum = head_input_limit().max(direct_ref_input_limit(object_format));
+    let (mut file, observed) = open_regular_bounded(
+        path,
+        operation,
+        "loose ref file",
+        maximum,
+        BoundedInputClass::RefControl,
+        control,
+    )?;
+    let mut prefix = [0u8; 5];
+    let mut length = 0usize;
+    while length < prefix.len() {
+        let read = control.run(|| file.read(&mut prefix[length..]))?;
+        match read {
+            Ok(0) => break,
+            Ok(count) => length += count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(io_refusal(operation, path.to_path_buf(), error)),
+        }
+    }
+    let limit = if prefix == *b"ref: " {
+        head_input_limit()
+    } else {
+        direct_ref_input_limit(object_format)
+    };
+    if observed > limit {
+        return Err(BoundedInputClass::RefControl.limit_refusal(path, limit, observed));
+    }
+    let remaining = limit - length as u64;
+    let remainder = control::read_bytes(file, remaining, control).map_err(|error| match error {
+        ReadFailure::Io(error) => io_refusal(operation, path.to_path_buf(), error),
+        ReadFailure::Interrupted(error) => error,
+    })?;
+    let mut bytes = prefix[..length].to_vec();
+    bytes.extend_from_slice(&remainder);
+    if bytes.len() as u64 > limit {
+        return Err(BoundedInputClass::RefControl.limit_refusal(path, limit, bytes.len() as u64));
+    }
+    Ok(bytes)
+}
+
+pub(super) fn parse_source_ref(
     path: &Path,
     bytes: &[u8],
     object_format: GitHashAlgorithm,
-) -> Result<GitOid, LooseGitImportRefusal> {
+) -> Result<SourceRef, LooseGitImportRefusal> {
+    if let Some(symbolic) = bytes.strip_prefix(b"ref: ") {
+        let Some(target) = symbolic.strip_suffix(b"\n") else {
+            return Err(LooseGitImportRefusal::RefContents(Box::new(
+                path.to_path_buf(),
+            )));
+        };
+        if !target.starts_with(b"refs/") {
+            return Err(LooseGitImportRefusal::SymbolicRefUnsupported(Box::new(
+                path.to_path_buf(),
+            )));
+        }
+        let target = RefName::try_new(target).map_err(|source| LooseGitImportRefusal::RefName {
+            path: Box::new(path.to_path_buf()),
+            source: Box::new(source),
+        })?;
+        return Ok(SourceRef::Symbolic {
+            target,
+            path: path.to_path_buf(),
+        });
+    }
     let text = std::str::from_utf8(bytes)
         .map_err(|_| LooseGitImportRefusal::RefContents(Box::new(path.to_path_buf())))?;
-    if text.starts_with("ref: ") {
-        return Err(LooseGitImportRefusal::SymbolicRefUnsupported(Box::new(
-            path.to_path_buf(),
-        )));
-    }
     let Some(identity) = text.strip_suffix('\n') else {
         return Err(LooseGitImportRefusal::RefContents(Box::new(
             path.to_path_buf(),
@@ -594,12 +658,12 @@ pub(super) fn parse_direct_ref(
             path.to_path_buf(),
         )));
     }
-    GitOid::from_hex(object_format, identity).map_err(|error| {
-        LooseGitImportRefusal::ObjectIdentity {
+    GitOid::from_hex(object_format, identity)
+        .map(SourceRef::Direct)
+        .map_err(|error| LooseGitImportRefusal::ObjectIdentity {
             path: Box::new(path.to_path_buf()),
             source: Box::new(error),
-        }
-    })
+        })
 }
 
 pub(super) fn read_local_object(

@@ -4,18 +4,23 @@
 use std::collections::BTreeMap;
 
 use fgit_forge::event::pull_request::{PullRequestAction, PullRequestCommand, PullRequestData};
+use fgit_forge::event::pull_request_labels::{MAX_LABEL_BYTES, MAX_LABELS, validate_labels};
 use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber};
 use fgit_types::{GitHashAlgorithm, GitOid, RefName, RepositoryAuthorityHeadId};
 use fgit_wire::smart_http::{BodyFraming, head::Envelope};
 
 use super::super::issues::{
-    ApiError, MAX_FORM_BYTES, Page, Rendering, parse_decimal, parse_form, parse_page,
-    parse_snapshot,
+    ApiError, MAX_FORM_BYTES, Page, Rendering, parse_decimal, parse_form,
+    parse_form_with_field_limit, parse_snapshot,
 };
 
 #[derive(Debug)]
 pub(super) enum Operation {
-    List(Page),
+    List {
+        page: Page,
+        labels: Vec<String>,
+    },
+    Search(super::search::Search),
     Show {
         number: PullRequestNumber,
         expected_head: Option<RepositoryAuthorityHeadId>,
@@ -69,7 +74,10 @@ impl<'a> Request<'a> {
                     return Err(ApiError::bad("body_not_allowed"));
                 }
                 if suffix.is_empty() {
-                    Operation::List(parse_page(query, "after")?)
+                    let (page, labels) = list_page(query)?;
+                    Operation::List { page, labels }
+                } else if suffix == "/search" {
+                    Operation::Search(super::search::parse(query.unwrap_or("").as_bytes())?)
                 } else {
                     let number = number(suffix.strip_prefix('/').ok_or_else(ApiError::not_found)?)?;
                     let (mut expected_head, mut render) = (None, None);
@@ -125,6 +133,7 @@ impl<'a> Request<'a> {
                     "update" => PullRequestAction::Update,
                     "close" => PullRequestAction::Close,
                     "reopen" => PullRequestAction::Reopen,
+                    "retarget" => PullRequestAction::Retarget,
                     _ => return Err(ApiError::not_found()),
                 };
                 Operation::Mutate {
@@ -218,6 +227,67 @@ fn number(text: &str) -> Result<PullRequestNumber, ApiError> {
     PullRequestNumber::try_new(parse_decimal(text)?)
         .ok_or_else(|| ApiError::bad("invalid_pull_request_number"))
 }
+
+/// Label predicates are ANDed before native pagination. Repeating one label
+/// is a caller error, and a cursor without an exact snapshot remains refused.
+fn list_page(query: Option<&str>) -> Result<(Page, Vec<String>), ApiError> {
+    let mut fields = BTreeMap::new();
+    let mut labels = Vec::new();
+    for (key, value) in parse_form_with_field_limit(
+        query.unwrap_or("").as_bytes(),
+        MAX_LABELS + 4,
+        "label",
+        MAX_LABEL_BYTES,
+    )? {
+        if key == "label" {
+            if labels.len() == MAX_LABELS {
+                return Err(ApiError::too_large());
+            }
+            labels.push(value);
+        } else if !matches!(key.as_str(), "after" | "limit" | "expected_head" | "render") {
+            return Err(ApiError::bad("unknown_query_field"));
+        } else if fields.insert(key, value).is_some() {
+            return Err(ApiError::bad("duplicate_field"));
+        }
+    }
+    labels.sort();
+    validate_labels(&labels).map_err(|_| ApiError::bad("invalid_labels"))?;
+    let after = fields
+        .remove("after")
+        .map(|value| parse_decimal(&value))
+        .transpose()?
+        .unwrap_or(0);
+    let limit = fields
+        .remove("limit")
+        .map(|value| parse_decimal(&value))
+        .transpose()?
+        .unwrap_or(50);
+    if !(1..=100).contains(&limit) {
+        return Err(ApiError::bad("invalid_page_limit"));
+    }
+    let expected_head = fields
+        .remove("expected_head")
+        .map(|value| parse_snapshot(&value))
+        .transpose()?;
+    if after != 0 && expected_head.is_none() {
+        return Err(ApiError::bad("snapshot_required"));
+    }
+    let render = fields
+        .remove("render")
+        .map(|value| {
+            Rendering::from_query(&value).ok_or_else(|| ApiError::bad("unsupported_rendering"))
+        })
+        .transpose()?;
+    Ok((
+        Page {
+            after,
+            limit: limit as u16,
+            expected_head,
+            render,
+        },
+        labels,
+    ))
+}
 fn take(fields: &mut BTreeMap<String, String>, name: &str) -> Result<String, ApiError> {
     fields
         .remove(name)
@@ -242,6 +312,61 @@ fn oid(text: &str, format: GitHashAlgorithm) -> Result<GitOid, ApiError> {
 mod tests {
     use super::*;
     use fgit_wire::smart_http::{HttpLimits, head};
+
+    #[test]
+    fn label_list_queries_keep_exact_spelling_and_require_pinned_continuations() {
+        let pin = format!("alg:1:{}", "ab".repeat(32));
+        let (page, labels) = list_page(Some(&format!(
+            "label=triage&label=bug&after=7&limit=1&expected_head={pin}&render=html_safe"
+        )))
+        .unwrap();
+        assert_eq!(labels, ["bug", "triage"]);
+        assert_eq!((page.after, page.limit), (7, 1));
+        assert_eq!(page.render, Some(Rendering::HtmlSafe));
+        assert!(page.expected_head.is_some());
+        for invalid in [
+            "label=",
+            "label=+",
+            "label=bug&label=bug",
+            "label=x%00y",
+            "label=bug&after=1",
+            "label=bug&limit=0",
+            "label=bug&limit=101",
+            "label=bug&limit=1&limit=2",
+            "label=bug&actor=trusted",
+            "label=%FF",
+        ] {
+            assert!(list_page(Some(invalid)).is_err(), "{invalid}");
+        }
+        assert!(list_page(Some(&format!("label={}", "é".repeat(33)))).is_err());
+        assert!(list_page(Some(&format!("label={}", "é".repeat(32)))).is_ok());
+        assert_eq!(list_page(None).unwrap().1, Vec::<String>::new());
+    }
+
+    #[test]
+    fn label_list_and_search_routes_preserve_their_explicit_filter_grammars() {
+        let bytes =
+            b"GET /repo.git/api/v1/pulls?label=triage&label=bug HTTP/1.1\r\nHost: local\r\n\r\n";
+        let envelope = head::parse(bytes, HttpLimits::default()).unwrap().unwrap();
+        let request = Request::parse(&envelope).unwrap().unwrap();
+        let Operation::List { labels, .. } = request.operation else {
+            panic!("label filters must remain on the native list route")
+        };
+        assert_eq!(labels, ["bug", "triage"]);
+        for target in [
+            "/repo.git/api/v1/pulls/search?label=bug",
+            "/repo.git/api/v1/pulls?query=needle",
+        ] {
+            let bytes = format!("GET {target} HTTP/1.1\r\nHost: local\r\n\r\n");
+            let envelope = head::parse(bytes.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            assert!(
+                Request::parse(&envelope).is_err(),
+                "a filter must never be silently discarded"
+            );
+        }
+    }
 
     fn fields(format: GitHashAlgorithm) -> String {
         format!(
@@ -443,8 +568,8 @@ mod tests {
     }
 
     #[test]
-    fn rendering_is_explicit_and_consistent_on_list_and_detail_routes() {
-        for suffix in ["", "/7"] {
+    fn rendering_is_explicit_and_consistent_on_list_detail_and_search_routes() {
+        for suffix in ["", "/7", "/search"] {
             for (query, requested) in [
                 ("", None),
                 ("?render=html_safe", Some(Rendering::HtmlSafe)),
@@ -463,7 +588,8 @@ mod tests {
                     panic!("rendering must stay on the authorized metadata route");
                 };
                 match request.operation {
-                    Operation::List(page) => assert_eq!(page.render, requested),
+                    Operation::List { page, .. } => assert_eq!(page.render, requested),
+                    Operation::Search(search) => assert_eq!(search.render, requested),
                     Operation::Show { render, .. } => assert_eq!(render, requested),
                     Operation::Mutate { .. } => panic!("rendering is not publication"),
                 }
@@ -530,5 +656,91 @@ mod tests {
         }
         let body = fields(GitHashAlgorithm::Sha1) + "&render=html_safe";
         assert!(command("open", &body, GitHashAlgorithm::Sha1).is_err());
+    }
+    #[test]
+    fn retarget_keeps_the_explicit_version_and_full_native_metadata() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let body = fields(format).replace("expected_version=0", "expected_version=2");
+            let retargeted = command("retarget", &body, format).unwrap();
+            let updated = command("update", &body, format).unwrap();
+            assert_eq!(retargeted.action, PullRequestAction::Retarget);
+            assert_eq!(retargeted.number, PullRequestNumber::try_new(7).unwrap());
+            assert_eq!(
+                retargeted.expected_version,
+                ExpectedVersion::Exactly(AggregateVersion::try_new(2).unwrap())
+            );
+            assert_eq!(retargeted.data, updated.data);
+            assert_eq!(retargeted.data.body, "%2f\n\"");
+            let actor = fgit_types::PrincipalId::from_bytes([7; 16]);
+            assert_ne!(
+                retargeted.proposed_event(actor, format).unwrap(),
+                updated.proposed_event(actor, format).unwrap()
+            );
+            assert_eq!(super::super::output::action(retargeted.action), "retarget");
+        }
+    }
+
+    #[test]
+    fn retarget_cannot_reset_version_omit_content_or_supply_its_own_actor() {
+        let format = GitHashAlgorithm::Sha1;
+        let body = fields(format).replace("expected_version=0", "expected_version=2");
+        for field in [
+            "expected_version",
+            "object_format",
+            "source_ref",
+            "target_ref",
+            "source_tip",
+            "target_tip",
+            "title",
+            "body",
+        ] {
+            let missing = body
+                .split('&')
+                .filter(|part| !part.starts_with(&format!("{field}=")))
+                .collect::<Vec<_>>()
+                .join("&");
+            assert!(
+                command("retarget", &missing, format).is_err(),
+                "missing {field}"
+            );
+        }
+        for invalid in [
+            body.replace("expected_version=2", "expected_version=0"),
+            body.replace("expected_version=2", "expected_version=02"),
+            body.replace(
+                "expected_version=2",
+                "expected_version=18446744073709551615",
+            ),
+            body.clone() + "&principal_id=administrator",
+            body.clone() + "&expected_version=3",
+            body.replace("object_format=sha1", "object_format=sha256"),
+        ] {
+            assert!(command("retarget", &invalid, format).is_err());
+        }
+        assert!(command("retarget", &body, format).is_ok());
+    }
+
+    #[test]
+    fn retarget_route_is_a_body_bearing_mutation_not_a_read_or_merge_shortcut() {
+        let bytes = b"POST /repo.git/api/v1/pulls/7/retarget HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n\r\n";
+        let envelope = head::parse(bytes, HttpLimits::default()).unwrap().unwrap();
+        // Exercise the full PR route selector, including collaboration routers.
+        let routed = super::super::Request::parse(&envelope).unwrap().unwrap();
+        assert!(routed.is_mutation());
+        assert!(routed.accepts_body());
+        assert_eq!(
+            routed.agent_operation(),
+            Some(fgit_identity::agent::PULLS_WRITE)
+        );
+        for text in [
+            "GET /repo.git/api/v1/pulls/7/retarget HTTP/1.1\r\nHost: local\r\n\r\n",
+            "POST /repo.git/api/v1/pulls/7/retarget HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n",
+            "POST /repo.git/api/v1/pulls/7/retarget?force=true HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n\r\n",
+        ] {
+            let envelope = head::parse(text.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            assert!(Request::parse(&envelope).is_err());
+        }
     }
 }

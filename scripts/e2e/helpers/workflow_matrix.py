@@ -93,13 +93,15 @@ jobs:
       - run: test ! -e linux; test -z "${MODE+x}"; printf INDEPENDENT
 '''
 bad = good.replace('!= never:fail', '!= release:linux')
-invalid = good.replace('fail-fast: false', 'fail-fast: true')
+invalid = good.replace('fail-fast: false', 'fail-fast: yes')
+fast = bad.replace('fail-fast: false', 'fail-fast: true')
+default_fast = bad.replace('      fail-fast: false\n', '')
 missing = good.replace("          - mode: release\n            target: custom\n            payload: '$(touch injected); literal $HOME'", '          - mode: release\n            target: custom')
 variants = [f'build__matrix_{i:03d}' for i in range(4)]
 
 for fmt in ('sha1', 'sha256'):
     source = root / (fmt + '-source')
-    files = {f'.github/workflows/{name}.yml': text.encode() for name, text in [('good', good), ('bad', bad), ('invalid', invalid), ('missing', missing)]}
+    files = {f'.github/workflows/{name}.yml': text.encode() for name, text in [('good', good), ('bad', bad), ('invalid', invalid), ('missing', missing), ('fast', fast), ('default-fast', default_fast)]}
     files['src/input.txt'] = b'persisted native input\n'
     tree = source_tree(source, fmt, files)
     tip = native_object(source, fmt, 'commit', f'tree {tree}\nauthor Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\n\nmatrix\n'.encode())
@@ -181,10 +183,38 @@ for fmt in ('sha1', 'sha256'):
         assert record['evidence_sha256'] == fact['evidence_sha256'] and record['execution_retried'] is False
     workflow('invalid', 3, 2)
     workflow('missing', 4, 2)
+    fast_graph = None
+    fast_recovery = []
+    for name, number in [('fast', 6), ('default-fast', 7)]:
+        selected = workflow(name, number, 1)
+        selected_report, selected_dir, _, _, selected_journal, selected_recover, selected_history, selected_facts = selected
+        selected_jobs = selected_report['execution']['jobs']
+        assert [job['outcome'] for job in selected_jobs] == [
+            'succeeded', 'failed', 'skipped', 'skipped', 'succeeded', 'skipped', 'succeeded'
+        ]
+        assert not selected_report['succeeded']
+        assert all(not job['steps'] for job in selected_jobs[2:4])
+        graph_root = selected_report['execution']['workflow_graph']
+        assert graph_root != failure_report['execution']['workflow_graph']
+        if fast_graph is not None:
+            assert graph_root == fast_graph
+        fast_graph = graph_root
+        for job, conclusion in [(variants[1], 'failure'), (variants[2], 'action_required'), ('unrelated', 'success')]:
+            entry, index, fact = selected_facts[job]
+            publish = ['workflow', 'publish', *scope, 'refs/heads/main', '--trusted-local', '--run-directory', selected_dir, '--journal-id', selected_journal, '--batch', entry['batch_sha256'], '--fact-index', index, '--principal-id', principal, '--idempotency-key', fmt + '-' + name + '-' + job, '--object-format', fmt]
+            raw = run(fmt + '-' + name + '-publish-' + job, publish)
+            record = json.loads(raw)
+            assert record['command_committed'] and record['conclusion'] == conclusion
+            assert record['evidence_sha256'] == fact['evidence_sha256']
+            assert record['execution_retried'] is False and record['refs_changed'] is False
+            assert run(fmt + '-' + name + '-retry-' + job, publish) == raw
+        fast_recovery.append((name, selected_recover, selected_history))
     source.rename(root / (fmt + '-source-offline'))
     assert run(fmt + '-source-free-recover', recovery_args) == history_raw
+    for name, args, expected_history in fast_recovery:
+        assert run(fmt + '-' + name + '-source-free-recover', args) == expected_history
     rerun = workflow('good', 5)
     assert rerun[0]['succeeded'] and rerun[0]['execution']['workflow_graph'] == report['execution']['workflow_graph']
-    cases.append({'format': fmt, 'matrix_variants': len(variants), 'distinct_published_checks': len(checks), 'failed_variant_blocks_package': True, 'skipped_diagnostics_not_failed_run': True, 'source_free_recovery': True})
+    cases.append({'format': fmt, 'matrix_variants': len(variants), 'distinct_published_checks': len(checks), 'failed_variant_blocks_package': True, 'skipped_diagnostics_not_failed_run': True, 'source_free_recovery': True, 'fail_fast_default_and_true': True, 'fail_fast_skips_never_pass_checks': True})
     print(json.dumps(cases[-1]), flush=True)
 (root / 'results.json').write_text(json.dumps({'commands': commands, 'cases': cases}, indent=2) + '\n')

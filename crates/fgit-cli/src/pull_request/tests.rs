@@ -117,6 +117,9 @@ fn row<'a>(event: &'a ForgeEvent, mutation: &'a Mutation) -> Row<'a> {
         data: Some(&mutation.command.data),
         opened_by: Some(mutation.principal),
         last_metadata_actor: Some(mutation.principal),
+        labels: &[],
+        labels_version: None,
+        labels_actor: None,
     }
 }
 
@@ -379,6 +382,9 @@ fn merge_only_receipts_do_not_invent_an_opener_or_metadata() {
         data: None,
         opened_by: None,
         last_metadata_actor: None,
+        labels: &[],
+        labels_version: None,
+        labels_actor: None,
     };
     let options = parse(&read_args("list")).unwrap();
     let (text, _) = read_receipt(&options, read_options(&options), head(1), None, &[row]).unwrap();
@@ -496,4 +502,34 @@ fn body_files_allow_empty_data_but_refuse_bad_encoding_size_and_symlinks() {
         assert!(read_body_file(&link).is_err());
     }
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn label_filters_are_exact_and_checked_again_before_rendering() {
+    let mut input = read_args("list");
+    input.extend(["--label", "urgent", "--label", "bug"].map(str::to_owned));
+    let options = parse(&input).unwrap();
+    let read = read_options(&options);
+    assert_eq!(read.labels, ["bug", "urgent"]);
+    let opened = parse(&args(40)).unwrap();
+    let mutation = mutation(&opened);
+    let event = mutation.command.proposed_event(mutation.principal, opened.format).unwrap();
+    let mut value = row(&event, mutation);
+    assert!(read_receipt(&options, read, head(1), None, &[value]).is_err());
+    let labels = vec!["bug".into(), "urgent".into()];
+    value = row(&event, mutation);
+    value.labels = &labels;
+    value.labels_version = Some(AggregateVersion::try_new(9_007_199_254_740_993).unwrap());
+    value.labels_actor = Some(mutation.principal);
+    let (report, exit) = read_receipt(&options, read, head(1), None, &[value]).unwrap();
+    assert_eq!(exit, 0);
+    assert!(report.contains("\"label_filter\":[\"bug\",\"urgent\"]"));
+    assert!(report.contains("\"labels_version\":\"9007199254740993\""));
+    for action in ["show", "open"] {
+        let mut input = if action == "show" { read_args(action) } else { args(40) };
+        input.extend(["--label".into(), "bug".into()]);
+        assert!(parse(&input).is_err());
+    }
+    input.extend(["--label".into(), "bug".into()]);
+    assert!(parse(&input).is_err());
 }

@@ -97,7 +97,6 @@ for (const [name, make, code] of [
   ['same commit', f => f.original, 'source_workspace_refresh_same_commit'],
   ['other format', () => source([{ bytes: 'base' }], 'sha256', 'next'), 'source_workspace_refresh_format'],
   ['dropped selected path', () => source([{ path: '62', bytes: 'base' }], 'sha1', 'next'), 'source_workspace_refresh_selection'],
-  ['extra selected path', () => source([{ bytes: 'base' }, { path: '62', bytes: 'new' }], 'sha1', 'next'), 'source_workspace_refresh_selection'],
 ]) test(`${name} is not silently treated as a refresh`, async t => {
   const f = await setup(t);
   await assert.rejects(f.preview(make(f)), { code }); assert(!existsSync(f.output));

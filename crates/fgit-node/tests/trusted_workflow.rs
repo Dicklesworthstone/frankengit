@@ -744,3 +744,9 @@ fn literal_multiline_script_executes_exact_decoded_bytes_and_persists_commitment
 
 #[path = "trusted_workflow/artifacts.rs"]
 mod artifacts;
+
+#[path = "trusted_workflow/shell.rs"]
+mod shell_tests;
+
+#[path = "trusted_workflow/defaults.rs"]
+mod defaults_tests;

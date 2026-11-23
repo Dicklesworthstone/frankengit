@@ -8,7 +8,7 @@
   <script type="module" src="./browser.mjs"></script>
 </head>
 <body>
-  <header><strong>FrankenGit</strong><span>Repository source</span><span class="badge">Read only</span><a href="./branches/">Branches</a><a href="./protection/">Review protection</a><a href="./queues/">Merge queues</a><a href="./history/">History and blame</a><a href="./search/">Code search</a><a href="./milestones/">Milestones</a><a href="./transfers/">Git transfers</a><a href="./transfers/verify/">Verify exports</a><a href="./tags/">Tags</a><a href="./replay/">Cherry-pick and revert</a><a href="./rebase/">Rebase</a><a href="./artifacts/">Workflow artifacts</a></header>
+  <header><strong>FrankenGit</strong><span>Repository source</span><a href="/ui/">Repositories</a><span class="badge">Read only</span><a href="./branches/">Branches</a><a href="./protection/">Review protection</a><a href="./queues/">Merge queues</a><a href="./history/">History and blame</a><a href="./search/">Code search</a><a href="./milestones/">Milestones</a><a href="./transfers/">Git transfers</a><a href="./transfers/verify/">Verify exports</a><a href="./tags/">Tags</a><a href="./replay/">Cherry-pick and revert</a><a href="./rebase/">Rebase</a><a href="./artifacts/">Workflow artifacts</a></header>
   <main>
     <h1>Explore this repository</h1>
     <p>Browse an authorized, snapshot-pinned view. File names and source are displayed as data, never executed.</p>
@@ -27,6 +27,7 @@
       <button type="submit">Search snapshot</button>
     </form>
     <button id="cancel-read" type="button" disabled>Cancel read</button>
+    <p class="hint">Download directory saves the selected directory as source.tar; Download directory as ZIP saves source.zip. Both export up to 128 MiB at this exact snapshot. ZIP supports longer UTF-8 paths; tar preserves raw byte names. The server validates the archive; the browser checks its format, snapshot and complete response length before starting the download. The browser does not cryptographically verify or extract the archive contents. Gitlinks contain no submodule contents.</p>
     <p class="hint">Files up to 8 MiB can be read completely, verified against their native Git blob ID, and downloaded as inert bytes. Byte-range previews are not full-file verification. No executable permissions or symbolic links are created. Optional path verification also checks every containing directory against the selected root tree, within 128 pages, 12,800 entries and 4 MiB of encoded tree data in total. Commit-chain verification additionally hashes the original selected commit and checks its root-tree header before reading any parent directory. It uses one bounded history query (up to 4,096 commits, 16,384 edges and 4 MiB of metadata on the server); unavailable or over-budget history refuses without fallback. All proof and file reads share one deadline. Authority and author signatures are not verified; noncanonical original tree modes cannot be reconstructed from this API.</p>
     <div id="status" role="status" aria-live="polite">Enter a read-scoped token to begin.</div>
     <section id="snapshot" aria-label="Selected snapshot"></section>

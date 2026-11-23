@@ -699,3 +699,8 @@ mod snapshots;
 
 #[path = "review_tests/quorum.rs"]
 mod quorum;
+
+#[path = "review_tests/authentication.rs"]
+mod authentication;
+
+mod retarget;

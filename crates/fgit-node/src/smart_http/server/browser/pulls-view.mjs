@@ -2,7 +2,7 @@
 // preparing, inspecting and displaying approvals never submits a mutation.
 import { PullClient } from './pulls.mjs';
 import { markdownBody } from './markdown.mjs';
-import { decimal, oid, unhex, fail, showReply, subjectReferences } from './pulls-core.mjs';
+import { decimal, oid, unhex, fail, showReply, subjectReferences, pullLabels, pullLabelState } from './pulls-core.mjs';
 import { RECEIPT_LIMIT, fastForwardCommand, ProtectionClient, protectionPolicy, protectionChanges } from './pulls-actions.mjs';
 import { candidateMethod } from './pulls-candidate.mjs';
 import { ResolutionEditor } from './pulls-resolution-view.mjs';
@@ -28,6 +28,10 @@ function element(doc, tag, value = '') {
 function item(doc, parent, tag, value) { const el = element(doc, tag, value); parent.append(el); return el; }
 function nativeRef(data, name) { return data[name] === null ? `byte ref: ${data[`${name}_hex`]}` : data[name]; }
 function identity(entry) { return entry === null ? '(absent)' : `${entry.mode.toString(8)} ${entry.oid}`; }
+function labelsFromLines(value) {
+  return pullLabels(value === '' ? [] : value.split(/\r?\n/u).filter(line => line.length));
+}
+function labelNames(labels) { return labels.length ? labels.map(label => JSON.stringify(label)).join(', ') : '(none)'; }
 
 export function renderCommentAnchor(doc, parent, anchor, status = null) {
   item(doc, parent, 'p', `Source comment · ${anchor.side === 'before' ? 'Before' : 'After'} · ${displayBytes(anchor.path_hex)} · ` +
@@ -43,6 +47,7 @@ export function renderCommentAnchor(doc, parent, anchor, status = null) {
 // The validated full report is retained for download; rendering has a separate
 // ceiling. Clipping never changes the comparison receipt or omits a path label.
 export function renderInspection(doc, parent, report) {
+  if (report.type === 'pull_request_rebase_inspection') return renderRebaseInspection(doc, parent, report);
   parent.replaceChildren();
   item(doc, parent, 'h3', `Inspected candidate ${report.candidate_commit}`);
   item(doc, parent, 'pre', `PR #${report.subject.pull_request} · version ${report.subject.pull_request_version} · policy ${report.subject.policy_epoch}\n` +
@@ -52,6 +57,31 @@ export function renderInspection(doc, parent, report) {
     `Bundle: ${report.bundle.bytes} bytes · SHA-256 ${report.bundle.sha256}\nSnapshot: ${report.snapshot_token}`);
   item(doc, parent, 'p', 'Read-only inspection. No objects staged, review recorded, or merge authorized. Binary bodies are not included.');
   return renderComparison(doc, parent, report.comparison, 'inspection');
+}
+export function renderRebaseInspection(doc, parent, report) {
+  parent.replaceChildren();
+  item(doc, parent, 'h3', `Inspected rebased series ${report.candidate_commit}`);
+  item(doc, parent, 'pre', `PR #${report.subject.pull_request} · version ${report.subject.pull_request_version} · policy ${report.subject.policy_epoch}\n` +
+    `Source: ${nativeRef(report.subject, 'source_ref')} · ${report.subject.source_tip}\nSource reference bytes: ${report.subject.source_ref_hex}\n` +
+    `Target: ${nativeRef(report.subject, 'target_ref')} · ${report.subject.target_tip}\nTarget reference bytes: ${report.subject.target_ref_hex}\n` +
+    `Upstream: ${report.merge_base}\n${report.commits.length} rewritten commits\n` +
+    `Bundle: ${report.bundle.bytes} bytes · SHA-256 ${report.bundle.sha256}\nSnapshot: ${report.snapshot_token}`);
+  item(doc, parent, 'p', 'Every rewritten commit is inspected in order, including temporary changes absent from the final tree. Landing advances only the target; the source branch stays unchanged.');
+  const budget = { remaining: DISPLAY_BYTES, shownHunks: 0 }; let clipped = false;
+  for (const [index, step] of report.commits.entries()) {
+    const section = element(doc, 'section'); parent.append(section);
+    item(doc, section, 'h3', `Commit ${index + 1} of ${report.commits.length}: ${step.commit}`);
+    item(doc, section, 'pre', `Parent: ${step.parent}\nTree: ${step.tree}`);
+    const count = Math.min(step.commit_hex.length / 2, budget.remaining); budget.remaining -= count;
+    item(doc, section, 'pre', displayBytes(step.commit_hex.slice(0, count * 2)));
+    if (count * 2 !== step.commit_hex.length) { clipped = true; item(doc, section, 'p', 'Commit body clipped. Download the full inspection JSON.'); }
+    clipped = renderComparison(doc, section, step.comparison, 'inspection', null, budget).clipped || clipped;
+  }
+  item(doc, parent, 'h3', 'Original source compared with the final rebased candidate');
+  clipped = renderComparison(doc, parent, report.source_comparison, 'inspection', null, budget).clipped || clipped;
+  item(doc, parent, 'p', 'Read-only inspection. No objects staged, approval recorded, or merge authorized. Binary bodies are not included.');
+  if (clipped) item(doc, parent, 'p', 'DISPLAY CLIPPED: download the complete series inspection before completing review. Every commit and changed path is still identified above.');
+  return { clipped, shownHunks: budget.shownHunks, commentButtons: [] };
 }
 export function renderPullDiff(doc, parent, result, { onComment = null } = {}) {
   const report = result.reply;
@@ -66,8 +96,8 @@ export function renderPullDiff(doc, parent, result, { onComment = null } = {}) {
   item(doc, parent, 'p', 'Read-only, snapshot-bound source evidence. No candidate, approval, transaction or publication is created. Object identities are server-reported, not independently proven by these hunks.');
   return renderComparison(doc, parent, result.comparison, 'diff', onComment ? { result, onComment } : null);
 }
-function renderComparison(doc, parent, comparison, kind, comments = null) {
-  let remaining = DISPLAY_BYTES, shownHunks = 0, clipped = false;
+function renderComparison(doc, parent, comparison, kind, comments = null, budget = null) {
+  let remaining = budget?.remaining ?? DISPLAY_BYTES, shownHunks = budget?.shownHunks ?? 0, clipped = false;
   const commentButtons = [];
   if (!comparison.entries.length) item(doc, parent, 'p', kind === 'inspection'
     ? 'No changed paths in this exact candidate comparison. The commit identity is still significant.'
@@ -110,6 +140,7 @@ function renderComparison(doc, parent, comparison, kind, comments = null) {
     }
   }
   if (clipped) item(doc, parent, 'p', `DISPLAY CLIPPED: not every hunk or byte is shown. Download the full ${kind} JSON before completing review. All changed path labels remain above.`);
+  if (budget) { budget.remaining = remaining; budget.shownHunks = shownHunks; }
   return { clipped, shownHunks, commentButtons };
 }
 // The selected show() observation, not the editable metadata/candidate forms,
@@ -141,11 +172,14 @@ async function fileText(input) {
   if (bytes.length > RECEIPT_LIMIT || bytes.length !== file.size) fail('Invalid receipt size.');
   return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
 }
-const IDS = ['connection', 'token', 'recovery-only', 'original-principal', 'connection-mode', 'disconnect', 'status', 'refresh', 'pr-list', 'list-paging', 'select-pr', 'select-number', 'select-load',
+const SEARCH_IDS = ['search-query', 'search-state', 'search-opened-by', 'search-case-sensitive',
+  'search-source-ref', 'search-source-encoding', 'search-target-ref', 'search-target-encoding', 'search-limit', 'search-max-scan', 'search-submit', 'search-clear'];
+const IDS = ['connection', 'token', 'recovery-only', 'original-principal', 'connection-mode', 'disconnect', 'status', 'refresh', 'pr-list', 'list-paging', 'select-pr', 'select-number', 'select-load', 'pr-search', ...SEARCH_IDS,
+  'label-filter', 'label-filter-values', 'label-filter-apply',
   'comments-load', 'comments-limit', 'conversation', 'comment-paging', 'comment-form', 'comment-version', 'comment-location', 'comment-general', 'comment-body', 'comment-stage',
   'selected', 'snapshot', 'reviews-load', 'reviews', 'review-paging', 'metadata', 'pr-number', 'metadata-action', 'expected-version',
   'object-format', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body', 'metadata-stage', 'new-pr',
-  'prepare', 'candidate-method', 'policy-epoch', 'author', 'committer', 'timestamp', 'message', 'prepare-candidate', 'candidate', 'candidate-download',
+  'prepare', 'candidate-method', 'candidate-profile', 'rebase-fields', 'rebase-upstream', 'rebase-empty', 'policy-epoch', 'author', 'committer', 'timestamp', 'message', 'prepare-candidate', 'candidate', 'candidate-download',
   'candidate-import', 'candidate-import-file', 'candidate-import-submit', 'inspection-download', 'resolution', 'resolution-paths', 'resolve-candidate', 'review', 'review-action', 'review-version', 'reason', 'review-stage',
   'merge', 'merge-heading', 'merge-method-guidance', 'merge-reviewer-fields', 'required-reviewers', 'merge-stage', 'pending', 'confirm', 'send', 'recover', 'discard', 'receipt-download', 'receipt-import', 'receipt-import-file', 'receipt-import-submit'];
 
@@ -154,9 +188,19 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   const nodes = Object.fromEntries(IDS.map(id => { const el = doc.getElementById(id); if (!el) fail(`Missing UI element: ${id}`); return [id, el]; }));
   const client = new PullClient({ href, fetchImpl, cryptoImpl }), download = downloadImpl ?? downloader(doc);
   nodes['candidate-method'].value ||= 'merge-commit';
+  nodes['candidate-profile'].value ||= 'path-merge-v1';
+  nodes['rebase-empty'].value ||= 'stop';
+  function resetSearch() {
+    for (const id of ['search-query', 'search-opened-by', 'search-source-ref', 'search-target-ref']) nodes[id].value = '';
+    nodes['search-state'].value = 'all'; nodes['search-case-sensitive'].checked = false;
+    nodes['search-source-encoding'].value = 'text'; nodes['search-target-encoding'].value = 'text';
+    nodes['search-limit'].value = '20'; nodes['search-max-scan'].value = '200';
+  }
+  resetSearch();
   const resolution = new ResolutionEditor(doc, nodes['resolution-paths'], displayBytes);
   let operation = null, generation = 0, selected = null, listPage = null, reviewPage = null, fastForward = null, conversation = null;
   let inlineSelection = null, inlineButtons = [];
+  let labelsPanel = null;
   let closeChecks = null;
   function clearChecks() { closeChecks?.(); closeChecks = null; }
   const number = (id, min = 0) => decimal(nodes[id].value, id, min);
@@ -164,6 +208,35 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   const button = (parent, label, handler) => { const el = element(doc, 'button', label); el.type = 'button';
     el.addEventListener('click', event => { event.preventDefault(); handler(); }); parent.append(el); return el; };
   const on = (id, event, handler) => nodes[id].addEventListener(event, ev => { ev.preventDefault(); handler(); });
+  function renderPreparation(result, resolved = false) {
+    nodes.candidate.replaceChildren(); resolution.clear();
+    const metadata = result.metadata, rebasing = metadata.method === 'rebase';
+    if (result.inspection) {
+      const rendered = renderInspection(doc, nodes.candidate, result.inspection);
+      status((resolved ? 'Resolved candidate constructed and inspected. No vote or publication exists.'
+        : 'Candidate prepared and inspected, without publication.') +
+        (rendered.clipped ? ' Display clipped: download the full report before reviewing.' : ''));
+      return;
+    }
+    item(doc, nodes.candidate, 'h3', 'Preparation: ' + metadata.state);
+    if (rebasing) item(doc, nodes.candidate, 'pre', 'Stopped at original commit ' + metadata.stopped_commit + '. No candidate bundle was produced.');
+    for (const conflict of metadata.conflicts) item(doc, nodes.candidate, 'pre',
+      displayBytes(conflict.path_hex) + ' · ' + conflict.kind + '\nPath bytes: ' + conflict.path_hex);
+    if (metadata.state === 'conflicted' && client.conflict) {
+      resolution.show(metadata);
+      status(rebasing
+        ? (resolved ? 'Earlier resolutions are retained. ' : '') +
+          'Choose every conflict for this original commit. The complete series will be reconstructed and inspected before review or publication becomes available.'
+        : 'Choose every conflict explicitly below. Resolution constructs and inspects a new ' +
+          (metadata.method === 'squash' ? 'squash' : 'merge') + ' candidate; it does not record approval or publish.');
+    } else if (rebasing) {
+      status(metadata.state === 'became_empty'
+        ? 'Rebase stopped at a newly empty commit. Choose stop, drop or keep explicitly and prepare again. No approval or publication was produced.'
+        : 'Rebase stopped without a publishable candidate. Reload the selection before preparing again.');
+    } else if (metadata.state === 'conflicted') {
+      status('This profile produced conflicts. Revise the source or explicitly prepare with another profile; direct-path resolution is unavailable for these conflict coordinates.');
+    } else status('Already up to date. No candidate, transaction or approval was produced.');
+  }
   function controls() {
     const busy = Boolean(operation) || client.busy, recovering = client.recoveryOnly,
       connected = client.connected && !recovering, pending = client.pending, candidate = client.candidate;
@@ -173,9 +246,16 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     nodes['connection-mode'].textContent = !client.connected ? 'Disconnected. No credential is active.' : recovering
       ? 'RECOVERY ONLY: the selected original principal must match the authenticated outcome response. No PR reads or mutation sends are permitted. Reconnect explicitly for ordinary work.'
       : 'Ordinary connection. Changing the recovery selection takes effect only when Connect is submitted.';
-    for (const id of ['refresh', 'new-pr', 'select-number', 'select-load', 'candidate-import-file', 'candidate-import-submit']) nodes[id].disabled = !connected || busy;
+    for (const id of ['refresh', 'new-pr', 'select-number', 'select-load', 'candidate-import-file', 'candidate-import-submit', 'label-filter-values', 'label-filter-apply', ...SEARCH_IDS]) nodes[id].disabled = !connected || busy;
+    nodes.refresh.textContent = listPage?.query ? 'Refresh current search' : 'Refresh PR list';
     nodes['metadata-stage'].disabled = !connected || busy || Boolean(pending);
     nodes['prepare-candidate'].disabled = !connected || busy || !selected?.row?.data || selected.row.state !== 'open';
+    const preparingRebase = nodes['candidate-method'].value === 'rebase';
+    nodes['rebase-fields'].hidden = !preparingRebase;
+    nodes['rebase-upstream'].required = preparingRebase;
+    nodes['rebase-upstream'].disabled = nodes['rebase-empty'].disabled = !preparingRebase || busy;
+    nodes['candidate-profile'].disabled = preparingRebase || busy;
+    for (const id of ['author', 'message']) { nodes[id].required = !preparingRebase; nodes[id].disabled = preparingRebase || busy; }
     nodes['reviews-load'].disabled = !connected || busy || !selected;
     nodes['comments-load'].disabled = !connected || busy || !selected;
     nodes['comments-limit'].disabled = !connected || busy || !selected;
@@ -184,6 +264,13 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     nodes['comment-stage'].disabled = !canComment || !sourceCurrent || busy || Boolean(pending);
     nodes['comment-body'].disabled = !canComment || busy;
     nodes['comment-general'].disabled = !connected || busy || Boolean(pending) || !inlineSelection;
+    if (labelsPanel) {
+      const current = connected && selected?.row === labelsPanel.row && !selected.stale && !labelsPanel.stale;
+      labelsPanel.load.disabled = !current || busy || !labelsPanel.row.data;
+      const editable = current && labelsPanel.observed?.reply.found;
+      labelsPanel.input.disabled = labelsPanel.clear.disabled = !editable || busy || Boolean(pending);
+      labelsPanel.stage.disabled = !editable || busy || Boolean(pending);
+    }
     for (const control of inlineButtons) control.disabled = !connected || busy || Boolean(pending) || !selected || Boolean(selected.stale);
     nodes['comment-location'].replaceChildren();
     if (inlineSelection) {
@@ -198,11 +285,11 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     nodes['resolve-candidate'].disabled = !connected || busy || !resolving;
     resolution.setDisabled(!connected || busy || !resolving);
     for (const id of ['review-stage', 'merge-stage']) nodes[id].disabled = !candidate || busy || Boolean(pending);
-    const method = candidateMethod(candidate), inspectedFastForward = method === 'fast-forward-only', squash = method === 'squash';
+    const method = candidateMethod(candidate), inspectedFastForward = method === 'fast-forward-only', squash = method === 'squash', rebase = method === 'rebase';
     const rawFastForward = inspectedFastForward && (Object.hasOwn(candidate.fields, 'source_ref_hex') || Object.hasOwn(candidate.fields, 'target_ref_hex'));
     if (rawFastForward) nodes['merge-stage'].disabled = true;
-    nodes['merge-heading'].textContent = inspectedFastForward ? 'Fast-forward inspected source' : squash ? 'Reviewed squash' : 'Reviewed merge';
-    nodes['merge-stage'].textContent = inspectedFastForward ? 'Prepare fast-forward — do not send' : squash ? 'Prepare squash — do not send' : 'Prepare merge — do not send';
+    nodes['merge-heading'].textContent = inspectedFastForward ? 'Fast-forward inspected source' : rebase ? 'Reviewed rebase' : squash ? 'Reviewed squash' : 'Reviewed merge';
+    nodes['merge-stage'].textContent = inspectedFastForward ? 'Prepare fast-forward — do not send' : rebase ? 'Prepare rebase merge — do not send' : squash ? 'Prepare squash — do not send' : 'Prepare merge — do not send';
     nodes['merge-reviewer-fields'].hidden = inspectedFastForward;
     nodes['required-reviewers'].disabled = inspectedFastForward || !candidate || busy || Boolean(pending);
     nodes['required-reviewers'].required = !inspectedFastForward;
@@ -210,6 +297,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
       ? 'This source-tip candidate can be reviewed with its exact reference bytes. Fast-forward publication through this form requires text branch references.'
       : inspectedFastForward
       ? 'Publish the exact inspected source tip with the native fast-forward method. Current branch protection determines required approvals. The request preserves the inspected PR version and both branch tips; it sends no candidate bundle or caller-selected reviewer list.'
+      : rebase ? 'Publish the complete inspected series on the target while preserving the source branch. Required checks and path-specific reviews cover every rewritten commit, including temporary changes.'
       : squash ? 'Publish the inspected squash with the target as its only parent and the explicit reviewer requirements below. Current branch protection also applies.'
         : 'Publish the inspected two-parent candidate with the explicit reviewer requirements below. Current branch protection also applies.';
     for (const id of ['candidate-download', 'inspection-download']) nodes[id].disabled = !candidate || busy;
@@ -234,11 +322,13 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     clearChecks();
     clearComments();
     inlineButtons = [];
-    selected = null; listPage = null; reviewPage = null; fastForward = null; resolution.clear();
+    selected = null; listPage = null; reviewPage = null; fastForward = null; labelsPanel = null; resolution.clear();
+    resetSearch();
     for (const id of ['selected', 'snapshot', 'pr-list', 'list-paging', 'reviews', 'review-paging', 'candidate']) nodes[id].replaceChildren();
     for (const id of ['select-number', 'pr-number', 'expected-version', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body',
-      'policy-epoch', 'author', 'committer', 'timestamp', 'message', 'review-version', 'reason', 'required-reviewers']) nodes[id].value = '';
+      'policy-epoch', 'author', 'committer', 'timestamp', 'message', 'review-version', 'reason', 'required-reviewers', 'label-filter-values']) nodes[id].value = '';
     nodes['candidate-method'].value = 'merge-commit';
+    nodes['candidate-profile'].value = 'path-merge-v1';
     nodes.confirm.checked = false;
   }
   function disconnect() {
@@ -271,16 +361,56 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   function renderList(result) {
     listPage = result; nodes['pr-list'].replaceChildren(); nodes['list-paging'].replaceChildren();
     item(doc, nodes['pr-list'], 'p', `Snapshot: ${result.head}`);
-    if (!result.reply.pull_requests.length) item(doc, nodes['pr-list'], 'p', 'No PRs on this visible page.');
-    for (const row of result.reply.pull_requests) button(nodes['pr-list'], `#${row.number} · ${row.state} · ${row.data?.title ?? '(merge-only record)'}`,
-      () => loadPr(row.number, result.head));
-    if (result.reply.next_after !== null) button(nodes['list-paging'], 'Next PR page', () => loadList(result.reply.next_after, result.head));
+    const labels = result.reply.labels ?? [];
+    if (labels.length) item(doc, nodes['pr-list'], 'p', `Required labels: ${labelNames(labels)}`);
+    if (result.query) {
+      const filters = [`state ${result.query.state}`];
+      if (result.query.query !== null) filters.push(`literal ${JSON.stringify(result.query.query)} (${result.query.case_sensitive ? 'exact case' : 'ASCII case ignored'})`);
+      if (result.query.opened_by !== null) filters.push(`opener ${result.query.opened_by}`);
+      for (const name of ['source', 'target']) if (result.query[`${name}_ref_hex`] !== null) filters.push(`${name} branch ${displayBytes(result.query[`${name}_ref_hex`])}`);
+      item(doc, nodes['pr-list'], 'p', `Applied filters: ${displayText(filters.join('; '))}`);
+      item(doc, nodes['pr-list'], 'p', `${result.reply.count} matches; ${result.reply.scanned} PRs examined on this page. ${result.reply.complete
+        ? 'Search complete for the remaining snapshot range.' : result.reply.stop_reason === 'scan_limit'
+        ? 'Scan limit reached. More PRs remain at this snapshot.' : 'Result limit reached. More PRs remain at this snapshot.'}`);
+    }
+    if (!result.reply.pull_requests.length) item(doc, nodes['pr-list'], 'p', result.query
+      ? result.reply.complete ? 'No matching PRs in the remaining snapshot range.' : 'No matches on this page. Continue searching the same snapshot.'
+      : 'No PRs on this visible page.');
+    for (const row of result.reply.pull_requests) button(nodes['pr-list'], `#${row.number} · ${row.state} · ${row.data?.title ?? '(merge-only record)'}` +
+      (Array.isArray(row.labels) ? ` · labels: ${labelNames(row.labels)}` : ''), () => loadPr(row.number, result.head));
+    if (result.reply.next_after !== null) {
+      if (result.query) button(nodes['list-paging'], 'Continue PR search', () => loadSearch(result.query,
+        { after: result.reply.next_after, head: result.head, limit: result.reply.limit, maxScan: result.reply.max_scan }));
+      else button(nodes['list-paging'], 'Next PR page', () => loadList(result.reply.next_after, result.head, labels));
+    }
   }
-  function loadList(after = 0, head = null) {
+  function loadList(after = 0, head = null, labels = null) {
     return run('read', async guard => {
-      client.cancelReads(); nodes['pr-list'].replaceChildren(); nodes['list-paging'].replaceChildren();
-      const result = await client.list({ after, head }); guard(); renderList(result);
+      const wanted = labels === null ? labelsFromLines(nodes['label-filter-values'].value) : pullLabels(labels);
+      client.cancelReads(); listPage = null; nodes['pr-list'].replaceChildren(); nodes['list-paging'].replaceChildren();
+      const result = await client.list({ after, head, labels: wanted }); guard(); renderList(result);
       status('PR page loaded at one snapshot. Opening a row retains that snapshot.');
+    });
+  }
+  function searchFields() {
+    const query = { state: nodes['search-state'].value, case_sensitive: nodes['search-case-sensitive'].checked };
+    if (nodes['search-query'].value !== '') query.query = nodes['search-query'].value;
+    if (nodes['search-opened-by'].value !== '') query.opened_by = nodes['search-opened-by'].value;
+    for (const side of ['source', 'target']) {
+      const encoding = nodes[`search-${side}-encoding`].value;
+      if (!['text', 'hex'].includes(encoding)) fail('Choose a valid branch search encoding.');
+      if (nodes[`search-${side}-ref`].value !== '') query[`${side}_ref${encoding === 'hex' ? '_hex' : ''}`] = nodes[`search-${side}-ref`].value;
+    }
+    return query;
+  }
+  function loadSearch(query = null, options = null) {
+    return run('read', async guard => {
+      const filters = query ?? searchFields(), parameters = options ?? {
+        limit: number('search-limit', 1), maxScan: number('search-max-scan', 1) };
+      client.cancelReads(); listPage = null; nodes['pr-list'].replaceChildren(); nodes['list-paging'].replaceChildren();
+      const result = await client.search(filters, parameters); guard(); renderList(result);
+      status(result.reply.complete ? 'PR search complete at this snapshot. Opening a result retains that snapshot.'
+        : 'PR search page loaded. Continue to examine more PRs at the same snapshot with these applied filters.');
     });
   }
   function fieldsFromRow(row, format) {
@@ -301,13 +431,64 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     if (!keepDraft) { nodes['comment-body'].value = ''; inlineSelection = null; }
   }
   function renderSelected(result) {
-    clearChecks(); clearProposal(); fastForward = null; inlineButtons = [];
+    clearChecks(); clearProposal(); fastForward = null; labelsPanel = null; inlineButtons = [];
     const row = result.reply.pull_request; nodes.selected.replaceChildren(); nodes['reviews'].replaceChildren(); nodes['review-paging'].replaceChildren(); reviewPage = null;
     nodes.snapshot.textContent = `Selected snapshot: ${result.head}`;
     if (!row) { selected = null; item(doc, nodes.selected, 'p', 'This PR was not found or is not disclosed.'); return; }
     selected = { row, head: result.head, format: result.binding.format };
     item(doc, nodes.selected, 'h2', `#${row.number} · ${row.state} · ${row.data?.title ?? '(merge-only record)'}`);
     item(doc, nodes.selected, 'p', `PR version ${row.version}. Opener: ${row.opened_by ?? '(not recorded)'}`);
+    const labelSection = element(doc, 'section'); labelSection.id = 'pr-labels';
+    item(doc, labelSection, 'h3', 'Labels');
+    const initialLabels = pullLabelState(row, { optional: true });
+    const labelStatus = item(doc, labelSection, 'p', initialLabels
+      ? `Labels at this snapshot: ${labelNames(initialLabels.labels)} · labels version ${initialLabels.version}`
+      : 'This PR response does not include labels. Load labels to check whether this server supports them.');
+    labelStatus.id = 'pr-labels-status';
+    item(doc, labelSection, 'p', 'Labels organize open, closed, and merged PRs. Replacing them preserves PR metadata, branch tips, and existing approvals. Load this selected snapshot before editing; a concurrent label replacement refuses the saved version.');
+    const panel = { row, observed: null, stale: false };
+    panel.load = button(labelSection, 'Load labels at this snapshot', () => run('read', async guard => {
+      if (labelsPanel !== panel || selected?.row !== row || selected.stale || panel.stale) fail('Reload and select the intended PR before loading labels.');
+      panel.observed = null; panel.input.value = ''; panel.clear.checked = false;
+      labelStatus.textContent = 'Loading selected PR labels…';
+      try {
+        const loaded = await client.labels(row.number, result); guard();
+        if (labelsPanel !== panel || selected?.row !== row) fail('The selected PR changed.');
+        panel.observed = loaded;
+        if (!loaded.reply.found) {
+          labelStatus.textContent = 'PR labels are unavailable or not disclosed.';
+          status('No editable labels were inferred.'); return;
+        }
+        panel.input.value = loaded.reply.labels.join('\n');
+        labelStatus.textContent = displayText(`PR #${row.number} · labels version ${loaded.reply.labels_version} · metadata version ${loaded.reply.pull_request_version}\n` +
+          `Labels: ${labelNames(loaded.reply.labels)}\nLast label editor: ${loaded.reply.labels_actor ?? '(no published labels)'}`);
+        status('Labels loaded at the selected PR snapshot. Edit the full set, then prepare it for explicit confirmation.');
+      } catch (error) {
+        guard();
+        if (error.status === 409) panel.stale = true;
+        labelStatus.textContent = displayText(`Labels unavailable: ${error.message || 'read failed'}. Reload the PR explicitly before trying a fresh observation.`);
+        throw error;
+      }
+    }));
+    panel.load.id = 'pr-labels-load';
+    const labelsForm = element(doc, 'form'); labelsForm.id = 'pr-labels-form';
+    const inputLabel = item(doc, labelsForm, 'label', 'Replacement labels, one per line');
+    panel.input = element(doc, 'textarea'); panel.input.id = 'pr-labels-values'; panel.input.rows = 4; panel.input.maxLength = 2079; panel.input.spellcheck = false;
+    inputLabel.append(panel.input);
+    const clearLabel = item(doc, labelsForm, 'label', 'Clear all labels (requires an empty replacement)');
+    panel.clear = element(doc, 'input'); panel.clear.id = 'pr-labels-clear'; panel.clear.type = 'checkbox'; clearLabel.append(panel.clear);
+    panel.stage = item(doc, labelsForm, 'button', 'Prepare labels — do not send'); panel.stage.id = 'pr-labels-stage'; panel.stage.type = 'submit';
+    labelsForm.addEventListener('submit', event => {
+      event.preventDefault();
+      void run('stage', async guard => {
+        if (labelsPanel !== panel || selected?.row !== row || selected.stale || panel.stale || !panel.observed?.reply.found) fail('Load the selected PR labels before preparing a replacement.');
+        const wanted = labelsFromLines(panel.input.value);
+        if (wanted.length ? panel.clear.checked : !panel.clear.checked) fail('To clear all labels, leave the replacement empty and explicitly select Clear all labels.');
+        await client.stageLabels(row.number, panel.observed, wanted); guard(); nodes.confirm.checked = false;
+        status(`Labels replacement prepared for PR #${row.number} at labels version ${panel.observed.reply.labels_version}. Nothing sent. Review the exact set below, then explicitly confirm Send/Retry.`);
+      });
+    });
+    labelSection.append(labelsForm); nodes.selected.append(labelSection); labelsPanel = panel;
     const mergePanel = element(doc, 'section'); mergePanel.id = 'fast-forward-panel';
     item(doc, mergePanel, 'h3', 'Fast-forward merge');
     item(doc, mergePanel, 'p', 'Publish the recorded source tip and mark this PR merged together, without creating a new commit. The node must verify ancestry, the exact PR version and both live branch tips, and current branch protection. No force or alternative merge method is attempted.');
@@ -466,6 +647,15 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
       } else status(`Comment outcome unknown (${result.state}). Keep the original request and recover or retry it unchanged.`);
       return;
     }
+    if (result.action === 'set-labels') {
+      nodes.confirm.checked = false;
+      if (result.terminal) {
+        if (labelsPanel?.row.number === result.number) { labelsPanel.observed = null; labelsPanel.stale = true; }
+        status(`Canonical ${result.outcome}: transaction ${result.tx}${result.rcr ? `, record ${result.rcr}` : `, refusal ${result.refusal}`}. ` +
+          'Reload the PR to observe its current labels before editing again. PR metadata, branch tips and existing approvals are unchanged; external delivery is not established.');
+      } else status(`Labels outcome unknown (${result.state}). Keep the original request and recover or retry it unchanged.`);
+      return;
+    }
     nodes.confirm.checked = false; nodes.candidate.replaceChildren();
     if (result.terminal) {
       resolution.clear();
@@ -496,7 +686,11 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   });
   nodes['recovery-only'].addEventListener('change', controls);
   on('disconnect', 'click', disconnect);
-  on('refresh', 'click', () => loadList());
+  on('label-filter', 'submit', () => loadList());
+  on('pr-search', 'submit', () => loadSearch());
+  on('search-clear', 'click', () => { resetSearch(); nodes['label-filter-values'].value = ''; loadList(0, null, []); });
+  on('refresh', 'click', () => listPage?.query
+    ? loadSearch(listPage.query, { limit: listPage.reply.limit, maxScan: listPage.reply.max_scan }) : loadList());
   on('select-pr', 'submit', () => run('read', async guard => {
     const requested = number('select-number', 1); clearChecks(); client.cancelReads(); invalidateCandidate(); clearProposal(); selected = null;
     nodes.selected.replaceChildren(); nodes.snapshot.replaceChildren(); nodes.reviews.replaceChildren(); nodes['review-paging'].replaceChildren();
@@ -521,7 +715,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     if (operation || !client.connected || client.recoveryOnly) return;
     clearChecks();
     clearComments();
-    invalidateCandidate(); selected = null; nodes.selected.replaceChildren(); nodes.snapshot.replaceChildren(); nodes.reviews.replaceChildren(); nodes['review-paging'].replaceChildren();
+    invalidateCandidate(); selected = null; labelsPanel = null; nodes.selected.replaceChildren(); nodes.snapshot.replaceChildren(); nodes.reviews.replaceChildren(); nodes['review-paging'].replaceChildren();
     for (const id of ['pr-number', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body']) nodes[id].value = '';
     nodes['expected-version'].value = '0'; nodes['object-format'].value = client.binding?.format ?? 'sha1'; nodes['metadata-action'].value = 'open';
     status('New PR proposal. Choose an explicit unused number and both exact tips; nothing has been submitted.'); controls();
@@ -536,29 +730,25 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     const data = selected.row.data;
     const fields = { object_format: selected.format, pull_request_version: selected.row.version, policy_epoch: number('policy-epoch', 1),
       ...subjectReferences(data), source_tip: data.source_tip, target_tip: data.target_tip };
-    const metadata = { author: nodes.author.value, committer: nodes.committer.value, timestamp: number('timestamp'), message: nodes.message.value };
     nodes.candidate.replaceChildren(); resolution.clear();
-    const result = await client.prepareAndInspect(selected.row.number, fields, metadata, nodes['candidate-method'].value); guard();
-    if (result.inspection) {
-      const rendered = renderInspection(doc, nodes.candidate, result.inspection);
-      status(`Candidate prepared and inspected, without publication.${rendered.clipped ? ' Display clipped: download the full report before reviewing.' : ''}`);
-    } else {
-      item(doc, nodes.candidate, 'h3', `Preparation: ${result.metadata.state}`);
-      for (const conflict of result.metadata.conflicts) item(doc, nodes.candidate, 'pre', `${displayBytes(conflict.path_hex)} · ${conflict.kind}\nPath bytes: ${conflict.path_hex}`);
-      if (result.metadata.state === 'conflicted') {
-        resolution.show(result.metadata);
-        status(`Choose every conflict explicitly below. Resolution constructs and inspects a new ${result.metadata.method === 'squash' ? 'squash' : 'merge'} candidate; it does not record approval or publish.`);
-      } else status('Already up to date. No candidate, transaction or approval was produced.');
-    }
+    const rebasing = nodes['candidate-method'].value === 'rebase';
+    const result = rebasing
+      ? await client.prepareRebaseAndInspect(selected.row.number, fields, { upstream: nodes['rebase-upstream'].value,
+        committer: nodes.committer.value, timestamp: number('timestamp'), empty: nodes['rebase-empty'].value })
+      : await client.prepareAndInspect(selected.row.number, fields,
+        { author: nodes.author.value, committer: nodes.committer.value, timestamp: number('timestamp'), message: nodes.message.value },
+        nodes['candidate-method'].value, nodes['candidate-profile'].value); guard();
+    renderPreparation(result);
   }));
   on('resolution', 'submit', () => run('candidate', async guard => {
     const choices = await resolution.collect(guard); guard();
-    const result = await client.resolveAndInspect(choices); guard(); resolution.clear();
-    const rendered = renderInspection(doc, nodes.candidate, result.inspection);
-    status(`Resolved candidate constructed and inspected. No vote or publication exists.${rendered.clipped ? ' Display clipped: download the full inspection before reviewing.' : ''}`);
+    const result = await client.resolveAndInspect(choices); guard();
+    renderPreparation(result, true);
   }));
   for (const id of ['metadata', 'prepare']) nodes[id].addEventListener('input', invalidateCandidate);
   on('candidate-method', 'change', invalidateCandidate);
+  on('candidate-profile', 'change', invalidateCandidate);
+  on('rebase-empty', 'change', invalidateCandidate);
   on('candidate-download', 'click', () => run('export', async () => { downloadText('frankengit-candidate.json', client.exportCandidate()); status('Candidate receipt exported without credentials. Its bytes must be inspected before another reviewer can act.'); }));
   on('inspection-download', 'click', () => run('export', async () => {
     const candidate = client.candidate; if (!candidate) fail('No inspected candidate.');
@@ -580,7 +770,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     } else {
       const method = candidateMethod(client.candidate), reviewers = nodes['required-reviewers'].value.split(/[\s,]+/u).filter(Boolean);
       await client.stageMerge(reviewers); guard(); nodes.confirm.checked = false;
-      status(`${method === 'squash' ? 'Squash' : 'Merge'} request prepared locally with explicit reviewer requirements. The node will recheck current authority and all gates at publication.`);
+      status(`${method === 'rebase' ? 'Rebase merge' : method === 'squash' ? 'Squash' : 'Merge'} request prepared locally with explicit reviewer requirements. The node will recheck current authority and all gates at publication.`);
     }
   }));
   nodes.confirm.addEventListener('change', controls);
@@ -607,7 +797,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   });
   doc.defaultView.addEventListener('pagehide', disconnect);
   status('Connect with a repository token. Credentials remain only in page memory.'); controls();
-  return { client, disconnect, loadPr, loadList, loadReviews, loadComments };
+  return { client, disconnect, loadPr, loadList, loadSearch, loadReviews, loadComments };
 }
 
 // Review-protection administration has its own connection and native client.

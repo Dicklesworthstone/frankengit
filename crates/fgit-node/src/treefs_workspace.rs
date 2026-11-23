@@ -34,11 +34,13 @@ mod queue;
 pub use discussions::DiscussionReadRefusal;
 pub use events::{ForgeEventDisclosureProfile, ForgeEventReadGrants};
 pub use issues::IssueReadRefusal;
+pub use merge_prepare::{PreparedRebaseBundle, RebasePreparationRefusal};
 pub use milestones::MilestoneReadRefusal;
 pub use notifications::{
     InboxSyncOutcome, NotificationInboxPage, NotificationReadRefusal, NotificationThreadState,
     NotificationThreadView,
 };
+pub use pull_request::PreparedPullRequestRebaseBundle;
 pub use pull_request::{
     PullRequestCheckEvidence, PullRequestChecksPage, PullRequestChecksReadRefusal,
     WorkflowCheckSummary,
@@ -46,6 +48,7 @@ pub use pull_request::{
 pub use pull_request::{
     PullRequestCommentView, PullRequestCommentsPage, PullRequestCommentsReadRefusal,
 };
+pub use pull_request::{PullRequestSearchPage, PullRequestSearchRefusal};
 pub use queue::{PreparedQueueHeadBundle, QueueRead, QueueReadRefusal};
 mod session_state;
 mod sessions;
@@ -78,7 +81,7 @@ pub use trusted_workflow::artifacts::{
 #[cfg(target_os = "linux")]
 pub use trusted_workflow::workflow_watch;
 #[cfg(target_os = "linux")]
-pub use trusted_workflow::{TrustedWorkflowFailure, TrustedWorkflowRun};
+pub use trusted_workflow::{TrustedWorkflowFailure, TrustedWorkflowRebase, TrustedWorkflowRun};
 
 use crate::{
     AdmissionMaterializationRefusal, AuthoritySelectedClosure, ClosureSelectionSource,
@@ -160,6 +163,8 @@ pub enum NodeWorkspaceRefusal {
     WorkspaceExport(fgit_treefs::ExportRefusal),
     /// Native merge construction refused its bounded inputs or source.
     MergePreparation(fgit_forge::preparation::PreparationError),
+    /// A linear PR rebase could not produce a complete reviewable artifact.
+    RebasePreparation(Box<RebasePreparationRefusal>),
     /// The independently checked generated merge failed native validation.
     MergeValidation(fgit_admission::ProjectionFailure),
     /// Packing a fully validated in-memory merge candidate failed.

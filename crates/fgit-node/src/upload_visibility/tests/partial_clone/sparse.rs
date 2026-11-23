@@ -14,6 +14,7 @@ fn sparse_apply(
     engine::apply_selection_with_sparse(
         &graph.objects,
         &graph.facts,
+        &[],
         ids,
         request,
         limits,
@@ -361,6 +362,7 @@ fn sparse_every_work_stop_preserves_original_selection_and_bad_loader_metadata_r
             engine::apply_selection_with_sparse(
                 &graph.objects,
                 &graph.facts,
+                &[],
                 &mut ids,
                 &request,
                 &PackLimits::default(),
@@ -485,7 +487,7 @@ fn sparse_native_fetch_of_annotated_blob_tag_keeps_its_user_given_target() {
     }
 }
 
-fn http_fetch(
+pub(super) fn http_fetch(
     node: &OneNode,
     version: u8,
     want: GitOid,
@@ -658,46 +660,47 @@ fn sparse_preflight_cannot_replace_a_cancelled_original_database_context() {
         ..
     } = fixture_with_public_body(GitHashAlgorithm::Sha1, b"public\n".to_vec());
     delete_private(&node, private);
-    let context = node.request_context();
-    let head = node
-        .runtime()
-        .block_on(node.materialize_admission_in(&context))
-        .unwrap();
-    let deadline = GitDaemonSessionDeadline::new(
-        GitDaemonSessionTimeout::DEFAULT,
-        GitDaemonSessionWorkScaling::DEFAULT,
-    );
-    let scope = node
-        .prepare_visible_upload_pack(&context, &head, &WireLimits::default(), &deadline)
-        .unwrap();
-    let pack_context = node.session_pack_materialization_context(&deadline);
     let pattern = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, b"public\n");
-    let fetch = request(
-        vec![public],
-        vec![],
-        Some(ObjectFilter::SparseObject(pattern)),
-    );
-    context.cancel();
-    let result = node.prepare_upload_pack_selection(
-        &head,
-        &scope,
-        &fetch,
-        &deadline,
-        &pack_context,
-        context.authority(),
-        &Cell::new(None),
-        &mut || true,
-    );
-    assert!(
-        matches!(result, Err(NodePackMaterializationRefusal::Pack(error)) if matches!(*error, PackWriteError::Pack(PackError::DeadlineExceeded)))
-    );
-    assert_eq!(
-        deadline
-            .shared
-            .selected_upload_bytes
-            .load(Ordering::Relaxed),
-        0
-    );
+    for filter in [
+        ObjectFilter::SparseObject(pattern),
+        ObjectFilter::SparseObjectName(b"public:public".to_vec()),
+    ] {
+        let context = node.request_context();
+        let head = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&context))
+            .unwrap();
+        let deadline = GitDaemonSessionDeadline::new(
+            GitDaemonSessionTimeout::DEFAULT,
+            GitDaemonSessionWorkScaling::DEFAULT,
+        );
+        let scope = node
+            .prepare_visible_upload_pack(&context, &head, &WireLimits::default(), &deadline)
+            .unwrap();
+        let pack_context = node.session_pack_materialization_context(&deadline);
+        let fetch = request(vec![public], vec![], Some(filter));
+        context.cancel();
+        let result = node.prepare_upload_pack_selection(
+            &head,
+            &scope,
+            &fetch,
+            &deadline,
+            &pack_context,
+            context.authority(),
+            &Cell::new(None),
+            &mut || true,
+        );
+        assert!(
+            matches!(result, Err(NodePackMaterializationRefusal::Pack(error)) if matches!(*error, PackWriteError::Pack(PackError::DeadlineExceeded)))
+        );
+        assert_eq!(
+            deadline
+                .shared
+                .selected_upload_bytes
+                .load(Ordering::Relaxed),
+            0
+        );
+    }
     node.shutdown().unwrap();
 }
 

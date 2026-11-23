@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Repositories · FrankenGit</title>
+  <link rel="stylesheet" href="/ui/repositories.css">
+  <script type="module" src="/ui/repositories.mjs"></script>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="brand">FrankenGit</p>
+      <h1>Your repositories</h1>
+      <p>Connect to see the repositories your credential can read on this server.</p>
+    </header>
+    <section aria-labelledby="connection-heading">
+      <h2 id="connection-heading">Connect</h2>
+      <form id="connection-form" autocomplete="off">
+        <label for="credential">Operator bearer credential</label>
+        <input id="credential" name="credential" type="password" required minlength="64" maxlength="64" pattern="[0-9a-f]{64}" autocomplete="off" spellcheck="false" autocapitalize="off" aria-describedby="credential-help">
+        <p id="credential-help" class="hint">Use the 64-character credential issued by your server operator. This page does not save the credential.</p>
+        <div class="actions">
+          <button id="connect" type="submit">Connect</button>
+          <button id="disconnect" type="button" class="secondary" disabled>Disconnect</button>
+        </div>
+      </form>
+      <p id="connection-status" role="status" aria-live="polite">Enter a credential, then connect.</p>
+    </section>
+    <section aria-labelledby="repositories-heading">
+      <h2 id="repositories-heading">Available repositories</h2>
+      <p id="catalog-description" class="hint">Nothing is requested until you connect. Disconnect clears this list.</p>
+      <ul id="repositories" aria-describedby="catalog-description"></ul>
+    </section>
+    <noscript><p>Repository discovery requires JavaScript and an explicit bearer credential.</p></noscript>
+  </main>
+</body>
+</html>

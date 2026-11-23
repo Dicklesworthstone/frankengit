@@ -33,6 +33,20 @@
 <label>Or exact replacement file <input id="replacement" type="file"></label>
 <button id="save-file" type="button">Download exact draft bytes</button>
 <button id="queue-file" type="button">Queue this edit</button><button id="clear-edits" type="button">Clear queued edits</button><ol id="edits"></ol></section>
+<section aria-labelledby="import-heading"><h2 id="import-heading">Import files into this branch</h2>
+<p>Add or update several files without creating a patch. The import compares them with the selected branch base, preserves files you did not select, and skips unchanged files. It adds all validated changes to the queue together; it does not send a publication.</p>
+<label>Destination directory (optional; blank means repository root) <input id="import-prefix" spellcheck="false" maxlength="8192"></label>
+<label>Destination encoding <select id="import-prefix-kind"><option value="utf8">UTF-8 text</option><option value="hex">Exact lowercase hex bytes</option></select></label>
+<label>Imported file modes <select id="import-mode"><option value="preserve">Preserve existing modes; new files are regular (100644)</option><option value="100644">Set every imported file to regular (100644)</option><option value="100755">Set every imported file to executable (100755)</option></select></label>
+<label>Select individual files <input id="batch-files" type="file" multiple></label>
+<button id="import-files" type="button">Import selected files into queue</button>
+<label>Or select one directory <input id="directory-files" type="file" webkitdirectory multiple></label>
+<button id="import-directory" type="button">Import selected directory into queue</button>
+<button id="cancel-import" type="button" disabled>Cancel import</button>
+<p>Directory selection keeps paths inside the selected folder and omits that folder’s own name. Empty directories are not imported. If this browser cannot select directories, use individual files and the destination field. Executable permissions are never inferred from local filenames.</p>
+<p>The same 256 KiB per-file, 64-path and 1 MiB combined draft limits apply, including existing queued edits and original file bytes. Collisions with queued paths, Git control directories, symlinks and gitlinks refuse. A failed or cancelled import preserves the existing queue and current file draft. Review every queued path and mode, then prepare and inspect the candidate below.</p>
+<div id="import-report" role="status" aria-live="polite"></div>
+</section>
 <section><h2>Explicit commit metadata</h2>
 <label>Author: Name &lt;email&gt; <input id="author" spellcheck="false"></label>
 <label>Committer: Name &lt;email&gt; <input id="committer" spellcheck="false"></label>

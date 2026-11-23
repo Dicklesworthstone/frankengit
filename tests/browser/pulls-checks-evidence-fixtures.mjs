@@ -17,6 +17,12 @@ export function step(extra = {}) {
     stdout_hex: Buffer.from('running tests\n').toString('hex'), stderr_hex: Buffer.from('assertion failed\n').toString('hex'),
     elapsed_millis: 12, output_complete: true, workspace_retained: false, ...extra };
 }
+export function toleratedReport() {
+  const { index, name, script, ...observation } = step();
+  return report({ schema_version: 3, shell: null, shell_flags: null, succeeded: true,
+    jobs: [{ id: 'test', outcome: 'succeeded', steps: [{ index, name, script,
+      shell: '/bin/sh', shell_flags: ['-eu', '-c'], continue_on_error: true, outcome_tolerated: true, ...observation }], failure: null }] });
+}
 function nativeJson(value) {
   if (typeof value === 'string') return '"' + value.replace(/["\\\u0000-\u001f]/gu, c => c === '"' || c === '\\' ? `\\${c}` : `\\u${c.codePointAt(0).toString(16).padStart(4, '0')}`) + '"';
   if (Array.isArray(value)) return `[${value.map(nativeJson).join(',')}]`;

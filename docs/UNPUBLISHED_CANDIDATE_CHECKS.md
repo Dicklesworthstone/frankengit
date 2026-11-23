@@ -32,6 +32,14 @@ does not accept a caller-selected method shortcut. A fast-forward candidate is
 the original source tip. A merge or squash candidate is the prepared commit.
 A source-tip check cannot substitute for a different merged tree.
 
+Rebase candidates use the explicitly selected whole-series validator through
+`fg workflow publish-candidate --method rebase`. It verifies the target-only
+bundle prerequisites, original common-base ancestry, and every intermediate
+rewritten commit and object. This does not change the canonical check identity
+or attach a separate merge-method attestation to an otherwise compatible tree.
+See [trusted rebase CI](TRUSTED_REBASE_WORKFLOW.md) for the complete execution,
+publication and protected-merge flow.
+
 The embedded check uses the original target ref as an anchor. This is distinct
 from asserting that the target currently names the candidate. The execution's
 original authority head remains provenance. Unrelated metadata publication,
@@ -129,6 +137,12 @@ command's `--help`. A fast-forward may execute its exact canonical source
 commit through the ordinary trusted workflow runner; publication still
 validates the complete PR candidate and target ancestry.
 
+For a rebase, `fg workflow run-rebase-candidate` executes the final tree of the
+already prepared complete series. It retains the original target base and the
+actual final rewritten parent separately, without creating a canonical CI ref.
+Automatic watcher preparation and directory dispatch retain their existing
+merge/squash profiles.
+
 Retain the original private run directory, its independent `journal_id`,
 original delivery batch, fact index and any minimum pin. These select one real
 completed job. The journal's proposal can remain `action_required` after a
@@ -156,6 +170,10 @@ fg workflow publish-candidate "$STORAGE" "$TENANT" "$REPOSITORY" "$TARGET_REF" \
   --merge-base "$MERGE_BASE" --candidate-commit "$CANDIDATE_COMMIT" \
   --bundle "$CANDIDATE_BUNDLE" --bundle-sha256 "$BUNDLE_SHA256"
 ```
+
+Add `--method rebase` for an exact rebase artifact. This is an explicit
+whole-series validation selection; omitted flags preserve the existing
+merge/squash/fast-forward profile. No alternate validation is tried on refusal.
 
 Every variable is an actual retained coordinate; this example does not select
 defaults, refresh a stale subject or claim execution. Non-UTF-8 source refs use

@@ -744,8 +744,10 @@ fn run_subcommand(arguments: &[String]) -> ExitCode {
         }
         Ok(fgit_cli::CliOutcome::Doctor(report)) => {
             println!(
-                "authenticated authority head at generation {}{}",
+                "authenticated authority head at generation {}; repository_incarnation={}; object_format={}{}",
                 report.authority_head().receipt().generation().get(),
+                report.repository_incarnation_id(),
+                report.object_format().as_str(),
                 report
                     .sampled_object()
                     .map_or_else(String::new, |identity| format!(

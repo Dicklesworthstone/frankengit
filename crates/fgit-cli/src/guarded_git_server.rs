@@ -14,7 +14,7 @@ use std::net::{SocketAddr, TcpListener, ToSocketAddrs};
 use std::path::PathBuf;
 use std::time::Duration;
 
-const USAGE: &str = "usage: fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <1..1000000> --max-in-flight <1..16> | --continuous --stop-file <absent-path> [--max-in-flight <1..16>]] [--receive-principal <principal-id-hex> [--allow-unauthenticated-network-push]] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--processing-timeout-secs <non-zero>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>] [--received-pack-cache-mib <0..65536>]";
+const USAGE: &str = "usage: fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <1..1000000> --max-in-flight <1..16> | --continuous --stop-file <absent-path> [--max-in-flight <1..16>]] [--receive-principal <principal-id-hex> [--allow-unauthenticated-network-push]] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--processing-timeout-secs <non-zero>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>] [--received-pack-cache-mib <0..65536>] [--require-lfs-payloads <absolute-private-directory>]";
 
 struct Prepared {
     /// The operator explicitly accepted that any network peer can push as the
@@ -87,6 +87,7 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
                     | "--pack-max-blob-mib"
                     | "--pack-cache-mib"
                     | "--received-pack-cache-mib"
+                    | "--require-lfs-payloads"
             ) {
                 return Err(USAGE.into());
             }
@@ -202,7 +203,7 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
 /// Session-deadline and receive/pack byte-envelope flags shared by every raw
 /// Git transport (`fg serve` and `fg serve-ssh`), so the operator bounds each
 /// transport identically.
-pub(crate) const SESSION_AND_ENVELOPE_FLAGS: [&str; 9] = [
+pub(crate) const SESSION_AND_ENVELOPE_FLAGS: [&str; 10] = [
     "--session-timeout-secs",
     "--session-secs-per-mib",
     "--session-max-extension-secs",
@@ -212,6 +213,7 @@ pub(crate) const SESSION_AND_ENVELOPE_FLAGS: [&str; 9] = [
     "--pack-max-blob-mib",
     "--pack-cache-mib",
     "--received-pack-cache-mib",
+    "--require-lfs-payloads",
 ];
 
 /// Apply [`SESSION_AND_ENVELOPE_FLAGS`] to a node configuration.
@@ -282,7 +284,26 @@ pub(crate) fn apply_session_and_envelope_flags(
             fgit_cli::parse_received_pack_cache_mib(value).map_err(|error| error.to_string())?,
         );
     }
-    Ok(configuration)
+    apply_receive_lfs_flag(configuration, flags)
+}
+
+/// The same explicit custody requirement on HTTP, SSH and raw Git receive.
+/// Selecting it does not grant LFS download/upload or enable Git receive.
+pub(crate) fn apply_receive_lfs_flag(
+    configuration: NodeConfig,
+    flags: &BTreeMap<&str, &str>,
+) -> Result<NodeConfig, String> {
+    let Some(root) = flags.get("--require-lfs-payloads") else {
+        return Ok(configuration);
+    };
+    if !cfg!(unix) {
+        return Err("receive-side LFS custody requires Unix".into());
+    }
+    let root = PathBuf::from(*root);
+    if !root.is_absolute() || root.as_os_str().len() > 4096 {
+        return Err("--require-lfs-payloads needs an absolute bounded private directory".into());
+    }
+    Ok(configuration.with_receive_lfs_root(root))
 }
 
 pub fn run(arguments: &[String]) -> Result<CliOutcome, String> {
@@ -301,10 +322,13 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, String> {
         );
     }
     let prepared_unauthenticated_network_push = prepared.unauthenticated_network_push;
+    let lfs_payloads_required = prepared.configuration.receive_lfs_root().is_some();
     let listener = TcpListener::bind(&prepared.listen).map_err(|e| e.to_string())?;
     let listen_address = listener.local_addr().map_err(|e| e.to_string())?;
     let mut node = OneNode::open_existing(prepared.configuration).map_err(|e| e.to_string())?;
     let serving: Result<_, String> = (|| {
+        node.validate_receive_lfs_storage()
+            .map_err(|code| format!("cannot open required LFS custody: {code:?}"))?;
         let selected = node
             .runtime()
             .block_on(node.authenticate_authority_head())
@@ -314,7 +338,7 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, String> {
         let control = stop.as_ref().map(crate::service_stop::StopControl::new);
         if control.is_some() {
             let mut out = io::stdout().lock();
-            writeln!(out, "{{\"type\":\"git_daemon_listening\",\"schema_version\":1,\"address\":\"{listen_address}\",\"lifetime\":\"continuous\",\"repository_incarnation\":\"{}\",\"receive_enabled\":{}}}",
+            writeln!(out, "{{\"type\":\"git_daemon_listening\",\"schema_version\":1,\"address\":\"{listen_address}\",\"lifetime\":\"continuous\",\"repository_incarnation\":\"{}\",\"receive_enabled\":{},\"lfs_payloads_required\":{lfs_payloads_required}}}",
                 node.repository_incarnation_id(), prepared.receive_enabled)
                 .and_then(|()| out.flush())
                 .map_err(|error| format!("cannot report git-daemon readiness: {error}"))?;
@@ -386,6 +410,44 @@ mod tests {
         let mut arguments = arguments(extra);
         arguments[4] = listen.to_owned();
         arguments
+    }
+
+    #[test]
+    fn required_lfs_custody_is_explicit_and_does_not_enable_receive() {
+        assert!(
+            parse(&arguments(&[]))
+                .unwrap()
+                .configuration
+                .receive_lfs_root()
+                .is_none()
+        );
+        #[cfg(unix)]
+        {
+            let selected = parse(&arguments(&[
+                "--require-lfs-payloads",
+                "/operator/lfs-custody",
+            ]))
+            .unwrap();
+            assert!(!selected.receive_enabled);
+            assert_eq!(
+                selected.configuration.receive_lfs_root(),
+                Some(std::path::Path::new("/operator/lfs-custody"))
+            );
+            assert!(selected.configuration.http_lfs_root().is_none());
+        }
+        for extra in [
+            vec!["--require-lfs-payloads"],
+            vec!["--require-lfs-payloads", ""],
+            vec!["--require-lfs-payloads", "relative-custody"],
+            vec![
+                "--require-lfs-payloads",
+                "/one",
+                "--require-lfs-payloads",
+                "/two",
+            ],
+        ] {
+            assert!(parse(&arguments(&extra)).is_err(), "{extra:?}");
+        }
     }
 
     #[test]

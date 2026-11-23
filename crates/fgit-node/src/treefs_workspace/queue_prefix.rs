@@ -473,6 +473,7 @@ fn preparation_identity(
     hash.update(&[match profile {
         MergeProfile::PathMergeV1 => 1,
         MergeProfile::ExactRenamesV1 => 2,
+        MergeProfile::BuiltinAttributesV1 => 3,
     }]);
     hash.update(&(entries.len() as u64).to_be_bytes());
     for (entry, step) in entries.iter().zip(&plan.steps) {

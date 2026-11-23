@@ -81,6 +81,7 @@ struct Executor<'a> {
     closed: usize,
     cancel_after_close: Option<&'a Cell<bool>>,
     retain: bool,
+    fail_first: bool,
 }
 impl Executor<'_> {
     fn new(path: PathBuf) -> Self {
@@ -91,6 +92,7 @@ impl Executor<'_> {
             closed: 0,
             cancel_after_close: None,
             retain: false,
+            fail_first: false,
         }
     }
 }
@@ -113,9 +115,14 @@ impl WorkflowExecutor for Executor<'_> {
         _: StepLimits,
         _: &dyn Fn() -> bool,
     ) -> Result<StepObservation, WorkerFailure> {
+        let failed = self.fail_first && self.started.len() == 1;
         Ok(StepObservation {
-            outcome: StepOutcome::Succeeded,
-            exit_code: Some(0),
+            outcome: if failed {
+                StepOutcome::Failed
+            } else {
+                StepOutcome::Succeeded
+            },
+            exit_code: Some(i32::from(failed)),
             stdout: script.as_bytes().to_vec(),
             stderr: Vec::new(),
             elapsed_millis: 1,
@@ -196,6 +203,116 @@ fn each_completed_job_reaches_disk_before_the_next_scope_and_survives_reopen() {
             assert_eq!(fact.conclusion, Some(CheckRunConclusion::ActionRequired));
         }
     }
+}
+
+#[test]
+fn matrix_fail_fast_retains_failure_and_zero_attempt_skips_across_journal_reopen() {
+    let source = "name: fail fast custody\non: push\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    strategy:\n      matrix:\n        value: [one, two]\n    steps:\n      - run: build\n  independent:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: independent\n  package:\n    runs-on: fgit-trusted-local\n    needs: build\n    steps:\n      - run: package\n";
+    let temp = Temp::new();
+    let mut c = coordinator();
+    let mut prepared = enqueue(&mut c, 1, source);
+    let mut journal =
+        FileCheckJournal::create(&temp.path(), scope(), CheckJournalLimits::default()).unwrap();
+    let mut executor = Executor::new(temp.path());
+    executor.fail_first = true;
+    let receipt = c
+        .execute_trusted_workflow_journaled(
+            &mut prepared,
+            &mut executor,
+            &mut journal,
+            200,
+            &|| true,
+        )
+        .unwrap()
+        .clone();
+    assert_eq!(executor.started, ["build__matrix_000", "independent"]);
+    assert_eq!(executor.closed, 2);
+    assert_eq!(
+        receipt
+            .report()
+            .jobs
+            .iter()
+            .map(|job| job.outcome)
+            .collect::<Vec<_>>(),
+        [
+            JobOutcome::Failed,
+            JobOutcome::Skipped,
+            JobOutcome::Succeeded,
+            JobOutcome::Skipped,
+        ]
+    );
+    assert!(!receipt.report().succeeded());
+    assert_eq!(c.obligations.workflow_scopes_opened, 2);
+    assert_eq!(c.obligations.workflow_scopes_closed, 2);
+    let prior = executor.started.clone();
+    assert_eq!(
+        c.execute_trusted_workflow_journaled(
+            &mut prepared,
+            &mut executor,
+            &mut journal,
+            201,
+            &|| true
+        )
+        .unwrap()
+        .commitment(),
+        receipt.commitment(),
+    );
+    assert_eq!(
+        executor.started, prior,
+        "receipt retry cannot launch a skipped job"
+    );
+    c.verify_quiescence().unwrap();
+    let pin = journal.pin();
+    drop(c);
+    drop(prepared);
+    drop(journal);
+    let mut reopened = FileCheckJournal::open(
+        &temp.path(),
+        scope(),
+        CheckJournalLimits::default(),
+        Some(pin),
+        &|| true,
+    )
+    .unwrap();
+    let mut recovered = 0usize;
+    for batch in collect(&mut reopened) {
+        for (index, fact) in batch.facts().iter().enumerate() {
+            if fact.status != CheckRunStatus::Completed {
+                continue;
+            }
+            let bytes = reopened
+                .read_evidence(fact.receipt_commitment.unwrap())
+                .unwrap();
+            assert_eq!(bytes, receipt.job_frame(&fact.job_id).unwrap());
+            let observation = super::observations::verify_trusted_job(
+                &batch,
+                index,
+                &bytes,
+                super::observations::MAX_OBSERVATION_BYTES,
+                &|| true,
+            )
+            .unwrap();
+            let job = &observation.report().jobs[0];
+            assert_eq!(
+                job,
+                receipt
+                    .report()
+                    .jobs
+                    .iter()
+                    .find(|job| job.id == fact.job_id)
+                    .unwrap()
+            );
+            if job.outcome == JobOutcome::Skipped {
+                assert_eq!(observation.job_attempt(&fact.job_id), Some(0));
+                assert_eq!(fact.conclusion, Some(CheckRunConclusion::ActionRequired));
+                assert!(job.steps.is_empty() && job.failure.is_none());
+            } else {
+                assert_eq!(observation.job_attempt(&fact.job_id), Some(1));
+            }
+            recovered += 1;
+        }
+    }
+    assert_eq!(recovered, 4);
 }
 
 #[test]

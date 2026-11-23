@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use fgit_admission::evidence::AdmissionAuthentication;
 use fgit_identity::deploy_key::DeployKeyBinding;
-use fgit_ssh::command::SshGitService;
+use fgit_ssh::command::{SshGitCommand, SshGitService};
 use fgit_ssh::session::{SessionPhase, SshServerSession, SshSessionError};
 use fgit_ssh::{
     AuthRefusal, SigningKey, SshCommandAuthorizer, SshCommandGrant, StaticDeployKeyAuthorizer,
@@ -35,8 +35,10 @@ use crate::{
 mod deadline;
 mod deploy_keys;
 mod lifetime;
+mod routing;
 
 pub use deploy_keys::{FileDeployKeyAuthorizer, FileDeployKeyRefusal};
+pub use routing::{MAX_SSH_REPOSITORY_ROUTES, SshRepositoryRoute};
 
 use lifetime::{Acceptance, Completion, Pending, reap};
 
@@ -82,6 +84,7 @@ pub enum NodeSshRefusal {
     ZeroSessionLimit,
     ZeroInFlightLimit,
     LimitsExceeded,
+    InvalidRoutes(&'static str),
     NotServing,
     StopControl(io::Error),
     CounterExhausted,
@@ -102,6 +105,9 @@ impl Display for NodeSshRefusal {
                 formatter,
                 "SSH limits exceeded (max 1000000 sessions, max 16 in-flight)"
             ),
+            Self::InvalidRoutes(reason) => {
+                write!(formatter, "invalid SSH repository routes: {reason}")
+            }
             Self::NotServing => write!(formatter, "SSH requires a serving node"),
             Self::StopControl(err) => write!(formatter, "SSH stop control failed: {err}"),
             Self::CounterExhausted => write!(formatter, "SSH session counter exhausted"),
@@ -336,6 +342,23 @@ struct SessionCommandAuthorizer {
 }
 
 impl SshCommandAuthorizer for SessionCommandAuthorizer {
+    fn authorize_repository_command(
+        &self,
+        authenticated_key: &[u8; 32],
+        command: &SshGitCommand,
+    ) -> Result<SshCommandGrant, AuthRefusal> {
+        if self.deadline.expired() || !crate::tcp_peer_connected(&self.peer) {
+            return Err(AuthRefusal::AuthorizationSourceUnavailable);
+        }
+        let grant = self
+            .source
+            .authorize_repository_command(authenticated_key, command);
+        if self.deadline.expired() || !crate::tcp_peer_connected(&self.peer) {
+            return Err(AuthRefusal::AuthorizationSourceUnavailable);
+        }
+        grant
+    }
+
     fn authorize_command(
         &self,
         authenticated_key: &[u8; 32],
@@ -468,6 +491,73 @@ impl OneNode {
         allow_receive: bool,
         acceptance: Acceptance<'_>,
     ) -> Result<SshServerReceipt, NodeSshRefusal> {
+        let services = Arc::new(routing::Services::single(
+            self,
+            max_in_flight,
+            authorizer,
+            allow_receive,
+        ));
+        self.serve_ssh_catalog_lifetime(
+            listener,
+            max_in_flight,
+            server_signing_key,
+            services,
+            acceptance,
+        )
+    }
+
+    /// Serve one immutable catalog of canonically pinned repositories under a
+    /// global session budget. Unknown paths and denied grants have one refusal;
+    /// a repository node is leased only after its exact route is authorized.
+    pub fn serve_ssh_routes_bounded(
+        &self,
+        listener: &TcpListener,
+        limits: SshServerLimits,
+        server_signing_key: SigningKey,
+        routes: Vec<SshRepositoryRoute>,
+    ) -> Result<SshServerReceipt, NodeSshRefusal> {
+        let limits = SshServerLimits::try_new(limits.max_sessions, limits.max_in_flight)?;
+        let services = Arc::new(routing::Services::routed(routes, limits.max_in_flight)?);
+        self.serve_ssh_catalog_lifetime(
+            listener,
+            limits.max_in_flight,
+            server_signing_key,
+            services,
+            Acceptance::Bounded(limits.max_sessions),
+        )
+    }
+
+    /// Serve exact repository routes until controlled retirement. The anchor
+    /// node owns the listener runtime and accepted-session deadline profile.
+    /// Every route owns its writer/quota state, and all pools close after the
+    /// listener stops and every accepted session drains.
+    pub fn serve_ssh_routes_until_stopped(
+        &self,
+        listener: TcpListener,
+        max_in_flight: usize,
+        server_signing_key: SigningKey,
+        routes: Vec<SshRepositoryRoute>,
+        should_stop: &dyn Fn() -> io::Result<bool>,
+    ) -> Result<SshServerReceipt, NodeSshRefusal> {
+        SshServerLimits::try_new(1, max_in_flight)?;
+        let services = Arc::new(routing::Services::routed(routes, max_in_flight)?);
+        self.serve_ssh_catalog_lifetime(
+            listener,
+            max_in_flight,
+            server_signing_key,
+            services,
+            Acceptance::UntilStopped(should_stop),
+        )
+    }
+
+    fn serve_ssh_catalog_lifetime<L: Borrow<TcpListener>>(
+        &self,
+        listener: L,
+        max_in_flight: usize,
+        server_signing_key: SigningKey,
+        services: Arc<routing::Services>,
+        acceptance: Acceptance<'_>,
+    ) -> Result<SshServerReceipt, NodeSshRefusal> {
         if self.cell_state() != fgit_types::cell::CellState::Serving {
             return Err(NodeSshRefusal::NotServing);
         }
@@ -476,16 +566,6 @@ impl OneNode {
             .set_nonblocking(true)
             .map_err(NodeSshRefusal::Accept)?;
 
-        let writers = Arc::new(crate::WriterGate::new(crate::MAX_CONCURRENT_WRITERS));
-        // Rate accounting belongs to the service, not a short-lived lane lease.
-        let quota = Arc::new(PushQuota::default());
-        let nodes = Arc::new(crate::node_lanes::NodeLanes::new(
-            self.service_config
-                .clone()
-                .with_expected_repository_incarnation(self.repository_incarnation_id()),
-            max_in_flight,
-            "SSH",
-        ));
         let completed = Arc::new(AtomicUsize::new(0));
         let refused = Arc::new(AtomicUsize::new(0));
         let mut pending = Vec::with_capacity(max_in_flight);
@@ -537,24 +617,13 @@ impl OneNode {
                 refused: Arc::clone(&refused),
                 success: false,
             };
-            let child_nodes = Arc::clone(&nodes);
+            let child_services = Arc::clone(&services);
             let host_key = server_signing_key.clone();
-            let child_authorizer = Arc::clone(&authorizer);
-            let child_writers = Arc::clone(&writers);
-            let child_quota = Arc::clone(&quota);
 
             let task = match self.runtime.submit_blocking(move || {
                 let mut completion = completion;
-                completion.success = Self::serve_one_ssh_session(
-                    stream,
-                    host_key,
-                    child_authorizer,
-                    &child_nodes,
-                    allow_receive,
-                    &child_writers,
-                    &child_quota,
-                    deadline,
-                );
+                completion.success =
+                    Self::serve_one_ssh_session(stream, host_key, child_services, deadline);
                 // Drop settles accounting even if the session unwinds. A
                 // rejected submission also drops this owned completion guard.
             }) {
@@ -586,7 +655,7 @@ impl OneNode {
         for task in pending {
             (task.join)();
         }
-        if let Err(error) = nodes.close() {
+        if let Err(error) = services.close() {
             if terminal_refusal.is_none() {
                 terminal_refusal = Some(NodeSshRefusal::Shutdown(error));
             } else {
@@ -616,11 +685,7 @@ impl OneNode {
     fn serve_one_ssh_session(
         mut stream: TcpStream,
         host_key: SigningKey,
-        authorizer: Arc<dyn SshCommandAuthorizer>,
-        nodes: &crate::node_lanes::NodeLanes,
-        allow_receive: bool,
-        writers: &crate::WriterGate,
-        quota: &PushQuota,
+        services: Arc<routing::Services>,
         deadline: GitDaemonSessionDeadline,
     ) -> bool {
         if stream.set_nonblocking(false).is_err() || deadline.expired() {
@@ -630,7 +695,7 @@ impl OneNode {
             return false;
         };
         let authorizer = Arc::new(SessionCommandAuthorizer {
-            source: authorizer,
+            source: services.clone(),
             deadline: deadline.clone(),
             peer,
         });
@@ -683,7 +748,12 @@ impl OneNode {
             Some(cmd) => cmd.clone(),
             None => return false,
         };
-        if command.service() == SshGitService::ReceivePack && !allow_receive {
+        // Authorization and dispatch use one immutable catalog. There is no
+        // path-to-ID fallback or repository lease before this exact selection.
+        let Some(selected) = services.selected(&command) else {
+            return false;
+        };
+        if command.service() == SshGitService::ReceivePack && !selected.allow_receive {
             let recipient = session.client_channel_id().unwrap_or(0);
             session.send_channel_extended_data(
                 recipient,
@@ -705,7 +775,7 @@ impl OneNode {
 
         // A leased node is already authenticated and in service; the pool
         // logs why when it cannot supply one.
-        let Some(child_node) = nodes.lease() else {
+        let Some(child_node) = selected.nodes.lease() else {
             let recipient = session.client_channel_id().unwrap_or(0);
             session.send_channel_extended_data(
                 recipient,
@@ -761,8 +831,8 @@ impl OneNode {
                             &mut writer,
                             grant,
                             &git_protocol,
-                            writers,
-                            quota,
+                            &selected.writers,
+                            &selected.quota,
                             &deadline,
                         )
                         .inspect_err(|error| eprintln!("ssh session failed: receive-pack: {error}"))
@@ -793,7 +863,7 @@ impl OneNode {
 
         // Only a node whose complete session succeeded returns to the pool.
         let cleanup = if served && delivered {
-            nodes.restore(child_node)
+            selected.nodes.restore(child_node)
         } else {
             child_node.shutdown()
         };

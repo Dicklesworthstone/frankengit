@@ -10,7 +10,12 @@ const MAX_RECORDS: usize = 64;
 const MAX_VARIABLES: usize = 16;
 const MAX_VALUE_BYTES: usize = 1024;
 
-pub(super) fn select(strategy: &Node) -> Result<Vec<Variables>, WorkflowRefusal> {
+pub(super) struct Selection {
+    pub rows: Vec<Variables>,
+    pub fail_fast: bool,
+}
+
+pub(super) fn select(strategy: &Node) -> Result<Selection, WorkflowRefusal> {
     let Node::Mapping { entries, .. } = strategy else {
         return Err(WorkflowRefusal::ConstructUnsupported {
             construct: "job.strategy",
@@ -28,12 +33,17 @@ pub(super) fn select(strategy: &Node) -> Result<Vec<Variables>, WorkflowRefusal>
             });
         }
     }
-    if !matches!(strategy.get("fail-fast"), Some(Node::Scalar { value, .. }) if value == "false") {
-        return Err(invalid(
-            "static matrices require explicit fail-fast: false",
-            strategy.span(),
-        ));
-    }
+    let fail_fast = match strategy.get("fail-fast") {
+        None => true,
+        Some(Node::Scalar { value, .. }) if value == "true" => true,
+        Some(Node::Scalar { value, .. }) if value == "false" => false,
+        Some(node) => {
+            return Err(invalid(
+                "a literal true or false matrix fail-fast policy",
+                node.span(),
+            ));
+        }
+    };
     let matrix = strategy
         .get("matrix")
         .ok_or_else(|| invalid("a static matrix mapping", strategy.span()))?;
@@ -169,7 +179,7 @@ pub(super) fn select(strategy: &Node) -> Result<Vec<Variables>, WorkflowRefusal>
             ));
         }
     }
-    Ok(rows)
+    Ok(Selection { rows, fail_fast })
 }
 
 fn records(node: Option<&Node>) -> Result<Vec<Variables>, WorkflowRefusal> {

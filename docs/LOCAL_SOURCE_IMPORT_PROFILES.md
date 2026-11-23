@@ -41,12 +41,37 @@ fg import ./fgit-data \
   import-feature-checkout ../feature-checkout --json
 ```
 
-This imports the repository's shared direct refs and the selected worktree's
-private direct refs, not just the checked-out branch. Other worktrees' private
+This imports the repository's shared refs and the selected worktree's
+private refs, not just the checked-out branch. Other worktrees' private
 refs do not become source refs. The same ref-count budget covers shared and
-private refs. The source `HEAD` must name a branch; detached HEAD and symbolic
-refs other than HEAD retain their existing refusals. Import changes destination
-refs only, so choose the destination's initial branch as described below.
+private refs. The source `HEAD` must name a branch; detached HEAD retains its
+existing refusal. Import changes destination refs only, so choose the
+destination's initial branch as described below.
+
+### Symbolic refs become direct snapshot refs
+
+An ordinary checkout can contain `refs/remotes/origin/HEAD` pointing to
+`refs/remotes/origin/main`. Import resolves these aliases, including bounded
+alias chains, after selecting the complete source namespace. Loose refs override
+same-name packed refs, and linked worktrees resolve against their own private
+ref namespaces together with the shared refs. An alias cannot cause a read from
+another worktree, a pseudoref such as `FETCH_HEAD`, or a filesystem path.
+
+Each imported alias becomes an independent **direct ref at the resolved native
+object ID**. Later changes to its source target do not move the destination's
+alias. This is a snapshot import; it does not create persistent symbolic refs
+in canonical state. Replacing source aliases with those same direct IDs leaves
+the imported ref map and sealed retry identity unchanged. Source and destination
+`HEAD` retain their separate rules below.
+
+Every target must be a canonical `refs/` name present in the selected namespace.
+Missing targets, cycles and chains over 32 aliases refuse the complete import
+before object placement. All aliases count toward the existing ref-count
+ceiling. A direct loose ref keeps its native hex-line byte bound; a symbolic
+line may contain `ref: `, at most 1,024 target-name bytes, and one final LF. The
+same caller cancellation control covers file reads and every resolution step.
+Normal target-kind validation still applies to the resulting refs: a symbolic
+`refs/heads/*` alias cannot make a blob, tree or annotated tag a branch tip.
 
 Each gitfile and commondir is limited to 16 KiB and one nonempty path; a path is
 limited to 256 components. LF, CRLF, or no terminal newline is accepted. NULs,
@@ -171,6 +196,7 @@ serves it: no HEAD line in protocol v0, and `unborn HEAD symref-target:` in v2.
 ```sh
 cargo test -p fgit-node --lib loose_import:: -- --test-threads=2
 cargo test -p fgit-node --test packed_import worktrees:: -- --test-threads=2
+cargo test -p fgit-node --test import_symbolic_refs -- --test-threads=2
 cargo test -p fgit-cli --bin fg import_command:: -- --test-threads=2
 cargo test -p fgit-node --test large_loose_import -- --test-threads=1
 FG_BIN=/path/to/fg bash scripts/e2e/suites/admission/import_profiles.sh
@@ -190,6 +216,13 @@ the selected private ref namespaces and HEAD, exact stored native objects,
 unchanged retry identity, and cold reopen after source removal. Malformed,
 oversized, cyclic and symlinked directory controls, changed source controls and
 refs, cancellation, and outside object alternates have refusal cases.
+
+Symbolic-ref cases cover both native hash domains, packed/loose overrides,
+selected-worktree private refs, exact alias-depth boundaries, typed cycle and
+missing-target refusals, per-file bounds and cancellation. Durable import tests
+compare alias and direct-ref retries, remove the original source, reopen the
+node and export the exact snapshot into a fresh node. These are authored cases;
+their execution must be reported separately at the tested source revision.
 
 ## Packed-source regression campaign
 

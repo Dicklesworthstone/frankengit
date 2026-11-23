@@ -64,7 +64,7 @@ async function connectRecovery(s, principal = source.actor) {
 }
 async function restore(s) { s.el(s.receiptInput).files = [uploaded(s.receipt)]; await s.el(s.restore).fire(); assert(s.client.pending); }
 function ordinaryButtons(kind) {
-  return kind === 'source' ? ['select-base', 'load-file', 'queue-file', 'prepare-edits', 'prepare-patch', 'stage', 'send', 'discard', 'save-file']
+  return kind === 'source' ? ['select-base', 'load-file', 'queue-file', 'import-files', 'import-directory', 'cancel-import', 'prepare-edits', 'prepare-patch', 'stage', 'send', 'discard', 'save-file']
     : ['queue', 'import-files', 'import-directory', 'prepare', 'stage', 'send', 'discard'];
 }
 
@@ -127,7 +127,7 @@ for (const kind of ['source', 'initial']) {
     const s = await setup(kind); await connectRecovery(s); let reads = 0;
     const file = { name: 'safe.txt', webkitRelativePath: 'project/safe.txt', size: 1,
       async arrayBuffer() { reads++; return new Uint8Array([65]).buffer; } };
-    const files = kind === 'source' ? ['replacement', 'patch'] : ['file', 'batch-files', 'directory-files'];
+    const files = kind === 'source' ? ['replacement', 'patch', 'batch-files', 'directory-files'] : ['file', 'batch-files', 'directory-files'];
     for (const id of files) { s.el(id).files = [file]; await s.el(id).fire('change', true); }
     for (const name of ordinaryButtons(kind)) await s.el(name).fire('click', true);
     assert.equal(reads, 0); assert.equal(s.f.calls.length, 0); assert.equal(s.app.queued.length, 0);

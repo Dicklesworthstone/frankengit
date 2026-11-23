@@ -17,6 +17,7 @@
 //! bytes so a future change to any of these rules is a visible version bump
 //! rather than a silent reordering of everyone's goldens.
 
+use crate::workflow::defaults::{DefaultsScope, RunDefaults};
 use crate::workflow::registry;
 use crate::workflow::yaml::{Node, Span};
 use crate::workflow::{StepContext, TimeoutMinutes, WorkflowRefusal, context, deadline, matrix};
@@ -42,6 +43,14 @@ pub const TRIGGER_CANONICAL_VERSION: &str = "fgit-workflow/v5";
 pub const PATH_CANONICAL_VERSION: &str = "fgit-workflow/v6";
 /// Explicit tag filters select the tag namespace without changing old graph bytes.
 pub const TAG_CANONICAL_VERSION: &str = "fgit-workflow/v7";
+/// Explicit closed shell profiles bind interpreter semantics without changing old graphs.
+pub const SHELL_CANONICAL_VERSION: &str = "fgit-workflow/v8";
+/// Default/explicit fail-fast matrix groups bind their execution policy.
+/// Explicit fail-fast:false graphs retain their existing canonical version.
+pub const MATRIX_FAIL_FAST_CANONICAL_VERSION: &str = "fgit-workflow/v9";
+/// Explicit step-local ordinary-failure tolerance binds the execution policy.
+/// Omitted and false values retain their existing canonical graph bytes.
+pub const CONTINUE_ON_ERROR_CANONICAL_VERSION: &str = "fgit-workflow/v10";
 
 /// One accepted trigger.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -116,6 +125,9 @@ pub struct Step {
     pub run: String,
     /// Native terminal-state predicate. Default is success().
     pub condition: Condition,
+    /// Tolerate only an ordinary nonzero process exit, retaining its raw failure.
+    /// Cancellation, resource refusal and lost containment are never tolerated.
+    pub continue_on_error: bool,
     /// Literal process environment and workspace-relative directory.
     pub context: StepContext,
     /// Optional local cap, intersected with job and operator time ceilings.
@@ -184,7 +196,13 @@ impl WorkflowGraph {
             .jobs
             .iter()
             .any(|job| job.steps.iter().any(|step| !step.context.is_default()));
-        let version = if self.has_tag_filters() {
+        let version = if self.has_continue_on_error() {
+            CONTINUE_ON_ERROR_CANONICAL_VERSION
+        } else if self.has_matrix_fail_fast() {
+            MATRIX_FAIL_FAST_CANONICAL_VERSION
+        } else if self.has_explicit_shells() {
+            SHELL_CANONICAL_VERSION
+        } else if self.has_tag_filters() {
             TAG_CANONICAL_VERSION
         } else if self.has_path_filters() {
             PATH_CANONICAL_VERSION
@@ -246,6 +264,9 @@ impl WorkflowGraph {
                     escape(&job.id),
                     escape(binding.source_job())
                 ));
+                if binding.fail_fast() {
+                    lines.push(format!("matrix-fail-fast\t{}\ttrue", escape(&job.id)));
+                }
                 for (key, value) in binding.values() {
                     lines.push(format!(
                         "matrix-value\t{}\t{}\t{}",
@@ -294,11 +315,24 @@ impl WorkflowGraph {
                         escape(directory)
                     ));
                 }
+                if let Some(shell) = step.context.shell() {
+                    lines.push(format!(
+                        "step-shell\t{}\t{index}\t{}",
+                        escape(&job.id),
+                        shell.token()
+                    ));
+                }
                 if step.condition != Condition::Success {
                     lines.push(format!(
                         "step-if\t{}\t{index}\t{}",
                         escape(&job.id),
                         step.condition.token()
+                    ));
+                }
+                if step.continue_on_error {
+                    lines.push(format!(
+                        "step-continue-on-error\t{}\t{index}\ttrue",
+                        escape(&job.id)
                     ));
                 }
                 if let Some(timeout) = step.timeout_minutes {
@@ -325,6 +359,32 @@ impl WorkflowGraph {
         self.jobs.iter().any(|job| {
             job.timeout_minutes.is_some()
                 || job.steps.iter().any(|step| step.timeout_minutes.is_some())
+        })
+    }
+
+    /// Whether an execution adapter must implement explicit interpreter selection.
+    #[must_use]
+    pub fn has_explicit_shells(&self) -> bool {
+        self.jobs
+            .iter()
+            .any(|job| job.steps.iter().any(|step| step.context.shell().is_some()))
+    }
+
+    /// Whether execution must preserve an explicitly tolerated ordinary failure.
+    #[must_use]
+    pub fn has_continue_on_error(&self) -> bool {
+        self.jobs
+            .iter()
+            .any(|job| job.steps.iter().any(|step| step.continue_on_error))
+    }
+
+    /// Whether an execution adapter must preserve matrix-local fail-fast.
+    #[must_use]
+    pub fn has_matrix_fail_fast(&self) -> bool {
+        self.jobs.iter().any(|job| {
+            job.matrix
+                .as_ref()
+                .is_some_and(matrix::MatrixBinding::fail_fast)
         })
     }
 }
@@ -410,6 +470,7 @@ fn check_keys(
 fn lower_step(
     node: &Node,
     environment: &context::Environment,
+    defaults: RunDefaults<'_>,
     expanded_bytes: &mut usize,
 ) -> Result<Step, WorkflowRefusal> {
     check_keys(
@@ -421,7 +482,9 @@ fn lower_step(
             "if",
             "env",
             "working-directory",
+            "shell",
             "timeout-minutes",
+            "continue-on-error",
         ],
         &[("uses", "step.uses"), ("with", "step.with")],
     )?;
@@ -449,10 +512,26 @@ fn lower_step(
         name,
         run,
         condition: condition(node.get("if"), "step.if", node.span())?,
+        continue_on_error: continue_on_error(node.get("continue-on-error"))?,
         span: node.span(),
-        context: context::lower(node, environment, expanded_bytes)?,
+        context: context::lower(node, environment, defaults, expanded_bytes)?,
         timeout_minutes: deadline::lower(node.get("timeout-minutes"), "step.timeout-minutes")?,
     })
+}
+
+/// Failure policy is a closed boolean, never an expression or YAML truthiness.
+fn continue_on_error(node: Option<&Node>) -> Result<bool, WorkflowRefusal> {
+    let Some(node) = node else {
+        return Ok(false);
+    };
+    match expect_scalar(node, "jobs.<id>.steps[].continue-on-error")? {
+        "false" => Ok(false),
+        "true" => Ok(true),
+        _ => Err(WorkflowRefusal::Malformed {
+            expected: "literal true or false for step.continue-on-error",
+            span: node.span(),
+        }),
+    }
 }
 
 /// Lowers one job.
@@ -461,12 +540,21 @@ pub(super) fn lower_job(
     node: &Node,
     span: Span,
     workflow_environment: &context::Environment,
+    workflow_defaults: RunDefaults<'_>,
     expanded_bytes: &mut usize,
 ) -> Result<Job, WorkflowRefusal> {
     check_keys(
         node,
         "a job",
-        &["runs-on", "needs", "steps", "if", "timeout-minutes", "env"],
+        &[
+            "runs-on",
+            "needs",
+            "steps",
+            "if",
+            "timeout-minutes",
+            "env",
+            "defaults",
+        ],
         &[
             ("strategy", "job.strategy"),
             ("permissions", "job.permissions"),
@@ -513,9 +601,10 @@ pub(super) fn lower_job(
     let explicit = context::lower_environment(node, context::EnvironmentScope::Job)?;
     let environment =
         context::inherit_environment(workflow_environment, explicit, expanded_bytes, node.span())?;
+    let defaults = RunDefaults::lower(node, DefaultsScope::Job)?.inherit(workflow_defaults);
     let steps = items
         .iter()
-        .map(|step| lower_step(step, &environment, expanded_bytes))
+        .map(|step| lower_step(step, &environment, defaults, expanded_bytes))
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(Job {
@@ -584,7 +673,7 @@ pub fn lower(document: &Node) -> Result<WorkflowGraph, WorkflowRefusal> {
     check_keys(
         document,
         "a workflow",
-        &["name", "on", "jobs", "env"],
+        &["name", "on", "jobs", "env", "defaults"],
         &[
             ("concurrency", "workflow.concurrency"),
             ("permissions", "job.permissions"),
@@ -623,7 +712,8 @@ pub fn lower(document: &Node) -> Result<WorkflowGraph, WorkflowRefusal> {
         });
     };
     let environment = context::lower_environment(document, context::EnvironmentScope::Workflow)?;
-    let jobs = matrix::lower_jobs(entries, span, &environment)?;
+    let defaults = RunDefaults::lower(document, DefaultsScope::Workflow)?;
+    let jobs = matrix::lower_jobs(entries, span, &environment, defaults)?;
 
     Ok(WorkflowGraph {
         name,

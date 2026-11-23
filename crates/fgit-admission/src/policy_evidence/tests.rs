@@ -772,10 +772,13 @@ fn exact_minor_dispatch_refuses_future_schema_truncation_suffix_and_tight_bounds
     let mut relabelled_agent = frame.clone();
     relabelled_agent[minor..minor + 2].copy_from_slice(&5_u16.to_be_bytes());
     assert!(PolicyDecisionRecord::decode(&relabelled_agent, DecodeLimits::DEFAULT).is_err());
-    future[minor..minor + 2].copy_from_slice(&6_u16.to_be_bytes());
+    let mut relabelled_kind = frame.clone();
+    relabelled_kind[minor..minor + 2].copy_from_slice(&6_u16.to_be_bytes());
+    assert!(PolicyDecisionRecord::decode(&relabelled_kind, DecodeLimits::DEFAULT).is_err());
+    future[minor..minor + 2].copy_from_slice(&7_u16.to_be_bytes());
     assert!(matches!(
         PolicyDecisionRecord::decode(&future, DecodeLimits::DEFAULT),
-        Err(CodecRefusal::SchemaMinorUnsupported { observed: 6, .. })
+        Err(CodecRefusal::SchemaMinorUnsupported { observed: 7, .. })
     ));
     PolicyDecisionRecord::decode(&frame, DecodeLimits::DEFAULT).unwrap();
 }

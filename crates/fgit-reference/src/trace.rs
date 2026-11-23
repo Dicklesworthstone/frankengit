@@ -360,6 +360,10 @@ fn write_forge_event(out: &mut Encoder, event: &ForgeEventKind) -> Result<(), Co
             out.write_raw_byte(14);
             write_slug(out, "ForgeEntityId", credential.label())?;
         }
+        ForgeEventKind::PullRequestLabelsChanged { labels } => {
+            out.write_raw_byte(15);
+            write_slug(out, "ForgeEntityId", labels.label())?;
+        }
         ForgeEventKind::PullRequestReviewed { review, target } => {
             out.write_raw_byte(5);
             write_slug(out, "ForgeEntityId", review.label())?;
@@ -435,6 +439,9 @@ fn read_forge_event(input: &mut Decoder<'_>) -> Result<ForgeEventKind, CodecRefu
         }),
         14 => Ok(ForgeEventKind::AgentCredentialChanged {
             credential: ForgeEntityId::new(read_slug(input, "ForgeEntityId")?),
+        }),
+        15 => Ok(ForgeEventKind::PullRequestLabelsChanged {
+            labels: ForgeEntityId::new(read_slug(input, "ForgeEntityId")?),
         }),
         8 => Ok(ForgeEventKind::WorkflowCheckObserved {
             check: ForgeEntityId::new(read_slug(input, "ForgeEntityId")?),
@@ -2366,5 +2373,88 @@ mod tests {
         let mut decoded = Decoder::new(bytes.as_bytes(), DecodeLimits::DEFAULT);
         assert_eq!(read_forge_event(&mut decoded).unwrap(), changed);
         decoded.finish().unwrap();
+    }
+
+    #[test]
+    fn pull_request_labels_tag_fifteen_round_trips_and_folds_without_ref_effects() {
+        use crate::effect::{FoldBasis, FoldOutcome, NetEffectFolder, ReferenceFolder};
+        use crate::harness::{RequestBuilder, label};
+        use crate::intent::{IdempotencyKey, OutboxDeliveryKey, OutboxIntent};
+
+        let entity = ForgeEntityId::new(label("pull-request-labels/7"));
+        let event = ForgeEventKind::PullRequestLabelsChanged { labels: entity };
+        let literal = b"\x0f\0\0\0\x15pull-request-labels/7";
+        let mut out = Encoder::new();
+        write_forge_event(&mut out, &event).unwrap();
+        assert_eq!(out.as_bytes(), literal);
+        let mut input = Decoder::new(literal, DecodeLimits::DEFAULT);
+        assert_eq!(read_forge_event(&mut input).unwrap(), event);
+        input.finish().unwrap();
+        for end in 0..literal.len() {
+            let mut input = Decoder::new(&literal[..end], DecodeLimits::DEFAULT);
+            assert!(read_forge_event(&mut input).is_err());
+        }
+        assert_eq!(event.required_ref_effect(), None);
+        assert_eq!(event.entity(), entity);
+
+        let mut mint = IdentityMint::new(95);
+        let stream = ForgeStreamId::new(entity.label());
+        let delivery = OutboxDeliveryKey::new(label("labels-delivery"));
+        let parameters = mint.digest();
+        let request = RequestBuilder::new(
+            mint.tenant(),
+            mint.repository(),
+            mint.principal(),
+            fgit_types::label::SchemaId::new(
+                fgit_types::label::SchemaFamily::from_static("fgit/ref-txn"),
+                2,
+                0,
+            ),
+            IdempotencyKey::new(label("labels")),
+        )
+        .statement(
+            fgit_types::MismatchPolicy::TxnAbort,
+            vec![
+                Intent::Forge(ForgeIntent {
+                    stream,
+                    expected_position: ForgeStreamPosition::GENESIS,
+                    event: event.clone(),
+                }),
+                Intent::Outbox(OutboxIntent {
+                    delivery_key: delivery,
+                    parameters,
+                }),
+            ],
+        )
+        .build(&mut mint);
+        let refs = BTreeMap::new();
+        let mut forge_positions = BTreeMap::new();
+        let retention = BTreeSet::new();
+        let outbox = BTreeMap::new();
+        let fold = |positions: &BTreeMap<ForgeStreamId, ForgeStreamPosition>| {
+            ReferenceFolder.fold(
+                FoldBasis {
+                    refs: &refs,
+                    forge_positions: positions,
+                    retention: &retention,
+                    outbox: &outbox,
+                },
+                &request,
+            )
+        };
+        let report = fold(&forge_positions);
+        assert!(report.is_total_for(&request));
+        let effects = report.effects().unwrap();
+        assert_eq!(effects.forge.get(&stream), Some(&vec![event]));
+        assert_eq!(effects.outbox.get(&delivery), Some(&parameters));
+        assert!(effects.refs.is_empty() && effects.retention.is_empty());
+        forge_positions.insert(stream, ForgeStreamPosition::new(1));
+        assert!(matches!(
+            fold(&forge_positions).outcome,
+            FoldOutcome::Aborted {
+                code: fgit_types::RefusalCode::ForgeTransitionInvalid,
+                ..
+            }
+        ));
     }
 }

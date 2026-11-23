@@ -16,8 +16,9 @@ the exact executed commit.
 ## Interfaces
 
 - HTTP: `GET /<repository-route>/api/v1/pulls/<number>/checks`. Enable the existing
-  pulls API and supply a credential with `pulls-read`. Write or Git-read grants
-  do not imply this grant. Optional parameters are `limit` (1–100, default 20),
+  pulls API and supply an ordinary credential with `pulls-read`, or a sponsored
+  agent credential with the independent `pulls-feedback-read` scope. Write or
+  Git-read grants do not imply these grants. Optional parameters are `limit` (1–100, default 20),
   `after` (an exact check ID) and `expected_head` (the first page's snapshot token).
 - CLI: `fg pr checks <storage-root> <tenant-id> <repository-id> <number>
   --trusted-local [--object-format sha1|sha256] [--limit N]
@@ -26,7 +27,8 @@ the exact executed commit.
   failure. `complete` indicates whether more observation pages remain.
 - MCP: `frankengit_pull_checks`, enabled by the existing pulls read grant.
   `number` is an exact positive decimal string. `limit` is a JSON integer from
-  1–20 (default 5); `after` and `expected_head` have the HTTP semantics.
+  1–20 (default 5); `after` and `expected_head` have the HTTP semantics. Sponsored
+  calls require `--allow-pulls` and their independent `pulls-feedback-read` scope.
 - Browser: open a PR and select **Load checks at this snapshot**. All subsequent
   pages retain that selected PR snapshot. Refreshing the PR is an explicit action.
   To inspect output, connect a separate evidence credential with both `pulls-read`
@@ -72,10 +74,27 @@ GET /<repository-route>/api/v1/pulls/<number>/checks/evidence?check=<check-id>&e
 
 URL-encode both values. Both fields are mandatory; pagination fields, request
 bodies, Git protocol headers and idempotency keys are rejected. The pulls API
-must be enabled, and the supplied bearer credential must have **both**
-`pulls-read` and `artifact-read`. Neither grant alone discloses execution output.
+must be enabled. Authorization depends on the bearer profile:
+
+| Bearer profile | Required authority |
+| --- | --- |
+| Ordinary credential | Both `pulls-read` and `artifact-read`; neither alone discloses execution output |
+| Sponsored agent credential | The independent `pulls-check-evidence-read` scope; feedback-summary and metadata scopes do not imply it |
+
+The sponsored route uses the existing `--allow-pulls` server ceiling and grants
+no generic artifact inspection or namespace access. It needs no separate artifact
+launch flag. The HTTP query grammar is unchanged: there is no caller-supplied
+digest parameter. Its exact check ID and snapshot select the canonical evidence
+whose digest is returned in the check row.
 No workflow-artifact root is required: these bytes come from the selected
 canonical check event, and its `evidence_sha256` is not an artifact-container ID.
+
+The [MCP evidence reader](MCP_CHECK_EVIDENCE.md) exposes bounded byte ranges of the
+same canonical selection. Its sponsored launch also needs only `--allow-pulls`
+plus `pulls-check-evidence-read`; the trusted-local MCP profile retains both
+`--allow-pulls` and `--allow-artifacts`. MCP requires an additional
+`expected_evidence_sha256` argument and verifies the full evidence before each
+range. Agents that also list checks need the separate `pulls-feedback-read` scope.
 
 The reader authenticates the pinned head, resolves the PR's source at that head,
 applies current caller and canonical hidden-ref visibility to both branches,
@@ -84,6 +103,10 @@ and commit must exactly match the PR. Missing or hidden PRs, missing checks,
 checks for another source, and a source already moved at the selected head all
 return the same generic HTTP 404 without subject or output metadata. An
 unavailable retained snapshot returns 409; it never selects a newer snapshot.
+Sponsored requests reauthenticate the current canonical credential and preserve
+the original agent, sponsor, repository binding, monotonic deadline and response
+budget through selection and disclosure. The capability permits only canonical
+reads, with no check mutation, execution, review decision or merge authority.
 
 A successful response is a bounded JSON envelope with these fields:
 

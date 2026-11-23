@@ -1,6 +1,6 @@
 //! Literal process inputs, with explicit workflow/job/step inheritance.
 //! No host environment, secret lookup or executable interpolation participates.
-use super::{Node, Span, WorkflowRefusal};
+use super::{Node, Span, WorkflowRefusal, defaults::RunDefaults};
 use std::collections::BTreeMap;
 
 pub const MAX_ENVIRONMENT_ENTRIES: usize = 64;
@@ -45,12 +45,41 @@ impl EnvironmentScope {
     }
 }
 
-/// Validated literal environment and workspace-relative directory. A context
+/// A closed explicit shell profile, never an executable path or argv template.
+/// An absent selection retains the native runner's original sh/nounset profile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StepShell {
+    /// POSIX shell with early exit on command failure.
+    Sh,
+    /// Bash without startup files, with early exit and failed-pipeline checking.
+    Bash,
+}
+
+impl StepShell {
+    pub fn parse(value: &str) -> Result<Self, ContextRefusal> {
+        match value {
+            "sh" => Ok(Self::Sh),
+            "bash" => Ok(Self::Bash),
+            _ => Err(ContextRefusal::Shell),
+        }
+    }
+
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Sh => "sh",
+            Self::Bash => "bash",
+        }
+    }
+}
+
+/// Validated literal environment, workspace-relative directory and shell. A context
 /// cannot be mutated after validation or accidentally evaluated as shell text.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct StepContext {
     environment: BTreeMap<String, String>,
     working_directory: Option<String>,
+    shell: Option<StepShell>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -62,6 +91,7 @@ pub enum ContextRefusal {
     Value,
     Bytes,
     WorkingDirectory,
+    Shell,
 }
 impl ContextRefusal {
     #[must_use]
@@ -79,6 +109,9 @@ impl ContextRefusal {
             Self::Bytes => "at most 65536 aggregate step environment bytes",
             Self::WorkingDirectory => {
                 "a workspace-relative directory without parent traversal, controls, backslashes or expressions"
+            }
+            Self::Shell => {
+                "one literal shell name, sh or bash, without a path, options or expressions"
             }
         }
     }
@@ -118,7 +151,19 @@ impl StepContext {
         Ok(Self {
             environment: selected,
             working_directory,
+            shell: None,
         })
+    }
+    /// Select one fixed native interpreter profile; this grants no capabilities.
+    #[must_use]
+    pub const fn with_shell(mut self, shell: StepShell) -> Self {
+        self.shell = Some(shell);
+        self
+    }
+    /// Explicit selection, distinct from the original native default profile.
+    #[must_use]
+    pub const fn shell(&self) -> Option<StepShell> {
+        self.shell
     }
     #[must_use]
     pub const fn environment(&self) -> &BTreeMap<String, String> {
@@ -130,7 +175,7 @@ impl StepContext {
     }
     #[must_use]
     pub fn is_default(&self) -> bool {
-        self.environment.is_empty() && self.working_directory.is_none()
+        self.environment.is_empty() && self.working_directory.is_none() && self.shell.is_none()
     }
 }
 fn validate_entry(key: &str, value: &str) -> Result<(), ContextRefusal> {
@@ -161,6 +206,10 @@ fn validate_entry(key: &str, value: &str) -> Result<(), ContextRefusal> {
     Ok(())
 }
 fn normalize_directory(value: &str) -> Result<Option<String>, ContextRefusal> {
+    normalize_directory_ref(value).map(|directory| directory.map(str::to_owned))
+}
+
+pub(super) fn normalize_directory_ref(value: &str) -> Result<Option<&str>, ContextRefusal> {
     if value.is_empty()
         || value.len() > MAX_WORKING_DIRECTORY_BYTES
         || value.starts_with('/')
@@ -180,7 +229,7 @@ fn normalize_directory(value: &str) -> Result<Option<String>, ContextRefusal> {
     {
         return Err(ContextRefusal::WorkingDirectory);
     }
-    Ok(Some(path.to_owned()))
+    Ok(Some(path))
 }
 
 /// Validate one source map before any child can override it. In particular,
@@ -296,6 +345,7 @@ pub(super) fn inherit_environment(
 pub(super) fn lower(
     node: &Node,
     inherited: &Environment,
+    defaults: RunDefaults<'_>,
     expanded_bytes: &mut usize,
 ) -> Result<StepContext, WorkflowRefusal> {
     let explicit = lower_environment(node, EnvironmentScope::Step)?;
@@ -311,11 +361,25 @@ pub(super) fn lower(
         };
         normalize_directory(value).map_err(|error| invalid(error, cwd.span()))?
     } else {
-        None
+        defaults.copy_directory(expanded_bytes, node.span())?
+    };
+    let shell = if let Some(selected) = node.get("shell") {
+        let Node::Scalar { value, .. } = selected else {
+            return Err(WorkflowRefusal::FieldShape {
+                path: "jobs.<id>.steps[].shell",
+                expected: "one literal shell name, sh or bash",
+                observed: selected.shape(),
+                span: selected.span(),
+            });
+        };
+        Some(StepShell::parse(value).map_err(|error| invalid(error, selected.span()))?)
+    } else {
+        defaults.shell()
     };
     Ok(StepContext {
         environment,
         working_directory,
+        shell,
     })
 }
 const fn invalid(error: ContextRefusal, span: Span) -> WorkflowRefusal {

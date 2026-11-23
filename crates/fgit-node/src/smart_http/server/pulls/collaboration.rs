@@ -78,7 +78,7 @@ pub(super) fn authenticate(
         return Err(ApiError::not_found());
     }
     let permitted = match request.operation {
-        Operation::List(_) => grant.permits_reviews(false),
+        Operation::List(_) => grant.permits_reviews(false) || grant.permits_pull_feedback_read(),
         Operation::Review(_) => grant.permits_reviews(true),
         Operation::Merge => grant.permits_reviewed_merge(),
     };
@@ -104,10 +104,49 @@ pub(super) fn execute(
     reader: &mut impl Read,
     limits: HttpLimits,
     maximum_response: u64,
+    deadline: &GitDaemonSessionDeadline,
 ) -> Result<Reply, ApiError> {
     let authenticated = session
         .authenticated_session()
         .ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?;
+    // Reads retain the original transport and sponsored-request deadlines.
+    // The mutation path below keeps its separate bounded processing phase.
+    if let Operation::List(page) = request.operation {
+        let context = node.authenticated_session_request_context(deadline, session);
+        let visibility = RefVisibility::new();
+        let result = drive_request_while(
+            node,
+            &context,
+            node.read_reviews_in(
+                &context,
+                &visibility,
+                request.number,
+                page.after,
+                page.limit,
+                page.expected_head,
+            ),
+            &mut || !deadline.expired(),
+        )
+        .map_err(|error| {
+            if error.is_snapshot_unavailable() {
+                ApiError::snapshot_moved()
+            } else {
+                ApiError::unavailable()
+            }
+        })?;
+        let maximum = usize::try_from(maximum_response)
+            .unwrap_or(usize::MAX)
+            .min(output::MAX_REPLY_BYTES);
+        return Ok(Reply {
+            status: if result.is_some() {
+                Status::Success
+            } else {
+                Status::NotFound
+            },
+            body: output::page(node, request.number, page, result.as_ref(), maximum)?,
+            terminal: None,
+        });
+    }
     let bytes = if request.is_mutation() {
         match request.encoding {
             Encoding::Form => read_form(reader, framing, limits)?,
@@ -125,38 +164,6 @@ pub(super) fn execute(
     let maximum = usize::try_from(maximum_response)
         .unwrap_or(usize::MAX)
         .min(output::MAX_REPLY_BYTES);
-    if let Operation::List(page) = request.operation {
-        let visibility = RefVisibility::new();
-        let result = drive_request_while(
-            node,
-            &context,
-            node.read_reviews_in(
-                &context,
-                &visibility,
-                request.number,
-                page.after,
-                page.limit,
-                page.expected_head,
-            ),
-            &mut live,
-        )
-        .map_err(|error| {
-            if error.is_snapshot_unavailable() {
-                ApiError::snapshot_moved()
-            } else {
-                ApiError::unavailable()
-            }
-        })?;
-        return Ok(Reply {
-            status: if result.is_some() {
-                Status::Success
-            } else {
-                Status::NotFound
-            },
-            body: output::page(node, request.number, page, result.as_ref(), maximum)?,
-            terminal: None,
-        });
-    }
     let upload = match request.encoding {
         Encoding::Form => multipart::Upload {
             command: &bytes,
@@ -182,6 +189,19 @@ pub(super) fn execute(
         super::super::require_ref_writes(authenticated, [&subject.target_ref])?;
     }
     let (tx, terminal) = match &command {
+        Command::RebaseReview(command) => drive_request_while(
+            node,
+            &context,
+            node.admit_rebase_candidate_review_durable_in(
+                &context,
+                session,
+                command,
+                upload.bundle,
+                Default::default(),
+            ),
+            &mut live,
+        )
+        .map_err(admission_error)?,
         Command::Review(command) => drive_request_while(
             node,
             &context,

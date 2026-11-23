@@ -665,16 +665,31 @@ request identity; a losing CAS revalidates the same command against a new basis.
 Key reuse with different command semantics MUST fail closed.
 
 The trusted-local operation requires operator-asserted authentication and no
-narrowed ref-write credential scope. Canonically declared agent principals MUST
-be refused even when presented with operator provenance. With no installed
-review-protection policy, the explicitly authorized local operator may establish
-the default. With an installed policy, the actor MUST be one of its current
-canonical administrators. Proposed or historical administrators cannot authorize
-a new request. This authority does not follow from remote Git push permission,
-source publication grants, agent sponsorship, branch review approval or a model
-recommendation. Each CAS preparation checks the currently selected policy before
-reading target objects. Canonical visibility of HEAD, its old target and the new
-target applies independently of administrator status.
+narrowed ref-write credential scope. With no installed review-protection policy,
+the explicitly authorized local operator may establish the default. With an
+installed policy, the actor MUST be one of its current canonical administrators.
+The trusted-local entry point MUST continue to refuse HTTP-token, SSH and
+sponsored-agent provenance.
+
+The separate HTTP administrator profile requires host-verified `HttpToken`
+authentication, an independently enabled administration surface and a dedicated
+`default-branch-write` grant. The grant MUST NOT be inferred from Git receive,
+source publication or protection-edit permission. A narrowed ref-write credential
+MUST be refused. An installed canonical review-protection policy is mandatory;
+the remote profile MUST NOT bootstrap administrator authority from its absence.
+At every CAS preparation, the authenticated principal MUST be one of the selected
+policy's current administrators. Its canonical principal snapshot MUST retain
+the actual HTTP-token provenance, never relabel it as an operator assertion.
+The command, request-identity schema and HEAD-transition schema remain the same
+across these profiles; credential fields are not client-supplied command data.
+
+Both profiles MUST refuse canonically declared agent principals, including agents
+presented with operator or ordinary HTTP-token provenance. Proposed or historical
+administrators cannot authorize a new decision. This authority does not follow
+from agent sponsorship, branch review approval or a model recommendation. Each
+CAS preparation checks the currently selected policy before reading target
+objects. Canonical visibility of HEAD, its old target and the new target applies
+independently of administrator status.
 
 The canonical symbolic-ref delta has domain
 `frankengit/admission-head-delta/v1`, schema family `admission-head-delta`, version
@@ -709,11 +724,14 @@ new canonical HEAD, and advertisements and historical reads select that same
 authenticated state.
 
 Exact historical terminal recovery MUST precede current administrator, quota,
-readiness and target-existence checks once original operator provenance and
-request identity are established. Later policy rotation, branch deletion or
-default selection cannot rewrite an earlier decision. A cancellation, failed
-receipt write or disconnect cannot establish non-commit. The caller recovers the
-original scoped TxId or retries the exact command and key, without refreshing
+readiness and target-existence checks once authentication for the selected entry
+point and the original scoped principal, key and request identity are established.
+Recovery preserves the original decision's recorded provenance and does not
+claim that a new decision was authorized by the current policy. Later policy
+rotation, branch deletion or default selection cannot rewrite an earlier
+decision. A cancellation, failed receipt write or disconnect cannot establish
+non-commit. The caller recovers the original scoped TxId or retries the exact
+command and key, without refreshing
 either expectation. Reads report absent, unborn and resolved states distinctly,
 bound to one authenticated head, and authorize disclosure of both HEAD and its
 target.
@@ -939,6 +957,127 @@ Publication receipts may echo the original anchor but do not invent a read-time
 status. A known immutable terminal result is resolved using the original complete
 command before fresh PR-basis validation; retrying after PR changes must not
 refresh an anchor, body, discussion version or idempotency key.
+
+#### 20.1.2 Independent native pull-request labels
+
+Label replacement advances the separate `PullRequestLabels(number)` aggregate.
+It never advances the PR content version, changes its opener or lifecycle,
+refreshes recorded branch tips, invalidates reviews, moves Git refs or changes
+policy. Open, closed and merged PRs with retained native metadata are valid
+subjects; an absent, legacy-only or standalone merge receipt cannot acquire
+invented native PR metadata through this operation.
+
+The canonical owner is `fgit-forge/src/event/pull_request_labels.rs`. Required
+aggregate escape **15**, following the zero `u64` escape, carries the positive
+big-endian `u64` PR number and has stream label `pull-request-labels/N`.
+Required event kind **27** carries the exact 16-byte authenticated actor,
+followed by a big-endian `u32` label count and that many canonical length-prefixed
+UTF-8 byte strings. The count is at most 32, checked before allocation; each
+label is at most 64 UTF-8 bytes, nonblank and contains no control characters.
+Labels MUST be strictly increasing in exact UTF-8 byte order. Duplicates,
+noncanonical order and invalid text refuse. Case, whitespace within nonblank
+labels and Unicode spelling are preserved; no trimming or normalization changes
+identity. The reference trace and transaction normal form use required marker
+**15**, `PullRequestLabelsChanged`, naming only the independent labels entity
+and requiring no ref effect. Existing aggregate/event/normal-form bytes are
+unchanged; older readers refuse unfamiliar required tags.
+
+`PullRequestLabelsCommand` binds the PR number, exact labels predecessor and
+complete replacement set. A never-written stream uses `NewStream`; subsequent
+commands use its exact positive label version. An empty set explicitly clears
+labels and retains its new version. Every accepted replacement advances this
+version, including replacement by an identical set. The actor and complete
+event are bound by the single-event batch root in the `forge` scoped request
+entry `pull-request-labels.event-batch-root.v1`, using the existing receive
+admission schema. Final preparation independently reconstructs and compares the
+complete seal. Neither a PR content command nor a comment seal can substitute
+for the labels profile.
+
+Every authority-head CAS attempt rechecks current authenticated write authority,
+native PR existence, disclosure of both current PR branch identities and the
+exact labels predecessor against one authenticated publication basis. Sponsored
+credentials require current `PULLS_WRITE` authority at that same basis. This
+repository metadata permission is not an opener-only permission and grants no
+ref-write authority. A head-CAS loser retains the same actor, complete label
+set, expected version, seal and transaction identity. Concurrent PR lifecycle
+or content changes are preserved; concurrent labels changes produce a stale
+predecessor refusal. The event and its outbox obligation publish atomically.
+Known terminal retries recover their original decision before fresh intake,
+quota or subject checks, while still verifying the original complete command.
+Unavailable selected evidence and cancellation remain undecided, never a
+fabricated successful clear or permanent business refusal.
+
+Native list/detail projections read metadata and the complete labels frontier
+at the same selected authority head. An absent labels frontier yields an empty
+set and no label version or actor; a retained clear has an explicit version and
+actor. A selected frontier with missing, invalid or mismatched event bytes MUST
+fail rather than become an empty set. Label filters require all supplied exact
+labels and run before pagination and continuation selection. Current disclosure
+policy also applies to retained snapshots. Scans retain the existing 65,536
+candidate/event bound, additionally charge all loaded label-batch bytes against
+a 128 MiB budget, and charge retained label bytes against the 32 MiB page budget.
+Cancellation or exhaustion refuses the whole read rather than returning a
+complete-looking partial result.
+
+#### 20.1.3 Native pull-request rebase-and-merge
+
+The explicit `rebase/v1` native merge method applies only to an existing open
+PR with an exact positive content version. Its immutable request binds the
+original source and target refs/tips, original common base, reviewed candidate
+and method. A successful authority-head replacement publishes the target update,
+native PR merge event and delivery obligation together. The source ref MUST NOT
+be rewritten as an implicit part of this operation.
+
+Both the original source-to-base suffix and candidate-to-target series MUST be
+independently checked as nonempty single-parent chains of at most 256 commits.
+The base MUST also be an ancestor of the target. Candidate native identities,
+intermediate trees and all required object edges MUST verify under aggregate
+object, byte, edge and cancellation limits; selected intermediate commits do not
+terminate series validation. Candidate commit bodies admit at most 16 MiB in
+total. An entirely dropped series, a multi-parent step or a stale current PR/ref
+subject refuses rather than selecting another merge method.
+
+The preparation artifact names the target and has the target tip as its sole
+prerequisite. Whole-series inspection MUST expose every rewritten commit and
+parent-to-child difference, including changes absent from the final tree.
+Candidate review remains bound to the exact PR subject, base and final commit
+identity; existing review-event bytes are unchanged. Path-specific protection
+MUST consider the union of changes across all intermediate commits and MUST
+reject substitution of a final-tree-only path witness.
+
+Preparation and inspection grant no publication authority. Current native
+review, check, visibility, quota and ref policy gates remain in force on every
+publication basis. Existing seals and recorded outcomes retain their identity
+and retry semantics. See [the native PR rebase workflow](NATIVE_PULL_REQUEST_REBASE.md)
+for the bounded client and unsupported-surface contract.
+
+#### 20.1.4 Explicit native PR retargeting
+
+`Retarget` changes the target branch of an existing open native PR at its exact
+positive predecessor version. It MUST preserve the source branch and MUST name
+a different target branch. The complete desired metadata, explicit current
+source/new-target tips, authenticated actor and action form the existing sealed
+metadata request. Admission MUST verify both submitted live tips and current
+disclosure policy for the source, original target and replacement target. A
+missing original target does not prevent retargeting; a missing source or new
+target does. Retargeting MUST NOT move or recreate any Git ref.
+
+The canonical owner is `fgit-forge/src/event/pull_request.rs`. Retarget uses
+required action code **5** in `PullRequestChangedNative`; codes 1 through 4 keep
+their original bytes and semantics. Update and Reopen still cannot change either
+branch identity. Closed, merged and legacy-only streams cannot be retargeted.
+Readers MUST support code 5 before writers activate it; unknown required actions
+refuse rather than being reinterpreted as Update.
+
+Publication advances the PR content version and coupled outbox through the
+ordinary single authority-head CAS, preserving PR number, original opener and
+independent conversation/labels streams. Previous reviews remain bound to their
+original exact subject and cannot authorize the new target, even if target tips
+or candidate bytes happen to match. Original source-comment anchors remain
+historical coordinates, never silently retargeted. Existing original-outcome
+recovery precedes fresh-state evaluation: repeating the same command/key after
+later target changes or closure returns its original decision without publishing
+another event. See [the retarget workflow](PULL_REQUEST_RETARGET.md).
 
 ### 20.2 Native issue assignment deltas
 
@@ -1443,13 +1582,15 @@ match the authenticated principal. Private preferences MUST NOT enter shared
 repository event feeds or webhook batches, including wildcard subscriptions.
 
 The native PR inbox derives an append-stable positive `activity_version` by
-replaying PR lifecycle, conversation and individual-reviewer events in exact
+replaying PR lifecycle, conversation, labels and individual-reviewer events in exact
 authenticated RCR/event order. It MUST NOT sort independent aggregates to assign
 activity ordinals, conflate their aggregate versions, or publish a second
 canonical activity stream. The selected source MUST verify the full history
 and each selected stream's final event root and range against the canonical
 forge frontier. Activity includes native open/update/close/reopen, comments,
-review changes and successful native merges. A merge's actor MUST come from
+review changes, label replacements and successful native merges. Label events
+advance this activity prefix without changing the PR content version, and a
+label writer alone does not acquire a participant subscription. A merge's actor MUST come from
 its RCR-bound principal snapshot with verified identity and repository binding.
 The current reader and current credentials MUST NOT substitute for that actor.
 
@@ -1637,6 +1778,24 @@ merge. Exact terminal recovery uses the original principal, key, subject, pin
 and retained execution record before fresh bundle or current-eligibility
 checks. An undecided recovery lookup creates no new seal or observation.
 A losing CAS attempt revalidates at its new basis.
+
+An explicitly selected rebase candidate-check path MUST instead apply the
+complete-series rules in §20.1.3. The artifact names the target and has only the
+target tip as its prerequisite. Original-source history MUST NOT satisfy
+uploaded object edges or external delta bases. Both the original source suffix
+and the rewritten target-based series are nonempty single-parent chains of at
+most 256 commits; all intermediate objects and the cumulative commit-body bound
+MUST verify even when their changes disappear from the final tree. Validation
+for a check need not render a human diff and MUST NOT substitute a final-tree-only
+proof or infer a rebase profile after another validator refuses.
+
+This explicit selection changes the required native validation, not the
+candidate-check canonical encoding or identity. The exact subject, base,
+candidate commit, bundle digest and retained execution evidence remain the
+bindings. No separate merge-method attestation is inferred for a compatible
+candidate tree. Original terminal recovery still precedes fresh bundle and
+profile validation, so changing a caller's validation selection cannot turn a
+recorded refusal into success or republish a completed observation.
 
 Each protected branch may independently contain a strictly sorted unique
 `required_candidate_checks` vector. A selector contains publisher, raw 32-byte

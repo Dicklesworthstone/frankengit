@@ -1,6 +1,7 @@
 //! Authenticated exact-PR-source workflow observations. A read grants neither
 //! execution authority nor approval. Evidence bodies require a separate output
-//! disclosure grant in addition to ordinary PR read permission.
+//! disclosure grant. Sponsored readers use their own exact-check capability;
+//! ordinary operators retain the independent PR-read plus artifact-read pair.
 
 mod output;
 mod request;
@@ -9,9 +10,7 @@ pub(in crate::smart_http::server) use request::Request;
 use super::super::issues::{ApiError, Reply};
 use super::super::{Profile, Status, retry_key};
 use crate::smart_http::drive_request_while;
-use crate::{
-    GitDaemonSessionDeadline, GitDaemonSessionWorkScaling, LoopbackReceiveSession, OneNode,
-};
+use crate::{GitDaemonSessionDeadline, LoopbackReceiveSession, OneNode};
 use fgit_authority::IdempotencyKey;
 use fgit_wire::smart_http::head::Envelope;
 use fgit_wire::visibility::RefVisibility;
@@ -29,10 +28,18 @@ pub(super) fn authenticate(
     if request.repository_route.as_bytes() != profile.route {
         return Err(ApiError::not_found());
     }
-    if !profile.allow_pulls() || !grant.permits_pulls(false) {
+    let permitted = grant.permits_pulls(false)
+        || if request.evidence.is_some() {
+            grant.permits_pull_check_evidence_read()
+        } else {
+            grant.permits_pull_feedback_read()
+        };
+    if !profile.allow_pulls() || !permitted {
         return Err(ApiError::new(Status::Forbidden, "forbidden"));
     }
-    if request.evidence.is_some() && !grant.permits_artifact_read() {
+    if request.evidence.is_some()
+        && !(grant.permits_artifact_read() || grant.permits_pull_check_evidence_read())
+    {
         return Err(ApiError::new(
             Status::Forbidden,
             "artifact_read_not_granted",
@@ -44,8 +51,7 @@ pub(super) fn authenticate(
     {
         return Err(ApiError::bad("checks_have_no_transaction_key"));
     }
-    Ok(LoopbackReceiveSession::authenticated(
-        grant.principal,
+    Ok(grant.session(
         IdempotencyKey::new(b"read-only-pull-request-checks".to_vec())
             .map_err(|_| ApiError::unavailable())?,
     ))
@@ -56,15 +62,12 @@ pub(super) fn execute(
     request: &Request<'_>,
     session: &LoopbackReceiveSession,
     maximum_response: u64,
+    deadline: &GitDaemonSessionDeadline,
 ) -> Result<Reply, ApiError> {
     if session.authenticated_session().is_none() {
         return Err(ApiError::new(Status::Unauthorized, "unauthorized"));
     }
-    let deadline = GitDaemonSessionDeadline::new(
-        node.git_daemon_session_timeout,
-        GitDaemonSessionWorkScaling::FLAT,
-    );
-    let context = node.session_request_context(&deadline);
+    let context = node.authenticated_session_request_context(deadline, session);
     let visibility = RefVisibility::new();
     if let Some(check) = request.evidence {
         let head = request
@@ -81,7 +84,7 @@ pub(super) fn execute(
                 check,
                 head,
             ),
-            &mut || !deadline.expired(),
+            &mut || context.is_live() && !deadline.expired(),
         )
         .map_err(read_error)?
         .ok_or_else(ApiError::not_found)?;
@@ -91,7 +94,7 @@ pub(super) fn execute(
         return Ok(Reply {
             status: Status::Success,
             body: output::evidence(node, request.number, check, head, &result, maximum, &|| {
-                !deadline.expired()
+                context.is_live() && !deadline.expired()
             })?,
             terminal: None,
         });

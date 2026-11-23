@@ -82,6 +82,7 @@ pub(super) fn report(temp: &Temp) -> TrustedWorkflowRun {
         candidate: None,
         merge: None,
         merge_style: Default::default(),
+        rebase: None,
         workflow_blob: GitOid::Sha1(GitOidSha1::from_bytes([6; 20])),
         workflow_path: b"workflow.yml".to_vec(),
         read_prefixes: vec![b"workflow.yml".to_vec()],

@@ -3,7 +3,7 @@
 use super::{ApiError, request};
 use fgit_forge::MilestoneNumber;
 use fgit_forge::event::issue::{
-    CompiledIssueQuery, IssueQuery, IssueState, MAX_LABELS, MilestoneFilter,
+    AssigneeFilter, CompiledIssueQuery, IssueQuery, IssueState, MAX_LABELS, MilestoneFilter,
 };
 use fgit_forge::issue_search::{MAX_RESULTS, MAX_SCAN, SearchError, SearchRequest};
 use fgit_types::PrincipalId;
@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 pub(super) fn parse(body: &[u8]) -> Result<(CompiledIssueQuery, SearchRequest), ApiError> {
     let mut flags = BTreeMap::new();
     let mut labels = Vec::new();
-    for (name, value) in request::form(body, MAX_LABELS + 9)? {
+    for (name, value) in request::form(body, MAX_LABELS + 10)? {
         if name == "label" {
             if labels.len() == MAX_LABELS {
                 return Err(ApiError::too_large());
@@ -24,6 +24,7 @@ pub(super) fn parse(body: &[u8]) -> Result<(CompiledIssueQuery, SearchRequest), 
                 "query"
                     | "state"
                     | "opened_by"
+                    | "assignee"
                     | "case_sensitive"
                     | "after"
                     | "limit"
@@ -47,6 +48,18 @@ pub(super) fn parse(body: &[u8]) -> Result<(CompiledIssueQuery, SearchRequest), 
     let opened_by = flags
         .get("opened_by")
         .map(|text| PrincipalId::from_hex(text).map_err(|_| ApiError::bad("invalid_opener")))
+        .transpose()?;
+    let assignee = flags
+        .get("assignee")
+        .map(|value| {
+            if value == "none" {
+                Ok(AssigneeFilter::Unassigned)
+            } else {
+                PrincipalId::from_hex(value)
+                    .map(AssigneeFilter::Principal)
+                    .map_err(|_| ApiError::bad("invalid_assignee"))
+            }
+        })
         .transpose()?;
     let case_sensitive = match flags.get("case_sensitive").map_or("false", String::as_str) {
         "true" => true,
@@ -73,6 +86,7 @@ pub(super) fn parse(body: &[u8]) -> Result<(CompiledIssueQuery, SearchRequest), 
     let query = IssueQuery {
         state,
         opened_by,
+        assignee,
         labels,
         text,
         case_sensitive,

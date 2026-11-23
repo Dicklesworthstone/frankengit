@@ -172,6 +172,43 @@ impl OneNode {
         bundle: &[u8],
         limits: AdmissionLimits,
     ) -> Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal> {
+        self.admit_trusted_candidate_check_with_profile_in(
+            request, session, record, bundle, limits, false,
+        )
+        .await
+    }
+
+    /// Publish an exact unpublished rebase candidate observation after verifying
+    /// the complete original and rewritten series. The target-named bundle has
+    /// only the target prerequisite, and every intermediate object is checked.
+    /// Human diff-rendering limits do not restrict check admission.
+    ///
+    /// The existing event binds the subject, candidate, base, bundle and actual
+    /// execution evidence. This selects validation, not a new canonical method
+    /// identity: exact original outcomes recover before fresh bundle access.
+    pub async fn admit_trusted_rebase_candidate_workflow_check_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        record: &CandidateWorkflowCheckRecord,
+        bundle: &[u8],
+        limits: AdmissionLimits,
+    ) -> Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal> {
+        self.admit_trusted_candidate_check_with_profile_in(
+            request, session, record, bundle, limits, true,
+        )
+        .await
+    }
+
+    async fn admit_trusted_candidate_check_with_profile_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        record: &CandidateWorkflowCheckRecord,
+        bundle: &[u8],
+        limits: AdmissionLimits,
+        rebase: bool,
+    ) -> Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal> {
         if let Some(terminal) = self
             .recover_trusted_candidate_workflow_check_in(request, session, record)
             .await?
@@ -205,6 +242,7 @@ impl OneNode {
             },
             request,
             bundle,
+            rebase,
         };
         let terminal = Box::pin(candidate::admit_async(
             &self.authority,
@@ -276,6 +314,7 @@ struct CandidateCheckOwner<'a> {
     inner: NodeNativeMergeProjection<'a>,
     request: &'a NodeRequestContext,
     bundle: &'a [u8],
+    rebase: bool,
 }
 impl AsyncAdmissionProjection<FsqliteAuthorityStore> for CandidateCheckOwner<'_> {
     fn collect_cumulative_outcomes_async<'a>(
@@ -449,17 +488,30 @@ impl CandidateWorkflowCheckProjection<FsqliteAuthorityStore> for CandidateCheckO
                 RefusalCode::ObjectClosureIncomplete,
             ));
         }
-        let result = self
-            .inner
-            .node
-            .validate_merge_bundle_in(
-                self.request,
-                &record.candidate.merge(subject),
-                self.bundle,
-                &RefVisibility::new(),
-                Some(basis.id()),
-            )
-            .await;
+        let merge = record.candidate.merge(subject);
+        let result = if self.rebase {
+            self.inner
+                .node
+                .validate_rebase_merge_bundle_in(
+                    self.request,
+                    &merge,
+                    self.bundle,
+                    &RefVisibility::new(),
+                    Some(basis.id()),
+                )
+                .await
+        } else {
+            self.inner
+                .node
+                .validate_merge_bundle_in(
+                    self.request,
+                    &merge,
+                    self.bundle,
+                    &RefVisibility::new(),
+                    Some(basis.id()),
+                )
+                .await
+        };
         self.merge_checkpoint(cx)
             .map_err(ProjectionFailure::Unavailable)?;
         use crate::treefs_workspace::publication::BundleInspectionRefusal as E;

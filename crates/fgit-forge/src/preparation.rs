@@ -16,6 +16,7 @@ use fgit_diff::{
 };
 use fgit_types::{GitHashAlgorithm, GitOid};
 
+mod attributes;
 pub mod queue_prefix;
 pub mod rebase;
 pub mod renames;
@@ -33,6 +34,9 @@ pub enum MergeProfile {
     /// Unique content-identical regular-file moves, including cross-directory
     /// moves. No similarity scores, copy detection or directory-rename inference.
     ExactRenamesV1,
+    /// Exact-path merges using stable, repository-owned attribute rules and
+    /// built-in text/binary decisions. Never runs filters or external drivers.
+    BuiltinAttributesV1,
 }
 
 /// Parent shape is independent of the tree merge profile. Squash retains the
@@ -416,6 +420,14 @@ pub fn prepare_merge_with_options<S: MergeObjectSource>(
         MergeProfile::ExactRenamesV1 => {
             renames::merge(&mut planner, base_tree, our_tree, their_tree)?
         }
+        MergeProfile::BuiltinAttributesV1 => planner.directory_context(
+            Some(base_tree),
+            our_tree,
+            their_tree,
+            &[],
+            0,
+            &attributes::Context::builtin(),
+        )?,
     };
     source.checkpoint()?;
     if !planner.conflicts.is_empty() {
@@ -637,6 +649,25 @@ impl<'a, S: MergeObjectSource> Planner<'a, S> {
         depth: usize,
         inherited_attributes: bool,
     ) -> Result<Option<GitOid>, PreparationError> {
+        self.directory_context(
+            base,
+            ours,
+            theirs,
+            path,
+            depth,
+            &attributes::Context::legacy(inherited_attributes),
+        )
+    }
+
+    fn directory_context(
+        &mut self,
+        base: Option<GitOid>,
+        ours: GitOid,
+        theirs: GitOid,
+        path: &[u8],
+        depth: usize,
+        inherited_attributes: &attributes::Context,
+    ) -> Result<Option<GitOid>, PreparationError> {
         self.source.checkpoint()?;
         if depth > self.limits.max_depth {
             return Err(PreparationError::Budget("tree depth"));
@@ -650,10 +681,7 @@ impl<'a, S: MergeObjectSource> Planner<'a, S> {
         let b = self.entries(base)?;
         let o = self.entries(Some(ours))?;
         let t = self.entries(Some(theirs))?;
-        let attributes = inherited_attributes
-            || [&b, &o, &t]
-                .iter()
-                .any(|tree| tree.contains_key(b".gitattributes".as_slice()));
+        let attributes = inherited_attributes.descend([&b, &o, &t], path);
         let before = self.conflicts.len();
         let mut result = Vec::new();
         for (name, [base, ours, theirs]) in tree_entries::Join::new(&b, &o, &t) {
@@ -680,7 +708,7 @@ impl<'a, S: MergeObjectSource> Planner<'a, S> {
                 child.push(b'/');
             }
             child.extend_from_slice(name);
-            if let Some(entry) = self.entry(base, ours, theirs, &child, depth, attributes)? {
+            if let Some(entry) = self.entry(base, ours, theirs, &child, depth, &attributes)? {
                 result.push(entry);
             }
         }
@@ -760,7 +788,7 @@ impl<'a, S: MergeObjectSource> Planner<'a, S> {
         theirs: Option<&MergeEntry>,
         path: &[u8],
         depth: usize,
-        attributes: bool,
+        attributes: &attributes::Context,
     ) -> Result<Option<MergeEntry>, PreparationError> {
         match tree_entries::trivial(base, ours, theirs) {
             tree_entries::Trivial::Entry(entry) => return Ok(Some(entry.clone())),
@@ -771,7 +799,7 @@ impl<'a, S: MergeObjectSource> Planner<'a, S> {
             return self.conflict(path, ConflictKind::ModifyDelete, base, ours, theirs);
         };
         if o.mode == 0o040000 && t.mode == 0o040000 && base.is_none_or(|b| b.mode == 0o040000) {
-            let merged = self.directory(
+            let merged = self.directory_context(
                 base.map(|b| b.oid),
                 o.oid,
                 t.oid,
@@ -808,14 +836,20 @@ impl<'a, S: MergeObjectSource> Planner<'a, S> {
         } else if base.is_some_and(|b| b.oid == o.oid) {
             t.oid
         } else {
-            if attributes {
-                return self.conflict(
-                    path,
-                    ConflictKind::AttributesRequireDriver,
-                    base,
-                    ours,
-                    theirs,
-                );
+            match attributes.driver(self, path)? {
+                attributes::Driver::Text => {}
+                attributes::Driver::Binary => {
+                    return self.conflict(path, ConflictKind::Binary, base, ours, theirs);
+                }
+                attributes::Driver::Unsupported => {
+                    return self.conflict(
+                        path,
+                        ConflictKind::AttributesRequireDriver,
+                        base,
+                        ours,
+                        theirs,
+                    );
+                }
             }
             if self.content_merges == self.limits.max_content_merges {
                 return Err(PreparationError::Budget("content merges"));

@@ -124,6 +124,60 @@ The capability-owned native entry point is
 publication remain separate. `SymlinkPolicy::Refuse` also prevents this profile
 from creating or reading symlink entries.
 
+### Explicit opaque gitlink profile
+
+`fg patch prepare --profile exact-gitlink-v1` creates, updates and deletes Git
+submodule pointers (mode `160000`) alongside ordinary exact text changes such as
+`.gitmodules`. It treats each pointer as an external commit identity, verifies
+the old pointer against the selected source tree and emits the new pointer in
+the candidate tree. It never reads or imports the foreign commit, hashes a
+synthetic pointer line as a blob, checks out a submodule or accesses its URL.
+
+Use the canonical full-index Git submodule diff shape, for example:
+
+```diff
+diff --git a/vendor/lib b/vendor/lib
+index 1111111111111111111111111111111111111111..2222222222222222222222222222222222222222 160000
+--- a/vendor/lib
++++ b/vendor/lib
+@@ -1 +1 @@
+-Subproject commit 1111111111111111111111111111111111111111
++Subproject commit 2222222222222222222222222222222222222222
+```
+
+The identities are illustrative; use the actual selected pointer and the exact
+intended replacement. All pointer and index IDs must be lowercase, full-width
+and in the repository's native hash domain: 40 characters for SHA-1, 64 for
+SHA-256. Creation uses `new file mode 160000`, an all-zero old index,
+`--- /dev/null`, and `@@ -0,0 +1 @@`; deletion uses `deleted file mode 160000`,
+an all-zero new index, `+++ /dev/null`, and `@@ -1 +0,0 @@`. The present side must
+be nonzero. Each side is exactly one `Subproject commit <id>` line with a final
+LF, matching its index. Abbreviations, dirty suffixes, partial images, extra
+context and missing-final-newline markers refuse.
+
+This profile permits regular-file text edits and mode changes, but refuses
+binary sections, symlink edits, copies, renames and conversion between gitlinks
+and other entry kinds. Every older profile continues to refuse gitlink edits.
+Paths remain disjoint, complete-directory disclosure preserves siblings, and
+all changes share the existing input, output and cancellation bounds. Synthetic
+pointer-image bytes count against the patch budget. Initial-history preparation
+is unchanged and does not admit this profile.
+
+The explicit native APIs are `OneNode::prepare_workspace_gitlink_patch_in` and
+`OneNode::prepare_trusted_gitlink_patch_in`. HTTP preparation selects
+`patch_profile=exact-gitlink-v1`; MCP `prepare_patch` selects
+`"profile": "exact-gitlink-v1"`. Both retain the existing source-candidate grant
+and require separately authorized, reviewed saved-bundle publication.
+
+For this profile, CLI, HTTP and MCP path receipts use `old_object` and
+`new_object` for **every** changed path, since a gitlink target is a commit
+pointer rather than a blob. `new_mode` distinguishes a pointer (`160000`, octal)
+from an ordinary file; deletion has a null new object and mode. HTTP encodes
+modes as JSON numbers, while CLI and MCP receipts use octal strings. All older
+profiles retain `old_blob` and `new_blob`. Inspection identifies gitlink entries
+without opening their targets. These selectors do not enable gitlink authoring
+in the browser editor or the JavaScript source-workspace commands.
+
 ### Shared resource bounds
 
 - `fgit_diff::patch::UnifiedPatch` parses borrowed hunk data and applies files
@@ -156,8 +210,12 @@ allocation policy. Ordinary node and capability limits remain in force.
 
 ```bash
 cargo test --locked -p fgit-diff --lib patch::tests
+cargo test --locked -p fgit-diff --lib patch::gitlink_tests
 cargo test --locked -p fgit-node --test workspace_patch
+cargo test --locked -p fgit-node --test workspace_gitlink_edits --test workspace_gitlink_patch
+cargo test --locked -p fgit-node --lib sponsored_http_gitlink
 cargo test --locked -p fgit-cli --bin fg patch_command::tests
+cargo test --locked -p fgit-cli --bin fg sponsored_mcp_gitlink
 cargo test --locked -p fgit-cli --test native_patch_smoke
 ```
 

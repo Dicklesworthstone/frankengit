@@ -1,13 +1,15 @@
 //! Candidate execution enters the same preflight, journal and job driver as
 //! canonical source. Only input provenance and the host plan constructor differ.
 mod merge;
+mod rebase;
 use super::{
     Arc, ByteCount, FETCH_BYTES, FETCH_OBJECTS, Format, GitHashAlgorithm, GitOid, HostRefusal,
     Instant, NativeObjectIdentity, NodeRequestContext, OneNode, Path, RefName,
     RepositoryAuthorityHeadId, RepositoryCommitId, SOURCE_LIMITS, Sha1, Sha256, SparseManifest,
     SparseWorkspacePlan, TreeCapability, TreePath, TrustedWorkflowArtifactConfig,
-    TrustedWorkflowCandidate, TrustedWorkflowFailure, TrustedWorkflowRun, WorkflowLimits,
-    WorkspaceId, artifacts, hex, run_inputs, validate_inputs, workspace_request_live,
+    TrustedWorkflowCandidate, TrustedWorkflowFailure, TrustedWorkflowRebase, TrustedWorkflowRun,
+    WorkflowLimits, WorkspaceId, artifacts, hex, run_inputs, validate_inputs,
+    workspace_request_live,
 };
 use fgit_forge::event::NativeMerge;
 use fgit_forge::preparation::MergeCommitStyle;
@@ -19,6 +21,11 @@ pub(super) enum WorkflowInputs<A: GitHashAlgorithm> {
         manifest: Arc<SparseCandidateManifest<A>>,
         bundle_sha256: [u8; 32],
         merge: Option<(NativeMerge, MergeCommitStyle)>,
+    },
+    Rebase {
+        manifest: Arc<SparseCandidateManifest<A>>,
+        bundle_sha256: [u8; 32],
+        rebase: TrustedWorkflowRebase,
     },
 }
 impl<A: GitHashAlgorithm> WorkflowInputs<A> {
@@ -36,18 +43,29 @@ impl<A: GitHashAlgorithm> WorkflowInputs<A> {
                 bundle_sha256: *bundle_sha256,
                 merge: merge.clone(),
             },
+            Self::Rebase {
+                manifest,
+                bundle_sha256,
+                rebase,
+            } => Self::Rebase {
+                manifest: Arc::clone(manifest),
+                bundle_sha256: *bundle_sha256,
+                rebase: rebase.clone(),
+            },
         }
     }
     pub(super) fn entries(&self) -> &[SparseEntry<A>] {
         match self {
             Self::Canonical(m) => m.entries(),
-            Self::Candidate { manifest, .. } => manifest.entries(),
+            Self::Candidate { manifest, .. } | Self::Rebase { manifest, .. } => manifest.entries(),
         }
     }
     pub(super) fn payload_bytes(&self) -> usize {
         match self {
             Self::Canonical(m) => m.receipt().payload_bytes(),
-            Self::Candidate { manifest, .. } => manifest.payload_bytes(),
+            Self::Candidate { manifest, .. } | Self::Rebase { manifest, .. } => {
+                manifest.payload_bytes()
+            }
         }
     }
     pub(super) fn host_plan(
@@ -58,21 +76,29 @@ impl<A: GitHashAlgorithm> WorkflowInputs<A> {
             Self::Canonical(m) => {
                 SparseWorkspacePlan::new(Arc::clone(m), Vec::new(), capability, 0, SOURCE_LIMITS)
             }
-            Self::Candidate { manifest, .. } => SparseWorkspacePlan::for_candidate(
-                Arc::clone(manifest),
-                capability,
-                0,
-                SOURCE_LIMITS,
-            ),
+            Self::Candidate { manifest, .. } | Self::Rebase { manifest, .. } => {
+                SparseWorkspacePlan::for_candidate(
+                    Arc::clone(manifest),
+                    capability,
+                    0,
+                    SOURCE_LIMITS,
+                )
+            }
         }
     }
     pub(super) const fn merge(&self) -> Option<&NativeMerge> {
         match self {
-            Self::Canonical(_) => None,
+            Self::Canonical(_) | Self::Rebase { .. } => None,
             Self::Candidate { merge, .. } => match merge {
                 Some((m, _)) => Some(m),
                 None => None,
             },
+        }
+    }
+    pub(super) const fn rebase(&self) -> Option<&TrustedWorkflowRebase> {
+        match self {
+            Self::Rebase { rebase, .. } => Some(rebase),
+            _ => None,
         }
     }
     pub(super) const fn merge_style(&self) -> MergeCommitStyle {
@@ -143,6 +169,37 @@ impl<A: GitHashAlgorithm> WorkflowInputs<A> {
                     Some(TrustedWorkflowCandidate {
                         commit,
                         tree: native(m.candidate_tree_oid().digest_bytes())?,
+                        bundle_sha256: *bundle_sha256,
+                    }),
+                ))
+            }
+            Self::Rebase {
+                manifest,
+                bundle_sha256,
+                rebase,
+            } => {
+                let base = native(manifest.base_commit_oid().digest_bytes())?;
+                let commit = native(manifest.candidate_commit_oid().digest_bytes())?;
+                let parents = manifest
+                    .parents()
+                    .iter()
+                    .map(|id| native(id.digest_bytes()))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if base != rebase.merge.target_tip_before
+                    || commit != rebase.merge.merge_commit
+                    || parents != [rebase.parent]
+                {
+                    return Err(TrustedWorkflowFailure::InvalidInput(
+                        "workflow provenance differs from verified rebase series",
+                    ));
+                }
+                Ok((
+                    manifest.base_rcr_id(),
+                    base,
+                    native(manifest.base_tree_oid().digest_bytes())?,
+                    Some(TrustedWorkflowCandidate {
+                        commit,
+                        tree: native(manifest.candidate_tree_oid().digest_bytes())?,
                         bundle_sha256: *bundle_sha256,
                     }),
                 ))

@@ -226,6 +226,9 @@ fn parse_input(arguments: &[String]) -> Result<Input, String> {
     validate_resolutions(&resolutions, PreparationLimits::default())
         .map_err(|error| error.to_string())?;
     let options = parse(&normal)?;
+    if options.profile != fgit_forge::preparation::MergeProfile::PathMergeV1 {
+        return Err("merge resolve requires --profile path-v1; other preparation profiles do not select its conflict set".into());
+    }
     Ok(Input {
         options,
         inputs,
@@ -240,6 +243,9 @@ fn commit_style(method: NativeMergeMethod) -> Result<MergeCommitStyle, String> {
         NativeMergeMethod::Squash => Ok(MergeCommitStyle::Squash),
         NativeMergeMethod::FastForwardOnly => {
             Err("fast-forward cannot resolve conflicts into a new candidate".into())
+        }
+        NativeMergeMethod::Rebase => {
+            Err("use fg pr prepare-rebase for a linear PR candidate".into())
         }
     }
 }
@@ -442,6 +448,18 @@ mod tests {
         let mut invalid = valid.clone();
         invalid.retain(|arg| arg != "--trusted-local");
         assert!(parse_input(&invalid).is_err());
+        for profile in ["exact-renames-v1", "builtin-attributes-v1"] {
+            let mut invalid = valid.clone();
+            let at = invalid.iter().position(|arg| arg == "--profile").unwrap();
+            invalid[at + 1] = profile.into();
+            assert!(
+                parse_input(&invalid)
+                    .err()
+                    .unwrap()
+                    .contains("requires --profile path-v1"),
+                "resolution must not silently use another profile's conflict set"
+            );
+        }
         for extra in [
             vec!["--ours", "file"],
             vec!["--theirs", "../escape"],

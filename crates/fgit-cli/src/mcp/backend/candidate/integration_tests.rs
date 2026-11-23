@@ -1,4 +1,6 @@
 //! Real persisted-node calls through the MCP protocol, not a fake Git engine.
+mod binary_refactor;
+
 use super::super::super::protocol::{ReadTools, Server};
 use super::super::Options;
 use super::*;
@@ -332,9 +334,9 @@ fn candidate_fits_the_existing_full_registry_without_gaining_mutation_annotation
     backend.options.outcomes = true;
     backend.options.principal = Some(sponsor());
     backend.options.validate_access().unwrap();
-    // The 95-tool catalog minus queues (7), agent context (1), artifacts (3),
-    // protection (2), notification writes (5), and independent discussions (9).
-    assert_eq!(backend.tools().len(), 68);
+    // Full issue, pull and source groups, including independent PR labels,
+    // without queues, context, artifacts, protection or discussion grants.
+    assert_eq!(backend.tools().len(), 71);
     assert!(
         backend
             .tools()

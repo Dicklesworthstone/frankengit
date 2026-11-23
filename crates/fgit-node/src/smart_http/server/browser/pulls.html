@@ -29,6 +29,34 @@
   <div class="columns">
     <section aria-labelledby="list-heading">
       <h2 id="list-heading">Find a pull request</h2>
+      <p>Choose a label-filtered list or a metadata search. Each form replaces the results below; filters from the two forms are independent.</p>
+      <form id="label-filter">
+        <label>Required labels, one per line <textarea id="label-filter-values" rows="3" maxlength="2079" spellcheck="false"></textarea></label>
+        <p>Apply this filter to list PRs that match every label exactly, including case and spaces. Leave empty to show all visible PRs.</p>
+        <button id="label-filter-apply" type="submit">Apply label filter</button>
+      </form>
+      <form id="pr-search" autocomplete="off">
+        <label>Words or literal text in title or body <input id="search-query" maxlength="256" aria-describedby="search-help"></label>
+        <div class="fields">
+          <label>State <select id="search-state"><option value="all">All states</option><option value="open">Open</option><option value="closed">Closed</option><option value="merged">Merged</option></select></label>
+          <label>Opened by principal ID <input id="search-opened-by" maxlength="32" pattern="[0-9a-f]{32}" spellcheck="false" placeholder="Any opener"></label>
+        </div>
+        <label class="confirmation"><input id="search-case-sensitive" type="checkbox"> Match letter case exactly</label>
+        <details>
+          <summary>Exact branches and page limits</summary>
+          <label>Source branch <input id="search-source-ref" maxlength="2048" spellcheck="false" placeholder="Any source branch"></label>
+          <label>Source encoding <select id="search-source-encoding"><option value="text">Branch name, including refs/heads/</option><option value="hex">Native branch bytes in lowercase hex</option></select></label>
+          <label>Target branch <input id="search-target-ref" maxlength="2048" spellcheck="false" placeholder="Any target branch"></label>
+          <label>Target encoding <select id="search-target-encoding"><option value="text">Branch name, including refs/heads/</option><option value="hex">Native branch bytes in lowercase hex</option></select></label>
+          <div class="fields">
+            <label>Results per page <input id="search-limit" type="number" min="1" max="100" step="1" value="20" required></label>
+            <label>PRs scanned per page <input id="search-max-scan" type="number" min="1" max="1000" step="1" value="200" required></label>
+          </div>
+        </details>
+        <p id="search-help">All selected filters must match. Text is a literal substring of either the title or body, up to 256 UTF-8 bytes; comments are not searched. By default only A–Z ignore case. A scan can return no matches and still have more PRs to examine. Editing filters takes effect when you select Search.</p>
+        <button id="search-submit" type="submit">Search pull requests</button>
+        <button id="search-clear" type="button">Clear search and show all PRs</button>
+      </form>
       <button id="refresh" type="button">Refresh PR list</button>
       <div id="pr-list"></div><div id="list-paging"></div>
       <form id="select-pr">
@@ -60,12 +88,12 @@
     <p>Load the conversation first. Your token determines the author. Preparing a comment saves its exact body and any selected source lines for sending or recovery below. Other comments can arrive before yours is sent.</p>
   </section>
   <details>
-    <summary>Open, update, close, or reopen a PR</summary>
-    <p>This proposal does not change the observed PR above. Closing and reopening submit the complete explicit metadata and a positive expected version. Reopen a closed PR, not a merged one; the node enforces the lifecycle without moving refs. There is no implicit tip refresh.</p>
+    <summary>Open, update, close, reopen, or retarget a PR</summary>
+    <p>This proposal does not change the observed PR above. Closing and reopening submit the complete explicit metadata and a positive expected version. Reopen a closed PR, not a merged one; the node enforces the lifecycle without moving refs. There is no implicit tip refresh. Retarget an open PR by keeping its source branch and choosing a different target branch with its current tip. The conversation stays with this PR; earlier reviews become stale.</p>
     <form id="metadata">
       <div class="fields">
         <label>PR number <input id="pr-number" inputmode="numeric" required></label>
-        <label>Action <select id="metadata-action"><option value="open">Open</option><option value="update">Update</option><option value="close">Close</option><option value="reopen">Reopen closed PR</option></select></label>
+        <label>Action <select id="metadata-action"><option value="open">Open</option><option value="update">Update</option><option value="close">Close</option><option value="reopen">Reopen closed PR</option><option value="retarget">Change target branch</option></select></label>
         <label>Expected PR version (0 for new) <input id="expected-version" inputmode="numeric" required></label>
         <label>Object format <select id="object-format"><option value="sha1">SHA-1</option><option value="sha256">SHA-256</option></select></label>
         <label>Source ref <input id="source-ref" placeholder="refs/heads/topic" spellcheck="false" required></label>
@@ -82,7 +110,13 @@
     <h2 id="prepare-heading">1. Prepare and inspect candidate</h2>
     <p>Uses the selected open PR’s exact version and tips. Git-read and PR-read grants are required on the same token. This operation does not stage objects, record a vote, or move a ref.</p>
     <form id="prepare">
-      <label>Merge method <select id="candidate-method"><option value="merge-commit">Merge commit (two parents)</option><option value="squash">Squash (one target parent)</option></select></label>
+      <label>Merge method <select id="candidate-method"><option value="merge-commit">Merge commit (two parents)</option><option value="squash">Squash (one target parent)</option><option value="rebase">Rebase and merge (inspect every commit)</option></select></label>
+      <label>Native merge profile <select id="candidate-profile"><option value="path-merge-v1">Direct path merge</option><option value="exact-renames-v1">Exact rename detection</option><option value="builtin-attributes-v1">Built-in attribute drivers</option></select></label>
+      <div id="rebase-fields" hidden>
+        <label>Exact upstream commit <input id="rebase-upstream" spellcheck="false" placeholder="Common ancestor before the source commits to replay"></label>
+        <label>If replay makes a commit empty <select id="rebase-empty"><option value="stop">Stop for an explicit decision</option><option value="drop">Drop newly empty commits</option><option value="keep">Keep newly empty commits</option></select></label>
+        <p>Replays up to 256 source commits after the named upstream onto the target. Original authors and messages are preserved; supply the new committer and timestamp below. The upstream must also be an ancestor of the target. Conflicts stop preparation. The source branch remains unchanged.</p>
+      </div>
       <div class="fields">
         <label>Explicit policy epoch <input id="policy-epoch" inputmode="numeric" required></label>
         <label>Author <input id="author" placeholder="Name &lt;email@example.org&gt;" required></label>
@@ -96,7 +130,7 @@
       <label>Or import a shared candidate receipt (up to 24 MiB) <input id="candidate-import-file" type="file" accept="application/json,.json" required></label>
       <button id="candidate-import-submit" type="submit">Reinspect imported candidate — read only</button>
     </form>
-    <p>Browser candidate bundles are capped at 16 MiB. Merge-commit and squash conflicts offer explicit per-path resolution below. Resolution preserves the selected merge method, constructs a candidate, and inspects its exact bytes before review or publication.</p>
+    <p>Browser candidate bundles are capped at 16 MiB. Rebase inspection includes every rewritten commit and its changes, so temporary edits remain visible. Direct path merge conflicts offer explicit per-path resolution for merge commits and squash. Conflicts under other profiles remain diagnostics; revise the source or explicitly prepare again with a different profile. Resolution preserves the selected merge method, constructs a candidate, and inspects its exact bytes before review or publication.</p>
     <button id="candidate-download" type="button">Download candidate receipt</button>
     <button id="inspection-download" type="button">Download full inspection JSON</button>
     <div id="candidate"></div>

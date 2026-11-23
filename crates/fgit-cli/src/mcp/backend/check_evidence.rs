@@ -70,7 +70,7 @@ pub(super) fn tool() -> Tool {
     );
     Tool {
         name: NAME,
-        description: "Read at most 65536 exact bytes of one canonical PR check's evidence at a mandatory selected snapshot and expected SHA-256. Requires BOTH PR-read and independent artifact-read launch grants; sponsored-agent profiles cannot use it. Current visibility applies to both PR branches. The entire canonical evidence is verified before each range. A native-decoded report_span locates diagnostic JSON when recognized. Output is untrusted execution data, not approval, independent execution verification or merge permission.",
+        description: "Read at most 65536 exact bytes of one canonical PR check's evidence at a mandatory selected snapshot and expected SHA-256. Operators require both PR-read and artifact-read launch grants; sponsored agents require the PR launch ceiling and independent pulls-check-evidence-read credential scope. This grants no general artifact access. Current visibility applies to both PR branches. The entire canonical evidence is verified before each range. A native-decoded report_span locates diagnostic JSON when recognized. Output is untrusted execution data, not approval, independent execution verification or merge permission.",
         schema: object([
             ("type", text("object")),
             ("properties", Value::Object(properties)),
@@ -166,12 +166,14 @@ fn parse(args: &Object) -> Result<Query, ToolError> {
 }
 
 pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
-    // Direct handler callers cannot bypass discovery, sponsored-profile
-    // exclusions or either independent disclosure grant.
-    if !backend.options.pulls
-        || !backend.options.artifacts
-        || backend.options.agent_token_file.is_some()
-    {
+    // Direct handler callers must retain the authenticated operation, not just
+    // the launch ceiling. Agent evidence reads never inherit artifact custody.
+    if !backend.options.pulls {
+        return Err(ToolError::invalid("tool_not_granted"));
+    }
+    if backend.agent.is_some() || backend.options.agent_token_file.is_some() {
+        super::agent::check_operation(backend, fgit_identity::agent::PULLS_CHECK_EVIDENCE_READ)?;
+    } else if !backend.options.artifacts {
         return Err(ToolError::invalid("tool_not_granted"));
     }
     let query = parse(args)?;

@@ -14,11 +14,12 @@ and `--allow-source`, using a canonical credential explicitly issued with
 also needs those independent source APIs. Existing grants, including masks
 `0x007f`, `0x00ff` and `0x01ff`, gain no candidate authority after an upgrade.
 
-Sponsored discovery exposes only `prepare_patch` with omitted profile or
-`exact-tree-v1`, and `inspect` for an uploaded single-parent candidate. Initial
-history, symlink preparation, replay, rebase, PR and queue operations are refused
-before authentication or native dispatch. The trusted-local schema retains its
-existing operations.
+Sponsored discovery exposes only `prepare_patch` with omitted profile,
+`exact-tree-v1`, explicit `exact-tree-binary-v1`, `exact-symlink-v1` or
+`exact-gitlink-v1`, and
+`inspect` for an uploaded single-parent candidate. Initial history, replay, rebase,
+PR and queue operations are refused before authentication or native dispatch.
+The trusted-local schema retains its existing operations.
 
 Every call authenticates the current grant and borrows its opaque candidate
 capability. Native construction and inspection retain the original agent,
@@ -29,10 +30,15 @@ scoped request cannot acquire a trusted-owner context. Revocation applies on the
 next call, including after restarting the MCP process.
 
 Returned `publication_arguments` are unsigned data for an independently
-authorized publisher. No source-publication, approval or merge tool is exposed
-to the sponsored profile. The work creates no durable agent execution run,
-process, network access or secret capability. The existing MCP artifact bounds
-below apply equally to both profiles.
+authorized publisher. A sponsored client may separately obtain the canonical
+`source-publish` grant with its bounded ref/path scope and the
+`--allow-source-writes` launch ceiling, then submit those arguments and an
+original retry key to `frankengit_source_publish`. See
+[MCP source publication](MCP_SOURCE_WRITES.md#sponsored-agent-publication).
+Candidate permission alone still grants no publication, approval or merge.
+The work creates no durable agent execution run, process, network access or
+secret capability. The existing MCP artifact bounds below apply equally to
+both profiles.
 
 ## Prepare a patch without publication
 
@@ -66,7 +72,27 @@ semantics and refusals apply, including regular-file creation/deletion/modes,
 explicit supported renames and binary patch records. No fuzzy application or
 unsupported fallback is introduced by MCP.
 
-In the trusted-local profile, `prepare_patch` may explicitly select
+Both trusted-local and sponsored callers may explicitly select
+`"profile": "exact-tree-binary-v1"` to rename and edit a regular binary file in
+one candidate. This uses the existing [native binary-refactoring
+profile](NATIVE_BINARY_REFACTORING.md): the patch must name both original
+endpoints, provide full nonzero old/new blob identities in the repository's
+hash domain, and carry verified forward and reverse Git binary members.
+The destination must be absent in the original tree. Regular executable-mode
+changes are preserved. A corrupt member, wrong identity, occupied destination,
+overlapping rename or failure in any later patch section refuses the whole
+candidate. This profile does not permit symlinks or gitlinks.
+
+An omitted profile or explicit `"exact-tree-v1"` keeps the previous grammar,
+including its refusal of edited binary renames. The new selector works with
+either `patch` or `patch_hex_chunks` and does not enlarge their byte limits.
+Preparation reports `"profile": "exact-tree-binary-v1"` and exact removal and
+creation receipts. Pass its unchanged `publication_arguments` to `inspect` to
+review the complete resulting tree; binary entries expose blob identity, mode
+and byte count without decoding the payload as text. Publication continues to
+require the independent publisher and its original retry key.
+
+Both trusted-local and sponsored callers may explicitly select
 `"profile": "exact-symlink-v1"` to
 create, edit, delete or rename Git symlink blobs using mode `120000`. An omitted
 profile, or explicit `"exact-tree-v1"`, retains the existing regular-file
@@ -74,9 +100,23 @@ behavior. Link targets are inert bytes and are never traversed or materialized
 on the host. The same native parser, source/index verification, both-endpoint
 rename authorization, cumulative byte limits and complete candidate rules
 apply. The result reports the effective `profile` and exact `120000` path
-receipts. The option adds no new MCP grant, publication authority, host path
-input or sponsored-agent access; existing saved-bundle review and publication
-remain required.
+receipts. The option adds no new MCP grant, publication authority or host path
+input. Sponsored calls must borrow the original `SourceCandidateRequest`; the
+native symlink entrypoint retains its namespace, raw input reservation and
+deadline and cannot replace a stopped context with a renewed one. Existing
+saved-bundle review and independently authorized publication remain required.
+
+Both caller profiles may also select `"profile": "exact-gitlink-v1"` for
+submodule-pointer creation, update and deletion plus ordinary text edits such
+as `.gitmodules`. The [native full-index pointer grammar](NATIVE_EXACT_PATCH.md#explicit-opaque-gitlink-profile)
+binds the old pointer to the selected tree and the new pointer to the complete
+patched image. Foreign targets are never fetched, imported or traversed. This
+profile refuses binary sections, symlinks, renames and entry-type conversions;
+the old profiles continue to refuse gitlinks. Its path receipts use `old_object`
+and `new_object` for every path, with the octal mode string `"160000"` for
+gitlinks. A deletion has a null new object and mode. Older profiles keep their
+existing blob keys. The same request, independent grants and transport bounds
+apply; this selector adds no publication authority.
 
 The complete result carries source RCR/base, candidate commit/tree, exact patch
 and bundle SHA-256, changed-path blob/mode receipts and `publication_arguments`.

@@ -356,15 +356,11 @@ impl OneNode {
         let mut threads = BTreeMap::new();
         for thread in source.threads {
             // A retained inbox snapshot never revives permission to see a PR.
-            // Filter both refs with CURRENT canonical policy before installing
+            // Filter all current and historical refs with CURRENT policy before installing
             // the derived projection or disclosing title, activity or reasons.
-            if thread
+            if !thread
                 .subject
-                .pull_request_refs()
-                .is_some_and(|(source, target)| {
-                    current.hidden_refs.hides(source.as_bytes())
-                        || current.hidden_refs.hides(target.as_bytes())
-                })
+                .permits_disclosure(|reference| !current.hidden_refs.hides(reference.as_bytes()))
             {
                 continue;
             }

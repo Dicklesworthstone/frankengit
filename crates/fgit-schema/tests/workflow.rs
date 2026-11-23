@@ -319,9 +319,17 @@ fn condition_and_literal_profiles_are_normalized_while_broader_constructs_still_
         compile(static_matrix, &Limits::DEFAULT).unwrap().jobs.len(),
         2
     );
-    for invalid in [
+    for selected in [
         static_matrix.replace("fail-fast: false", "fail-fast: true"),
         static_matrix.replace("      fail-fast: false\n", ""),
+    ] {
+        let graph = compile(&selected, &Limits::DEFAULT).unwrap();
+        assert_eq!(graph.jobs.len(), 2);
+        assert!(graph.has_matrix_fail_fast());
+    }
+    for invalid in [
+        static_matrix.replace("fail-fast: false", "fail-fast: yes"),
+        static_matrix.replace("fail-fast: false", "fail-fast: '${{ matrix.mode }}'"),
         static_matrix.replace("      matrix:", "      unsupported: value\n      matrix:"),
     ] {
         assert!(compile(&invalid, &Limits::DEFAULT).is_err());

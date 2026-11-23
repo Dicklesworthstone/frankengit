@@ -41,7 +41,40 @@ pub(super) fn tools() -> Vec<Tool> {
         (PUBLISH_REBASE, "Publish an independently inspected native linear-rebase bundle through ordinary atomic admission. The exact old SOURCE tip is the branch lease; onto is only the bundle prerequisite. Requires the original retry key and explicit source-write grant. Retains native protection and complete-series validation; recovered outcomes are historical decisions, not new bundle or replay-equivalence attestations. Sponsored profiles exclude this tool."),
     ].into_iter().map(|(name, description)| Tool { name, description, schema: schema(name) }).collect()
 }
+pub(super) fn agent_tool() -> Tool {
+    Tool {
+        name: PUBLISH,
+        description: "Publish one inspected single-parent native Git bundle at an exact existing branch and base under the independent canonical source-publish grant. Requires the source-write launch ceiling and the credential's current ref and changed-path scope. At most 24 KiB in three hex chunks. Native quarantine, full change verification and current branch protections remain mandatory. Use the original retry key; a recovered receipt is a historical decision. No initial history, branch creation, rebase, review, merge or Git receive authority.",
+        schema: schema_for_profile(PUBLISH, true),
+    }
+}
+
+pub(super) fn agent_branch_tool() -> Tool {
+    Tool {
+        name: CREATE,
+        description: "Create one absent task branch at the exact current tip of a visible branch under the independent canonical source-branch-create grant and source-write launch ceiling. The credential's finite destination-ref scope, current visibility, ordinary protection, original retry key and agent/sponsor evidence remain mandatory. No object import, new commit, branch overwrite, update, deletion, rename, atomic multi-branch transaction or merge authority. A recovered receipt is a historical decision, not a claim about today's refs.",
+        schema: schema_for_profile(CREATE, true),
+    }
+}
+
+/// This closed profile gate runs before credential lookup and is repeated by
+/// the handler so bypassing protocol dispatch cannot open an operator route.
+pub(super) fn agent_operation(name: &str, args: &Object) -> Result<(), ToolError> {
+    match name {
+        PUBLISH if !args.contains_key("initial") => Ok(()),
+        CREATE => require_fields(
+            args,
+            &["reference", "reference_hex", "target", "idempotency_key"],
+        ),
+        _ => Err(ToolError::invalid("tool_not_granted")),
+    }
+}
+
 fn schema(name: &str) -> Value {
+    schema_for_profile(name, false)
+}
+
+fn schema_for_profile(name: &str, agent: bool) -> Value {
     if name == PUBLISH_REBASE {
         return rebase::schema();
     }
@@ -107,7 +140,7 @@ fn schema(name: &str) -> Value {
             ),
         );
     }
-    if name == PUBLISH {
+    if name == PUBLISH && !agent {
         initial::schema(result)
     } else {
         result
@@ -252,6 +285,10 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
     if !backend.options.writes.source || !is_tool(name) {
         return Err(ToolError::invalid("tool_not_granted"));
     }
+    let sponsored = backend.options.agent_token_file.is_some() || backend.agent.is_some();
+    if sponsored {
+        agent_operation(name, args)?;
+    }
     if name == PUBLISH_REBASE {
         return rebase::call(backend, args);
     }
@@ -260,12 +297,16 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
     }
     let key = common::key(args)?;
     let input = parse(name, args, backend.options.format)?;
-    let session = common::session(backend, key)?;
+    let session = if sponsored {
+        super::agent::session(backend, key)?
+    } else {
+        common::session(backend, key)?
+    };
     let principal = session
         .authenticated_session()
         .ok_or(ToolError::invalid("principal_not_bound"))?
         .principal_id();
-    let request = fgit_cli::command_request_context(&backend.node);
+    let request = backend.command_context();
     let admitted = if let Some(bytes) = &input.bundle {
         let command = &input.commands[0];
         let (ExpectedOld::Exactly(base), ProposedNew::Update(candidate)) =
@@ -273,17 +314,57 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
         else {
             return Err(ToolError::invalid("invalid_publication_shape"));
         };
+        if sponsored {
+            // The session above checks the original key and supplies receipt
+            // attribution only. Actual publication needs the opaque independent
+            // grant and retains its original request deadline.
+            let publication = super::agent::source_publication_request(backend)?;
+            backend
+                .node
+                .runtime()
+                .block_on(backend.node.apply_agent_workspace_bundle_in(
+                    &request,
+                    &publication,
+                    &command.name,
+                    base,
+                    candidate,
+                    bytes,
+                ))
+        } else {
+            backend
+                .node
+                .runtime()
+                .block_on(backend.node.apply_workspace_bundle_durable_in(
+                    &request,
+                    principal,
+                    common::required(args, "idempotency_key")?.as_bytes(),
+                    &command.name,
+                    base,
+                    candidate,
+                    bytes,
+                ))
+        }
+    } else if sponsored {
+        let [command] = input.commands.as_slice() else {
+            return Err(ToolError::invalid("invalid_branch_creation_shape"));
+        };
+        let (ExpectedOld::Absent, ProposedNew::Update(target)) =
+            (command.expected_old, command.proposed_new)
+        else {
+            return Err(ToolError::invalid("invalid_branch_creation_shape"));
+        };
+        // This opaque request is independent of publication authority. Do not
+        // send sponsored branch commands through the broad operator adapter.
+        let creation = super::agent::source_branch_creation_request(backend)?;
         backend
             .node
             .runtime()
-            .block_on(backend.node.apply_workspace_bundle_durable_in(
+            .block_on(backend.node.create_agent_branch_in(
                 &request,
-                principal,
-                common::required(args, "idempotency_key")?.as_bytes(),
+                &creation,
                 &command.name,
-                base,
-                candidate,
-                bytes,
+                target,
+                Default::default(),
             ))
     } else if name == TRANSACTION {
         backend

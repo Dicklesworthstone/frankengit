@@ -91,6 +91,27 @@ fn preparation_keeps_queue_and_review_subject_guards_without_write_authority() {
 }
 
 #[test]
+fn builtin_attributes_selection_retains_the_original_queue_landing_guard() {
+    let Operation::Prepare(expected) = options::parse(&candidate_args("prepare"))
+        .unwrap()
+        .operation
+    else {
+        panic!()
+    };
+    let mut args = candidate_args("prepare");
+    replace(&mut args, "--profile", "builtin-attributes-v1");
+    let Operation::Prepare(selected) = options::parse(&args).unwrap().operation else {
+        panic!()
+    };
+    assert_eq!(selected.profile, MergeProfile::BuiltinAttributesV1);
+    assert_eq!(selected.number, expected.number);
+    assert_eq!(selected.expected_version, expected.expected_version);
+    assert_eq!(selected.subject, expected.subject);
+    assert_eq!(selected.metadata, expected.metadata);
+    assert_eq!(selected.output, expected.output);
+}
+
+#[test]
 fn candidate_metadata_and_native_hash_formats_are_explicit() {
     for (format, width) in [("sha1", 20), ("sha256", 32)] {
         for action in ["prepare", "land-candidate"] {

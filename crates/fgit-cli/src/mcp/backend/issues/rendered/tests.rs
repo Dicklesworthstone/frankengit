@@ -70,7 +70,7 @@ fn profiles_are_explicit_and_raw_mode_is_byte_compatible() {
 }
 
 #[test]
-fn all_four_read_descriptors_expose_the_same_closed_render_grammar() {
+fn all_metadata_read_descriptors_expose_the_same_closed_render_grammar() {
     let tools = super::super::tools()
         .into_iter()
         .chain(super::super::super::pulls::tools());
@@ -85,7 +85,7 @@ fn all_four_read_descriptors_expose_the_same_closed_render_grammar() {
             Value::Array(PROFILES.into_iter().map(text).collect())
         );
     }
-    assert_eq!(count, 4);
+    assert_eq!(count, 6);
 }
 
 #[test]

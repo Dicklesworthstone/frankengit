@@ -400,7 +400,7 @@ impl<'repo, R: UploadPackRepository> UploadRpc<'repo, R> {
                     self.pack_request = Some(request);
                     self.command_complete = true;
                 }
-                WireEvent::LsRefs { .. } => {
+                WireEvent::LsRefs { .. } | WireEvent::ObjectInfo { .. } => {
                     if self.command_complete {
                         return Err(RpcError::MultipleCommands);
                     }

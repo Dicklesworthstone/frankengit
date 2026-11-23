@@ -353,13 +353,14 @@ def exercise(fg: str, git: Git, root: Path, fmt: str, transport: str, source: di
                    and cloned.returncode == 0 and missing(git, v0) == omitted(git, source["path"], "blob:none"),
                    text(cloned))
         for name, spec in (("expression", "sparse:oid=main:.sparse-patterns"),
+                           ("revision-operator", "sparse:oid=main~1:.sparse-patterns"),
                            ("object-id", f"sparse:oid={git.out('-C', source['path'], 'rev-parse', 'main:.sparse-patterns')}")):
             for version in ("2", "0"):
                 target = root / f"clone-{prefix}-sparse-{name}-v{version}"
                 result = git.run("-c", f"protocol.version={version}", "clone", "-q", "--no-checkout", f"--filter={spec}",
                                  url, target, env=env)
                 said = text(result)
-                if name == "expression":
+                if name == "revision-operator":
                     fatal = [line for line in said.splitlines() if line.startswith("fatal:")]
                     checks.add(f"{prefix}-sparse-{name}-v{version}-refused",
                                result.returncode != 0 and not target.exists() and fatal[:1] == [SPARSE_REFUSAL],

@@ -28,6 +28,7 @@ function resolutionPath(value) {
   }
   return bytes;
 }
+export { identity as resolutionIdentity, resolutionPath };
 function conflictRows(report, fields) {
   record(report);
   if (report.state !== 'conflicted' || report.type !== 'merge_preparation' || report.profile !== 'path-merge-v1' ||

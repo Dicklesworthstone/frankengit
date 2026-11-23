@@ -46,14 +46,44 @@ Base status values used below are `required-v1`, `planned`, `experimental-v1`, `
 | Archive generation | required-v1 subset | Pure-Rust tar/zip generation, path safety, deterministic ordering, resource bounds |
 | Diff/merge | required-v1 core | Pure-Rust Myers/patience/histogram-style diff profiles and deterministic merge; oracle corpus for observable behavior |
 
+## Exact-name fetches with protocol v2
+
+Authenticated upload-pack views advertise `fetch=... ref-in-want` over raw
+Git, SSH's shared Git command path and smart HTTP. A request may name visible
+refs with `want-ref`, alongside ordinary OID wants. Resolution and pack
+selection use the same immutable request snapshot; earlier `ls-refs` output
+is not treated as the current tip. The response includes the exact requested
+name/OID pairs before its pack section. Hidden, deleted and nonexistent names
+receive the same validated-name Git error, with no pack construction.
+
+The [ref-in-want profile](GIT_REF_IN_WANT.md) defines aliases, unpeeled tags,
+raw-byte names, duplicate refusal, shared selector/output limits and
+cancellation. The wire suite covers both hash formats and the shared HTTP
+adapter; native tests cover persisted visibility, restart and actual pack
+construction. This capability does not expand the historical stock-client
+campaign totals below or imply a completed cross-transport qualification.
+
+## Negotiation-only fetches with protocol v2
+
+Native upload-pack advertises `wait-for-done` through the shared Git/SSH and
+HTTP capability renderer. Have-only requests return bounded ACK/NAK responses
+without selecting a pack, and persistent sessions can carry successive rounds
+or a fresh normal fetch. The [negotiation-only profile](GIT_NEGOTIATION_ONLY.md)
+describes visibility, request reset, resource and cancellation boundaries.
+Authored wire/native regressions remain unexecuted for this change; historical
+stock-client and Tier A totals below are unchanged.
+
 ## Executed stock-client rows: partial clone, notes, gitlinks, atomic push, push options
 
-Current implementation supports `sparse:oid=<exact visible blob OID>` through
-the shared native selector. Symbolic blob expressions and `sparse:path` remain
-unsupported. See [the supported grammar and bounds](PARTIAL_CLONE_SERVING.md#sparse-pattern-blobs).
+Current implementation supports `sparse:oid=<exact visible blob OID>` and
+`sparse:oid=<visible ref>:<repository path>` through the shared native selector.
+Symbolic names support HEAD, full refs, unambiguous short branch/tag names and
+annotated-tag peeling. Revision operators and `sparse:path` remain unsupported.
+See [the supported grammar and bounds](PARTIAL_CLONE_SERVING.md#sparse-pattern-blobs).
 The historical sparse-refusal results below remain tied to their named
-revision. The stock-transport helper now exercises exact-OID omission and lazy
-checkout against Git's own omitted set, but that updated campaign requires its
+revision. The stock-transport helper now exercises exact-OID and ref/path
+omission and lazy checkout against Git's own omitted set, beside an unsupported
+revision-expression refusal, but that updated campaign requires its
 own execution; the old passing result does not validate the new capability.
 
 These rows come from one discovered suite, `suites-transport-stock_transport_capabilities`

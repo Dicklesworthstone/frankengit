@@ -10,12 +10,16 @@ mod core;
 mod discussions;
 mod historical;
 mod indexed_search;
+mod issue_search;
 mod labels;
 mod locking;
 mod milestones;
 mod notifications;
 mod pull_append;
+mod pull_labels;
 mod pull_reopen;
+mod pull_retarget;
+mod pull_search;
 mod queues;
 mod rebase;
 mod tags;
@@ -109,6 +113,7 @@ const ADDITIONS: &[McpToolEntry] = &[
     append::ENTRY,
     milestones::CLEAR,
     locking::LOCK,
+    issue_search::ENTRY,
     milestones::SET,
     locking::UNLOCK,
     milestones::CLOSE,
@@ -119,7 +124,11 @@ const ADDITIONS: &[McpToolEntry] = &[
     milestones::SHOW,
     pull_append::ENTRY,
     check_evidence::READ,
+    pull_labels::READ,
     pull_reopen::ENTRY,
+    pull_retarget::ENTRY,
+    pull_search::ENTRY,
+    pull_labels::WRITE,
     queues::DEQUEUE,
     queues::ENQUEUE,
     queues::LAND,

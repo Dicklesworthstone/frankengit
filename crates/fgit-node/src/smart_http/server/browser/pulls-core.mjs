@@ -103,6 +103,51 @@ export function pinned(reply, previous = null, expected = null) {
   if (expected !== null && expected !== head) fail('Snapshot moved. Reload explicitly rather than combining views.');
   return { binding: scope, head };
 }
+// Label identity is the exact UTF-8 string. Native ordering compares encoded
+// bytes, which differs from JavaScript's default UTF-16 order for some names.
+export function pullLabels(values, canonical = false) {
+  if (!Array.isArray(values) || values.length > 32) fail('Choose at most 32 distinct PR labels.');
+  const ordered = values.map(value => {
+    text(value, 64, 'PR label');
+    // Rust str::trim uses Unicode White_Space. JavaScript trim also removes
+    // U+FEFF, which is a valid literal label byte sequence in the native model.
+    if (/^[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]*$/u.test(value) ||
+        /[\u0000-\u001f\u007f-\u009f]/u.test(value)) fail('Invalid blank or control-containing PR label.');
+    return value;
+  });
+  ordered.sort((a, b) => {
+    const left = hex(utf8.encode(a)), right = hex(utf8.encode(b));
+    return left < right ? -1 : left > right ? 1 : 0;
+  });
+  if (new Set(ordered).size !== ordered.length) fail('Duplicate PR label.');
+  if (canonical && ordered.some((value, index) => value !== values[index])) fail('PR labels are not canonically ordered.');
+  return ordered;
+}
+export function pullLabelState(row, { optional = false } = {}) {
+  record(row);
+  const names = ['labels', 'labels_version', 'labels_actor'];
+  if (optional && names.every(name => !Object.hasOwn(row, name))) return null;
+  const labels = pullLabels(row.labels, true), version = integer(row.labels_version, 'PR labels version');
+  if (version === 0) {
+    if (labels.length || row.labels_actor !== null) fail('Uninitialized PR labels contain published state.');
+  } else principal(row.labels_actor);
+  return { labels, version, actor: row.labels_actor };
+}
+export function pullLabelsReply(reply, number, observed, scope) {
+  const selected = pinned(reply, scope, observed.head), row = observed.reply.pull_request;
+  if (reply.type !== 'pull_request_labels' || reply.number !== number || typeof reply.found !== 'boolean' ||
+      reply.read_only !== true || reply.transaction_created !== false ||
+      reply.source_head !== observed.reply.source_head) fail('Invalid or unpinned PR labels observation.');
+  if (reply.found) {
+    if (!row?.data || row.number !== number || reply.pull_request_version !== row.version) fail('PR labels refer to another metadata observation.');
+    pullLabelState(reply);
+    const existing = pullLabelState(row, { optional: true });
+    if (existing && (existing.version !== reply.labels_version || existing.actor !== reply.labels_actor ||
+        JSON.stringify(existing.labels) !== JSON.stringify(reply.labels))) fail('PR labels changed within the selected snapshot.');
+  } else if (reply.pull_request_version !== null || reply.labels_version !== null ||
+      reply.labels_actor !== null || reply.labels !== null) fail('Missing PR labels disclosed another record.');
+  return { ...selected, reply };
+}
 export function prData(row, algorithm) {
   record(row);
   if (format(row.object_format) !== algorithm) fail('PR object format changed.');
@@ -114,6 +159,7 @@ export function prData(row, algorithm) {
 }
 export function prRow(row, algorithm) {
   record(row); integer(row.number, 'PR number', 1); integer(row.version, 'PR version', 1);
+  pullLabelState(row, { optional: true });
   if (!['open', 'closed', 'merged'].includes(row.state) || typeof row.merge_only !== 'boolean') fail('Invalid PR lifecycle.');
   if (row.data === null) { if (!row.merge_only || row.state !== 'merged') fail('Missing PR metadata.'); }
   else { prData(row.data, algorithm); if (row.merge_only) fail('Inconsistent PR metadata.'); }
@@ -128,13 +174,86 @@ export function prRow(row, algorithm) {
   } else if (row.merge !== null) fail('Unmerged PR has a merge record.');
   return row;
 }
-export function listReply(reply, { after = 0, limit = 20, head = null, scope = null } = {}) {
+export function listReply(reply, { after = 0, limit = 20, head = null, scope = null, labels = [] } = {}) {
   const selected = pinned(reply, scope, head);
+  const wanted = pullLabels(labels, true);
+  if (Object.hasOwn(reply, 'labels') ? JSON.stringify(pullLabels(reply.labels, true)) !== JSON.stringify(wanted) : wanted.length) fail('PR label filters changed.');
   if (reply.type !== 'pull_request_page' || reply.after !== after || reply.limit !== limit || !Array.isArray(reply.pull_requests) || reply.pull_requests.length > limit) fail('Invalid PR page.');
   let previous = after;
-  for (const row of reply.pull_requests) { prRow(row, selected.binding.format); if (row.number <= previous) fail('Invalid PR ordering.'); previous = row.number; }
+  for (const row of reply.pull_requests) {
+    prRow(row, selected.binding.format);
+    if (wanted.length && (!Array.isArray(row.labels) || wanted.some(label => !row.labels.includes(label)))) fail('PR row does not match every selected label.');
+    if (row.number <= previous) fail('Invalid PR ordering.'); previous = row.number;
+  }
   if (reply.next_after !== null && (reply.pull_requests.length !== limit || reply.next_after !== previous)) fail('Invalid PR continuation.');
   return { ...selected, reply };
+}
+// A search is one immutable predicate over a selected authority snapshot. Raw
+// reference aliases normalize to native bytes; display labels are never refs.
+export function pullSearchQuery(input = {}) {
+  keys(input, ['state', 'opened_by', 'source_ref', 'source_ref_hex', 'target_ref', 'target_ref_hex', 'query', 'case_sensitive']);
+  const result = { state: input.state === undefined ? 'all' : input.state, opened_by: input.opened_by ?? null,
+    source_ref_hex: null, target_ref_hex: null, query: input.query ?? null,
+    case_sensitive: input.case_sensitive === undefined ? false : input.case_sensitive };
+  if (!['all', 'open', 'closed', 'merged'].includes(result.state)) fail('Choose a valid PR search state.');
+  if (result.opened_by !== null) principal(result.opened_by);
+  for (const name of ['source_ref', 'target_ref']) {
+    const encoded = `${name}_hex`, hasText = input[name] !== undefined && input[name] !== null,
+      hasHex = input[encoded] !== undefined && input[encoded] !== null;
+    if (hasText && hasHex) fail(`Supply exactly one ${name} search encoding.`);
+    if (hasText || hasHex) result[encoded] = commandReference({ [hasText ? name : encoded]: input[hasText ? name : encoded] }, name).hex;
+  }
+  if (result.query !== null && !text(result.query, 256, 'PR search query').length) fail('An explicit PR search query cannot be empty.');
+  if (typeof result.case_sensitive !== 'boolean' || (result.case_sensitive && result.query === null)) fail('Case-sensitive search requires a literal query.');
+  return Object.freeze(result);
+}
+export function pullSearchParameters(input = {}) {
+  keys(input, ['after', 'limit', 'maxScan', 'head', 'render']);
+  const { after = 0, limit = 20, maxScan = 200, head = null, render = false } = input;
+  integer(after, 'PR search cursor'); integer(limit, 'PR search page size', 1, 100);
+  integer(maxScan, 'PR search scan limit', 1, 1000);
+  if (head !== null) snapshot(head);
+  if (after && head === null) fail('PR search continuation requires its original snapshot.');
+  if (typeof render !== 'boolean') fail('Invalid Markdown presentation choice.');
+  return Object.freeze({ after, limit, maxScan, head, render });
+}
+function matchesPullSearch(row, query) {
+  if (query.state !== 'all' && row.state !== query.state) return false;
+  if (query.opened_by !== null && (row.data === null || row.opened_by !== query.opened_by)) return false;
+  const references = row.data ?? row.merge;
+  for (const name of ['source_ref_hex', 'target_ref_hex']) if (query[name] !== null && references[name] !== query[name]) return false;
+  if (query.query === null) return true;
+  if (row.data === null) return false;
+  const fold = value => query.case_sensitive ? value : value.replace(/[A-Z]/g, letter => letter.toLowerCase());
+  const literal = fold(query.query);
+  return fold(row.data.title).includes(literal) || fold(row.data.body).includes(literal);
+}
+export function pullSearchReply(reply, input = {}, options = {}) {
+  const { scope = null, ...page } = options, parameters = pullSearchParameters(page), query = pullSearchQuery(input);
+  const { after, limit, maxScan, head } = parameters, selected = pinned(reply, scope, head);
+  keys(reply.filters, Object.keys(query));
+  if (Object.keys(query).some(name => reply.filters[name] !== query[name])) fail('PR search filters changed. Restart explicitly.');
+  if (reply.type !== 'pull_request_search' || reply.after !== after || reply.limit !== limit || reply.max_scan !== maxScan ||
+      !Array.isArray(reply.pull_requests) || reply.pull_requests.length > limit || reply.count !== reply.pull_requests.length) fail('Invalid PR search page.');
+  integer(reply.scanned, 'scanned PR count', reply.count, maxScan);
+  let previous = after;
+  for (const row of reply.pull_requests) {
+    prRow(row, selected.binding.format);
+    if (row.number <= previous || !matchesPullSearch(row, query)) fail('Invalid or nonmatching PR search result.');
+    previous = row.number;
+  }
+  if (reply.stop_reason === 'exhausted') {
+    if (reply.complete !== true || reply.next_after !== null) fail('Invalid exhausted PR search.');
+  } else {
+    integer(reply.next_after, 'PR search continuation', after + 1);
+    if (reply.complete !== false || reply.scanned === 0 || reply.next_after < previous || reply.next_after - after < reply.scanned) fail('Invalid PR search continuation.');
+    if (reply.stop_reason === 'result_limit') {
+      if (reply.count !== limit) fail('Invalid PR search result limit.');
+    } else if (reply.stop_reason === 'scan_limit') {
+      if (reply.scanned !== maxScan || reply.count >= limit) fail('Invalid PR search scan limit.');
+    } else fail('Unknown PR search stopping reason.');
+  }
+  return { ...selected, reply, query, parameters };
 }
 export function showReply(reply, number, { head = null, scope = null } = {}) {
   const selected = pinned(reply, scope, head);
@@ -205,7 +324,7 @@ export function form(fields) {
   return body;
 }
 export function metadataCommand(action, fields) {
-  if (!['open', 'update', 'close', 'reopen'].includes(action)) fail('Unsupported PR metadata action.');
+  if (!['open', 'update', 'close', 'reopen', 'retarget'].includes(action)) fail('Unsupported PR metadata action.');
   keys(fields, ['expected_version', 'object_format', 'source_ref', 'target_ref', 'source_tip', 'target_tip', 'title', 'body']);
   const version = integer(fields.expected_version, 'expected PR version', 0, Number.MAX_SAFE_INTEGER - 1);
   if ((action === 'open') !== (version === 0)) fail('Only a new PR uses expected version zero.');
@@ -217,7 +336,7 @@ export function metadataCommand(action, fields) {
   form(result); return result;
 }
 export function rootFor(href, suffix = '/ui/pulls/') {
-  if (!['/ui/pulls/', '/ui/source/', '/ui/initial/', '/ui/branches/', '/ui/search/', '/ui/transfers/', '/ui/tags/', '/ui/replay/', '/ui/rebase/', '/ui/queues/', '/ui/artifacts/'].includes(suffix)) fail('Unsupported browser profile.');
+  if (!['/ui/pulls/', '/ui/source/', '/ui/initial/', '/ui/branches/', '/ui/default-branch/', '/ui/search/', '/ui/transfers/', '/ui/tags/', '/ui/replay/', '/ui/rebase/', '/ui/queues/', '/ui/artifacts/'].includes(suffix)) fail('Unsupported browser profile.');
   const page = new URL(href);
   if (!['https:', 'http:'].includes(page.protocol) || page.search || page.hash || page.username || page.password || !page.pathname.endsWith(suffix)) fail(`Open the exact repository ${suffix} endpoint.`);
   if (page.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(page.hostname)) fail('Use HTTPS outside loopback.');
@@ -275,9 +394,9 @@ export function apiError(status) {
 // a key, resubmit a body during outcome lookup, or turn a read into a write.
 function requirePublicationEnvelope(path, method, body, key, read) {
   const route = path.split('?', 1)[0];
-  const publication = /^pulls\/[1-9][0-9]*\/(?:open|update|close|reopen|merge|fast-forward|reviews\/(?:approve|request-changes|withdraw))$/.test(route) ||
+  const publication = /^pulls\/[1-9][0-9]*\/(?:open|update|close|reopen|retarget|merge|fast-forward|reviews\/(?:approve|request-changes|withdraw))$/.test(route) ||
     /^queues\/[1-9][0-9]*\/(?:enqueue|dequeue|reorder|land|land-candidate)$/.test(route) ||
-    (method !== 'GET' && /^pulls\/[1-9][0-9]*\/comments(?:\/append)?$/.test(route)) ||
+    (method !== 'GET' && /^pulls\/[1-9][0-9]*\/(?:comments(?:\/append)?|labels)$/.test(route)) ||
     /^source\/(?:apply|initial\/apply|rebase\/apply|branches\/(?:create|update|delete|rename|transaction)|bundle\/(?:import|fetch)|tags\/(?:lightweight|annotated|delete))$/.test(route);
   const recovery = route === 'outcomes';
   if ((publication || recovery) && (path !== route || method !== 'POST' || read !== false ||
@@ -296,7 +415,7 @@ function recoverySelection(value) {
 // Abort an old view without cancelling a submitted mutation; disconnect cancels
 // both but never erases the pending request's responsibility.
 export class Transport {
-  #fetch; #crypto; #token = ''; #fingerprint = ''; #recovery = null; #epoch = 0; #all = new Set(); #reads = new Set(); #timeout; #source; #initial; #branches; #search; #transfers; #tags; #replay; #rebase; #checkEvidence; #queues; #artifacts;
+  #fetch; #crypto; #token = ''; #fingerprint = ''; #recovery = null; #epoch = 0; #all = new Set(); #reads = new Set(); #timeout; #source; #initial; #branches; #defaultBranch; #search; #transfers; #tags; #replay; #rebase; #checkEvidence; #queues; #artifacts;
   // WebIDL fetch refuses any receiver but the global (Chrome: "Illegal invocation"),
   // so the stored fetch is always invoked as a plain call, never as a method of this client.
   constructor({ href, fetchImpl = globalThis.fetch, cryptoImpl = globalThis.crypto, timeoutMs = 30_000, pageSuffix = '/ui/pulls/', checkEvidenceOnly = false }) {
@@ -304,6 +423,7 @@ export class Transport {
     this.#checkEvidence = checkEvidenceOnly;
     this.#queues = pageSuffix === '/ui/queues/';
     this.#artifacts = pageSuffix === '/ui/artifacts/';
+    this.#defaultBranch = pageSuffix === '/ui/default-branch/';
     this.root = Object.freeze(rootFor(href, pageSuffix)); this.#source = pageSuffix === '/ui/source/'; this.#initial = pageSuffix === '/ui/initial/'; this.#branches = pageSuffix === '/ui/branches/'; this.#search = pageSuffix === '/ui/search/'; this.#transfers = pageSuffix === '/ui/transfers/'; this.#tags = pageSuffix === '/ui/tags/'; this.#replay = pageSuffix === '/ui/replay/'; this.#rebase = pageSuffix === '/ui/rebase/'; this.#fetch = (...request) => fetchImpl(...request); this.#crypto = cryptoImpl;
     this.#timeout = integer(timeoutMs, 'timeout', 1, 300_000);
   }
@@ -348,6 +468,46 @@ export class Transport {
     if (!Array.isArray(headerNames) || headerNames.length > 16 || headerNames.some(name => typeof name !== 'string' || !/^[a-z0-9-]{1,64}$/i.test(name))) fail('Invalid response header selection.');
     const capturedHeaders = [...headerNames];
     const url = new URL(path, this.root.api);
+    if (this.#defaultBranch) {
+      const observation = /^default-branch(?:\?[^#]+)?$/.test(path) && method === 'GET';
+      const listing = path === 'source/refs';
+      const publication = path === 'default-branch' && method === 'POST';
+      const outcome = path === 'outcomes';
+      if (!(observation || listing || publication || outcome) || binary || headerNames.length ||
+          contentType !== 'application/x-www-form-urlencoded') fail('Invalid default-branch profile route.');
+      integer(maximum, 'default-branch response limit', 1, listing ? 1024 * 1024 : 32 * 1024);
+      if (observation || listing) {
+        if (key !== undefined || !read || statuses.length !== 1 || statuses[0] !== 200 ||
+            (observation ? body !== undefined : method !== 'POST')) fail('Default-branch observations are read-only.');
+      } else if (method !== 'POST' || read || typeof key !== 'string' || !/^[\x21-\x7e]{1,256}$/.test(key) ||
+          (outcome ? (body !== undefined || statuses.length !== 1 || statuses[0] !== 200)
+            : (statuses.length !== 2 || statuses[0] !== 200 || statuses[1] !== 409))) fail('Default-branch publication requires the original key and non-read lifecycle.');
+      if (observation) {
+        const entries = [...url.searchParams];
+        if (entries.length > 1 || entries.some(([name, value]) => name !== 'expected_head' || !/^alg:[12]:[0-9a-f]{64}$/.test(value))) fail('Invalid default-branch snapshot query.');
+      }
+      if (listing || publication) {
+        if (typeof body !== 'string' || utf8.encode(body).length > 8192) fail('Invalid default-branch form.');
+        const values = new URLSearchParams(body), seen = new Set();
+        const allowed = listing ? ['object_format', 'namespace', 'limit', 'cursor_encoding', 'expected_head', 'after']
+          : ['expected_default_hex', 'expect_no_default', 'reference_hex', 'expected_tip'];
+        for (const [name] of values) { if (seen.has(name) || !allowed.includes(name)) fail('Unknown or repeated default-branch field.'); seen.add(name); }
+        if (listing) {
+          if (values.get('namespace') !== 'branches' || values.get('cursor_encoding') !== 'hex' ||
+              !/^alg:[12]:[0-9a-f]{64}$/.test(values.get('expected_head') ?? '') || seen.size !== (values.has('after') ? 6 : 5)) fail('Default-branch candidates require the exact observed snapshot.');
+          format(values.get('object_format')); integer(decimal(values.get('limit'), 'reference page size', 1), 'reference page size', 1, 100);
+          if (values.has('after')) branchBytes(values.get('after'));
+        } else {
+          if (seen.size !== 3 || values.has('expected_default_hex') === values.has('expect_no_default')) fail('One exact old default expectation is required.');
+          if (values.has('expected_default_hex')) branchBytes(values.get('expected_default_hex'));
+          else if (values.get('expect_no_default') !== 'true') fail('Absent default requires an explicit true expectation.');
+          branchBytes(values.get('reference_hex'));
+          const tip = values.get('expected_tip');
+          if (typeof tip !== 'string' || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(tip)) fail('Native hexadecimal default-branch tip required.');
+          oid(tip, tip.length === 40 ? 'sha1' : 'sha256');
+        }
+      }
+    }
     if (this.#artifacts) {
       const content = /^artifacts\/[0-9a-f]{64}\/content$/.test(path);
       if (!/^artifacts\/[0-9a-f]{64}(?:\/content)?$/.test(path) || method !== 'GET' ||
@@ -436,6 +596,13 @@ export class Transport {
     if (/^pulls\/[1-9][0-9]*\/checks(?:\?|$)/.test(path) &&
         (method !== 'GET' || body !== undefined || key !== undefined || !read || binary ||
          statuses.length !== 2 || statuses[0] !== 200 || statuses[1] !== 404)) fail('PR checks are a closed read-only profile.');
+    if (/^pulls\/[1-9][0-9]*\/labels(?:\?|$)/.test(path)) {
+      const reading = method === 'GET';
+      if (binary || headerNames.length || contentType !== 'application/x-www-form-urlencoded' ||
+          (reading ? (body !== undefined || key !== undefined || !read || statuses.length !== 2 || statuses[0] !== 200 || statuses[1] !== 404)
+            : (method !== 'POST' || path.includes('?') || read || body === undefined || statuses.length !== 2 || statuses[0] !== 200 || statuses[1] !== 409))) fail('Invalid PR labels request.');
+      integer(maximum, 'PR labels response limit', 1, 32 * 1024);
+    }
     if (/^pulls\/[1-9][0-9]*\/comments(?:\/append)?(?:\?|$)/.test(path)) {
       const reading = method === 'GET';
       if ((reading && path.split('?', 1)[0].endsWith('/append')) || binary || contentType !== 'application/x-www-form-urlencoded' ||
@@ -443,7 +610,26 @@ export class Transport {
             : (method !== 'POST' || path.includes('?') || read || body === undefined || statuses.length !== 2 || statuses[0] !== 200 || statuses[1] !== 409))) fail('Invalid PR conversation request.');
       integer(maximum, 'conversation response limit', 1, REPLY_LIMIT);
     }
-    const allowed = this.#artifacts
+    if (/^pulls\/search(?:\?|$)/.test(path)) {
+      if (method !== 'GET' || body !== undefined || key !== undefined || !read || binary ||
+          statuses.length !== 1 || statuses[0] !== 200) fail('PR search is a bodyless read at one snapshot.');
+      integer(maximum, 'PR search response limit', 1, REPLY_LIMIT);
+    }
+    if (/^pulls\/[1-9][0-9]*\/(?:prepare-rebase|resolve-rebase|inspect-rebase)(?:\?|$)/.test(path)) {
+      const resolving = path.endsWith('/resolve-rebase'), preparing = !path.endsWith('/inspect-rebase');
+      const multipart = /^multipart\/form-data; boundary=[A-Za-z0-9-_.]{1,70}$/.test(contentType);
+      const formType = contentType === 'application/x-www-form-urlencoded';
+      if (method !== 'POST' || body === undefined || key !== undefined || !read || path.includes('?') || headerNames.length ||
+          binary !== preparing || (resolving ? !(formType || multipart) : preparing ? !formType : !multipart) ||
+          statuses.length !== (preparing ? 2 : 1) || statuses[0] !== 200 || (preparing && statuses[1] !== 409)) fail('Invalid read-only PR rebase request.');
+      const bodyLimit = preparing && !resolving ? FORM_LIMIT : 16 * 1024 * 1024 + FORM_LIMIT + 64 * 1024;
+      if (!((typeof body === 'string' && utf8.encode(body).length <= bodyLimit) ||
+          (typeof Blob !== 'undefined' && body instanceof Blob && body.size <= bodyLimit))) fail('PR rebase input exceeds its bounded envelope.');
+      integer(maximum, 'PR rebase response limit', 1, preparing ? 18 * 1024 * 1024 + 16 * 1024 : REPLY_LIMIT);
+    }
+    const allowed = this.#defaultBranch
+      ? /^(?:default-branch(?:\?[^#]+)?|source\/refs|outcomes)$/.test(path)
+      : this.#artifacts
       ? /^artifacts\/[0-9a-f]{64}(?:\/content)?$/.test(path)
       : this.#queues
       ? /^(?:queues(?:\/[1-9][0-9]*(?:\/(?:enqueue|dequeue|reorder|land|prepare|land-candidate))?)?(?:\?[^#]*)?|pulls\/[1-9][0-9]*(?:\/inspect)?(?:\?[^#]*)?|outcomes)$/.test(path)
@@ -465,7 +651,7 @@ export class Transport {
       ? /^(?:source\/initial\/(?:prepare|apply)|outcomes)$/.test(path)
       : this.#source
       ? /^(?:source\/(?:tree|blob|prepare|inspect|apply)|outcomes)$/.test(path)
-      : /^(pulls(?:\/[1-9][0-9]*(?:\/(?:open|update|close|reopen|diff|checks|comments(?:\/append)?|prepare|resolve|inspect|merge|fast-forward|reviews(?:\/(?:approve|request-changes|withdraw))?))?)?(?:\?[^#]*)?|outcomes)$/.test(path);
+      : /^(pulls(?:\/search|\/[1-9][0-9]*(?:\/(?:open|update|close|reopen|retarget|diff|checks|labels|comments(?:\/append)?|prepare|prepare-rebase|resolve|resolve-rebase|inspect|inspect-rebase|merge|fast-forward|reviews(?:\/(?:approve|request-changes|withdraw))?))?)?(?:\?[^#]*)?|outcomes)$/.test(path);
     if (!allowed || url.origin !== this.root.origin || !url.pathname.startsWith(`${this.root.route}/api/v1/`)) fail('Invalid API route.');
     requirePublicationEnvelope(path, method, body, key, read);
     const epoch = this.#epoch, controller = new AbortController(); this.#all.add(controller); if (read) this.#reads.add(controller);

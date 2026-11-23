@@ -103,6 +103,41 @@ preserve a known transaction and terminal status. Consumers must parse a complet
 document and inspect its fields; neither a nonzero exit nor a truncated output
 proves non-commit. Repeating the outcome query never repeats the mutation.
 
+## Reusing an exact retained outcome set
+
+Resolution and publication through `CumulativeOutcomes` reuse computations over
+their private, immutable entries. The first root check or fold prepares the
+digest-sorted leaves, their Merkle root, and transaction-sorted offsets. Later
+lookups use binary search and unchanged-root checks reuse that derived root.
+A standalone cold lookup keeps the original linear scan, so it does not trigger
+a whole-history hash merely to answer one query.
+
+New batches validate duplicates in the original input order, encode only their
+new outcomes, and merge their leaves with the retained ordering. The digest-sorted
+commitment still requires rebuilding its Merkle interior; extension is not an
+append-only constant-time operation. Retained memory adds one offset and one
+leaf digest per outcome. Clones share prepared immutable data, and a successful
+authenticated extension replaces only the extended witness's index.
+
+These computations are disposable process state. Fresh head authentication,
+exact version-token checks, predecessor/successor roots, and accelerator conflict
+checks remain mandatory. Losing the prepared index restores the same reference
+computation. Canonical bytes, checkpoint formats, replay bounds, duplicate/error
+ordering, and the meaning of an undecided result are unchanged. This does not
+remove the cumulative retained-history capacity limit.
+
+The prepared-index tests compare roots, lookups and refusal details with the
+original fold across permutations, mixed terminal outcomes, incremental
+extensions, clones and concurrent first use. An explicitly invoked local CPU
+workload also runs the original implementation twice as an A/A control:
+
+```bash
+cargo test -p fgit-authority --lib retained_index_workload_timings -- --ignored --nocapture
+```
+
+That workload measures retained-index computation only, not network push
+throughput, durable-store latency, or a production capacity envelope.
+
 ## Applicability
 
 The command works for authority-sealed mutation keys, including PR lifecycle,

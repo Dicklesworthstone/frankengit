@@ -30,11 +30,20 @@ workspace_sha256 independently. Expand verifies additional source at the SAME co
 preserves originally selected edits/deletions/modes and creates a new workspace.
 It never changes the original or copies unselected local files. Occupied newly
 selected paths refuse. Keep the NEW workspace hash; this is not a branch refresh.
-Refresh previews the SAME selected paths at another independently chosen commit.
+Refresh retains ALL original selected paths at another independently chosen commit
+and may add independently selected files. Newly selected paths must be absent
+locally; occupied files or unsafe ancestors refuse without overwriting them.
 Unchanged files update; local edits/deletions carry only without content conflicts.
 Refresh requires the reviewed plan hash, refuses unresolved overlaps, and creates
 a NEW workspace without changing the original. No unselected files are copied.
 No ancestry, freshness or semantic compatibility is established.
+For upstream deletions, both refresh commands accept --deletions PRIVATE_SELECTION
+with schema "frankengit-workspace-refresh-deletions-v1" and sorted paths_hex.
+Name every omitted original selection, and only those paths. Complete verified
+parent trees in the NEXT package must prove each path absent; missing proof is
+not deletion. Keep at least one positively selected successor file. Local edits
+or chmod against deletion conflict; explicit local choices preserve those files
+as new local creations against the verified next baseline, available to capture.
 For conflicts, both refresh commands accept --resolutions PRIVATE_CHOICES. The
 closed file format binds the original conflict plan_sha256 and per-path local
 or selected choices. Preview those choices, then approve the NEW plan hash.
@@ -64,7 +73,7 @@ source execution, permission grant or repository mutation. Interrupted output
 slots are retained. Exit 0: complete; 1: refresh preview has conflicts; 2: refusal; 3: cancelled before output;
 4: a local output/result may exist: retain and inspect the reported root hash.`;
 function options(args) {
-  if (!Array.isArray(args) || args.length % 2 !== 1 || args.length > 19 ||
+  if (!Array.isArray(args) || args.length % 2 !== 1 || args.length > 21 ||
       args.some(a => typeof a !== 'string' || Buffer.byteLength(a) > 4096)) fail('source_workspace_arguments');
   const op = args[0], required = op === 'create' ? ['--package', '--expect', '--output']
     : op === 'expand' ? ['--workspace', '--sha256', '--package', '--expect', '--output']
@@ -77,7 +86,7 @@ function options(args) {
   const f = new Map();
   for (let i = 1; i < args.length; i += 2) {
     const key = args[i], value = args[i + 1];
-    if (![...required, '--timeout-ms', ...(['refresh-preview', 'refresh'].includes(op) ? ['--resolutions', '--merge-profile'] : [])].includes(key) || f.has(key) || !value || value.startsWith('--')) fail('source_workspace_option');
+    if (![...required, '--timeout-ms', ...(['refresh-preview', 'refresh'].includes(op) ? ['--resolutions', '--merge-profile', '--deletions'] : [])].includes(key) || f.has(key) || !value || value.startsWith('--')) fail('source_workspace_option');
     f.set(key, value);
     if (key === '--sha256' || key === '--approve-refresh-sha256') pin(value); else if (key === '--merge-profile') { if (value !== WORKSPACE_TEXT_MERGE_PROFILE) fail('source_workspace_refresh_merge_profile'); }
     else if (key !== '--timeout-ms') absolute(value);
@@ -116,8 +125,11 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
       const bytes = await privateFile(f.get('--package'), SOURCE_PACKAGE_BYTES, time);
       const resolutions = f.has('--resolutions')
         ? parse(await privateFile(f.get('--resolutions'), WORKSPACE_LIMITS.manifestBytes, time), WORKSPACE_LIMITS.manifestBytes) : undefined;
+      const deletions = f.has('--deletions')
+        ? parse(await privateFile(f.get('--deletions'), WORKSPACE_LIMITS.expectedBytes, time), WORKSPACE_LIMITS.expectedBytes) : undefined;
       const local = { check: time.check, signal: controller.signal, timeoutMs: time.remaining(),
         ...(resolutions === undefined ? {} : { resolutions }),
+        ...(deletions === undefined ? {} : { deletions }),
         ...(f.has('--merge-profile') ? { mergeProfile: f.get('--merge-profile') } : {}) };
       result = op === 'create' ? await createSourceWorkspace(f.get('--output'), bytes, expected, local)
         : op === 'expand' ? await expandSourceWorkspace(f.get('--workspace'), f.get('--sha256'), bytes, expected, f.get('--output'), local)

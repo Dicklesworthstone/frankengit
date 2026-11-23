@@ -225,6 +225,10 @@ pub enum ForgeEventKind {
     AgentCredentialChanged {
         credential: ForgeEntityId,
     },
+    /// Independent exact PR label state; no content-version or reference effect.
+    PullRequestLabelsChanged {
+        labels: ForgeEntityId,
+    },
 }
 
 impl ForgeEventKind {
@@ -242,6 +246,7 @@ impl ForgeEventKind {
             | Self::MilestoneChanged { .. }
             | Self::NotificationPreferenceChanged { .. }
             | Self::AgentCredentialChanged { .. }
+            | Self::PullRequestLabelsChanged { .. }
             | Self::ReviewProtectionChanged { .. }
             | Self::WorkflowCheckObserved { .. }
             | Self::PullRequestCommented { .. }
@@ -267,6 +272,7 @@ impl ForgeEventKind {
             Self::MilestoneChanged { milestone } => *milestone,
             Self::NotificationPreferenceChanged { preference } => *preference,
             Self::AgentCredentialChanged { credential } => *credential,
+            Self::PullRequestLabelsChanged { labels } => *labels,
         }
     }
 }

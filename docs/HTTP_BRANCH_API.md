@@ -29,13 +29,25 @@ incarnation. No new scope or listener flag is introduced:
 | Branch create/update/delete/rename | `receive` | `--allow-source` and `--allow-receive` |
 | Original transaction recovery | `outcomes-read` | `--allow-outcomes` |
 
+Canonical sponsored agent tokens can use only the create operation in this
+lifecycle, through the independent `source-branch-create` grant and the same
+source/receive deployment ceilings. Their destination must be within the
+credential's finite ref scope and their explicit commit must be a **current
+visible branch tip**. They cannot create from an arbitrary historical ancestor
+or infer a source branch. Existing source-publish and metadata grants acquire
+no branch-creation permission. See
+[sponsored task branches](SPONSORED_AGENT_CREDENTIALS.md#create-an-independently-scoped-task-branch)
+for issuance, original-outcome recovery and native admission guarantees.
+
 A receive-only token cannot list refs, inspect files, or prepare source edits.
 A read-only token cannot mutate a branch. PR/review/merge grants imply neither.
 Every mutation requires an explicit `Idempotency-Key`; ref listing rejects that
 header because it does not create a transaction. Forwarded identity headers
 never authenticate. Rotation retains retry identity when the principal stays
 the same; different principals using the same textual key have separate scopes.
-Revocation affects subsequent authentications, not already authenticated work.
+Reloadable operator-file revocation affects subsequent authentications, not
+already authenticated work. Sponsored credential revocation is also rechecked
+at the deciding admission basis, including after a compare-and-set retry.
 
 Authentication, deployment/grant checks and quotas precede `100 Continue` and
 body intake. Branch operations use mutation quota; listing uses the separate
@@ -101,9 +113,10 @@ curl --fail-with-body --header @/secure/branch-writer.headers \
   "$REPO_URL/api/v1/source/branches/create"
 ```
 
-The commit must already be verified and reachable through visible selected
+For operator-managed credentials, the commit must already be verified and reachable through visible selected
 history, including permitted ancestors. A digest alone grants no object access;
 unknown, hidden-only or non-commit objects cannot become branch tips here.
+Sponsored agents use the narrower current-visible-branch-tip profile above.
 This endpoint does not accept a PACK or introduce objects.
 
 ## Advance or delete an exact branch

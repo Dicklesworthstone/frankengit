@@ -1,5 +1,6 @@
 // The shared MCP presentation adapter is also used by the PR read tools.
 pub(super) mod rendered;
+mod search;
 
 use super::*;
 use fgit_forge::event::issue::{IssueAction, IssueSnapshot, IssueState};
@@ -17,9 +18,13 @@ pub(super) fn tools() -> Vec<Tool> {
             description: "Read an issue plus its exact versioned action/comment history. Number and cursors are decimal strings. No edits or publication.",
             schema: rendered::schema(schema(true)),
         },
+        search::tool(),
     ]
 }
 pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Value, ToolError> {
+    if name == "frankengit_issue_search" {
+        return search::call(backend, args);
+    }
     let show = name == "frankengit_issue_show";
     require_fields(
         args,

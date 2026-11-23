@@ -2,7 +2,8 @@
 // GitHub is read-only. Native issue publication is a separately confirmed phase.
 import { pathToFileURL } from 'node:url';
 import { INVENTORY_OPERATIONS, INVENTORY_HELP, inventoryArguments, runGithubInventoryCommand } from './lib/github-issue-inventory-command.mjs';
-import { captureGithubIssues, parseCapture, issueImportSteps, CAPTURE_LIMIT } from './lib/github-issue-source.mjs';
+import { captureGithubIssues, parseCapture, issueImportSteps, mapGithubIssueAssignees,
+  CAPTURE_LIMIT, ASSIGNEE_MAP_LIMIT } from './lib/github-issue-source.mjs';
 import { operatorError, operatorJson, operatorPath, privateRecordPath, absentRecord,
   readPrivateOperatorFile, saveOperatorRecord, recordDigest } from './lib/forge-operator-io.mjs';
 
@@ -12,6 +13,10 @@ export const HELP = `Usage: node scripts/import_github_issues.mjs capture
   [--max-read-bytes 1..268435456] [--source-retries 0..10]
 
 Usage: node scripts/import_github_issues.mjs inspect --capture PRIVATE_FILE [--offset NUMBER]
+
+Usage: node scripts/import_github_issues.mjs map-assignees
+  --capture PRIVATE_V2_CAPTURE --map PRIVATE_MAPPING --out PRIVATE_NEW_V3_CAPTURE
+  [--timeout-ms 1..300000]
 
 Usage: node scripts/import_github_issues.mjs prepare
   --capture PRIVATE_FILE --workdir NEW_PRIVATE_DIRECTORY
@@ -50,6 +55,12 @@ any close, under the existing native issue-write grant. Locked open issues remai
 open. Saved v1 captures/plans keep their exact commands and keys; their locks stay
 attribution only. Source authors, times, assignees, milestones and label metadata
 remain attributed data, not native permissions, historical events or roles.
+Map-assignees is an explicit offline opt-in: its closed mapping pins the exact
+V2 capture SHA-256 and maps every encountered GitHub user ID to a distinct native
+principal ID. The new V3 capture compiles ordinary assign commands after open.
+It never guesses from logins, enrolls accounts, or grants permissions. Missing,
+extra or duplicate mappings and more than 16 assignees per issue refuse. Inspect
+the new proposal before prepare; old captures and saved request keys stay intact.
 The GitHub credential is used only with api.github.com and is never saved.
 This Unix operator requires private files and a private existing output parent.
 
@@ -65,6 +76,7 @@ export function importArguments(args) {
   const destination = ['--workdir', '--url', '--tenant-id', '--repository-id', '--token-file', '--timeout-ms'];
   const allowed = operation === 'capture' ? ['--repository', '--issue', '--out', '--token-file', '--timeout-ms', '--max-read-bytes', '--source-retries']
     : operation === 'inspect' ? ['--capture', '--offset']
+    : operation === 'map-assignees' ? ['--capture', '--map', '--out', '--timeout-ms']
     : operation === 'prepare' ? [...destination, '--capture', '--offset']
     : ['run', 'status'].includes(operation) ? [...destination, '--confirm', '--max-mutations', ...(operation === 'run' ? ['--retry-unresolved'] : [])] : [];
   if (!allowed.length) throw operatorError('github_import_operation');
@@ -76,6 +88,7 @@ export function importArguments(args) {
   }
   const required = operation === 'capture' ? ['--repository', '--out']
     : operation === 'inspect' ? ['--capture']
+    : operation === 'map-assignees' ? ['--capture', '--map', '--out']
     : ['--workdir', '--url', '--tenant-id', '--repository-id', '--token-file', operation === 'prepare' ? '--capture' : '--confirm'];
   if (required.some(k => !values.has(k)) || (operation === 'capture' && !issues.length)) throw operatorError('github_import_required_option');
   if (values.has('--source-retries') && integer(values.get('--source-retries')) > 10) throw operatorError('github_import_source_retries');
@@ -109,6 +122,17 @@ export async function runGithubImportCommand(args, signal) {
   let tokenBytes;
   try {
     const out = await privateRecordPath(values.get('--out')); await absentRecord(out); check();
+    if (operation === 'map-assignees') {
+      const input = await readPrivateOperatorFile(values.get('--capture'), CAPTURE_LIMIT, check);
+      const mapping = await readPrivateOperatorFile(values.get('--map'), ASSIGNEE_MAP_LIMIT, check);
+      const result = mapGithubIssueAssignees(input, mapping); check();
+      const saved = await saveOperatorRecord(out, result.bytes, check);
+      return { text: operatorJson({ type: 'github_issue_assignee_mapping', path: saved.path, sha256: saved.sha256,
+        source_capture_sha256: result.capture.assignee_map.capture_sha256,
+        issues: result.capture.issues.length, mapped_users: result.capture.assignee_map.mappings.length,
+        assignment_commands: result.assignmentCommands, steps: result.steps,
+        network_accessed: false, mutation_submitted: false }), exitCode: 0 };
+    }
     let token = null;
     if (values.has('--token-file')) {
       if (operatorPath(values.get('--token-file')) === out) throw operatorError('github_import_separate_token');

@@ -53,6 +53,30 @@ fn original_queue_and_pull_guards_and_deterministic_metadata_survive_both_hash_d
 }
 
 #[test]
+fn builtin_attributes_selection_keeps_exact_queue_and_pull_coordinates() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let bytes = form(format);
+        let mut expected = parse(bytes.as_bytes(), format, incarnation()).unwrap();
+        expected.profile = MergeProfile::BuiltinAttributesV1;
+        let selected = parse(
+            format!("{bytes}&profile=builtin-attributes-v1").as_bytes(),
+            format,
+            incarnation(),
+        )
+        .unwrap();
+        assert_eq!(selected, expected);
+        assert!(
+            parse(
+                format!("{bytes}&profile=builtin-attributes-v1&method=squash").as_bytes(),
+                format,
+                incarnation(),
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
 fn byte_refs_and_non_utf8_messages_are_lossless_and_exclusively_encoded() {
     let valid = form(GitHashAlgorithm::Sha256)
         .replace(

@@ -80,6 +80,36 @@ fn preparation_requires_every_subject_coordinate_and_independent_commit_metadata
     }
 }
 #[test]
+fn builtin_attributes_selection_is_advertised_and_preserves_pinned_input() {
+    let properties = properties(PREPARE);
+    let profile = properties["merge_profile"].object().unwrap();
+    assert_eq!(profile["default"].text(), Some("path-merge-v1"));
+    let Value::Array(choices) = &profile["enum"] else {
+        panic!("merge profile schema must enumerate supported versions")
+    };
+    assert!(choices.contains(&text("builtin-attributes-v1")));
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut args = input(format);
+        let baseline = parse(&args, format).unwrap();
+        args.insert("merge_profile".into(), text("builtin-attributes-v1"));
+        let selected = parse(&args, format).unwrap();
+        assert_eq!(selected.profile, MergeProfile::BuiltinAttributesV1);
+        assert_eq!(selected.selection.subject, baseline.selection.subject);
+        assert_eq!(
+            selected.selection.expected_head,
+            baseline.selection.expected_head
+        );
+        assert_eq!(selected.metadata, baseline.metadata);
+        assert_eq!(selected.style, baseline.style);
+        args.insert("merge_profile".into(), text("builtin-attributes-v2"));
+        assert_eq!(
+            parse(&args, format).unwrap_err().code,
+            "invalid_merge_profile"
+        );
+    }
+}
+
+#[test]
 fn explicit_profiles_and_native_work_limits_are_closed_before_io() {
     let format = GitHashAlgorithm::Sha1;
     let good = input(format);

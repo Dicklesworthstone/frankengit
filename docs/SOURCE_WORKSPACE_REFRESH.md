@@ -4,14 +4,19 @@
 materialization to another independently selected commit. This addresses the
 working-copy gap between same-commit expansion and exact-draft replay: clean
 selected files can update while non-conflicting local content, modes and
-selected deletions survive. Related work: FG-026 and the TreeFS/agent bridge.
+selected deletions survive. The same refresh can add independently selected
+files, including dependencies introduced in the new source, without first
+obtaining another package for the old commit. Related work: FG-026 and the
+TreeFS/agent bridge.
 This external trusted-local adapter does not complete native TreeFS.
 
 ## Review, then create a refreshed workspace
 
 Obtain another selected-source package and an independent expectation using the
-existing source package workflow. Select the SAME regular-file paths as the
-original workspace, in the same native hash domain, at a different commit.
+existing source package workflow. Retain all regular-file paths selected in the
+original workspace, unless explicitly selecting and proving their source deletion
+as described below, in the same native hash domain, at a different commit. The
+new expectation may also select additional regular files at that commit.
 The next expectation is never inferred from the package. Keep all inputs and
 parent directories owner-private, as in `SOURCE_EDITING_WORKSPACES.md`.
 
@@ -23,6 +28,10 @@ node scripts/fg_source_workspace.mjs refresh-preview \
 
 Review the returned plan, especially the old/local/selected/result byte hashes,
 lengths and executable modes for each path. Retain `refresh_sha256` independently.
+Newly selected paths have disposition `added`, a null `before` image and a null
+`local` image. The null `before` means the path was not selected in the original
+workspace; it does not claim that the path was absent from the original Git tree.
+The null `local` records checked absence in the original editing directory.
 Preview performs no writes and creates no output slot. A conflicting preview
 returns exit 1 and lists every conflicting selected file in byte-path order.
 There is no automatic choice of a conflict side or insertion of conflict markers.
@@ -35,15 +44,93 @@ node scripts/fg_source_workspace.mjs refresh \
   --output /srv/refreshed-editing
 ```
 
-Refresh re-verifies both source selections and re-reads the original selected
-local paths. The complete plan must match the approved hash BEFORE output is
+Refresh re-verifies both source selections and re-reads every selected local
+path, including absence checks for newly selected paths and their ancestors.
+The complete plan must match the approved hash BEFORE output is
 created. A different source package, commit, local content, mode or deletion
 requires a new preview. The new directory must be absent and disjoint from the
 original. The original workspace is never overwritten or removed.
 
+A newly selected path already occupied locally refuses, even when its bytes
+match the new source. A file or symlink in a required ancestor position also
+refuses. Existing private directories may hold newly selected files; unrelated
+local siblings remain only in the original workspace. File/directory conflicts
+within the combined selection refuse before local content is read. These
+observations are rechecked before output ownership and before the final manifest.
+
+## Refresh when the new source deletes a selected file
+
+Use `--deletions PRIVATE_SELECTION` on both refresh commands to name source
+deletions deliberately. The private JSON file has this closed format:
+
+```json
+{
+  "schema": "frankengit-workspace-refresh-deletions-v1",
+  "paths_hex": ["7372632f6f6c642e7273"]
+}
+```
+
+The example path is `src/old.rs`. List byte paths in ascending hex order, without
+duplicates. The list must contain **every originally selected path omitted from
+the next expectation, and only those paths**. A locally deleted file still
+present in the new source belongs in the positive expectation, not this list.
+Omitting `--deletions` retains the existing requirement to select every original
+file and preserves existing refresh-plan bytes.
+
+```sh
+node scripts/fg_source_workspace.mjs refresh-preview \
+  --workspace /srv/editing --sha256 "$ORIGINAL_WORKSPACE_SHA256" \
+  --package /srv/review/next-source.json --expect /srv/review/next-expectation.json \
+  --deletions /srv/review/deletions.json
+
+node scripts/fg_source_workspace.mjs refresh \
+  --workspace /srv/editing --sha256 "$ORIGINAL_WORKSPACE_SHA256" \
+  --package /srv/review/next-source.json --expect /srv/review/next-expectation.json \
+  --deletions /srv/review/deletions.json \
+  --approve-refresh-sha256 "$REVIEWED_REFRESH_SHA256" \
+  --output /srv/refreshed-editing
+```
+
+The next package must prove each deletion from its complete, hash-verified parent
+trees at the independently selected new commit. A missing package entry, missing
+tree proof or HTTP error does not prove absence. If a parent directory survives,
+each directory needed to reach the deleted path must already be authenticated by
+the package's positively selected files. Select a surviving sibling in that
+directory as an anchor. If an earlier ancestor itself is absent, its authenticated
+parent can prove the entire missing path without inventing a subtree. An opaque
+surviving directory refuses; this option does not broaden the package grammar or
+fetch additional source automatically.
+
+**At least one positive successor file is required.** An empty successor package
+or a completely empty repository remains outside the existing selected-source
+package profile. The combined positive-file and deletion selections share the
+32-path and path-byte limits. File/ancestor collisions across the two selections
+refuse, including replacement of a deleted file with a directory in the same
+refresh.
+
+An unchanged local file takes the verified deletion (`deleted`); a file already
+deleted locally converges (`converged`). Local content or executable-mode changes
+against source deletion produce `local_modify_source_delete`, even with the text
+merge profile. Use the existing explicit resolutions to choose `selected` for
+deletion or `local` to preserve the complete local bytes and mode. Preview and
+approve the resolved plan with the same `--deletions` and `--resolutions` files.
+The reviewed plan binds the deletion selection and each concrete absence witness,
+along with the original, local and resulting images.
+
+A preserved local file is a new local creation against the new source baseline.
+It is absent from the immutable positive-file manifest, so ordinary `status`
+does not list it. Select its path explicitly with `capture` (or use the opt-in
+workspace scan) to create a new source draft; capture re-verifies its absence
+from the retained next package. The result remains an ordinary v1 workspace and
+its capture can be inspected offline. These extra local files share the same
+file-size, aggregate output and filesystem recheck limits as all other outputs.
+
 ## Default exact reconciliation, not a text merge
 
 - A locally unchanged file takes the selected source version.
+- A newly selected file with checked local absence takes its independently
+  verified source version. It is not a three-way merge or an adoption of an
+  untracked local file.
 - A selected source file unchanged from the old baseline keeps the local edit
   or local deletion.
 - Identical local and source results converge to the selected version.
@@ -75,11 +162,12 @@ then publishes `manifest.json` last. It rechecks the original observations befor
 ownership and again before completion. These are non-atomic filesystem checks,
 not protection against a hostile same-UID process or hardware power loss.
 
-Only originally selected paths are read and copied. UNSELECTED LOCAL FILES REMAIN
+Only the explicitly selected paths are read and copied. UNSELECTED LOCAL FILES REMAIN
 IN THE ORIGINAL WORKSPACE; do not delete it assuming this is a complete checkout
-migration. Upstream deletion or addition of selected paths is not supported by
-this profile: changing the selected population refuses rather than interpreting
-omitted proof as absence. No directory walk or automatic source fetch occurs.
+migration. Removing an originally selected path requires the explicit deletion
+selection and verified source absence described above. A locally deleted file
+still present upstream must remain in the positive source expectation.
+No directory walk or automatic source fetch occurs.
 
 Bounds remain 32 files, 1 MiB/file, 8 MiB logical source/local/output bytes,
 32 KiB path bytes, 64 components and 255 bytes/component. The combined result
@@ -94,7 +182,23 @@ return 2, or 3 for cancellation before output; successful completion returns 0.
 ## Focused validation
 
 Run `bash scripts/verify_source_workspace_refresh.sh`.
-The suite executes the complete production workspace and command bodies and the
+The expansion suite imports the complete production workspace and shared
+commit/tree/blob membership verifier. Independently framed SHA-1 and SHA-256
+packages exercise additional selections, retained local edits and deletions,
+local collisions, path topology, stale approvals, interrupted publication and
+resource limits. It uses actual private POSIX files and does not substitute the
+verification or publication functions. It does not invoke a native server or
+establish repository authority.
+
+The deletion suite also imports the production verifier and capture engine. Real
+SHA-1 and SHA-256 packages cover deletion and convergence, local edit/mode
+conflicts, preserved local recreations with offline capture inspection, nested
+absence witnesses, extant-file and opaque-parent refusals, caller-owned input
+mutation, stale reviews, combined limits, deadlines and late filesystem changes.
+The production CLI is exercised with deletion, resolution, merge-profile and
+timeout options together, including private-file enforcement.
+
+The existing reconciliation suites execute the complete production workspace and command bodies and the
 unchanged POSIX custody helper with actual private files, child processes, modes,
 links, racing creators and interruptions. Its pre-existing source/codec imports
 are explicit contract fixtures: these tests DO NOT execute the native membership

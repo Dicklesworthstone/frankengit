@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 use fgit_admission::default_branch::{self as api, CanonicalHeadChange, DefaultBranchCommand};
-use fgit_admission::evidence::AdmissionAuthentication;
+use fgit_admission::evidence::{AdmissionAuthentication, PrincipalSnapshotRecord};
 use fgit_admission::merge::native::{history, protection};
 use fgit_forge::event::protection::{ProtectionCommand, ReviewProtection};
 
@@ -232,6 +232,73 @@ fn submit(
         AdmissionLimits::default(),
         projection,
     ))
+}
+
+fn submit_http(
+    fixture: &Fixture,
+    context: &AdmissionContext,
+    command: &DefaultBranchCommand,
+    projection: &HeadProjection,
+) -> Result<TerminalOutcome, AdmissionError> {
+    poll_ready(api::admit_http_admin_async(
+        fixture.store.as_ref(),
+        &(),
+        context,
+        command,
+        AdmissionLimits::default(),
+        projection,
+    ))
+}
+
+fn administrator_policy(
+    fixture: &Fixture,
+    actor: PrincipalId,
+    key: &[u8],
+    expected_version: ExpectedVersion,
+    administrators: Vec<PrincipalId>,
+) {
+    let mut context = context(fixture, key);
+    context.principal_id = actor;
+    let command = ProtectionCommand {
+        expected_version,
+        expected_epoch: fixture.head().policy_epoch,
+        protection: ReviewProtection {
+            administrators,
+            branches: Vec::new(),
+            ref_policy: None,
+        },
+    };
+    committed(
+        poll_ready(protection::admit_async(
+            fixture.store.as_ref(),
+            &(),
+            &context,
+            &command,
+            AdmissionLimits::default(),
+            &HeadProjection::new(fixture, &context),
+        ))
+        .unwrap(),
+    );
+}
+
+fn recorded_authentication(fixture: &Fixture, id: PrincipalSnapshotId) -> AdmissionAuthentication {
+    let identity = id.as_internal_object_id();
+    let root = Digest::new(identity.algorithm(), *identity.digest());
+    let ImmutableRead::Present(frame) = fixture
+        .store
+        .backend
+        .read_immutable(&key(
+            b"frankengit/admission/principal-snapshot/v1/",
+            fixture.context.repository_id,
+            root,
+        ))
+        .unwrap()
+    else {
+        panic!("a HEAD decision must retain its original principal receipt");
+    };
+    let record = PrincipalSnapshotRecord::decode(&frame, DecodeLimits::DEFAULT).unwrap();
+    assert_eq!(record.id().unwrap(), id);
+    record.authentication().unwrap()
 }
 fn committed(outcome: TerminalOutcome) {
     assert!(
@@ -479,6 +546,264 @@ fn default_branch_remote_and_declared_agent_provenance_never_reaches_target_inta
             assert_eq!(projection.targets.load(Ordering::Relaxed), 0);
         }
     }
+}
+
+#[test]
+fn http_default_requires_current_administrators_and_records_real_http_provenance() {
+    for format in GitHashAlgorithm::ALL {
+        let fixture = configured_fixture(
+            *format,
+            RootLayoutVersion::RefStateAndObjectClosureMerkleV2,
+            Some(name(b"refs/heads/main")),
+            Vec::new(),
+        );
+        let absent_context = context(&fixture, b"remote-before-policy");
+        let mut absent_projection = HeadProjection::new(&fixture, &absent_context);
+        absent_projection.authentication = Some(AdmissionAuthentication::HttpToken);
+        let absent = submit_http(
+            &fixture,
+            &absent_context,
+            &command(&fixture),
+            &absent_projection,
+        )
+        .unwrap();
+        refused(absent, RefusalCode::PublicationPolicyRefused);
+        assert_eq!(absent_projection.snapshots.load(Ordering::Relaxed), 0);
+        assert_eq!(absent_projection.targets.load(Ordering::Relaxed), 0);
+        let administrator = fixture.context.principal_id;
+        administrator_policy(
+            &fixture,
+            administrator,
+            b"install-admin-policy",
+            ExpectedVersion::NewStream,
+            vec![administrator],
+        );
+        // A previously refused key retains its decision after policy changes.
+        assert_eq!(
+            submit_http(
+                &fixture,
+                &absent_context,
+                &command(&fixture),
+                &absent_projection,
+            )
+            .unwrap(),
+            absent
+        );
+        let mut other = context(&fixture, b"remote-not-administrator");
+        other.principal_id = PrincipalId::from_bytes([4; 16]);
+        let mut other_projection = HeadProjection::new(&fixture, &other);
+        other_projection.authentication = Some(AdmissionAuthentication::HttpToken);
+        refused(
+            submit_http(&fixture, &other, &command(&fixture), &other_projection).unwrap(),
+            RefusalCode::PublicationPolicyRefused,
+        );
+        assert_eq!(other_projection.snapshots.load(Ordering::Relaxed), 0);
+
+        let context = context(&fixture, b"remote-administrator");
+        let mut projection = HeadProjection::new(&fixture, &context);
+        projection.authentication = Some(AdmissionAuthentication::HttpToken);
+        let before = fixture.head();
+        let outcome = submit_http(&fixture, &context, &command(&fixture), &projection).unwrap();
+        committed(outcome);
+        let after = fixture.head();
+        assert_eq!(
+            refs_at(&fixture, &after).head_target(),
+            Some(&name(b"refs/heads/topic"))
+        );
+        assert_eq!(
+            refs_at(&fixture, &before).refs(),
+            refs_at(&fixture, &after).refs()
+        );
+        assert_eq!(before.forge_position_root, after.forge_position_root);
+        assert_eq!(before.outbox_root, after.outbox_root);
+        assert_eq!(before.configuration_root, after.configuration_root);
+        assert_eq!(before.policy_epoch, after.policy_epoch);
+        let batch =
+            read_decision_batch_body(&fixture.store.backend, after.decision_tail_id.unwrap())
+                .unwrap();
+        let record = &batch.committed_rcrs[0];
+        assert_eq!(
+            recorded_authentication(&fixture, record.principal_snapshot_id),
+            AdmissionAuthentication::HttpToken
+        );
+        let basis = PublicationBasis::new(
+            fgit_authority::authority_head_identity(&before).unwrap(),
+            before.clone(),
+        );
+        let selected_policy = poll_ready(protection::read_at(
+            fixture.store.as_ref(),
+            &(),
+            &basis,
+            &|| false,
+        ))
+        .unwrap();
+        assert_eq!(
+            selected_policy.protection().unwrap().administrators,
+            vec![administrator]
+        );
+        let witness = fgit_forge::ForgeEventBatch::of_one(selected_policy.event.unwrap());
+        let witness_root = evidence_root(&witness).unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .read::<fgit_forge::ForgeEventBatch>(
+                    context.repository_id,
+                    EVENT_NAMESPACE,
+                    witness_root,
+                )
+                .unwrap(),
+            witness
+        );
+        let delta: CanonicalHeadChange = fixture
+            .store
+            .read(context.repository_id, HEAD_DELTA, record.ref_delta_root)
+            .unwrap();
+        assert_eq!(record.ref_delta_root, record.invariant_evidence_root);
+        delta
+            .verify_transition(
+                &context,
+                &basis,
+                &refs_at(&fixture, &before),
+                &refs_at(&fixture, &after),
+                &command(&fixture),
+                Some(witness_root),
+            )
+            .unwrap();
+        assert_eq!(
+            delta.verify_transition(
+                &context,
+                &basis,
+                &refs_at(&fixture, &before),
+                &refs_at(&fixture, &after),
+                &command(&fixture),
+                None,
+            ),
+            Err(RefusalCode::EvidenceInvalid)
+        );
+        assert_eq!(
+            poll_ready(history::verify_record_evidence(
+                fixture.store.as_ref(),
+                &(),
+                context.repository_id,
+                record,
+                &|| false,
+            ))
+            .unwrap(),
+            history::OutboxRecordEvidence::Ordinary
+        );
+        administrator_policy(
+            &fixture,
+            administrator,
+            b"rotate-admin-policy",
+            ExpectedVersion::Exactly(fgit_forge::AggregateVersion::FIRST),
+            vec![other.principal_id],
+        );
+        let rotated = fixture.head();
+        let inspections = projection.targets.load(Ordering::Relaxed);
+        assert_eq!(
+            submit_http(&fixture, &context, &command(&fixture), &projection).unwrap(),
+            outcome
+        );
+        assert_eq!(fixture.head(), rotated);
+        assert_eq!(projection.targets.load(Ordering::Relaxed), inspections);
+        let later_context = self::context(&fixture, b"removed-admin-new-request");
+        let mut later_projection = HeadProjection::new(&fixture, &later_context);
+        later_projection.authentication = Some(AdmissionAuthentication::HttpToken);
+        refused(
+            submit_http(
+                &fixture,
+                &later_context,
+                &command(&fixture),
+                &later_projection,
+            )
+            .unwrap(),
+            RefusalCode::PublicationPolicyRefused,
+        );
+        assert_eq!(later_projection.targets.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[test]
+fn http_default_rejects_other_provenance_and_canonical_agents_before_source_intake() {
+    for authentication in [
+        None,
+        Some(AdmissionAuthentication::OperatorAssertion),
+        Some(AdmissionAuthentication::SshDeployKey),
+    ] {
+        let fixture = Fixture::new();
+        let context = context(&fixture, b"wrong-http-provenance");
+        let mut projection = HeadProjection::new(&fixture, &context);
+        projection.authentication = authentication;
+        refused(
+            submit_http(&fixture, &context, &command(&fixture), &projection).unwrap(),
+            RefusalCode::CapabilityScopeViolation,
+        );
+        assert_eq!(projection.snapshots.load(Ordering::Relaxed), 0);
+        assert_eq!(projection.targets.load(Ordering::Relaxed), 0);
+    }
+    for revoked in [false, true] {
+        let fixture = metadata_authentication::declared_agent_fixture(revoked);
+        for (index, authentication) in [
+            AdmissionAuthentication::HttpToken,
+            metadata_authentication::sponsored(&fixture),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let context = context(&fixture, format!("http-declared-agent-{index}").as_bytes());
+            let mut projection = HeadProjection::new(&fixture, &context);
+            projection.authentication = Some(authentication);
+            refused(
+                submit_http(&fixture, &context, &command(&fixture), &projection).unwrap(),
+                RefusalCode::CapabilityScopeViolation,
+            );
+            assert_eq!(projection.snapshots.load(Ordering::Relaxed), 0);
+            assert_eq!(projection.targets.load(Ordering::Relaxed), 0);
+        }
+    }
+}
+
+#[test]
+fn http_default_cas_loser_rechecks_current_administrators_before_second_target_read() {
+    let fixture = Arc::new(Fixture::new());
+    let administrator = fixture.context.principal_id;
+    administrator_policy(
+        &fixture,
+        administrator,
+        b"initial-http-admin",
+        ExpectedVersion::NewStream,
+        vec![administrator],
+    );
+    let before = fixture.head();
+    let context = context(&fixture, b"http-admin-race");
+    let competitor = fixture.clone();
+    *fixture.store.before_publish.lock().unwrap() = Some(Box::new(move || {
+        administrator_policy(
+            &competitor,
+            administrator,
+            b"concurrent-admin-rotation",
+            ExpectedVersion::Exactly(fgit_forge::AggregateVersion::FIRST),
+            vec![PrincipalId::from_bytes([4; 16])],
+        );
+    }));
+    let mut projection = HeadProjection::new(&fixture, &context);
+    projection.authentication = Some(AdmissionAuthentication::HttpToken);
+    let outcome = submit_http(&fixture, &context, &command(&fixture), &projection).unwrap();
+    refused(outcome, RefusalCode::PublicationPolicyRefused);
+    assert_eq!(projection.targets.load(Ordering::Relaxed), 1);
+    assert_eq!(projection.snapshots.load(Ordering::Relaxed), 1);
+    assert_eq!(fixture.head().ref_root, before.ref_root);
+    assert_ne!(
+        fixture.head().forge_position_root,
+        before.forge_position_root
+    );
+    let terminal_head = fixture.head();
+    assert_eq!(
+        submit_http(&fixture, &context, &command(&fixture), &projection).unwrap(),
+        outcome
+    );
+    assert_eq!(fixture.head(), terminal_head);
+    assert_eq!(projection.targets.load(Ordering::Relaxed), 1);
 }
 
 #[test]

@@ -283,7 +283,7 @@ where
             let closure = projection
                 .validate_review_async(store, cx, &basis, &authenticated, command, review.candidate)
                 .await?;
-            let prepared = prepare_event(
+            let mut prepared = prepare_event(
                 context, &event, &closure, tx_id, &attempt, &basis, &resolved,
             )
             .map_err(ProjectionFailure::Refuse)?;
@@ -301,6 +301,31 @@ where
                 return Err(
                     ProjectionFailure::Unavailable(RefusalCode::InternalInvariantBreach).into(),
                 );
+            }
+            if let Some(authentication) = projection.admission_authentication() {
+                // Reviews publish metadata without a ref-policy evaluation,
+                // but their immutable evidence must retain the method that
+                // authenticated this attempt. Do not change the review event
+                // or seal: terminal retries retain their original evidence.
+                prepared.evidence =
+                    crate::evidence::DecisionEvidenceBodies::derive_with_authentication(
+                        context,
+                        &basis,
+                        &prepared.request,
+                        &prepared.fold,
+                        authentication,
+                    )
+                    .map_err(ProjectionFailure::Unavailable)?;
+                prepared.materialization.record.principal_snapshot_id = prepared
+                    .evidence
+                    .principal_snapshot()
+                    .id()
+                    .map_err(ProjectionFailure::Unavailable)?;
+                prepared.materialization.record.policy_decision_root = prepared
+                    .evidence
+                    .policy_decision()
+                    .root()
+                    .map_err(ProjectionFailure::Unavailable)?;
             }
             Ok(prepared)
         }

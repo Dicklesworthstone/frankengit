@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(super) struct Visibility {
     pub(super) reviews: BTreeSet<PullRequestNumber>,
     pub(super) conversations: BTreeSet<PullRequestNumber>,
+    pub(super) labels: BTreeSet<PullRequestNumber>,
 }
 
 /// Resolve only event families whose independent grants have already passed.
@@ -41,9 +42,20 @@ where
     }
     let mut reviews = BTreeMap::new();
     let mut conversations = BTreeMap::new();
+    let mut labels = BTreeMap::new();
     for envelope in &page.events {
         stopped(cancelled)?;
         match (&envelope.event.payload, envelope.event.aggregate) {
+            (
+                ForgeEventPayload::PullRequestLabelsChangedNative(_),
+                AggregateId::PullRequestLabels(number),
+            ) if grants.pulls => {
+                let version = envelope.event.version;
+                labels
+                    .entry(number)
+                    .and_modify(|previous| *previous = std::cmp::max(*previous, version))
+                    .or_insert(version);
+            }
             (
                 ForgeEventPayload::PullRequestReviewedNative(review),
                 AggregateId::PullRequestReview {
@@ -80,6 +92,29 @@ where
     };
     let failure = |error| ForgeEventReadRefusal::Admission(Box::new(error));
     let mut result = Visibility::default();
+    for (number, required_version) in labels {
+        stopped(cancelled)?;
+        let page =
+            pull_request::read_page_at(store, cx, basis, number.get() - 1, 1, &visible, cancelled)
+                .await
+                .map_err(failure)?;
+        if page.source_head != basis.id() {
+            return Err(ForgeEventReadRefusal::InvalidPage);
+        }
+        if let Some(subject) = page
+            .pull_requests
+            .iter()
+            .find(|row| row.number == number && row.data.is_some())
+        {
+            if subject
+                .labels_version
+                .is_none_or(|version| version < required_version)
+            {
+                return Err(ForgeEventReadRefusal::InvalidPage);
+            }
+            result.labels.insert(number);
+        }
+    }
     for (number, required_version) in reviews {
         stopped(cancelled)?;
         let current =
@@ -136,6 +171,10 @@ pub(super) fn permitted(
         return true;
     }
     match (&event.payload, event.aggregate) {
+        (
+            ForgeEventPayload::PullRequestLabelsChangedNative(_),
+            AggregateId::PullRequestLabels(number),
+        ) => grants.pulls && visibility.labels.contains(&number),
         (ForgeEventPayload::MilestoneChangedNative(_), AggregateId::Milestone(_)) => grants.issues,
         (ForgeEventPayload::DiscussionChangedNative(_), AggregateId::Discussion(_)) => {
             grants.discussions

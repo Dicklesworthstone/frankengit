@@ -22,7 +22,11 @@ use fgit_types::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+mod agent_branch;
+mod agent_source;
 mod candidate_checks;
+pub use agent_branch::direct_branch_creation_decision_evidence_at;
+pub use agent_source::direct_source_decision_evidence_at;
 mod checks;
 pub mod path_reviews;
 mod queue_gate;
@@ -262,7 +266,7 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
-    enforce_direct_selected_at(store, cx, basis, refs, fold, None, None, cancelled)
+    enforce_direct_selected_at(store, cx, basis, refs, fold, None, None, false, cancelled)
         .await
         .map(|_| ())
 }
@@ -275,14 +279,17 @@ async fn enforce_direct_selected_at<S, C>(
     fold: &fgit_txn::TransactionFoldReport,
     principal: Option<PrincipalId>,
     authentication: Option<AdmissionAuthentication>,
+    source_authorized: bool,
     cancelled: &C,
 ) -> Result<Option<ProtectionState>, ProjectionFailure>
 where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
-    require_non_agent_publication_at(store, cx, basis, principal, authentication, cancelled)
-        .await?;
+    if !source_authorized {
+        require_non_agent_publication_at(store, cx, basis, principal, authentication, cancelled)
+            .await?;
+    }
     let fgit_reference::effect::FoldOutcome::Folded(effects) = &fold.outcome else {
         return Err(ProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid));
     };
@@ -392,7 +399,7 @@ where
     C: Fn() -> bool + Sync,
 {
     direct_decision_evidence_selected_at(
-        store, cx, context, basis, current, layout, request, fold, None, cancelled,
+        store, cx, context, basis, current, layout, request, fold, None, false, cancelled,
     )
     .await
 }
@@ -426,6 +433,7 @@ where
         request,
         fold,
         Some(authentication),
+        false,
         cancelled,
     )
     .await
@@ -441,6 +449,7 @@ async fn direct_decision_evidence_selected_at<S, C>(
     request: &fgit_reference::intent::TransactionRequest,
     fold: &fgit_txn::TransactionFoldReport,
     authentication: Option<AdmissionAuthentication>,
+    source_authorized: bool,
     cancelled: &C,
 ) -> Result<crate::evidence::DecisionEvidenceBodies, ProjectionFailure>
 where
@@ -462,6 +471,7 @@ where
         fold,
         Some(context.principal_id),
         authentication,
+        source_authorized,
         cancelled,
     )
     .await?;
@@ -628,6 +638,24 @@ where
                 )
                 .map_err(ProjectionFailure::Unavailable)?;
         }
+        crate::evidence::PolicyDecisionRecord::PrincipalKindActivated(record) => {
+            let selected = read_at(store, cx, basis, cancelled)
+                .await
+                .map_err(infrastructure)?;
+            let snapshot = selected
+                .protection()
+                .and_then(|p| p.ref_policy.as_ref())
+                .ok_or(ProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid))?;
+            record
+                .verify_provenance(
+                    basis,
+                    current,
+                    layout,
+                    &review_branches(&selected),
+                    snapshot,
+                )
+                .map_err(ProjectionFailure::Unavailable)?;
+        }
     }
     live(cancelled).map_err(infrastructure)
 }
@@ -762,6 +790,7 @@ where
             &prepared.fold,
             Some(context.principal_id),
             authentication,
+            false,
             cancelled,
         )
         .await?
@@ -866,7 +895,8 @@ fn enforce_installed_snapshot_with_authentication(
             principal.unwrap_or_else(|| PrincipalId::from_bytes([0; 16]))
         }
         fgit_policy::reference_profile::ReferencePolicyProfile::ReferenceActorIdV1
-        | fgit_policy::reference_profile::ReferencePolicyProfile::ReferenceAuthenticationV1 => {
+        | fgit_policy::reference_profile::ReferencePolicyProfile::ReferenceAuthenticationV1
+        | fgit_policy::reference_profile::ReferencePolicyProfile::ReferencePrincipalKindV1 => {
             principal.ok_or(ProjectionFailure::Refuse(RefusalCode::EvidenceMissing))?
         }
     };
@@ -874,6 +904,31 @@ fn enforce_installed_snapshot_with_authentication(
         .map_err(|_| ProjectionFailure::Refuse(RefusalCode::ResourceBudgetExceeded))?;
     let updates = crate::policy_bridge::ref_updates_from_effects(refs, effects)
         .map_err(|_| ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied))?;
+    if profile == fgit_policy::reference_profile::ReferencePolicyProfile::ReferencePrincipalKindV1 {
+        let Some(AdmissionAuthentication::AgentCredential(agent)) = authentication else {
+            // An authenticated transport or asserted principal ID supplies no
+            // kind. Refuse before evaluating even negated/unreachable clauses.
+            return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceMissing));
+        };
+        agent.validate().map_err(ProjectionFailure::Refuse)?;
+        if agent.agent() != principal {
+            return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid));
+        }
+        let input =
+            fgit_policy::reference_profile::AgentReferenceInput::try_new(principal, updates)
+                .map_err(|_| {
+                    ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied)
+                })?;
+        let verdict = fgit_policy::reference_profile::evaluate_agent(snapshot, &input)
+            .map_err(|_| ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied))?;
+        return if verdict.decision() == fgit_policy::Decision::Allow {
+            Ok(())
+        } else {
+            Err(ProjectionFailure::Refuse(
+                RefusalCode::ProtectedRefTransitionDenied,
+            ))
+        };
+    }
     if profile == fgit_policy::reference_profile::ReferencePolicyProfile::ReferenceAuthenticationV1
     {
         let authentication =
@@ -1597,6 +1652,155 @@ mod direct_policy_tests {
     use fgit_authority::{ExpectedOld, ProposedNew, RefCommand};
     use fgit_types::{GitOid, GitOidSha1, RefName};
     use std::collections::BTreeMap;
+
+    fn agent_authentication(
+        principal: PrincipalId,
+        sponsor_kind: fgit_forge::event::agent_credential::SponsorKind,
+    ) -> AdmissionAuthentication {
+        AdmissionAuthentication::AgentCredential(
+            crate::evidence::AgentAuthentication::try_new(
+                principal,
+                PrincipalId::from_bytes([0x44; 16]),
+                sponsor_kind,
+                fgit_forge::event::agent_credential::AgentCredentialId::try_new([0x55; 32])
+                    .unwrap(),
+                fgit_codec::harness::digest_of(7),
+                [0x66; 32],
+                100,
+                200,
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn installed_principal_kind_policy_uses_agent_witness_and_never_sponsor_kind() {
+        use fgit_forge::event::agent_credential::SponsorKind;
+        let principal = PrincipalId::from_bytes([0x33; 16]);
+        for oid in [
+            GitOid::Sha1(GitOidSha1::from_bytes([1; 20])),
+            GitOid::Sha256(fgit_types::GitOidSha256::from_bytes([1; 32])),
+        ] {
+            let effects = BTreeMap::from([(
+                RefName::try_new(b"refs/heads/agent-\xff").unwrap(),
+                fgit_reference::effect::RefEffect::Set(oid),
+            )]);
+            for (predicate, allowed) in [
+                (
+                    "actor.kind == agent and actor.authentication == single_factor",
+                    true,
+                ),
+                ("actor.kind in {human, agent}", true),
+                ("not actor.kind == human", true),
+                ("actor.kind == human", false),
+                ("actor.kind == service", false),
+                (
+                    "actor.kind == agent and actor.authentication >= multi_factor",
+                    false,
+                ),
+            ] {
+                let policy = ReviewProtection {
+                    administrators: vec![principal],
+                    branches: Vec::new(),
+                    ref_policy: Some(fgit_forge::event::protection::compile_ref_policy(&format!(
+                        "policy p {{ rule r {{ when {predicate} then allow }} default deny \"credential requirement\" }}"
+                    )).unwrap()),
+                };
+                for kind in [SponsorKind::Human, SponsorKind::Service] {
+                    let result = enforce_installed_snapshot_with_authentication(
+                        &policy,
+                        &BTreeMap::new(),
+                        &effects,
+                        Some(principal),
+                        Some(agent_authentication(principal, kind)),
+                    );
+                    if allowed {
+                        result.unwrap();
+                    } else {
+                        assert!(
+                            matches!(
+                                result,
+                                Err(ProjectionFailure::Refuse(
+                                    RefusalCode::ProtectedRefTransitionDenied
+                                ))
+                            ),
+                            "{predicate}"
+                        );
+                    }
+                }
+                assert!(matches!(
+                    enforce_installed_snapshot_with_authentication(
+                        &policy,
+                        &BTreeMap::new(),
+                        &effects,
+                        Some(principal),
+                        Some(agent_authentication(
+                            PrincipalId::from_bytes([0x77; 16]),
+                            SponsorKind::Human
+                        )),
+                    ),
+                    Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid)),
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_principal_kind_is_missing_even_when_negated_unreachable_or_without_subjects() {
+        let principal = PrincipalId::from_bytes([0x33; 16]);
+        let effects = BTreeMap::from([(
+            RefName::try_new(b"refs/heads/main").unwrap(),
+            fgit_reference::effect::RefEffect::Set(GitOid::Sha1(GitOidSha1::from_bytes([1; 20]))),
+        )]);
+        for predicate in [
+            "actor.kind == agent",
+            "not actor.kind == human",
+            "actor.id == \"unreachable\" and actor.kind == agent",
+        ] {
+            let policy = ReviewProtection {
+                administrators: vec![principal],
+                branches: Vec::new(),
+                ref_policy: Some(
+                    fgit_forge::event::protection::compile_ref_policy(&format!(
+                        "policy p {{ rule r {{ when {predicate} then allow }} default allow }}"
+                    ))
+                    .unwrap(),
+                ),
+            };
+            for effects in [&effects, &BTreeMap::new()] {
+                for authentication in [
+                    None,
+                    Some(AdmissionAuthentication::OperatorAssertion),
+                    Some(AdmissionAuthentication::HttpToken),
+                    Some(AdmissionAuthentication::SshDeployKey),
+                ] {
+                    assert!(matches!(
+                        enforce_installed_snapshot_with_authentication(
+                            &policy,
+                            &BTreeMap::new(),
+                            effects,
+                            Some(principal),
+                            authentication,
+                        ),
+                        Err(ProjectionFailure::Refuse(RefusalCode::EvidenceMissing)),
+                    ));
+                }
+                assert!(matches!(
+                    enforce_installed_snapshot_with_authentication(
+                        &policy,
+                        &BTreeMap::new(),
+                        effects,
+                        None,
+                        Some(agent_authentication(
+                            principal,
+                            fgit_forge::event::agent_credential::SponsorKind::Human
+                        )),
+                    ),
+                    Err(ProjectionFailure::Refuse(RefusalCode::EvidenceMissing)),
+                ));
+            }
+        }
+    }
 
     #[test]
     fn installed_authentication_policy_requires_verified_facts_with_permitted_twins() {

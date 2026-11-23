@@ -79,7 +79,8 @@ pub use treefs_workspace::IssueReadRefusal;
 pub use treefs_workspace::MilestoneReadRefusal;
 pub use treefs_workspace::RetiredForgeDeliveryReceipt;
 pub use treefs_workspace::candidate_inspection::{
-    BundleInspectionRefusal, PullRequestInspectionRefusal,
+    BundleInspectionRefusal, InspectedBundle, InspectedRebaseCommit, PullRequestInspectionRefusal,
+    RebaseBundleInspection,
 };
 /// Operator-owned native CI, with canonical event custody and explicit drain.
 #[cfg(target_os = "linux")]
@@ -95,9 +96,10 @@ pub use treefs_workspace::{
     TrustedWorkflowArtifactInputReceipt, TrustedWorkflowArtifactOutput,
     TrustedWorkflowArtifactSelection, TrustedWorkflowFailure, TrustedWorkflowJobArtifactInputs,
     TrustedWorkflowJobArtifacts, TrustedWorkflowJobLogs, TrustedWorkflowLogStream,
-    TrustedWorkflowRetainedArtifactInput, TrustedWorkflowRetainedArtifactProvenance,
-    TrustedWorkflowRun, TrustedWorkflowStepLog, WorkspaceBatchJob, WorkspaceBatchResult,
-    WorkspaceHostTelemetry, WorkspaceInputSharing, WorkspaceToolFailure, WorkspaceToolResult,
+    TrustedWorkflowRebase, TrustedWorkflowRetainedArtifactInput,
+    TrustedWorkflowRetainedArtifactProvenance, TrustedWorkflowRun, TrustedWorkflowStepLog,
+    WorkspaceBatchJob, WorkspaceBatchResult, WorkspaceHostTelemetry, WorkspaceInputSharing,
+    WorkspaceToolFailure, WorkspaceToolResult,
 };
 pub use treefs_workspace::{ForgeEventDisclosureProfile, ForgeEventReadGrants};
 pub use treefs_workspace::{
@@ -106,6 +108,9 @@ pub use treefs_workspace::{
 };
 pub use treefs_workspace::{
     MergeWorkspaceReceipt, NodeWorkspaceRefusal, WorkspaceSessionRefusal, WorkspaceShutdownBlocked,
+};
+pub use treefs_workspace::{
+    PreparedPullRequestRebaseBundle, PreparedRebaseBundle, RebasePreparationRefusal,
 };
 pub use treefs_workspace::{
     PreparedQueueHeadBundle, PreparedQueuePrefixBundle, QueuePrefixEntry, QueueRead,
@@ -118,6 +123,7 @@ pub use treefs_workspace::{
 pub use treefs_workspace::{
     PullRequestCommentView, PullRequestCommentsPage, PullRequestCommentsReadRefusal,
 };
+pub use treefs_workspace::{PullRequestSearchPage, PullRequestSearchRefusal};
 pub use treefs_workspace::{
     SelectedStreamBundleExport, StreamBundleExportQuery, StreamBundleExportReceipt,
     StreamBundleExportRefusal, StreamBundleImportQuery, StreamBundleImportRefusal,
@@ -216,15 +222,15 @@ mod receive_refusal;
 mod receive_staging;
 mod received_pack;
 mod received_pack_restore;
-pub use received_pack::ReceivedPackReceipt;
+pub use received_pack::{HybridPackReceipt, ReceivedPackReceipt};
 mod ssh;
 mod upload_visibility;
 mod verified_reads;
 pub mod webhook;
 
 pub use ssh::{
-    FileDeployKeyAuthorizer, FileDeployKeyRefusal, NodeSshRefusal, SshServerLimits,
-    SshServerReceipt,
+    FileDeployKeyAuthorizer, FileDeployKeyRefusal, MAX_SSH_REPOSITORY_ROUTES, NodeSshRefusal,
+    SshRepositoryRoute, SshServerLimits, SshServerReceipt,
 };
 pub use webhook::{DeadLetterQueue, WebhookDeliveryDestination};
 
@@ -322,9 +328,13 @@ pub struct AdmissionUploadPackRepository {
     object_format: GitHashAlgorithm,
     refs: Vec<AdvertisedRef>,
     head_target: Option<RefName>,
-    closure_objects: BTreeSet<GitOid>,
+    /// Immutable visible membership shared by adapters for one verified graph.
+    /// Session-local proofs and deadlines remain separate below.
+    closure_objects: Arc<PermittedObjectClosure>,
     tag_peels: BTreeMap<GitOid, GitOid>,
     shallow_proof: Option<upload_visibility::shallow::ShallowProof>,
+    object_info_proof: Option<upload_visibility::object_info::ObjectInfoProof>,
+    ref_in_want_deadline: Option<GitDaemonSessionDeadline>,
 }
 
 impl AdmissionUploadPackRepository {
@@ -407,9 +417,11 @@ impl AdmissionUploadPackRepository {
             object_format,
             refs,
             head_target,
-            closure_objects: BTreeSet::new(),
+            closure_objects: Arc::new(PermittedObjectClosure::default()),
             tag_peels: BTreeMap::new(),
             shallow_proof: None,
+            object_info_proof: None,
+            ref_in_want_deadline: None,
         })
     }
 
@@ -419,9 +431,18 @@ impl AdmissionUploadPackRepository {
     /// supplies only its private, exact-head visible-graph proof, never the
     /// cumulative admitted-history set or a physical object inventory.
     #[must_use]
-    pub fn with_closure_objects(mut self, objects: BTreeSet<GitOid>) -> Self {
+    pub fn with_closure_objects(self, objects: BTreeSet<GitOid>) -> Self {
+        self.with_shared_closure_objects(Arc::new(PermittedObjectClosure::new(objects)))
+    }
+
+    /// The native transport has already verified this immutable graph under
+    /// its exact authority basis. Sharing it does not share a session's
+    /// liveness or grant any proof to a replacement disclosure selection.
+    fn with_shared_closure_objects(mut self, objects: Arc<PermittedObjectClosure>) -> Self {
         self.closure_objects = objects;
         self.shallow_proof = None;
+        self.object_info_proof = None;
+        self.ref_in_want_deadline = None;
         self
     }
 
@@ -459,15 +480,62 @@ impl UploadPackRepository for AdmissionUploadPackRepository {
     }
 
     fn contains_want(&self, oid: AnyGitOid) -> bool {
-        self.refs.iter().any(|reference| reference.oid == oid)
-            || match GitOid::try_from(oid) {
-                Ok(oid) => self.closure_objects.contains(&oid),
-                Err(_) => false,
-            }
+        // The private visible-graph proof includes every advertised root.
+        // Avoid scanning all refs for every metadata query (including misses).
+        self.closure_objects.objects().contains(&oid)
+            || (self.object_info_proof.is_none()
+                && self.refs.iter().any(|reference| reference.oid == oid))
     }
 
     fn is_common(&self, oid: AnyGitOid) -> bool {
         self.contains_want(oid)
+    }
+
+    fn negotiation_checkpoint(&self) -> Result<(), WireError> {
+        if self
+            .ref_in_want_deadline
+            .as_ref()
+            .is_some_and(GitDaemonSessionDeadline::expired)
+        {
+            Err(WireError::PackSourceRefused)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn supports_ref_in_want(&self) -> bool {
+        self.ref_in_want_deadline.is_some()
+    }
+
+    fn ref_in_want_checkpoint(&self) -> Result<(), WireError> {
+        match &self.ref_in_want_deadline {
+            Some(deadline) if !deadline.expired() => Ok(()),
+            _ => Err(WireError::PackSourceRefused),
+        }
+    }
+
+    fn supports_object_info(&self) -> bool {
+        self.object_info_proof.is_some()
+    }
+
+    fn object_info_checkpoint(&self) -> Result<(), WireError> {
+        self.object_info_proof
+            .as_ref()
+            .ok_or(WireError::PackSourceRefused)?
+            .checkpoint()
+    }
+
+    fn object_info_size(&self, oid: AnyGitOid) -> Result<Option<u64>, WireError> {
+        let proof = self
+            .object_info_proof
+            .as_ref()
+            .ok_or(WireError::PackSourceRefused)?;
+        proof.checkpoint()?;
+        if self.contains_want(oid) {
+            proof.size(oid)
+        } else {
+            Ok(None)
+        }
     }
 
     fn supports_shallow(&self) -> bool {
@@ -1025,10 +1093,11 @@ impl MaterializedAdmission {
 /// A bounded Git pack derived from one authority-selected object closure.
 ///
 /// The payload is consumable only after the `fgit-pack` writer finished its
-/// temporary artifact and checksum, or a native-verified received pack matched
-/// the complete current authorized selection. Its evidence retains both the exact
+/// temporary artifact and checksum, an independently verified retained pack matched
+/// the complete current authorized selection, or both paths were joined into
+/// one verified hybrid pack. Its evidence retains both the exact
 /// authority head basis and the RCR/genesis source that selected the objects.
-/// Written packs live in private scratch custody (frankengit-8xyq); received
+/// Written packs live in private scratch custody (frankengit-8xyq); retained
 /// packs share bounded immutable cache custody. Each session reads bounded
 /// chunks through its own cursor.
 #[derive(Debug)]
@@ -1040,15 +1109,19 @@ pub struct AuthoritySelectedPackPayload {
 }
 
 /// Provenance of the exact bytes served for an authorized object selection.
-/// Received packs preserve verified sender compressed data; they do not claim
-/// the deterministic writer's ordering, compression profile, or work receipts.
+/// Reused packs preserve independently verified compressed data from receive,
+/// import, or native output. The stable `Received` variant describes retained
+/// representation evidence, not sender provenance or new encoder work.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PackMaterializationReceipt {
     /// A new artifact produced by the frozen native pack writer.
     Written(PackWriteReceipt),
-    /// A fully native-verified sender pack, exact disjoint composition, or
+    /// An independently verified retained pack, exact disjoint composition, or
     /// selective entry representation identified by its explicit profile.
     Received(ReceivedPackReceipt),
+    /// Verified retained entries plus newly written objects, joined under one
+    /// native checksum without changing the authorized selection.
+    Hybrid(HybridPackReceipt),
 }
 
 impl PackMaterializationReceipt {
@@ -1057,7 +1130,7 @@ impl PackMaterializationReceipt {
     pub const fn writer(&self) -> Option<&PackWriteReceipt> {
         match self {
             Self::Written(receipt) => Some(receipt),
-            Self::Received(_) => None,
+            Self::Received(_) | Self::Hybrid(_) => None,
         }
     }
 
@@ -1065,8 +1138,17 @@ impl PackMaterializationReceipt {
     #[must_use]
     pub const fn received(&self) -> Option<&ReceivedPackReceipt> {
         match self {
-            Self::Written(_) => None,
+            Self::Written(_) | Self::Hybrid(_) => None,
             Self::Received(receipt) => Some(receipt),
+        }
+    }
+
+    /// Separate retained-entry and native-writer evidence for a hybrid pack.
+    #[must_use]
+    pub const fn hybrid(&self) -> Option<&HybridPackReceipt> {
+        match self {
+            Self::Hybrid(receipt) => Some(receipt),
+            Self::Written(_) | Self::Received(_) => None,
         }
     }
 }
@@ -1107,8 +1189,20 @@ struct PreparedUploadPack {
     /// including parents omitted from an otherwise self-contained source pack.
     /// This private proof shares `basis` and never copies the whole have graph.
     held_bases: Vec<(GitOid, ObjectType)>,
+    /// A complete live representation pins its verified bytes through response
+    /// materialization, avoiding redundant cold restoration after a warm hit.
+    reused: Option<PreparedReceivedPack>,
     limits: PackLimits,
     write_profile: PackWriteProfile,
+}
+
+/// The envelope and client-held proof under which the pinned representation
+/// was selected. A changed envelope/proof must pass ordinary reuse checks.
+#[derive(Debug)]
+struct PreparedReceivedPack {
+    payload: received_pack::ReceivedPackPayload,
+    limits: PackLimits,
+    held_bases: Vec<(GitOid, ObjectType)>,
 }
 
 impl AuthoritySelectedPackPayload {
@@ -2585,6 +2679,7 @@ pub struct DurableAsyncAdmissionProjection<'materializer> {
     context: AdmissionContext,
     authentication: Option<AdmissionAuthentication>,
     agent_deadline: Option<std::time::Instant>,
+    source_publication: Option<&'materializer agent_credentials::SourcePublicationProof>,
     prepared: Mutex<Option<AsyncMaterializedBasis>>,
     /// At most one exact closure's pure preparation and canonical bytes.
     /// This never proves placement: each command still writes through its
@@ -2615,6 +2710,7 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
             context,
             authentication: None,
             agent_deadline: None,
+            source_publication: None,
             prepared: Mutex::new(None),
             prepared_closure: Mutex::new(None),
             publication: None,
@@ -2638,6 +2734,37 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
         self.authentication = Some(session.authentication);
         self.agent_deadline = session.agent_deadline;
         self
+    }
+
+    /// Only request-owned publication or task-branch authority selects this
+    /// scoped exception. Its variant carries either the complete native path
+    /// delta or an exact visible branch-tip target. Generic Git receive and
+    /// branch mutation cannot construct it from a principal receipt.
+    pub(crate) fn with_source_publication(
+        mut self,
+        proof: &'materializer agent_credentials::SourcePublicationProof,
+    ) -> Self {
+        self.authentication = Some(AdmissionAuthentication::AgentCredential(
+            proof.authentication(),
+        ));
+        self.source_publication = Some(proof);
+        self
+    }
+
+    fn source_publication_checkpoint(&self, cx: &FsqliteCx) -> Result<(), RefusalCode> {
+        if let Some(proof) = self.source_publication {
+            match checkpoint_pack_context(cx) {
+                PackContextCheckpoint::Live => {}
+                PackContextCheckpoint::Stopped {
+                    budget_exhaustion: Some(_),
+                } => return Err(RefusalCode::ResourceBudgetExceeded),
+                PackContextCheckpoint::Stopped {
+                    budget_exhaustion: None,
+                } => return Err(RefusalCode::CancellationInProgress),
+            }
+            proof.checkpoint()?;
+        }
+        Ok(())
     }
 
     /// Enables retained-leaf checkpoint reads in their dedicated fabric
@@ -2677,21 +2804,71 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
         fold: &TransactionFoldReport,
         closure: &ValidatedClosure,
     ) -> Result<CommitMaterialization, AsyncProjectionFailure> {
-        let bodies = admission_authentication::direct_decision_evidence_in(
-            authority,
-            cx,
-            &self.context,
-            basis,
-            &current,
-            root_layout,
-            request,
-            fold,
-            self.authentication,
-            &|| cx.checkpoint().is_err(),
-        )
-        .await?;
+        self.source_publication_checkpoint(cx)
+            .map_err(AsyncProjectionFailure::Unavailable)?;
+        let bodies = if let Some(proof) = self.source_publication {
+            let now = proof
+                .checkpoint()
+                .map_err(AsyncProjectionFailure::Unavailable)?;
+            match proof.change() {
+                agent_credentials::SourcePublicationChange::Update(paths) =>
+                    fgit_admission::merge::native::protection::direct_source_decision_evidence_at(
+                authority,
+                cx,
+                &self.context,
+                basis,
+                &current,
+                root_layout,
+                request,
+                fold,
+                proof.authentication(),
+                proof.reference(),
+                paths,
+                now,
+                &|| self.source_publication_checkpoint(cx).is_err(),
+            )
+            .await,
+                agent_credentials::SourcePublicationChange::BranchCreate(target) =>
+                    fgit_admission::merge::native::protection::direct_branch_creation_decision_evidence_at(
+                        authority,
+                        cx,
+                        &self.context,
+                        basis,
+                        &current,
+                        root_layout,
+                        request,
+                        fold,
+                        proof.authentication(),
+                        proof.reference(),
+                        *target,
+                        now,
+                        &|| self.source_publication_checkpoint(cx).is_err(),
+                    )
+                    .await,
+            }
+        } else {
+            admission_authentication::direct_decision_evidence_in(
+                authority,
+                cx,
+                &self.context,
+                basis,
+                &current,
+                root_layout,
+                request,
+                fold,
+                self.authentication,
+                &|| cx.checkpoint().is_err(),
+            )
+            .await
+        };
+        self.source_publication_checkpoint(cx)
+            .map_err(AsyncProjectionFailure::Unavailable)?;
+        let bodies = bodies?;
         let stage_context = cx.create_child();
-        let is_cancelled = || stage_context.checkpoint().is_err();
+        let is_cancelled = || {
+            stage_context.checkpoint().is_err()
+                || self.source_publication_checkpoint(&stage_context).is_err()
+        };
         let provider =
             DurableAdmissionEvidence::from_bodies(self.context.clone(), basis, request, bodies)
                 .map_err(async_projection_unavailable)?;
@@ -2729,11 +2906,11 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
         // is bounded synchronous link work (hard links and directory syncs;
         // every staged file was synced during validation), not a runtime bridge.
         if let Some(publication) = self.publication {
+            self.source_publication_checkpoint(&stage_context)
+                .map_err(AsyncProjectionFailure::Unavailable)?;
             publication
                 .staging
-                .publish(publication.fabric, &mut || {
-                    stage_context.checkpoint().is_ok()
-                })
+                .publish(publication.fabric, &mut || !is_cancelled())
                 .map_err(|error| AsyncProjectionFailure::Unavailable(publication_refusal(error)))?;
         }
         let ref_root = self
@@ -2781,6 +2958,10 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
 }
 
 impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionProjection<'_> {
+    fn publication_checkpoint(&self, cx: &FsqliteCx) -> Result<(), RefusalCode> {
+        self.source_publication_checkpoint(cx)
+    }
+
     async fn collect_cumulative_outcomes_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
@@ -2858,6 +3039,13 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
             )
             .await
             .map_err(async_projection_unavailable)?;
+        if let Some(proof) = self.source_publication {
+            self.source_publication_checkpoint(cx)
+                .map_err(AsyncProjectionFailure::Unavailable)?;
+            proof
+                .validate_snapshot(materialized.snapshot())
+                .map_err(AsyncProjectionFailure::Refuse)?;
+        }
         let prepared = AsyncMaterializedBasis {
             basis: basis.clone(),
             ref_state: match materialized.snapshot().head_target.clone() {
@@ -2879,7 +3067,7 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
     }
 
     fn supports_ref_microbatching(&self) -> bool {
-        true
+        self.source_publication.is_none()
     }
 
     async fn materialize_batch_commit_async<'a>(
@@ -6540,13 +6728,11 @@ impl GitDaemonSessionReceipt {
     }
 }
 
-/// Evidence that a client received the complete advertisement for an empty
-/// repository.
+/// Evidence that a client completed upload-pack without requesting a pack.
 ///
-/// Empty repositories have no reachable objects to negotiate, so a flush after
-/// the standard zero-identity advertisement is the complete upload-pack
-/// response.  Recording this separately prevents callers from claiming a pack
-/// was emitted when no pack was required.
+/// This includes empty-repository advertisements and v2 metadata or have-only
+/// negotiation sessions. It does not attest that the repository has no refs.
+/// Recording this separately prevents claiming a pack was emitted.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitDaemonAdvertisementReceipt {
     request: GitDaemonRequest,
@@ -6580,8 +6766,8 @@ impl GitDaemonReceiveReceipt {
 /// The complete observable result of one legacy git-daemon session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GitDaemonSessionOutcome {
-    /// The repository was canonically empty, so advertisement plus EOF was
-    /// the complete fetch response and no pack builder was called.
+    /// Upload-pack completed without a pack. The historical variant name also
+    /// covers v2 metadata and negotiation-only sessions on nonempty repositories.
     EmptyRepository(GitDaemonAdvertisementReceipt),
     /// Negotiation selected a request and a canonical pack payload was emitted.
     Pack(GitDaemonSessionReceipt),
@@ -6937,10 +7123,9 @@ where
 /// The server capability advertisement is built here rather than reusing the
 /// legacy capability set because protocol v2 advertises command names and
 /// feature values (`ls-refs`, `fetch`, `object-format`) instead of the v0/v1
-/// keyword set. Each v2 command request is a complete machine run: after
-/// `ls-refs` completes the loop installs a fresh machine so the same
-/// connection can carry the follow-up `fetch`; after `fetch` emits its pack
-/// the session is done.
+/// keyword set. Metadata and acknowledgment-only commands reset their request
+/// fields so the same connection can carry another independent v2 command.
+/// A pack-producing fetch terminates the session.
 fn serve_v2_upload_pack_after_greeting<R, W, BuildPack, Payload, PackError>(
     reader: &mut R,
     writer: &mut W,
@@ -6966,20 +7151,21 @@ where
         fgit_wire::GitObjectFormat::Sha1 => "sha1",
         fgit_wire::GitObjectFormat::Sha256 => "sha256",
     };
-    let advertisement_packets = vec![
+    let mut advertisement_packets = vec![
         Packet::Data(b"version 2\n".to_vec()),
         // Upstream advertises `unborn`: without it a v2 client never asks for
         // an empty repository's HEAD, and its clone falls back to its own default.
         Packet::Data(b"ls-refs=unborn\n".to_vec()),
-        Packet::Data(match (supports_filter, repository.supports_shallow()) {
-            (true, true) => b"fetch=shallow filter\n".to_vec(),
-            (true, false) => b"fetch=filter\n".to_vec(),
-            (false, true) => b"fetch=shallow\n".to_vec(),
-            (false, false) => b"fetch\n".to_vec(),
-        }),
+        Packet::Data(v2_fetch_capability(repository, supports_filter)),
         Packet::Data(format!("object-format={object_format}\n").into_bytes()),
         Packet::Flush,
     ];
+    if repository.supports_object_info() {
+        advertisement_packets.insert(
+            advertisement_packets.len() - 1,
+            Packet::Data(b"object-info\n".to_vec()),
+        );
+    }
     let server_capabilities = Capabilities::parse_v2_advertisement(&advertisement_packets, &limits)
         .map_err(|error| GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error)))?;
     write_packet_group(writer, &advertisement_packets, &limits)
@@ -6991,7 +7177,7 @@ where
             .map_err(|error| GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error)))
     };
     let mut machine = fresh_machine()?;
-    let mut ls_refs_completed = false;
+    let mut metadata_completed = false;
     let mut input = [0_u8; 16 * 1024];
     loop {
         let read = reader.read(&mut input).map_err(|source| {
@@ -7004,9 +7190,11 @@ where
             machine.finish().map_err(|error| {
                 GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error))
             })?;
-            if ls_refs_completed && machine.is_awaiting_command() {
-                // The client obtained everything it needed from ls-refs (the
-                // empty-repository shape) and closed the session cleanly.
+            if (metadata_completed || machine.has_completed_negotiation())
+                && machine.is_awaiting_command()
+            {
+                // Completed metadata and have-only negotiation sessions need
+                // no pack. A partially received next command still refuses.
                 return Ok(GitDaemonSessionOutcome::EmptyRepository(
                     GitDaemonAdvertisementReceipt { request },
                 ));
@@ -7040,8 +7228,8 @@ where
 
         for event in transition.events {
             match event {
-                WireEvent::LsRefs { .. } => {
-                    ls_refs_completed = true;
+                WireEvent::LsRefs { .. } | WireEvent::ObjectInfo { .. } => {
+                    metadata_completed = true;
                 }
                 WireEvent::PackRequested(pack_request) => {
                     check_selected_pack_deadline(writer, &limits, session_deadline)
@@ -7461,17 +7649,42 @@ fn unserved_filter_error(filter: &str) -> Vec<u8> {
     format!("ERR filter '{filter}' not supported\n").into_bytes()
 }
 
+/// The fetch features supplied by this exact repository view, shared by raw
+/// Git, SSH and smart HTTP. Parser support alone never advertises ref lookup.
+fn v2_fetch_capability(repository: &impl UploadPackRepository, supports_filter: bool) -> Vec<u8> {
+    let mut line = b"fetch".to_vec();
+    for (enabled, feature) in [
+        (repository.supports_shallow(), b"shallow".as_slice()),
+        (supports_filter, b"filter".as_slice()),
+        (repository.supports_ref_in_want(), b"ref-in-want".as_slice()),
+        (true, b"wait-for-done".as_slice()),
+    ] {
+        if enabled {
+            line.push(if line.len() == 5 { b'=' } else { b' ' });
+            line.extend_from_slice(feature);
+        }
+    }
+    line.push(b'\n');
+    line
+}
+
 /// The client-safe upload-pack refusal shared by git://, SSH and smart HTTP.
 ///
-/// The only reflected value is the fixed-width object ID parsed from this
-/// client's want. Hidden, deleted and never-seen objects have the same answer;
-/// neither the stored object kind nor physical existence enters the message.
+/// Reflected values are the fixed-width object ID or validated exact ref name
+/// from this client's want. Hidden, deleted and never-seen targets have the
+/// same answer; neither stored object kind nor existence enters the message.
 /// Other wire failures keep their existing transport behavior rather than
 /// reflecting arbitrary parser input or internal diagnostics.
 fn upload_want_error(error: &WireError) -> Option<Vec<u8>> {
     match error {
         WireError::WantNotAdvertised { oid } | WireError::WantNotReachable { oid } => {
             Some(format!("ERR upload-pack: not our ref {oid}\n").into_bytes())
+        }
+        WireError::UnknownWantedRef { name } if RefName::try_new_one_level(name).is_ok() => {
+            let mut line = b"ERR unknown ref ".to_vec();
+            line.extend_from_slice(name);
+            line.push(b'\n');
+            Some(line)
         }
         _ => None,
     }
@@ -7579,7 +7792,7 @@ fn refuse_unserved_filter(
             .filter
             .as_ref()
             .and_then(upload_visibility::unserved_filter_name),
-        WireEvent::LsRefs { .. } | WireEvent::Common(_) => None,
+        WireEvent::LsRefs { .. } | WireEvent::ObjectInfo { .. } | WireEvent::Common(_) => None,
     })?;
     // The typed refusal is the outcome; a client that is already gone
     // changes nothing about it.
@@ -7784,7 +7997,8 @@ pub struct NodeConfig {
     /// independently reopened children. This cache never selects objects or
     /// grants disclosure; each request authenticates its own selected closure.
     pack_computation_cache: Arc<PackComputationCache>,
-    /// Verified ingress representations. A hit never selects or authorizes
+    /// Independently verified retained representations from ingress or native
+    /// output. A hit never selects or authorizes
     /// objects. Optional disk custody must pass native and canonical integrity
     /// verification before it can enter a new service's live cache.
     received_pack_cache: Arc<received_pack::ReceivedPackCache>,
@@ -7828,6 +8042,9 @@ pub struct NodeConfig {
     /// Explicit runtime-only ceiling for the scoped HTTP review-protection API.
     /// Disabled by default; token scopes and current administrators still apply.
     http_protection_admin: bool,
+    /// Independent HTTP symbolic-HEAD administration ceiling. Every write
+    /// still needs its own credential grant and current canonical administrator.
+    http_default_branch_admin: bool,
     /// Independent HTTP queue-management ceiling; token scopes remain required.
     http_queue_management: bool,
     /// Independent HTTP queue-head landing ceiling; grants and ref scope still apply.
@@ -7838,6 +8055,10 @@ pub struct NodeConfig {
     /// transfer profile. Disabled unless an operator selects a private root;
     /// per-request LFS credentials remain independently required.
     http_lfs_root: Option<PathBuf>,
+    /// Optional receive-validation requirement for complete LFS payload custody.
+    /// This applies independently of the HTTP transfer endpoint and grants no
+    /// publication or payload-read authority to a transport credential.
+    receive_lfs_root: Option<PathBuf>,
     /// Opt-in workflow artifact custody reads; transport grants remain separate.
     workflow_artifact_root: Option<PathBuf>,
     /// Which cell this process is, for answers it serves.
@@ -7906,10 +8127,12 @@ impl NodeConfig {
             git_daemon_receive_principal: None,
             http_trusted_origin: None,
             http_protection_admin: false,
+            http_default_branch_admin: false,
             http_queue_management: false,
             http_queue_landings: false,
             http_discussions: false,
             http_lfs_root: None,
+            receive_lfs_root: None,
             workflow_artifact_root: None,
         }
     }
@@ -8090,6 +8313,20 @@ impl NodeConfig {
         self.http_protection_admin
     }
 
+    /// Enables explicit HTTP default-branch administration. This grants no
+    /// credential scope or administrator status and cannot bootstrap a policy.
+    #[must_use]
+    pub const fn with_http_default_branch_admin(mut self) -> Self {
+        self.http_default_branch_admin = true;
+        self
+    }
+
+    /// Whether HTTP default-branch changes were independently enabled.
+    #[must_use]
+    pub const fn http_default_branch_admin_enabled(&self) -> bool {
+        self.http_default_branch_admin
+    }
+
     /// Enables independently scoped HTTP queue reads and membership management.
     /// This grants no credential scope, Git ref write, review, or merge authority.
     #[must_use]
@@ -8148,6 +8385,27 @@ impl NodeConfig {
     #[must_use]
     pub fn http_lfs_root(&self) -> Option<&Path> {
         self.http_lfs_root.as_deref()
+    }
+
+    /// Requires supported LFS pointers reachable from proposed receive roots
+    /// to name fully verified payloads in this private artifact directory.
+    ///
+    /// The namespace binds this node's authenticated tenant, repository and
+    /// incarnation. The bounded check runs before object promotion and ref
+    /// admission on every transport using the production quarantine validator.
+    /// It does not enable HTTP transfers, grant credential scopes, rewrite
+    /// pointers, or change canonical transaction identities. Omission preserves
+    /// the existing Git-only receive profile. Unsupported hosts fail closed.
+    #[must_use]
+    pub fn with_receive_lfs_root(mut self, root: PathBuf) -> Self {
+        self.receive_lfs_root = Some(root);
+        self
+    }
+
+    /// The independently selected LFS custody requirement for receive validation.
+    #[must_use]
+    pub fn receive_lfs_root(&self) -> Option<&Path> {
+        self.receive_lfs_root.as_deref()
     }
 
     /// Selects the existing private trusted-workflow artifact custody root.
@@ -8487,6 +8745,8 @@ pub enum NodeInitialization {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorReport {
     authority_head: AuthenticatedHead,
+    repository_incarnation_id: RepositoryIncarnationId,
+    object_format: GitHashAlgorithm,
     sampled_object: Option<GitOid>,
 }
 
@@ -8536,6 +8796,19 @@ impl DoctorReport {
     #[must_use]
     pub const fn authority_head(&self) -> &AuthenticatedHead {
         &self.authority_head
+    }
+
+    /// Canonical identity resolved when this existing repository was opened.
+    /// Operators can retain this value as an explicit deployment expectation.
+    #[must_use]
+    pub const fn repository_incarnation_id(&self) -> RepositoryIncarnationId {
+        self.repository_incarnation_id
+    }
+
+    /// The repository's permanent, canonically resolved Git hash domain.
+    #[must_use]
+    pub const fn object_format(&self) -> GitHashAlgorithm {
+        self.object_format
     }
 
     /// The exact object independently re-verified by this invocation, if any.
@@ -8971,6 +9244,31 @@ impl OneNode {
                 Ok(node)
             }
             Err(opening) => Err(close_after_existing_open_failure(node, opening)),
+        }
+    }
+
+    /// Checks the optional receive-side LFS custody configuration before a
+    /// listener reports readiness. Each receive still verifies its own exact
+    /// payloads under its original deadline; this check caches no availability.
+    pub fn validate_receive_lfs_storage(&self) -> Result<(), RefusalCode> {
+        let Some(root) = self.service_config.receive_lfs_root() else {
+            return Ok(());
+        };
+        #[cfg(unix)]
+        {
+            fgit_object_fabric::artifact::storage::lfs::LfsStore::open(
+                root,
+                self.tenant_id,
+                self.repository_id,
+                self.repository_incarnation_id(),
+            )
+            .map(|_| ())
+            .map_err(|_| RefusalCode::DurabilityProfileUnavailable)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = root;
+            Err(RefusalCode::DurabilityProfileUnavailable)
         }
     }
 
@@ -10485,18 +10783,73 @@ impl OneNode {
             return Err(PackWriteError::from(PackError::DeadlineExceeded).into());
         }
         self.rearm_session_pack_materialization_context(pack_context, deadline, expanded_bytes)?;
-        // Cold custody must be revalidated before the held-base proof is
-        // frozen; otherwise a restarted service could never reuse thin entries.
-        self.restore_received_pack_custody(materialized, &keys, &held, &limits, live)?;
+        let mut held_bases =
+            self.received_pack_held_base_proof(disclosure, &keys, &held, write_profile.thin, live)?;
+        // A complete live hit already proves every selected representation.
+        // Pin it before probing optional durable custody: another service may
+        // have persisted equivalent encodings that would otherwise reread and
+        // revalidate every body against this request's deadline.
+        let reused = self.received_pack_cache().try_reuse_with_held(
+            &keys,
+            &limits,
+            request.options.ofs_delta(),
+            &held_bases,
+            live,
+        )?;
+        let reused = reused.and_then(|payload| {
+            let mut proof = Vec::new();
+            proof.try_reserve_exact(held_bases.len()).ok()?;
+            proof.extend_from_slice(&held_bases);
+            Some(PreparedReceivedPack {
+                payload,
+                limits: limits.clone(),
+                held_bases: proof,
+            })
+        });
+        if reused.is_none() {
+            self.restore_received_pack_custody(materialized, &keys, &held, &limits, live)?;
+            // Restored thin entries may add delta parents. Rebuild this same
+            // disclosure's held-kind proof before freezing the cold selection.
+            held_bases = self.received_pack_held_base_proof(
+                disclosure,
+                &keys,
+                &held,
+                write_profile.thin,
+                live,
+            )?;
+        }
+        if !live() {
+            return Err(PackWriteError::from(PackError::DeadlineExceeded).into());
+        }
+        Ok(PreparedUploadPack {
+            basis: materialized.basis().clone(),
+            request: request.clone(),
+            keys,
+            held,
+            held_bases,
+            reused,
+            limits,
+            write_profile,
+        })
+    }
+
+    fn received_pack_held_base_proof(
+        &self,
+        disclosure: &upload_visibility::VisibleUploadPack,
+        keys: &[PackOrderKey],
+        held: &BTreeSet<GitOid>,
+        thin: bool,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<(GitOid, ObjectType)>, NodePackMaterializationRefusal> {
         let mut held_bases = Vec::new();
-        if write_profile.thin && !keys.is_empty() {
+        if thin && !keys.is_empty() {
             // Only parents of retained selected entries need a held-kind proof.
             // A selective response may omit an original internal parent too.
             // Avoid indexing the entire client history again. A cache change
             // can only miss this optional proof, never enlarge the have closure.
             let candidates = self
                 .received_pack_cache()
-                .held_base_candidates(&keys, &held, live)?;
+                .held_base_candidates(keys, held, live)?;
             if held_bases.try_reserve_exact(candidates.len()).is_ok() {
                 for id in candidates {
                     if !live() {
@@ -10511,15 +10864,7 @@ impl OneNode {
         if !live() {
             return Err(PackWriteError::from(PackError::DeadlineExceeded).into());
         }
-        Ok(PreparedUploadPack {
-            basis: materialized.basis().clone(),
-            request: request.clone(),
-            keys,
-            held,
-            held_bases,
-            limits,
-            write_profile,
-        })
+        Ok(held_bases)
     }
 
     /// Materializes precisely the preflighted selection. No second graph walk
@@ -10549,7 +10894,20 @@ impl OneNode {
         // External REF bases additionally need this same private held-kind
         // proof and the existing thin/full-history negotiation gate.
         // Local exports retain their frozen writer profile.
-        let reused = if prepared.write_profile.thin {
+        let reused = if let Some(pack) = &prepared.reused
+            && pack.limits == prepared.limits
+            && pack.held_bases == prepared.held_bases
+            && (prepared.write_profile.thin || pack.payload.receipt().external_base_count() == 0)
+            && (prepared.request.options.ofs_delta()
+                || pack.payload.receipt().ofs_delta_count() == 0)
+        {
+            pack.payload.fresh_reader(live)?
+        } else {
+            None
+        };
+        let reused = if reused.is_some() {
+            reused
+        } else if prepared.write_profile.thin {
             self.received_pack_cache().try_reuse_with_held(
                 &prepared.keys,
                 &prepared.limits,
@@ -10591,6 +10949,74 @@ impl OneNode {
             inner: &source,
             ceiling: ceiling.as_ref(),
         };
+        // A native merge or workspace publication can add only a few objects
+        // to a large retained history. Reuse its closed, verified delta graph
+        // and encode only the uncovered identities. The native run is always
+        // self-contained: neither graph can acquire a dependency on the other.
+        // Both consume the original selection's aggregate envelope and request
+        // lifetime; no second graph walk or wider disclosure is introduced.
+        let held = if prepared.write_profile.thin {
+            prepared.held_bases.as_slice()
+        } else {
+            &[]
+        };
+        if let Some(partial) = self.received_pack_cache().try_reuse_partial(
+            &prepared.keys,
+            &prepared.limits,
+            held,
+            live,
+        )? {
+            let native_profile = if prepared.write_profile == PackWriteProfile::COMPRESSED_V5_THIN {
+                PackWriteProfile::COMPRESSED_V5
+            } else if prepared.write_profile == PackWriteProfile::COMPRESSED_V6_THIN {
+                PackWriteProfile::COMPRESSED_V6
+            } else {
+                prepared.write_profile
+            };
+            let native = self.stream_pack_entries(
+                &served,
+                partial.missing_keys(),
+                &[],
+                native_profile,
+                partial.native_limits(),
+                live,
+            );
+            match native {
+                Ok((mut pack, receipt)) => {
+                    self.retain_generated_pack(
+                        materialized,
+                        &mut pack,
+                        &receipt,
+                        received_pack::GeneratedPackSelection {
+                            keys: partial.missing_keys(),
+                            thin_bases: &[],
+                            limits: partial.native_limits(),
+                        },
+                        live,
+                    )?;
+                    let (pack, receipt) =
+                        partial.finish(pack, receipt, self.storage_root(), live)?;
+                    return Ok(AuthoritySelectedPackPayload {
+                        basis: materialized.basis().clone(),
+                        closure: materialized.selected_closure().clone(),
+                        receipt: PackMaterializationReceipt::Hybrid(receipt),
+                        pack: SelectedPackData::Written(pack),
+                    });
+                }
+                // Retained compressed bytes can require more space than a
+                // fresh encoding. A representation-only limit may therefore
+                // miss the accelerator; retry the ordinary writer under the
+                // SAME live request and full selected envelope. Cancellation,
+                // failed identity checks and I/O errors never take this path.
+                Err(NodePackMaterializationRefusal::Pack(error))
+                    if matches!(
+                        error.as_ref(),
+                        PackWriteError::OutputLimit { .. }
+                            | PackWriteError::Pack(PackError::TotalExpandedLimit { .. })
+                    ) => {}
+                Err(error) => return Err(error),
+            }
+        }
         let thin_bases = if prepared.write_profile.thin && !prepared.held.is_empty() {
             let sent = prepared.keys.iter().map(|key| key.id).collect();
             served.thin_base_hints(
@@ -10776,6 +11202,38 @@ impl OneNode {
         limits: &PackLimits,
         is_live: &mut impl FnMut() -> bool,
     ) -> Result<AuthoritySelectedPackPayload, NodePackMaterializationRefusal> {
+        let (mut pack, receipt) =
+            self.stream_pack_entries(source, keys, thin_bases, write_profile, limits, is_live)?;
+        self.retain_generated_pack(
+            materialized,
+            &mut pack,
+            &receipt,
+            received_pack::GeneratedPackSelection {
+                keys,
+                thin_bases,
+                limits,
+            },
+            is_live,
+        )?;
+        Ok(AuthoritySelectedPackPayload {
+            basis: materialized.basis().clone(),
+            closure: materialized.selected_closure().clone(),
+            receipt: PackMaterializationReceipt::Written(receipt),
+            pack: SelectedPackData::Written(pack),
+        })
+    }
+
+    /// One native entry run in private scratch custody. Only its caller can
+    /// attach the authenticated selection or join it to verified retained data.
+    fn stream_pack_entries(
+        &self,
+        source: &impl CanonicalObjectSource,
+        keys: &[PackOrderKey],
+        thin_bases: &[ThinBase],
+        write_profile: PackWriteProfile,
+        limits: &PackLimits,
+        is_live: &mut impl FnMut() -> bool,
+    ) -> Result<(pack_spool::SpooledPack, PackWriteReceipt), NodePackMaterializationRefusal> {
         // Both preparation paths keep identity-sorted keys. Overlay only the
         // exact selection's verified metadata; the adapter preserves native
         // identity, kind, owned bodies and streamed readers. Client-held thin
@@ -10809,12 +11267,7 @@ impl OneNode {
         let pack = spool.into_promoted().ok_or_else(|| {
             NodePackMaterializationRefusal::from(PackWriteError::PromotionRefused)
         })?;
-        Ok(AuthoritySelectedPackPayload {
-            basis: materialized.basis().clone(),
-            closure: materialized.selected_closure().clone(),
-            receipt: PackMaterializationReceipt::Written(receipt),
-            pack: SelectedPackData::Written(pack),
-        })
+        Ok((pack, receipt))
     }
 
     /// Returns the read-only canonical admission projection backed by this
@@ -11708,6 +12161,8 @@ impl OneNode {
         }
         Ok(DoctorReport {
             authority_head,
+            repository_incarnation_id: self.repository_incarnation_id(),
+            object_format: self.object_format(),
             sampled_object,
         })
     }

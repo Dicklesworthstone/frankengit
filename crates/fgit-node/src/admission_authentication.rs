@@ -241,6 +241,29 @@ impl DurableAdmissionMaterializer {
 }
 
 impl OneNode {
+    pub(crate) async fn admit_basis_bound_scoped_source_receive_in(
+        &self,
+        request: &NodeRequestContext,
+        context: &AdmissionContext,
+        validated: &BasisBoundValidatedReceive,
+        staging: Option<&super::receive_staging::ReceiveStaging>,
+        proof: &crate::agent_credentials::SourcePublicationProof,
+        limits: AdmissionLimits,
+    ) -> Result<AdmissionResult, AdmissionError> {
+        let projection = self
+            .durable_admission_projection_publishing(context, staging)?
+            .with_source_publication(proof);
+        Box::pin(admit_basis_bound_validated_receive_async(
+            &self.authority,
+            request.authority(),
+            context,
+            validated,
+            limits,
+            &projection,
+        ))
+        .await
+    }
+
     pub(crate) async fn admit_basis_bound_validated_receive_with_authentication_in(
         &self,
         request: &NodeRequestContext,

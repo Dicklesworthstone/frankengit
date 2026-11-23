@@ -1,7 +1,7 @@
 // Exact queue preparation, native full inspection and retained landing bytes.
 // Queue selection is a guard; only the native coupled decision grants landing.
 import { FORM_LIMIT, copy, fail, form, integer, keys, oid, pinned, record, text, unhex, utf8 } from './pulls-core.mjs';
-import { checkedBundle, checkedPath, digest, inspectionReply, multipart, preparationEnvelope } from './pulls-candidate.mjs';
+import { checkedBundle, checkedPath, digest, inspectionReply, mergeProfile, multipart, preparationEnvelope } from './pulls-candidate.mjs';
 import { COMMAND_LIMIT, normalizeQueueFields, queueCommand, queueInteger, queueReference, queueScope } from './queues-protocol.mjs';
 
 function closed(value, names) {
@@ -42,8 +42,7 @@ export function queuePreparationRequest(number, fields, metadata, scope) {
     command.message = text(metadata.message, 64 * 1024, 'commit message');
     if (!command.message.length) fail('An explicit nonempty commit message is required.');
   }
-  command.profile = metadata.profile ?? 'path-merge-v1';
-  if (!['path-merge-v1', 'exact-renames-v1'].includes(command.profile)) fail('Choose a supported native queue merge profile.');
+  command.profile = mergeProfile(metadata.profile ?? 'path-merge-v1');
   const body = form(command);
   if (utf8.encode(body).length > FORM_LIMIT) fail('Queue preparation form exceeds 256 KiB.');
   return { number, fields: normalized, profile: command.profile, command, body, path: `queues/${number}/prepare` };

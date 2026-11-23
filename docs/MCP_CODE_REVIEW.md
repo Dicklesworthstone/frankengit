@@ -14,6 +14,15 @@ repository work. The handler independently repeats the same permission check.
 No tool admits a transaction, executes scripts, creates a checkout, casts a
 review vote, or grants merge permission.
 
+In sponsored sessions these flags are launch ceilings, not authority. A
+canonical `source-history-read` grant authorizes `frankengit_source_compare`;
+the independent `pulls-diff-read` grant authorizes `frankengit_pull_diff`.
+Current-source, PR metadata, candidate, publication, and verified-blob grants
+do not imply either operation. Direct handler calls require the active opaque
+agent request; completed response reservations cannot be reused to authorize
+new work. The original request context and its deadline remain live through
+comparison and complete response validation.
+
 ## Ref comparison
 
 Example `tools/call` arguments for `frankengit_source_compare`:
@@ -99,8 +108,10 @@ before success, including exact hunk lengths and bound identities.
 diff pagination or silent truncation. Over-budget requests fail; narrow paths
 or adjust limits within the documented ceiling. `merge_permission=null` and
 `repository_changed=false` explicitly separate review data from authority.
-This local-owner profile is not remote authentication, a path-capability broker,
-a full Intent Run, or a complete FG-096 implementation.
+Local owner sessions retain their existing launch profile. Sponsored sessions
+use the canonical credential authentication described in
+`SPONSORED_AGENT_CREDENTIALS.md`; neither profile implements a full Intent Run
+or a complete FG-096 system.
 
 ## Verification boundary
 
@@ -114,3 +125,9 @@ requests do not advance authority. It also checks recorded PR tips after a later
 branch write. These test cases were written in an environment without Cargo or
 rustc and have **not been executed**. No package, conformance or release pass is
 claimed. Intended command: `cargo test --locked -p fgit-cli --bin fg-mcp`.
+
+The sponsored PR-diff regression module exercises SHA-1 and SHA-256 recorded
+tips, independent grants and launch ceilings, retained agent/sponsor provenance,
+request deadlines and response budgets, stale head/version pins, credential
+revocation, and absence of read-created publication. Its focused command is
+`cargo test --locked -p fgit-cli --lib mcp::backend::agent::tests::pull_diff`.

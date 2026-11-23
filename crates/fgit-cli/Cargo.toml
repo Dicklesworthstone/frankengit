@@ -38,6 +38,11 @@ fgit-wire.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 fgit-runner.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# DEP-118: private token reads reject symlinks/FIFOs before reading.
+# Reuses the admitted std/fs capability without new packages or features.
+rustix.workspace = true
+
 [dev-dependencies]
 fgit-authority-fsqlite.workspace = true
 fgit-git-object.workspace = true

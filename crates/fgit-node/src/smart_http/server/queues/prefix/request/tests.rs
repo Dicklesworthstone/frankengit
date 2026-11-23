@@ -74,6 +74,22 @@ fn ordered_original_subjects_keep_one_common_target_policy_and_explicit_metadata
 }
 
 #[test]
+fn builtin_attributes_profile_applies_to_the_exact_ordered_prefix() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let bytes = form(format, 2);
+        let mut expected = parse(bytes.as_bytes(), format, incarnation()).unwrap();
+        expected.profile = MergeProfile::BuiltinAttributesV1;
+        let selected = parse(
+            format!("{bytes}&profile=builtin-attributes-v1").as_bytes(),
+            format,
+            incarnation(),
+        )
+        .unwrap();
+        assert_eq!(selected, expected);
+    }
+}
+
+#[test]
 fn exact_consuming_grammar_refuses_missing_extra_aliased_and_duplicate_members() {
     let valid = form(GitHashAlgorithm::Sha1, 2);
     for field in valid.split('&').map(|part| part.split_once('=').unwrap().0) {

@@ -5,8 +5,11 @@
 mod checks;
 mod comments;
 mod fast_forward;
+mod labels;
 mod options;
 mod output;
+mod rebase;
+mod search;
 #[cfg(test)]
 mod tests;
 
@@ -23,21 +26,30 @@ use super::publication_support::{describe, write_terminal_receipt};
 use options::{Mutation, Operation, Options};
 
 const USAGE: &str = "\
-usage: fg pr <open|update|close|reopen> <storage-root> <tenant-id> <repository-id> <number>
+usage: fg pr <open|update|close|reopen|retarget> <storage-root> <tenant-id> <repository-id> <number>
   --trusted-local --principal <id> --idempotency-key <key>
   (--source-ref <branch> | --source-ref-hex <bytes>) --expected-source <oid>
   (--target-ref <branch> | --target-ref-hex <bytes>) --expected-target <oid>
-  --expected-version <0 for open; positive for update/close/reopen> --title <text>
+  --expected-version <0 for open; positive for update/close/reopen/retarget> --title <text>
   (--body <text> | --body-file <path>) [--object-format sha1|sha256]
 
 usage: fg pr list <storage-root> <tenant-id> <repository-id> --trusted-local
   [--limit <1..100>] [--after <number> --expected-head <snapshot-token>]
+  [--label <text> ...; require every selected label before pagination]
   [--object-format sha1|sha256]
 usage: fg pr show <storage-root> <tenant-id> <repository-id> <number> --trusted-local
   [--expected-head <snapshot-token>] [--object-format sha1|sha256]
+usage: fg pr search --help
+  Search visible PR metadata with state, author, branch and literal text filters.
 
 usage: fg pr fast-forward --help
   Fast-forward an existing PR with exact version/tips, without a new commit.
+usage: fg pr prepare-rebase --help
+  Prepare a target-branch rebase bundle for an exact existing PR subject.
+usage: fg pr resolve-rebase --help
+  Resolve original-commit conflicts at the inspected PR snapshot without publishing.
+usage: fg pr inspect-rebase --help
+  Inspect all candidate commit bodies and every rewritten step before review.
 usage: fg pr checks --help
   Read canonical workflow observations for the PR's exact source commit.
 usage: fg pr comment --help
@@ -46,6 +58,10 @@ usage: fg pr append-comment --help
   Append without a discussion predecessor; retain the original key for retries.
 usage: fg pr comments --help
   Read the PR conversation at one authenticated snapshot.
+usage: fg pr labels --help
+  Read the PR's independent exact-version label set.
+usage: fg pr set-labels --help
+  Replace or clear labels without changing PR versions, refs or approvals.
 
 Every metadata mutation supplies complete metadata, even close; no latest-tip lookup or
 implicit metadata clearing occurs. --body '' explicitly selects an empty body.
@@ -56,6 +72,26 @@ Exit 0: committed mutation or successful read; 3: canonical command refusal;
 This is a trusted local-operator interface, not a remote authorization service.";
 
 pub fn run(arguments: &[String]) -> Result<u8, String> {
+    if arguments.first().is_some_and(|argument| {
+        matches!(
+            argument.as_str(),
+            "prepare-rebase" | "resolve-rebase" | "inspect-rebase"
+        )
+    }) {
+        return rebase::run(arguments, &mut std::io::stdout().lock());
+    }
+    if arguments
+        .first()
+        .is_some_and(|argument| matches!(argument.as_str(), "labels" | "set-labels"))
+    {
+        return labels::run(arguments, &mut std::io::stdout().lock());
+    }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "search")
+    {
+        return search::run(&arguments[1..], &mut std::io::stdout().lock());
+    }
     if arguments.first().is_some_and(|argument| {
         matches!(argument.as_str(), "comment" | "append-comment" | "comments")
     }) {
@@ -78,7 +114,7 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
             && arguments[1] == "--help"
             && matches!(
                 arguments[0].as_str(),
-                "open" | "update" | "close" | "reopen" | "list" | "show"
+                "open" | "update" | "close" | "reopen" | "retarget" | "list" | "show"
             ))
     {
         return write_read_report(&mut std::io::stdout().lock(), USAGE).map(|()| 0);
@@ -124,12 +160,13 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
             Operation::Read(read) => {
                 let page = node
                     .runtime()
-                    .block_on(node.read_pull_requests_in(
+                    .block_on(node.read_pull_requests_filtered_in(
                         &request,
                         &Default::default(),
                         read.after(),
                         read.limit(),
                         read.expected_head,
+                        &read.labels,
                     ))
                     .map_err(|error| error.to_string())?;
                 let rows: Vec<_> = page
@@ -141,6 +178,9 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
                         data: view.data.as_ref(),
                         opened_by: view.opened_by,
                         last_metadata_actor: view.last_metadata_actor,
+                        labels: &view.labels,
+                        labels_version: view.labels_version,
+                        labels_actor: view.labels_actor,
                     })
                     .collect();
                 output::read_receipt(&options, read, page.source_head, page.next_after, &rows)
@@ -260,3 +300,6 @@ pub(crate) fn read_body_file(path: &Path) -> Result<String, String> {
 
 #[cfg(test)]
 mod reopen_tests;
+
+#[cfg(test)]
+mod retarget_tests;

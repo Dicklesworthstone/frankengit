@@ -44,7 +44,6 @@ fn agent_profile_requires_its_own_credential_and_incarnation_without_operator_id
 #[test]
 fn agent_profile_rejects_every_operator_only_group_and_keeps_grants_independent() {
     for flag in [
-        "--allow-source-writes",
         "--allow-review-writes",
         "--allow-reviewed-merges",
         "--allow-notification-writes",
@@ -67,6 +66,7 @@ fn agent_profile_rejects_every_operator_only_group_and_keeps_grants_independent(
         "--allow-outcomes",
         "--allow-source",
         "--allow-agent-context",
+        "--allow-source-writes",
     ] {
         let mut input = args();
         *input.last_mut().unwrap() = flag.into();
@@ -82,6 +82,7 @@ fn agent_profile_rejects_every_operator_only_group_and_keeps_grants_independent(
         assert_eq!(options.writes.pulls, flag == "--allow-pull-writes");
         assert_eq!(options.outcomes, flag == "--allow-outcomes");
         assert_eq!(options.source, flag == "--allow-source");
+        assert_eq!(options.writes.source, flag == "--allow-source-writes");
         assert_eq!(options.agent_context, flag == "--allow-agent-context");
         assert!(options.principal.is_none());
     }
@@ -94,6 +95,7 @@ fn agent_source_and_context_grants_have_independent_closed_tool_inventories() {
     let source_tools = BTreeSet::from([
         "frankengit_source_tree",
         "frankengit_source_blob",
+        "frankengit_source_verified_blob",
         "frankengit_source_search",
         "frankengit_source_search_batch",
         "frankengit_source_search_index",
@@ -110,6 +112,18 @@ fn agent_source_and_context_grants_have_independent_closed_tool_inventories() {
     ]);
     for (flags, expected) in [
         (vec!["--allow-source"], source_tools.clone()),
+        (
+            vec!["--allow-source-writes"],
+            BTreeSet::from(["frankengit_source_publish", "frankengit_branch_create"]),
+        ),
+        (
+            vec!["--allow-source", "--allow-source-writes"],
+            source_tools
+                .iter()
+                .copied()
+                .chain(["frankengit_source_publish", "frankengit_branch_create"])
+                .collect(),
+        ),
         (
             vec!["--allow-agent-context"],
             BTreeSet::from(["frankengit_agent_context"]),
@@ -133,7 +147,12 @@ fn agent_source_and_context_grants_have_independent_closed_tool_inventories() {
             flags.contains(&"--allow-agent-context")
         );
         assert!(!options.issues && !options.discussions && !options.pulls);
-        assert!(!options.writes.any() && !options.outcomes);
+        assert_eq!(
+            options.writes.source,
+            flags.contains(&"--allow-source-writes")
+        );
+        assert_eq!(options.writes.any(), options.writes.source);
+        assert!(!options.outcomes);
         let observed: BTreeSet<_> = backend::tools_for_options(&options)
             .iter()
             .map(|tool| tool.name)
@@ -146,7 +165,6 @@ fn agent_source_and_context_grants_have_independent_closed_tool_inventories() {
         for forbidden in [
             vec!["--principal".into(), "44".repeat(16)],
             vec!["--trusted-local".into()],
-            vec!["--allow-source-writes".into()],
             vec!["--allow-review-writes".into()],
         ] {
             let mut widened = input.clone();

@@ -220,6 +220,24 @@ fn deadline_graphs_require_the_job_scoped_profile_before_any_run_or_proposal() {
 }
 
 #[test]
+fn matrix_fail_fast_requires_the_job_scoped_profile_before_any_run_or_proposal() {
+    let source = "name: matrix\non: push\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    strategy:\n      matrix:\n        value: [one, two]\n    steps:\n      - run: echo build\n";
+    let mut c = coordinator();
+    let g = compile(source, &Limits::default()).unwrap();
+    assert!(matches!(
+        enqueue(&mut c, g),
+        Err(CoordinatorRefusal::UnsupportedExecution { reason, .. })
+            if reason == "matrix fail-fast requires the job-scoped workflow executor"
+    ));
+    assert!(c.active_runs.is_empty());
+    assert!(c.idempotency_map.is_empty());
+    assert!(c.outbox_facts.is_empty());
+    assert_eq!(c.obligations, ObligationSummary::default());
+    let twin = source.replace("    strategy:\n", "    strategy:\n      fail-fast: false\n");
+    assert!(enqueue(&mut c, compile(&twin, &Limits::default()).unwrap()).is_ok());
+}
+
+#[test]
 fn multistep_and_unavailable_runner_profiles_fail_explicitly() {
     let mut multi = graph("true");
     let repeated = multi.jobs[0].steps[0].clone();
@@ -239,6 +257,27 @@ fn multistep_and_unavailable_runner_profiles_fail_explicitly() {
             WorkflowError::UnsupportedRunner(_)
         ))
     ));
+}
+
+#[test]
+fn optional_failure_policy_is_refused_before_command_only_admission() {
+    let mut selected = graph("echo build");
+    let mut later = selected.jobs[0].clone();
+    later.id = "test".into();
+    later.needs = vec!["build".into()];
+    later.steps[0].continue_on_error = true;
+    selected.jobs.push(later);
+    let mut c = coordinator();
+    assert!(matches!(
+        enqueue(&mut c, selected),
+        Err(CoordinatorRefusal::UnsupportedExecution { job_id, reason })
+            if job_id == "test" && reason == "step continue-on-error requires the job-scoped workflow executor"
+    ));
+    assert!(c.active_runs.is_empty());
+    assert!(c.idempotency_map.is_empty());
+    assert!(c.outbox_facts.is_empty());
+    assert_eq!(c.obligations, ObligationSummary::default());
+    assert!(enqueue(&mut c, graph("echo build")).is_ok());
 }
 
 #[test]

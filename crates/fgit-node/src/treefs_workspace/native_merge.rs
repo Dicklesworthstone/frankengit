@@ -10,7 +10,7 @@ use fgit_admission::evidence::AdmissionAuthentication;
 use fgit_admission::merge::native::objects::{
     CanonicalObjectHeader, FrontierCommitMetadata, FrontierObjectHeaders, MAX_REUSED_BLOB_BYTES,
     MergeObjectLimits, ObjectFrontier, validate_fast_forward_objects_above,
-    validate_merge_objects_above, validate_squash_objects_above,
+    validate_merge_objects_above, validate_rebase_objects_above, validate_squash_objects_above,
 };
 use fgit_admission::merge::native::queue::ValidatedQueueLanding;
 use fgit_admission::merge::native::{
@@ -203,6 +203,14 @@ pub(in crate::treefs_workspace) fn bundle_merge_intent(
         (NativeMergeMethod::Squash, ExpectedVersion::NewStream) => {
             return Err(NodeWorkspaceRefusal::InvalidWorkspaceCandidate(
                 "squash requires an existing pull request and exact positive version",
+            ));
+        }
+        (NativeMergeMethod::Rebase, ExpectedVersion::Exactly(version)) => {
+            NativeMergeIntent::rebase(number, version, merge)
+        }
+        (NativeMergeMethod::Rebase, ExpectedVersion::NewStream) => {
+            return Err(NodeWorkspaceRefusal::InvalidWorkspaceCandidate(
+                "rebase-and-merge requires an existing pull request and exact positive version",
             ));
         }
         (NativeMergeMethod::FastForwardOnly, _) => {
@@ -891,6 +899,17 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
         self.validate_native_merge_at(authority, cx, basis, authenticated, intent, None)
     }
 
+    fn validate_rebase_async<'a>(
+        &'a self,
+        authority: &'a FsqliteAuthorityStore,
+        cx: &'a Cx,
+        basis: &'a PublicationBasis,
+        authenticated: &'a AuthenticatedHead,
+        intent: &'a NativeMergeIntent,
+    ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a {
+        self.validate_native_merge_at(authority, cx, basis, authenticated, intent, None)
+    }
+
     fn validate_queued_merge_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
@@ -1022,6 +1041,13 @@ impl NodeNativeMergeProjection<'_> {
                     object_limits,
                     &mut live,
                 ),
+                NativeMergeMethod::Rebase => validate_rebase_objects_above(
+                    &source,
+                    merge,
+                    ObjectFrontier::with_headers(objects, &headers),
+                    object_limits,
+                    &mut live,
+                ),
             };
             if exhaustion.get().is_some() {
                 return Err(ProjectionFailure::Unavailable(
@@ -1081,13 +1107,21 @@ impl NodeNativeMergeProjection<'_> {
                 }
             }
             let paths = if needs_paths {
-                let verified =
+                let verified = if intent.method() == NativeMergeMethod::Rebase {
+                    fgit_admission::merge::native::protection::path_reviews::verify_rebase_paths(
+                        &source,
+                        merge,
+                        object_limits,
+                        &mut live,
+                    )
+                } else {
                     fgit_admission::merge::native::protection::path_reviews::verify_merge_paths(
                         &source,
                         merge,
                         object_limits,
                         &mut live,
-                    );
+                    )
+                };
                 if exhaustion.get().is_some() {
                     return Err(ProjectionFailure::Unavailable(
                         RefusalCode::ResourceBudgetExceeded,

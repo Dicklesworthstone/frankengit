@@ -1,0 +1,34 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; line-height: 1.5; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #f5f7fa; color: #202b3b; }
+main { width: min(52rem, 100%); margin: 0 auto; padding: 3rem 1.25rem; }
+header { margin-bottom: 2rem; }
+.brand { color: #3555a6; font-weight: 700; letter-spacing: .03em; }
+h1 { font-size: clamp(2rem, 6vw, 3rem); line-height: 1.15; margin: .5rem 0 1rem; }
+h2 { font-size: 1.15rem; margin: 0 0 1rem; }
+section { background: #fff; border: 1px solid #d9e0eb; border-radius: .7rem; padding: 1.5rem; margin: 1rem 0; }
+label { display: block; font-weight: 600; margin-bottom: .4rem; }
+input { width: 100%; padding: .7rem; font: inherit; border: 1px solid #8290a8; border-radius: .3rem; background: #fff; color: inherit; }
+.hint { color: #4e5b70; font-size: .9rem; }
+.actions { display: flex; gap: .7rem; flex-wrap: wrap; margin-top: 1rem; }
+button { font: inherit; font-weight: 600; border: 1px solid #3555a6; border-radius: .3rem; background: #3555a6; color: #fff; padding: .6rem 1rem; cursor: pointer; }
+button.secondary { background: transparent; color: #3555a6; }
+button:disabled { opacity: .55; cursor: default; }
+:focus-visible { outline: 3px solid #cc8a00; outline-offset: 3px; }
+#connection-status { margin-bottom: 0; }
+#connection-status[data-status="error"] { color: #a21c26; }
+ul { margin: 0; padding: 0; list-style: none; }
+li { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem 0; border-top: 1px solid #d9e0eb; }
+code { overflow-wrap: anywhere; }
+li a, li span { flex-shrink: 0; }
+a { color: #254ca9; text-underline-offset: .2em; }
+li span { font-size: .85rem; color: #4e5b70; }
+@media (max-width: 32rem) { li { align-items: start; flex-direction: column; gap: .5rem; } section { padding: 1rem; } }
+@media (prefers-color-scheme: dark) {
+  body { background: #121923; color: #e7edf6; }
+  section, input { background: #1b2635; border-color: #42536c; }
+  .brand, a, button.secondary { color: #a9c3ff; }
+  .hint, li span { color: #b4c1d5; }
+  li { border-color: #42536c; }
+  #connection-status[data-status="error"] { color: #ffa6ad; }
+}

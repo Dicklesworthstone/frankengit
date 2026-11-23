@@ -40,7 +40,7 @@ function harness(respond = () => json(page())) {
     'change-action', 'change-title', 'change-body', 'change-labels', 'change-assignees', 'replace-title', 'replace-body', 'replace-labels',
     'title-field', 'body-field', 'labels-field', 'assignees-field', 'replace-body-label', 'prepared-change', 'prepared-summary', 'prepare-change',
     'save-receipt', 'send-change', 'check-outcome', 'discard-change', 'restore-receipt',
-    'issue-search', 'issue-search-query', 'issue-search-state', 'issue-search-opener',
+    'issue-search', 'issue-search-query', 'issue-search-state', 'issue-search-opener', 'issue-search-assignee',
     'issue-search-labels', 'issue-search-case', 'issue-search-scan', 'issue-search-cancel', 'issue-search-milestone',
     'milestone-field', 'load-milestones', 'selected-milestone', 'milestone-choices', 'milestone-paging'];
   const elements = Object.fromEntries(names.map(name => [name, new Element()])); elements['change-action'].value = 'open';

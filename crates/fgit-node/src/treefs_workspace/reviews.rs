@@ -49,6 +49,38 @@ impl OneNode {
         bundle: Option<&[u8]>,
         limits: AdmissionLimits,
     ) -> Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal> {
+        self.admit_candidate_review_with_rebase_profile_in(
+            request, session, command, bundle, limits, false,
+        )
+        .await
+    }
+
+    /// Record the same exact-candidate vote only after inspecting a complete
+    /// PR rebase series, including every intermediate commit and its diff.
+    /// This does not rewrite review-event bytes or grant publication authority.
+    pub async fn admit_rebase_candidate_review_durable_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        command: &CandidateReviewCommand,
+        bundle: Option<&[u8]>,
+        limits: AdmissionLimits,
+    ) -> Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal> {
+        self.admit_candidate_review_with_rebase_profile_in(
+            request, session, command, bundle, limits, true,
+        )
+        .await
+    }
+
+    async fn admit_candidate_review_with_rebase_profile_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        command: &CandidateReviewCommand,
+        bundle: Option<&[u8]>,
+        limits: AdmissionLimits,
+        rebase: bool,
+    ) -> Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal> {
         let authenticated = session
             .authenticated_session()
             .ok_or(NodeReceiveTransportRefusal::Unauthenticated)?;
@@ -99,6 +131,7 @@ impl OneNode {
             },
             request,
             bundle,
+            rebase,
         };
         let terminal = Box::pin(reviews::admit_candidate_review_async(
             &self.authority,
@@ -378,6 +411,7 @@ struct ReviewOwner<'a> {
     inner: NodeNativeMergeProjection<'a>,
     request: &'a NodeRequestContext,
     bundle: Option<&'a [u8]>,
+    rebase: bool,
 }
 impl AsyncAdmissionProjection<FsqliteAuthorityStore> for ReviewOwner<'_> {
     fn collect_cumulative_outcomes_async<'a>(
@@ -582,18 +616,36 @@ impl ReviewProjection<FsqliteAuthorityStore> for ReviewOwner<'_> {
                     mode: ComparisonMode::Direct,
                     ..ReviewOptions::default()
                 };
-                let result = self
-                    .inner
-                    .node
-                    .inspect_merge_bundle_in(
-                        self.request,
-                        &binding.merge(&command.subject),
-                        input,
-                        &RefVisibility::new(),
-                        Some(basis.id()),
-                        &options,
-                    )
-                    .await;
+                let result = if self.rebase {
+                    let merge = binding.merge(&command.subject);
+                    self.inner
+                        .node
+                        .inspect_pull_request_rebase_bundle_in(
+                            self.request,
+                            &command.subject,
+                            merge.base_tip,
+                            merge.merge_commit,
+                            input,
+                            &RefVisibility::new(),
+                            Some(basis.id()),
+                            &options,
+                        )
+                        .await
+                        .map(|_| ())
+                } else {
+                    self.inner
+                        .node
+                        .inspect_merge_bundle_in(
+                            self.request,
+                            &binding.merge(&command.subject),
+                            input,
+                            &RefVisibility::new(),
+                            Some(basis.id()),
+                            &options,
+                        )
+                        .await
+                        .map(|_| ())
+                };
                 self.merge_checkpoint(cx)
                     .map_err(ProjectionFailure::Unavailable)?;
                 use super::super::publication::BundleInspectionRefusal as E;

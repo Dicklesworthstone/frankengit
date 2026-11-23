@@ -9,8 +9,8 @@ use super::{
     CumulativeOutcomes, DuplicateAbsenceWitness, DuplicateScan, HeadKey, HeadRead, HeadReadReceipt,
     OutcomeFailure, OutcomeLookup, PublicationOutcome, RepositoryAuthorityHeadBody,
     RepositoryDecisionBatchBody, RepositoryId, TenantId, TerminalOutcome, TxId,
-    authority_head_identity, decision_batch_identity, fold_outcome_index, indexed_outcome,
-    indexed_outcome_async, publish_decisions_impl, publish_decisions_impl_async, reconcile_outcome,
+    authority_head_identity, decision_batch_identity, indexed_outcome, indexed_outcome_async,
+    publish_decisions_impl, publish_decisions_impl_async, reconcile_outcome,
 };
 
 /// Publish using a complete outcome set already collected at `expected`.
@@ -85,8 +85,8 @@ where
 /// absence at the authenticated head checked here. Later head movement remains
 /// possible, so a publication must still condition on the same exact token.
 ///
-/// This performs no decision-history reads or writes. It recomputes the root
-/// over the already retained set and preserves the original empty-genesis
+/// This performs no decision-history reads or writes. It derives the root once
+/// from the immutable retained set and preserves the original empty-genesis
 /// compatibility rule. A mismatched witness token, repository or root, invalid
 /// head authentication, accelerator conflict, and store failures remain typed
 /// errors rather than being treated as a cache miss.
@@ -211,7 +211,7 @@ fn check_root(
     {
         return Ok(());
     }
-    if fold_outcome_index(&cumulative.entries, &[])? != head.outcome_index_root {
+    if cumulative.prepared_root()? != head.outcome_index_root {
         return Err(mismatch("predecessor outcome root"));
     }
     Ok(())
@@ -338,6 +338,7 @@ impl CumulativeOutcomes {
         successor: &AuthenticatedHead,
         batch: &RepositoryDecisionBatchBody,
     ) -> Result<Self, OutcomeFailure> {
+        check_token(&self, predecessor.receipt().token())?;
         if predecessor.verified_against() != successor.verified_against() {
             return Err(mismatch("store instance"));
         }
@@ -399,11 +400,12 @@ impl CumulativeOutcomes {
                 )
             })
             .collect();
-        let root = self.fold_against(predecessor.receipt().token(), &stamped)?;
+        let prepared = self.prepare_extension(&stamped)?;
+        let root = prepared.root();
         if root != batch.resulting_outcome_index_root || root != next.outcome_index_root {
             return Err(mismatch("successor outcome root"));
         }
-        self.entries.extend(stamped);
+        self.retain_extension(stamped, prepared);
         self.observed = successor.receipt().token();
         Ok(self)
     }

@@ -12,6 +12,7 @@ mod queue_prefix;
 #[path = "rebase.rs"]
 mod rebase;
 pub use queue_prefix::{PreparedQueuePrefixBundle, QueuePrefixEntry};
+pub use rebase::{PreparedRebaseBundle, RebasePreparationRefusal};
 #[path = "source_history.rs"]
 mod source_history;
 #[path = "source_review.rs"]

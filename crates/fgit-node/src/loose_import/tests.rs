@@ -7,6 +7,7 @@ use fgit_types::{GitHashAlgorithm, GitOid, RepositoryId, TenantId};
 
 use super::{LooseGitImportRefusal, OneNode, read_through_first_excess_byte};
 
+mod symbolic_refs;
 mod worktrees;
 
 static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -362,7 +363,7 @@ fn local_import_refuses_an_unpaired_pack_instead_of_ignoring_it() {
 }
 
 #[test]
-fn loose_import_refuses_a_symbolic_ref_instead_of_resolving_it() {
+fn loose_import_refuses_a_symbolic_ref_whose_target_is_absent() {
     let scratch = ScratchDirectory::new();
     let source = scratch.0.join("source.git");
     let ref_path = source.join("refs/heads/main");
@@ -374,7 +375,8 @@ fn loose_import_refuses_a_symbolic_ref_instead_of_resolving_it() {
 
     assert!(matches!(
         node.stage_loose_git_import(&source),
-        Err(LooseGitImportRefusal::SymbolicRefUnsupported(path)) if *path == ref_path
+        Err(LooseGitImportRefusal::SymbolicRefTargetMissing { path, target })
+            if *path == ref_path && target.as_bytes() == b"refs/heads/other"
     ));
     node.shutdown().expect("node drains");
 }

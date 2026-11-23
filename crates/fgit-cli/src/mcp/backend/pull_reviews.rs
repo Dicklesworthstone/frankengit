@@ -87,8 +87,11 @@ fn query(args: &Object) -> Result<Query, ToolError> {
 }
 
 pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
+    if backend.options.agent_token_file.is_some() {
+        agent::check_operation(backend, fgit_identity::agent::PULLS_FEEDBACK_READ)?;
+    }
     let query = query(args)?;
-    let context = fgit_cli::command_request_context(&backend.node);
+    let context = backend.command_context();
     let page = backend
         .node
         .runtime()

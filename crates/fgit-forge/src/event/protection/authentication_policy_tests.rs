@@ -125,7 +125,6 @@ fn authentication_activation_keeps_administrator_epoch_and_fact_boundaries() {
         Err(RefusalCode::ProtectedRefTransitionDenied),
     );
     for predicate in [
-        "actor.kind == human",
         "actor.teams contains release",
         "actor.snapshot == \"unknown\"",
         "ref.update == fast_forward",
@@ -140,4 +139,17 @@ fn authentication_activation_keeps_administrator_epoch_and_fact_boundaries() {
             .unwrap();
         assert!(decode_ref_policy(&raw).is_err());
     }
+    // Kind has its own new event profile; kind predicates still cannot be
+    // installed or replayed under the historical authentication-only profile.
+    let kind = fgit_policy::compile_and_seal(
+        "policy p { rule r { when actor.kind == agent then allow } default deny \"agent\" }",
+    )
+    .unwrap();
+    assert!(
+        fgit_policy::reference_profile::validate_for(
+            fgit_policy::reference_profile::ReferencePolicyProfile::ReferenceAuthenticationV1,
+            &kind,
+        )
+        .is_err()
+    );
 }

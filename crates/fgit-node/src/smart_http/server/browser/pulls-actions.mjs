@@ -1,6 +1,6 @@
 // Exact commands and terminal decisions. Transport errors never prove rollback.
 import { keys, record, integer, principal, opaque, text, oid, binding, subject, SUBJECT_FIELDS, metadataCommand,
-  matchSubject, form, utf8, fail, hex, format, branch, reference, unhex, snapshot, rootFor, readBytes, apiError } from './pulls-core.mjs';
+  matchSubject, form, utf8, fail, hex, format, branch, reference, unhex, snapshot, rootFor, readBytes, apiError, pullLabels } from './pulls-core.mjs';
 import { BUNDLE_LIMIT, multipart, checkedBundle, digest, mergeMethod } from './pulls-candidate.mjs';
 import { sourceCommentAnchor, sourceCommentFields } from './pulls-comments.mjs';
 export const RECEIPT_LIMIT = 24 * 1024 * 1024;
@@ -19,9 +19,15 @@ export function appendCommentCommand(fields) {
   return { object_format: format(fields.object_format), body,
     ...(Object.hasOwn(fields, 'anchor') ? { anchor: sourceCommentAnchor(fields.anchor, fields.object_format) } : {}) };
 }
+export function pullLabelsCommand(fields) {
+  keys(fields, ['object_format', 'expected_version', 'labels']);
+  return { object_format: format(fields.object_format),
+    expected_version: integer(fields.expected_version, 'PR labels version', 0, Number.MAX_SAFE_INTEGER - 1),
+    labels: pullLabels(fields.labels) };
+}
 export function collaborationCommand(action, fields) {
   if (!['approve', 'request-changes', 'withdraw', 'merge'].includes(action)) fail('Unsupported review action.');
-  keys(fields, [...SUBJECT_FIELDS, 'merge_base', 'candidate_commit', ...(action === 'merge' ? ['required_reviewer', 'method'] : ['expected_version', 'reason'])]);
+  keys(fields, [...SUBJECT_FIELDS, 'merge_base', 'candidate_commit', 'method', ...(action === 'merge' ? ['required_reviewer'] : ['expected_version', 'reason'])]);
   const result = { ...subject(fields), merge_base: oid(fields.merge_base, fields.object_format), candidate_commit: oid(fields.candidate_commit, fields.object_format) };
   if (action === 'merge') {
     if (!Array.isArray(fields.required_reviewer) || !fields.required_reviewer.length || fields.required_reviewer.length > 32) fail('Select 1 through 32 explicit required reviewers.');
@@ -32,6 +38,10 @@ export function collaborationCommand(action, fields) {
     result.expected_version = integer(fields.expected_version, 'reviewer stream version', action === 'withdraw' ? 1 : 0, Number.MAX_SAFE_INTEGER - 1);
     result.reason = text(fields.reason, 4096, 'review reason');
     if (!result.reason.trim()) fail('An explicit nonempty review reason is required.');
+    if (Object.hasOwn(fields, 'method')) {
+      if (fields.method !== 'rebase') fail('Only rebase reviews use an explicit whole-series method.');
+      result.method = 'rebase';
+    }
   }
   form(result); return result;
 }
@@ -49,16 +59,18 @@ export function fastForwardCommand(fields) {
   return result;
 }
 export function command(action, fields) {
+  if (action === 'set-labels') return pullLabelsCommand(fields);
   if (action === 'comment') return commentCommand(fields);
   if (action === 'append-comment') return appendCommentCommand(fields);
   if (action === 'fast-forward') return fastForwardCommand(fields);
-  return ['open', 'update', 'close', 'reopen'].includes(action) ? metadataCommand(action, fields) : collaborationCommand(action, fields);
+  return ['open', 'update', 'close', 'reopen', 'retarget'].includes(action) ? metadataCommand(action, fields) : collaborationCommand(action, fields);
 }
 export function requestPath(number, action) {
   integer(number, 'PR number', 1);
+  if (action === 'set-labels') return `pulls/${number}/labels`;
   if (action === 'comment') return `pulls/${number}/comments`;
   if (action === 'append-comment') return `pulls/${number}/comments/append`;
-  if (!['open', 'update', 'close', 'reopen', 'approve', 'request-changes', 'withdraw', 'merge', 'fast-forward'].includes(action)) fail('Unknown action.');
+  if (!['open', 'update', 'close', 'reopen', 'retarget', 'approve', 'request-changes', 'withdraw', 'merge', 'fast-forward'].includes(action)) fail('Unknown action.');
   return `pulls/${number}/${['approve', 'request-changes', 'withdraw'].includes(action) ? `reviews/${action}` : action}`;
 }
 export function requestBody(action, fields, bundle, nonce) {
@@ -66,7 +78,10 @@ export function requestBody(action, fields, bundle, nonce) {
   // Plain comment bytes remain unchanged; an anchored comment additionally
   // binds the complete source selection, with no caller-selected authority.
   // The retained request scope independently binds the repository hash domain.
-  const encoded = form(['comment', 'append-comment'].includes(action) ? {
+  const encoded = form(action === 'set-labels' ? {
+    expected_version: normalized.expected_version,
+    ...(normalized.labels.length ? { label: normalized.labels } : { clear_labels: 'true' }),
+  } : ['comment', 'append-comment'].includes(action) ? {
     ...(action === 'comment' ? { expected_version: normalized.expected_version } : {}), body: normalized.body,
     ...(normalized.anchor ? sourceCommentFields(normalized.anchor) : {}) } : normalized);
   if (!/^[0-9a-f]{32}$/.test(nonce)) fail('Invalid request nonce.');
@@ -86,9 +101,15 @@ export function publication(reply, pending, status) {
   binding(reply, pending.scope); principal(reply.principal_id); opaque(reply.tx_id);
   integer(reply.decision_sequence, 'decision sequence', 1);
   if (!['committed', 'refused'].includes(reply.outcome) || status !== (reply.outcome === 'committed' ? 200 : 409) || reply.delivery_acknowledged !== null || reply.action !== pending.action) fail('HTTP status is not a matching terminal decision.');
-  const metadata = ['open', 'update', 'close', 'reopen'].includes(pending.action);
+  const metadata = ['open', 'update', 'close', 'reopen', 'retarget'].includes(pending.action);
   if (metadata) {
     if (reply.type !== 'pull_request_publication' || reply.number !== pending.number || reply.expected_version !== pending.fields.expected_version) fail('Wrong terminal PR command.');
+  } else if (pending.action === 'set-labels') {
+    if (reply.type !== 'pull_request_labels_publication' || reply.number !== pending.number ||
+        reply.expected_version !== pending.fields.expected_version || reply.refs_changed !== false ||
+        reply.pull_request_version_changed !== false ||
+        reply.labels_version !== (reply.outcome === 'committed' ? pending.fields.expected_version + 1 : null) ||
+        JSON.stringify(pullLabels(reply.labels, true)) !== JSON.stringify(pending.fields.labels)) fail('Wrong terminal PR labels command.');
   } else if (['comment', 'append-comment'].includes(pending.action)) {
     const expected = pending.action === 'comment' ? pending.fields.expected_version : null;
     if (reply.type !== 'pull_request_comment_publication' || reply.number !== pending.number ||
@@ -115,7 +136,11 @@ export function publication(reply, pending, status) {
       const expectedMethod = Object.hasOwn(fields, 'method') ? mergeMethod(fields.method) : 'merge-commit';
       if (mergeMethod(reply.method === undefined ? 'merge-commit' : reply.method) !== expectedMethod) fail('Terminal merge method changed.');
       if (!Array.isArray(reply.required_reviewers) || JSON.stringify(reply.required_reviewers) !== JSON.stringify(fields.required_reviewer)) fail('Terminal reviewer requirements changed.');
-    } else if (reply.required_reviewers !== null) fail('Review unexpectedly contains merge requirements.');
+    } else {
+      if (reply.required_reviewers !== null) fail('Review unexpectedly contains merge requirements.');
+      if ((fields.method === 'rebase' && reply.method !== 'rebase') ||
+          (fields.method !== 'rebase' && reply.method === 'rebase')) fail('Terminal review method changed.');
+    }
   }
   if (pending.observedTx && pending.observedTx !== reply.tx_id) fail('Transaction identity changed.');
   if (pending.observedPrincipal && pending.observedPrincipal !== reply.principal_id) fail('Recovery principal changed.');

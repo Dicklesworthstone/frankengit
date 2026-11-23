@@ -257,7 +257,7 @@ pub(super) fn execute(
     execute_command(node, session, &command, maximum_response)
 }
 
-/// Called only after the PR gateway has required both fetch and PR-read grants.
+/// Called only after the PR gateway has required its exact diff-read grants.
 /// The number is parsed from that route; fields cannot substitute other refs.
 /// It shares the exact native reader and bounded serializer with branch diffs.
 pub(in crate::smart_http::server) fn execute_pull(
@@ -268,16 +268,28 @@ pub(in crate::smart_http::server) fn execute_pull(
     reader: &mut impl Read,
     http: HttpLimits,
     maximum_response: u64,
+    deadline: &GitDaemonSessionDeadline,
 ) -> Result<Reply, ApiError> {
-    if session.authenticated_session().is_none() {
-        return Err(ApiError::new(Status::Unauthorized, "unauthorized"));
-    }
+    let authenticated = session
+        .authenticated_session()
+        .ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?;
     let command = Command::parse_for(
         &read_form(reader, framing, http)?,
         node.object_format,
         Some(number),
     )?;
-    execute_command(node, session, &command, maximum_response)
+    if authenticated.authentication().agent_provenance().is_some()
+        && matches!(
+            command.selection,
+            ReviewSelection::PullRequest {
+                expected_version: None,
+                ..
+            }
+        )
+    {
+        return Err(ApiError::bad("expected_pr_version_required"));
+    }
+    execute_command_in(node, session, &command, maximum_response, deadline)
 }
 fn execute_command(
     node: &OneNode,
@@ -289,7 +301,16 @@ fn execute_command(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
-    let context = node.authenticated_session_request_context(&deadline, session);
+    execute_command_in(node, session, command, maximum_response, &deadline)
+}
+fn execute_command_in(
+    node: &OneNode,
+    session: &LoopbackReceiveSession,
+    command: &Command,
+    maximum_response: u64,
+    deadline: &GitDaemonSessionDeadline,
+) -> Result<Reply, ApiError> {
+    let context = node.authenticated_session_request_context(deadline, session);
     let mut live = || !deadline.expired() && context.is_live();
     let report = drive_request_while(
         node,

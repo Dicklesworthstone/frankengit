@@ -53,6 +53,130 @@ const fn valid_prototype() -> McpToolEntry {
 }
 
 #[test]
+fn sponsored_branch_creation_declares_host_binding_without_broadening_other_mutations() {
+    let creation = find_tool("frankengit_branch_create").unwrap();
+    assert_eq!(creation.principal, PrincipalRequirement::HostBound);
+    assert_eq!(creation.read_mutation, ReadMutationClass::Mutation);
+    assert_eq!(
+        creation.capability,
+        CapabilityRequirement::PREPARE_PUBLICATION
+    );
+    assert_eq!(
+        creation.idempotency,
+        IdempotencyRequirement::RequiredDurableKey
+    );
+    assert_eq!(
+        creation.receipt,
+        EvidenceReceiptClass::CanonicalDecisionDigest
+    );
+    assert_eq!(
+        creation.cancellation,
+        CancellationBehavior::NonPreemptiveTerminalCommit
+    );
+    assert!(creation.description.contains("source-branch-create"));
+    assert!(creation.description.contains("source-publish grant alone"));
+    assert!(
+        creation
+            .description
+            .contains("finite destination-ref scope")
+    );
+    assert!(
+        creation
+            .description
+            .contains("historical decisions, not current refs")
+    );
+    let target = creation
+        .input_fields
+        .iter()
+        .find(|field| field.name == "target")
+        .unwrap();
+    assert!(target.required);
+    assert_eq!(target.classification, FieldClassification::SelectorPosition);
+    assert!(
+        target
+            .description
+            .contains("current tip of a visible branch")
+    );
+    assert!(
+        creation
+            .output_fields
+            .iter()
+            .any(|field| field.name == "tx_id" && field.required)
+    );
+    for field in [
+        "principal",
+        "sponsor",
+        "credential",
+        "force",
+        "initial",
+        "commands",
+        "bundle_hex_chunks",
+    ] {
+        assert!(
+            !creation
+                .input_fields
+                .iter()
+                .any(|input| input.name == field)
+        );
+    }
+    for code in [
+        "agent_operation_not_granted",
+        "agent_request_key_mismatch",
+        "source_mutation_outcome_unknown",
+    ] {
+        assert!(creation.refusal_codes.contains(&code));
+    }
+    assert_eq!(
+        creation.rest_api_path,
+        "POST /{repository}/api/v1/source/branches/create"
+    );
+
+    // Catalog admission requires independent host attribution and the mutation
+    // ceiling. Canonical token authentication still happens in the real host.
+    assert!(matches!(
+        admit_call(creation.name, 1, "{}", &["prepare_publication"], None),
+        Err(McpRefusal::PrincipalRequired { .. })
+    ));
+    assert!(matches!(
+        admit_call(
+            creation.name,
+            1,
+            "{}",
+            &["read_canonical_object"],
+            Some("host-bound-agent")
+        ),
+        Err(McpRefusal::CapabilityDenied { .. })
+    ));
+    let admitted = admit_call(
+        creation.name,
+        1,
+        "{}",
+        &["prepare_publication"],
+        Some("host-bound-agent"),
+    )
+    .unwrap();
+    assert_eq!(admitted.principal, Some("host-bound-agent"));
+    for name in [
+        "frankengit_branch_update",
+        "frankengit_branch_delete",
+        "frankengit_branch_rename",
+        "frankengit_branch_transaction",
+        "frankengit_source_publish_rebase",
+    ] {
+        assert_eq!(
+            find_tool(name).unwrap().principal,
+            PrincipalRequirement::OperatorBound
+        );
+    }
+    for artifact in fgit_schema::emit::artifacts()
+        .into_iter()
+        .filter(|artifact| matches!(artifact.name, "mcp-surface.schema.json" | "mcp_tools.json"))
+    {
+        assert!(artifact.contents.contains(creation.description));
+    }
+}
+
+#[test]
 fn current_native_index_reuse_is_explicit_and_retains_each_tools_read_grant() {
     for (name, capability, principal) in [
         (
@@ -119,9 +243,56 @@ fn protection_registry_describes_optional_queue_requirement_without_new_authorit
 }
 
 #[test]
+fn issue_search_registry_reuses_read_authority_with_bounded_candidate_continuation() {
+    let search = find_tool("frankengit_issue_search").unwrap();
+    let list = find_tool("frankengit_issue_list").unwrap();
+    assert_eq!(search.read_mutation, ReadMutationClass::ReadOnly);
+    assert_eq!(search.capability, list.capability);
+    assert_eq!(search.principal, list.principal);
+    assert_eq!(search.idempotency, IdempotencyRequirement::NotApplicable);
+    assert_eq!(search.pagination, list.pagination);
+    assert_eq!(search.cli_command, "fg issue search");
+    assert_eq!(search.rest_api_path, "POST /api/v1/issues/search");
+    for name in [
+        "assignee",
+        "opened_by",
+        "query",
+        "labels",
+        "milestone",
+        "max_scan",
+        "after",
+        "expected_head",
+    ] {
+        let field = search
+            .input_fields
+            .iter()
+            .find(|field| field.name == name)
+            .unwrap();
+        assert!(!field.required);
+        assert_eq!(field.classification, FieldClassification::SelectorPosition);
+    }
+    for name in ["principal", "idempotency_key", "expected_version"] {
+        assert!(!search.input_fields.iter().any(|field| field.name == name));
+    }
+    for name in ["filters", "issues"] {
+        assert_eq!(
+            search
+                .output_fields
+                .iter()
+                .find(|field| field.name == name)
+                .unwrap()
+                .classification,
+            FieldClassification::UntrustedContent
+        );
+    }
+    assert!(search.refusal_codes.contains(&"snapshot_required"));
+    assert!(search.refusal_codes.contains(&"snapshot_unavailable"));
+}
+
+#[test]
 fn test_registry_is_valid_and_sorted() {
     assert!(validate_registry(REGISTRY).is_ok());
-    assert_eq!(REGISTRY.len(), 101);
+    assert_eq!(REGISTRY.len(), 106);
     // Milestone edits expose an explicit null date clear as a real JSON Schema
     // union; a literal "string|null" type would not describe callable input.
     assert!(fgit_schema::emit::mcp_schema().contains("\"type\": [\"string\", \"null\"]"));
@@ -129,6 +300,7 @@ fn test_registry_is_valid_and_sorted() {
     assert!(find_tool("frankengit_discussion_append_comment").is_some());
     for name in [
         "frankengit_pull_reopen",
+        "frankengit_pull_retarget",
         "frankengit_source_historical_blob",
         "frankengit_source_historical_tree",
     ] {
@@ -453,8 +625,8 @@ fn test_generated_artifacts_byte_stability() {
         .iter()
         .find(|a| a.name == "mcp_tools.json")
         .unwrap();
-    assert!(mcp_tools.contents.contains("\"total_count\": 101"));
-    assert!(mcp_tools.contents.contains("\"active_count\": 97"));
+    assert!(mcp_tools.contents.contains("\"total_count\": 106"));
+    assert!(mcp_tools.contents.contains("\"active_count\": 102"));
     assert!(
         mcp_tools
             .contents
@@ -477,7 +649,7 @@ fn test_generated_artifacts_byte_stability() {
         .iter()
         .find(|a| a.name == "mcp_parity_manifest.json")
         .unwrap();
-    assert!(mcp_parity.contents.contains("\"total_tools\": 101"));
+    assert!(mcp_parity.contents.contains("\"total_tools\": 106"));
 }
 
 #[test]
@@ -487,7 +659,7 @@ fn test_server_parity_and_planted_drift() {
         .filter(|entry| entry.support_profile == SupportProfile::Active)
         .map(|entry| entry.name)
         .collect();
-    assert_eq!(active_names.len(), 97);
+    assert_eq!(active_names.len(), 102);
     assert!(active_names.contains(&"frankengit_issue_add_assignees"));
     assert!(active_names.contains(&"frankengit_issue_add_labels"));
     assert!(active_names.contains(&"frankengit_pull_append_comment"));

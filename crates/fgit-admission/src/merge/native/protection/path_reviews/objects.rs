@@ -1,7 +1,7 @@
 //! Native target-to-candidate path facts. Caller-supplied object edges, patch
 //! summaries and source-side diffs cannot construct this witness.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use fgit_forge::event::NativeMerge;
 use fgit_git_object::{AcceptanceProfile, ObjectError, ObjectType, ParseLimits, ParsedObject};
@@ -10,10 +10,66 @@ use fgit_types::{GitHashAlgorithm, GitOid, RefusalCode};
 
 use super::{
     MAX_MERGE_CHANGED_PATH_BYTES, MAX_MERGE_CHANGED_PATHS, MAX_MERGE_PATH_BYTES,
-    MAX_MERGE_PATH_DEPTH, VerifiedMergePaths,
+    MAX_MERGE_PATH_DEPTH, VerifiedMergePaths, VerifiedSourcePaths,
 };
 use crate::ProjectionFailure;
-use crate::merge::native::objects::{MAX_REUSED_BLOB_BYTES, MergeObjectLimits};
+use crate::merge::native::objects::{
+    MAX_REBASE_MERGE_COMMIT_BYTES, MAX_REBASE_MERGE_COMMITS, MAX_REUSED_BLOB_BYTES,
+    MergeObjectLimits,
+};
+
+/// Verify one exact single-parent source transition and all of its changed
+/// native paths. Reuses the merge path walk, including deletions, mode changes,
+/// both rename sides, directory replacement and gitlinks. No blob rendering or
+/// caller-supplied path summary participates in authorization. Pure nonempty
+/// directory creation/removal is represented by its affected descendants, so
+/// a narrow child grant can create its first file or remove its last file.
+/// Empty directories and type/mode replacements still require their own path.
+pub fn verify_source_paths(
+    source: &impl CanonicalObjectSource,
+    before: GitOid,
+    after: GitOid,
+    limits: MergeObjectLimits,
+    live: &mut impl FnMut() -> bool,
+) -> Result<VerifiedSourcePaths, ProjectionFailure> {
+    checkpoint(live)?;
+    if before.is_zero()
+        || after.is_zero()
+        || before == after
+        || before.algorithm() != after.algorithm()
+    {
+        return Err(invalid());
+    }
+    validate_limits(limits)?;
+    let mut walk = Walk {
+        source,
+        live,
+        format: after.algorithm(),
+        source_publication: true,
+        limits,
+        objects: 0,
+        bytes: 0,
+        entries: 0,
+        changed_bytes: 0,
+        changed: Vec::new(),
+        unique: None,
+        pending: Vec::new(),
+        pending_bytes: 0,
+    };
+    let before_tree = walk.commit_tree(before)?;
+    let (after_tree, parent) = walk.rebase_commit(after)?;
+    if parent != before {
+        return Err(invalid());
+    }
+    walk.compare_trees(before_tree, after_tree)?;
+    checkpoint(walk.live)?;
+    walk.changed.sort_unstable();
+    Ok(VerifiedSourcePaths {
+        before,
+        after,
+        changed_paths: walk.changed,
+    })
+}
 
 /// Compare the actual target-before and candidate commit trees. Every loaded
 /// commit/tree is independently hashed; identical subtree identities require
@@ -38,47 +94,102 @@ pub fn verify_merge_paths(
         source,
         live,
         format: merge.merge_commit.algorithm(),
+        source_publication: false,
         limits,
         objects: 0,
         bytes: 0,
         entries: 0,
         changed_bytes: 0,
         changed: Vec::new(),
+        unique: None,
         pending: Vec::new(),
         pending_bytes: 0,
     };
     let before = walk.commit_tree(merge.target_tip_before)?;
     let after = walk.commit_tree(merge.merge_commit)?;
-    walk.pending.push(Trees {
-        path: Vec::new(),
-        depth: 0,
-        before: Some(before),
-        after: Some(after),
-    });
-    while let Some(trees) = walk.pending.pop() {
-        walk.pending_bytes -= trees.path.len();
-        checkpoint(walk.live)?;
-        if trees.before == trees.after {
-            continue;
-        }
-        let before = walk.tree(trees.before)?;
-        let mut after = walk.tree(trees.after)?;
-        for (name, old) in before {
-            checkpoint(walk.live)?;
-            let new = after.remove(&name);
-            walk.entry(&trees, &name, Some(old), new)?;
-        }
-        for (name, new) in after {
-            checkpoint(walk.live)?;
-            walk.entry(&trees, &name, None, Some(new))?;
-        }
-    }
+    walk.compare_trees(before, after)?;
     checkpoint(walk.live)?;
     walk.changed.sort_unstable();
     checkpoint(walk.live)?;
     Ok(VerifiedMergePaths {
         merge: merge.clone(),
         changed_paths: walk.changed,
+        rebase_series: false,
+    })
+}
+
+/// Prove the union of paths changed by every commit in a reviewed linear
+/// series, including changes later reverted by another candidate commit.
+/// One walk owns all object, byte, tree-entry, path and cancellation budgets;
+/// restarting limits per commit would allow a series to multiply the profile.
+/// The chain must contain 1..256 strict native commits and end exactly at the
+/// target. Original source ancestry and current authorization remain separate
+/// obligations of the merge object verifier and admission driver.
+pub fn verify_rebase_paths(
+    source: &impl CanonicalObjectSource,
+    merge: &NativeMerge,
+    limits: MergeObjectLimits,
+    live: &mut impl FnMut() -> bool,
+) -> Result<VerifiedMergePaths, ProjectionFailure> {
+    checkpoint(live)?;
+    merge.validate().map_err(|_| invalid())?;
+    validate_limits(limits)?;
+    if merge.merge_commit == merge.target_tip_before {
+        return Err(invalid());
+    }
+    let mut walk = Walk {
+        source,
+        live,
+        format: merge.merge_commit.algorithm(),
+        source_publication: false,
+        limits,
+        objects: 0,
+        bytes: 0,
+        entries: 0,
+        changed_bytes: 0,
+        changed: Vec::new(),
+        unique: Some(BTreeSet::new()),
+        pending: Vec::new(),
+        pending_bytes: 0,
+    };
+    let mut cursor = merge.merge_commit;
+    let mut seen = BTreeSet::new();
+    let mut commit_bytes = 0usize;
+    let mut child_tree = None;
+    while cursor != merge.target_tip_before {
+        checkpoint(walk.live)?;
+        if seen.len() == MAX_REBASE_MERGE_COMMITS {
+            return Err(budget());
+        }
+        if !seen.insert(cursor) {
+            return Err(invalid());
+        }
+        let previous_bytes = walk.bytes;
+        let (tree, parent) = walk.rebase_commit(cursor)?;
+        commit_bytes = commit_bytes
+            .checked_add(walk.bytes - previous_bytes)
+            .filter(|bytes| *bytes <= MAX_REBASE_MERGE_COMMIT_BYTES)
+            .ok_or_else(budget)?;
+        if let Some(child) = child_tree {
+            walk.compare_trees(tree, child)?;
+        }
+        child_tree = Some(tree);
+        cursor = parent;
+    }
+    let target_tree = walk.commit_tree(merge.target_tip_before)?;
+    walk.entries = walk
+        .entries
+        .checked_add(1)
+        .filter(|edges| *edges <= limits.max_edges)
+        .ok_or_else(budget)?;
+    walk.compare_trees(target_tree, child_tree.ok_or_else(invalid)?)?;
+    checkpoint(walk.live)?;
+    walk.changed.sort_unstable();
+    checkpoint(walk.live)?;
+    Ok(VerifiedMergePaths {
+        merge: merge.clone(),
+        changed_paths: walk.changed,
+        rebase_series: true,
     })
 }
 
@@ -98,24 +209,40 @@ struct Trees {
     depth: usize,
     before: Option<GitOid>,
     after: Option<GitOid>,
+    /// A pure directory addition/removal is structural only when nonempty.
+    record_empty_directory: bool,
 }
 
 struct Walk<'a, S, L> {
     source: &'a S,
     live: &'a mut L,
     format: GitHashAlgorithm,
+    /// Merge/rebase review witnesses retain their structural directory paths.
+    source_publication: bool,
     limits: MergeObjectLimits,
     objects: usize,
     bytes: usize,
     entries: usize,
     changed_bytes: usize,
     changed: Vec<Vec<u8>>,
+    /// Present only for a series. Its keys mirror the bounded changed paths,
+    /// adding at most MAX_MERGE_CHANGED_PATH_BYTES of retained path payload.
+    unique: Option<BTreeSet<Vec<u8>>>,
     pending: Vec<Trees>,
     pending_bytes: usize,
 }
 
 impl<S: CanonicalObjectSource, L: FnMut() -> bool> Walk<'_, S, L> {
     fn read(&mut self, id: GitOid, kind: ObjectType) -> Result<ParsedObject, ProjectionFailure> {
+        self.read_with_profile(id, kind, AcceptanceProfile::GitCompatibleImport)
+    }
+
+    fn read_with_profile(
+        &mut self,
+        id: GitOid,
+        kind: ObjectType,
+        profile: AcceptanceProfile,
+    ) -> Result<ParsedObject, ProjectionFailure> {
         checkpoint(self.live)?;
         self.objects = self
             .objects
@@ -140,7 +267,7 @@ impl<S: CanonicalObjectSource, L: FnMut() -> bool> Walk<'_, S, L> {
             kind,
             object.body(),
             &id,
-            AcceptanceProfile::GitCompatibleImport,
+            profile,
             &ParseLimits {
                 max_object_bytes: self.limits.max_object_bytes,
                 max_tree_entries: self.limits.max_edges - self.entries,
@@ -157,6 +284,45 @@ impl<S: CanonicalObjectSource, L: FnMut() -> bool> Walk<'_, S, L> {
         let ParsedObject::Commit(commit) = self.read(id, ObjectType::Commit)? else {
             return Err(invalid());
         };
+        self.parsed_tree(&commit)
+    }
+
+    fn rebase_commit(&mut self, id: GitOid) -> Result<(GitOid, GitOid), ProjectionFailure> {
+        let ParsedObject::Commit(commit) =
+            self.read_with_profile(id, ObjectType::Commit, AcceptanceProfile::StrictCreate)?
+        else {
+            return Err(invalid());
+        };
+        let tree = self.parsed_tree(&commit)?;
+        if commit
+            .headers()
+            .iter()
+            .any(|header| header.name == b"parent" && !header.continuations.is_empty())
+        {
+            return Err(invalid());
+        }
+        let mut parents = commit.parent_references();
+        let parent = parents.next().ok_or_else(invalid)?;
+        if parents.next().is_some() {
+            return Err(invalid());
+        }
+        let parent = std::str::from_utf8(parent).map_err(|_| invalid())?;
+        let parent =
+            GitOid::from_hex(self.format, &parent.to_ascii_lowercase()).map_err(|_| invalid())?;
+        if parent.is_zero() {
+            return Err(invalid());
+        }
+        // A series also traverses one native tree and parent edge per commit.
+        // They share the entry-work ceiling used by all tree comparisons.
+        self.entries = self
+            .entries
+            .checked_add(2)
+            .filter(|edges| *edges <= self.limits.max_edges)
+            .ok_or_else(budget)?;
+        Ok((tree, parent))
+    }
+
+    fn parsed_tree(&self, commit: &fgit_git_object::Commit) -> Result<GitOid, ProjectionFailure> {
         if commit
             .headers()
             .iter()
@@ -178,6 +344,40 @@ impl<S: CanonicalObjectSource, L: FnMut() -> bool> Walk<'_, S, L> {
             return Err(invalid());
         }
         Ok(tree)
+    }
+
+    fn compare_trees(&mut self, before: GitOid, after: GitOid) -> Result<(), ProjectionFailure> {
+        self.pending.push(Trees {
+            path: Vec::new(),
+            depth: 0,
+            before: Some(before),
+            after: Some(after),
+            record_empty_directory: false,
+        });
+        while let Some(trees) = self.pending.pop() {
+            self.pending_bytes -= trees.path.len();
+            checkpoint(self.live)?;
+            if trees.before == trees.after {
+                continue;
+            }
+            let before = self.tree(trees.before)?;
+            let mut after = self.tree(trees.after)?;
+            if trees.record_empty_directory && before.is_empty() && after.is_empty() {
+                // An explicit empty tree has no descendant to carry its scope.
+                // It is still a real entry change, never an ancestor exemption.
+                self.record_changed_path(&trees.path)?;
+            }
+            for (name, old) in before {
+                checkpoint(self.live)?;
+                let new = after.remove(&name);
+                self.entry(&trees, &name, Some(old), new)?;
+            }
+            for (name, new) in after {
+                checkpoint(self.live)?;
+                self.entry(&trees, &name, None, Some(new))?;
+            }
+        }
+        Ok(())
     }
 
     fn tree(&mut self, id: Option<GitOid>) -> Result<BTreeMap<Vec<u8>, Entry>, ProjectionFailure> {
@@ -266,17 +466,14 @@ impl<S: CanonicalObjectSource, L: FnMut() -> bool> Walk<'_, S, L> {
         let only_subtree_identity = old_tree.is_some()
             && new_tree.is_some()
             && before.map(|entry| entry.mode) == after.map(|entry| entry.mode);
-        if !only_subtree_identity {
-            if self.changed.len() == MAX_MERGE_CHANGED_PATHS {
-                return Err(budget());
-            }
-            self.changed_bytes = self
-                .changed_bytes
-                .checked_add(path.len())
-                .filter(|n| *n <= MAX_MERGE_CHANGED_PATH_BYTES)
-                .ok_or_else(budget)?;
-            self.changed.try_reserve(1).map_err(|_| budget())?;
-            self.changed.push(path.clone());
+        let structural_directory = self.source_publication
+            && matches!(
+                (before, after),
+                (None, Some(Entry { mode: 0o040_000, .. }))
+                    | (Some(Entry { mode: 0o040_000, .. }), None)
+            );
+        if !only_subtree_identity && !structural_directory {
+            self.record_changed_path(&path)?;
         }
         if old_tree != new_tree {
             // Either side may be a removed/replaced directory. Descend both,
@@ -295,7 +492,32 @@ impl<S: CanonicalObjectSource, L: FnMut() -> bool> Walk<'_, S, L> {
                 depth,
                 before: old_tree,
                 after: new_tree,
+                record_empty_directory: structural_directory,
             });
+        }
+        Ok(())
+    }
+
+    fn record_changed_path(&mut self, path: &[u8]) -> Result<(), ProjectionFailure> {
+        if self
+            .unique
+            .as_ref()
+            .is_some_and(|paths| paths.contains(path))
+        {
+            return Ok(());
+        }
+        if self.changed.len() == MAX_MERGE_CHANGED_PATHS {
+            return Err(budget());
+        }
+        self.changed_bytes = self
+            .changed_bytes
+            .checked_add(path.len())
+            .filter(|n| *n <= MAX_MERGE_CHANGED_PATH_BYTES)
+            .ok_or_else(budget)?;
+        self.changed.try_reserve(1).map_err(|_| budget())?;
+        self.changed.push(path.to_vec());
+        if let Some(paths) = &mut self.unique {
+            paths.insert(path.to_vec());
         }
         Ok(())
     }

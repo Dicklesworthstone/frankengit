@@ -1,10 +1,11 @@
 //! PR diff is source disclosure plus PR metadata disclosure, not approval.
-//! Require both grants on the SAME credential before consuming a POST body.
+//! Operator credentials require both grants on the SAME credential. Sponsored
+//! agents require their independent PR-diff grant and both service ceilings.
 
 use super::super::issues::{ApiError, MAX_FORM_BYTES, Reply, parse_decimal};
 use super::super::source::review;
 use super::super::{Profile, Status, retry_key};
-use crate::{LoopbackReceiveSession, OneNode};
+use crate::{GitDaemonSessionDeadline, LoopbackReceiveSession, OneNode};
 use fgit_authority::IdempotencyKey;
 use fgit_forge::PullRequestNumber;
 use fgit_wire::smart_http::{BodyFraming, HttpLimits, Service, head::Envelope};
@@ -76,10 +77,15 @@ pub(super) fn authenticate(
     if request.repository_route.as_bytes() != profile.route {
         return Err(ApiError::not_found());
     }
-    // Like native PR preparation, PR diffs are enabled by the PR API switch;
-    // the separate source-browser switch is not an implicit PR permission.
-    if !profile.allow_pulls() || !grant.permits(Service::UploadPack) || !grant.permits_pulls(false)
-    {
+    // Preserve the operator's existing PR API profile. A separately issued
+    // agent diff grant is attenuated by BOTH source and PR service switches;
+    // neither old source nor metadata grants acquire this disclosure.
+    let permitted = if grant.permits_pull_diff_read() {
+        profile.allow_source()
+    } else {
+        grant.permits(Service::UploadPack) && grant.permits_pulls(false)
+    };
+    if !profile.allow_pulls() || !permitted {
         return Err(ApiError::new(Status::Forbidden, "forbidden"));
     }
     if retry_key(raw_head)
@@ -88,8 +94,7 @@ pub(super) fn authenticate(
     {
         return Err(ApiError::bad("diff_has_no_transaction_key"));
     }
-    Ok(LoopbackReceiveSession::authenticated(
-        grant.principal,
+    Ok(grant.session(
         IdempotencyKey::new(b"read-only-pull-request-diff".to_vec())
             .map_err(|_| ApiError::unavailable())?,
     ))
@@ -103,6 +108,7 @@ pub(super) fn execute(
     reader: &mut impl Read,
     limits: HttpLimits,
     maximum_response: u64,
+    deadline: &GitDaemonSessionDeadline,
 ) -> Result<Reply, ApiError> {
     review::execute_pull(
         node,
@@ -112,6 +118,7 @@ pub(super) fn execute(
         reader,
         limits,
         maximum_response,
+        deadline,
     )
 }
 

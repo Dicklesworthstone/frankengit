@@ -166,12 +166,16 @@ impl<'a> Request<'a> {
 pub(super) enum PatchProfile {
     Tree,
     BinaryTree,
+    Symlinks,
+    Gitlinks,
 }
 impl PatchProfile {
     fn parse(value: &str) -> Result<Self, ApiError> {
         match value {
             "exact-tree-v1" => Ok(Self::Tree),
             "exact-tree-binary-v1" => Ok(Self::BinaryTree),
+            "exact-symlink-v1" => Ok(Self::Symlinks),
+            "exact-gitlink-v1" => Ok(Self::Gitlinks),
             _ => Err(ApiError::bad("unsupported_source_patch_profile")),
         }
     }
@@ -179,6 +183,8 @@ impl PatchProfile {
         match self {
             Self::Tree => "exact-tree-v1",
             Self::BinaryTree => "exact-tree-binary-v1",
+            Self::Symlinks => "exact-symlink-v1",
+            Self::Gitlinks => "exact-gitlink-v1",
         }
     }
 }
@@ -399,6 +405,8 @@ mod tests {
             for (name, wanted) in [
                 ("exact-tree-v1", PatchProfile::Tree),
                 ("exact-tree-binary-v1", PatchProfile::BinaryTree),
+                ("exact-symlink-v1", PatchProfile::Symlinks),
+                ("exact-gitlink-v1", PatchProfile::Gitlinks),
             ] {
                 let pinned = format!(
                     "{body}&patch_profile={name}&expected_result_tree={}",
@@ -436,6 +444,8 @@ mod tests {
                 "exact-binary-v1",
                 "EXACT-TREE-BINARY-V1",
                 "exact-tree-binary-v1+",
+                "exact-symlink-v2",
+                "EXACT-SYMLINK-V1",
                 "null",
             ] {
                 assert!(

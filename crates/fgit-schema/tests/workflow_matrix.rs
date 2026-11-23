@@ -177,11 +177,11 @@ fn variant_names_cannot_alias_declared_jobs_and_needs_cannot_address_hidden_memb
 }
 
 #[test]
-fn explicit_failure_policy_and_unknown_strategy_fields_are_not_ignored() {
+fn malformed_failure_policy_and_unknown_strategy_fields_are_not_ignored() {
     let text = workflow(MODES, "");
     for changed in [
-        text.replace("      fail-fast: false\n", ""),
-        text.replace("fail-fast: false", "fail-fast: true"),
+        text.replace("fail-fast: false", "fail-fast: yes"),
+        text.replace("fail-fast: false", "fail-fast: '${{ matrix.mode }}'"),
         text.replace("      matrix:", "      max-parallel: 2\n      matrix:"),
         text.replace("      matrix:", "      typo: false\n      matrix:"),
     ] {

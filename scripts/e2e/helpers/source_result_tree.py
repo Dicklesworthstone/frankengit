@@ -97,11 +97,11 @@ class Fixture:
         return self.command('basis', ['pr', 'list', *self.scope, '--trusted-local', '--object-format', self.fmt])
     def form(self):
         return dict(object_format=self.fmt, ref='refs/heads/main', expected_commit=self.base, author=AUTHOR, committer=AUTHOR, timestamp='2', message=MESSAGE)
-    def validate(self, metadata, bundle):
+    def validate(self, metadata, bundle, reference='refs/heads/main'):
         assert metadata['root_tree'] == self.expected_tree and metadata['candidate_commit'] == self.candidate
         assert metadata['source_commit'] == self.base and not metadata['published'] and not metadata['objects_staged']
         assert metadata['bundle'] == dict(bytes=len(bundle), sha256=hashlib.sha256(bundle).hexdigest())
-        packed = bundle_objects(bundle, self.fmt, self.base, self.candidate)
+        packed = bundle_objects(bundle, self.fmt, self.base, self.candidate, reference)
         for identity, value in packed.items(): assert self.objects[identity] == value
         assert packed[self.candidate] == ('commit', self.commit_body)
         assert packed[self.expected_tree] == self.objects[self.expected_tree]

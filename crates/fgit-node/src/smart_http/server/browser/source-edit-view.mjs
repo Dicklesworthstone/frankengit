@@ -55,8 +55,9 @@ export function mountSourceEditor(doc, options = {}) {
   const byId = id => { const element = doc.getElementById(id); if (!element) throw new Error(`Missing source editor control ${id}`); return element; };
   const controls = Object.fromEntries(['token','connect','disconnect','recovery-only','original-principal','connection-mode','branch','format','select-base','base','path','path-kind','load-file',
     'change-kind','rename-options','rename-path','rename-path-kind','file-mode','file-text','file-hex','content-mode','text-editor','hex-editor','file-info','save-file','line-endings','replacement','queue-file','edits','clear-edits','author','committer','timestamp','message',
+    'batch-files','directory-files','import-prefix','import-prefix-kind','import-mode','import-files','import-directory','cancel-import','import-report',
     'prepare-edits','patch','prepare-patch','candidate','stage','confirm-send','send','recover','discard','save-receipt','restore-file','restore-receipt','pending','status'].map(id => [id, byId(id)]));
-  let edits = new Map(), renames = new Map(), loaded = null, replacement = null, replacementFile = null, revision = 0, textDirty = false, busy = false, viewMode = 'text';
+  let edits = new Map(), renames = new Map(), loaded = null, replacement = null, replacementFile = null, revision = 0, textDirty = false, busy = false, importing = false, viewMode = 'text';
   const urls = options.urls ?? globalThis.URL, timers = options.timers ?? globalThis, downloads = new Map();
   function releaseDownloads() {
     for (const [url, timer] of downloads) { timers.clearTimeout(timer); urls.revokeObjectURL(url); }
@@ -97,11 +98,13 @@ export function mountSourceEditor(doc, options = {}) {
     edits.clear(); renames.clear(); controls['rename-path'].value = ''; loaded = null; replacement = null; replacementFile = null; textDirty = false; viewMode = 'text';
     controls['content-mode'].value = viewMode; controls['file-hex'].value = ''; controls['file-info'].textContent = 'No file bytes loaded.'; releaseDownloads();
     controls['file-text'].value = ''; controls.replacement.value = ''; controls.patch.value = '';
+    controls['batch-files'].value = ''; controls['directory-files'].value = ''; controls['import-prefix'].value = '';
+    controls['import-prefix-kind'].value = 'utf8'; controls['import-mode'].value = 'preserve'; controls['import-report'].replaceChildren();
     controls.candidate.replaceChildren(); controls.edits.replaceChildren(); controls.base.textContent = '';
   }
   function changed() {
     if (client.recoveryOnly) return;
-    revision += 1; client.invalidateCandidate(); controls.candidate.replaceChildren(); controls['confirm-send'].checked = false; render();
+    revision += 1; client.invalidateCandidate(); controls.candidate.replaceChildren(); controls['import-report'].replaceChildren(); controls['confirm-send'].checked = false; render();
   }
   function render() {
     const pending = client.pending, candidate = client.candidate, recovering = client.recoveryOnly, connected = client.connected && !recovering;
@@ -120,6 +123,8 @@ export function mountSourceEditor(doc, options = {}) {
     controls['save-file'].disabled = busy || !connected || !!pending || !client.selection;
     controls.connect.disabled = busy; controls['select-base'].disabled = busy || !connected || !!pending;
     for (const id of ['load-file','queue-file','clear-edits','prepare-edits','prepare-patch']) controls[id].disabled = busy || !connected || !!pending || !client.selection;
+    for (const id of ['batch-files','directory-files','import-prefix','import-prefix-kind','import-mode','import-files','import-directory']) controls[id].disabled = busy || !connected || !!pending || !client.selection;
+    controls['cancel-import'].disabled = !importing || !connected || !!pending;
     controls.stage.disabled = busy || !connected || !!pending || !candidate;
     controls.send.disabled = busy || !connected || !pending;
     controls.recover.disabled = busy || !client.connected || !pending;
@@ -138,7 +143,7 @@ export function mountSourceEditor(doc, options = {}) {
       const action = pair ? `Rename ${label(pair[0])} → ${label(pair[1])} (two paths)`
         : `${edit.before === null ? 'Create' : edit.after === null ? 'Delete' : 'Edit'} ${label(key)}`;
       const row = element('li'), remove = element('button', 'Remove'); remove.type = 'button'; remove.disabled = recovering || busy || !!pending;
-      row.append(element('span', `${action}; ${edit.before?.bytes.length ?? 0} → ${after?.bytes.length ?? 0} bytes${editableText(after?.bytes ?? edit.before.bytes) === null ? ' (binary/raw)' : ''} `), remove);
+      row.append(element('span', `${action}; ${edit.before?.bytes.length ?? 0} → ${after?.bytes.length ?? 0} bytes${editableText(after?.bytes ?? edit.before.bytes) === null ? ' (binary/raw)' : ''}; modes ${edit.before?.mode.toString(8) ?? 'absent'} → ${after?.mode.toString(8) ?? 'absent'} `), remove);
       remove.addEventListener('click', () => { if (client.recoveryOnly || busy || client.pending) return; removeQueued(key); changed(); });
       controls.edits.append(row);
     }
@@ -298,6 +303,57 @@ export function mountSourceEditor(doc, options = {}) {
     edits = next; renames = nextRenames; changed(); status(`${edits.size} exact file effect(s) queued. Nothing has been submitted.`);
   }));
   controls['clear-edits'].addEventListener('click', () => { if (!client.recoveryOnly && !busy && !client.pending) { edits.clear(); renames.clear(); changed(); } });
+  for (const id of ['batch-files','directory-files','import-prefix','import-prefix-kind','import-mode']) {
+    controls[id].addEventListener(id.endsWith('-files') ? 'change' : 'input', () => {
+      if (client.recoveryOnly || client.pending || !client.connected) return;
+      changed();
+    });
+  }
+  async function importSelection(directory) {
+    if (!client.connected || client.pending || !client.selection) throw new Error('Select a branch base and resolve any original publication before importing files.');
+    changed();
+    const control = controls[directory ? 'directory-files' : 'batch-files'], started = revision;
+    const list = control.files, count = list?.length;
+    // Bound the FileList before copying it. The client captures and validates
+    // every descriptor and retained edit before its first asynchronous read.
+    if (!Number.isSafeInteger(count) || count < 1 || count + edits.size > EDIT_LIMIT) throw new Error('Choose files within the remaining 64-path queue limit.');
+    const selected = Array.from({ length: count }, (_, i) => list[i]);
+    const encoding = controls['import-prefix-kind'].value;
+    if (!['utf8', 'hex'].includes(encoding)) throw new Error('Choose text or exact hexadecimal destination bytes.');
+    const prefixHex = encoding === 'hex' ? controls['import-prefix'].value
+      : hex(utf8.encode(text(controls['import-prefix'].value, 4096, 'import destination')));
+    const mode = controls['import-mode'].value;
+    if (prefixHex !== '') sourcePath(prefixHex);
+    if (!['preserve','100644','100755'].includes(mode)) throw new Error('Choose an explicit imported-file mode policy.');
+    const check = () => {
+      if (started !== revision || !client.connected || client.pending || control.files?.length !== selected.length ||
+          selected.some((file, i) => control.files[i] !== file)) throw new Error('Import cancelled or file selection changed; the existing queue and file draft are unchanged.');
+    };
+    importing = true; render();
+    status('Checking selected paths and original files before reading the local import. Existing drafts remain unchanged until the complete import succeeds.');
+    try {
+      const result = await client.importFiles(selected, { directory, prefixHex, mode }, [...edits.values()]); check();
+      // importFiles returns a validated complete overlay, including copies of
+      // retained edits. Never adopt a successful prefix or infer deletions.
+      // Existing rename groups keep both endpoints and their removal semantics.
+      edits = new Map(result.edits.map(edit => [edit.path_hex, edit])); control.value = ''; changed();
+      const summary = `${result.created} created, ${result.updated} updated, ${result.unchanged.length} unchanged; ${edits.size} total queued paths. No unselected files were removed. Nothing published.`;
+      controls['import-report'].append(element('p', summary));
+      if (result.unchanged.length) {
+        const details = element('details'), paths = element('ul');
+        details.append(element('summary', `Unchanged files (${result.unchanged.length})`));
+        for (const path of result.unchanged) paths.append(element('li', label(path)));
+        details.append(paths); controls['import-report'].append(details);
+      }
+      status(`${summary} Review the queue, then prepare and inspect the native candidate.`);
+    } finally { importing = false; }
+  }
+  controls['import-files'].addEventListener('click', () => perform(() => importSelection(false)));
+  controls['import-directory'].addEventListener('click', () => perform(() => importSelection(true)));
+  controls['cancel-import'].addEventListener('click', () => {
+    if (!importing || client.recoveryOnly || client.pending || !client.connected) return;
+    changed(); status('Cancelling import. Existing queued edits and the current file draft are preserved; no publication was sent.');
+  });
   controls['prepare-edits'].addEventListener('click', () => perform(async () => {
     const prepared = await client.prepareEdits([...edits.values()], metadata()); inspectView(prepared);
     status('Native preparation and inspection completed. Inspect every changed path before preparing publication.');
@@ -340,7 +396,7 @@ export function mountSourceEditor(doc, options = {}) {
   }, true));
   (options.events ?? globalThis).addEventListener?.('pagehide', disconnect);
   (options.events ?? globalThis).addEventListener?.('beforeunload', event => {
-    if (client.pending || edits.size || replacement !== null || replacementFile || textDirty) { event.preventDefault(); event.returnValue = ''; }
+    if (client.pending || edits.size || replacement !== null || replacementFile || textDirty || importing) { event.preventDefault(); event.returnValue = ''; }
   });
   render(); return { client, disconnect, get queued() { return [...edits.values()].map(edit => structuredClone(edit)); } };
 }

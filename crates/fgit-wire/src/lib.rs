@@ -12,8 +12,9 @@
 //!
 //! Matched here: Git pkt-line framing (including flush, delimiter, and
 //! response-end), bounded v0/v1 advertisements and fetch negotiation,
-//! `multi_ack` / `multi_ack_detailed`, v2 `ls-refs` and `fetch` command
-//! sections, native SHA-1/SHA-256 object-ID widths, shallow/deepen and the
+//! `multi_ack` / `multi_ack_detailed`, v2 `ls-refs`, `fetch` and `object-info` command
+//! sections, exact snapshot-bound `ref-in-want` fetches, native SHA-1/SHA-256
+//! object-ID widths, shallow/deepen and the
 //! documented object-filter forms, and side-band-64k packet multiplexing.
 //! V0/v1 wants must be advertised unless the server explicitly enables
 //! `allow-reachable-sha1-in-want`; that extension also requires repository
@@ -25,7 +26,8 @@
 //! and publication remain outside this crate. Explicitly unsupported, and
 //! refused rather than delegated, are unknown v2 commands/capabilities,
 //! unbounded negotiation sets, malformed `deepen` and filter grammar,
-//! object-info/bundle-uri/server-option commands. The [`smart_http`] module
+//! bundle-uri/server-option commands. `object-info` supports the pinned Git
+//! 2.54 size profile over the same authorized object view as fetch. The [`smart_http`] module
 //! supplies bounded HTTP discovery and RPC framing, not authentication or
 //! sockets. A runtime adapter owns socket cancellation, while a pack
 //! implementation owns pack bytes and the eventual thin-pack or delta
@@ -38,13 +40,16 @@ pub use fgit_crypto::{AnyGitOid, GitObjectFormat};
 pub use fgit_git_object::ObjectType;
 
 use fgit_types::RefName;
+use request_ids::RequestObjectIds;
 
 /// Bounded shallow-history and partial-clone closure computation.
 pub mod closure;
 mod cutoff_ref;
 mod filter_syntax;
+mod object_info;
 /// Bounded SANS-I/O receive-pack parsing and structural pack quarantine.
 pub mod receive;
+mod request_ids;
 mod shallow_response;
 /// Bounded smart HTTP discovery, routing, and streaming message framing.
 pub mod smart_http;
@@ -53,6 +58,7 @@ pub mod sparse;
 /// Hidden-ref authorization policy and visibility-filtered repository views.
 pub mod stale_disclosure;
 pub mod visibility;
+mod wanted_refs;
 
 /// The largest pkt-line frame permitted by Git's common protocol.
 pub const MAX_PKT_LINE_BYTES: usize = 65_520;
@@ -76,7 +82,9 @@ pub struct WireLimits {
     pub max_capabilities: usize,
     /// Maximum bytes in one capability token.
     pub max_capability_bytes: usize,
-    /// Maximum `want` object IDs in one fetch request.
+    /// Maximum distinct `want` IDs plus `want-ref` names per fetch, or `oid`
+    /// arguments per object-info query. Different names count separately even
+    /// when they resolve to the same object.
     pub max_wants: usize,
     /// Maximum `have` object IDs in one fetch request.
     pub max_haves: usize,
@@ -233,6 +241,11 @@ pub enum WireError {
     WantNotAdvertised { oid: AnyGitOid },
     /// A v2 `want` was neither advertised nor permitted by the repository closure.
     WantNotReachable { oid: AnyGitOid },
+    /// A v2 `want-ref` did not name an exact visible ref in this snapshot.
+    /// Hidden and absent names have the same refusal.
+    UnknownWantedRef { name: Vec<u8> },
+    /// Git rejects requesting the same ref name twice in one fetch.
+    DuplicateWantedRef { name: Vec<u8> },
     /// A bounded request collection has reached its limit.
     TooManyObjectIds { field: &'static str, limit: usize },
     /// A request attempted `have` or `done` before any `want`.
@@ -350,6 +363,8 @@ impl Display for WireError {
             }
             Self::WantNotAdvertised { oid } => write!(formatter, "want {oid:?} was not advertised"),
             Self::WantNotReachable { oid } => write!(formatter, "want {oid:?} is not reachable"),
+            Self::UnknownWantedRef { name } => write!(formatter, "unknown wanted ref {name:?}"),
+            Self::DuplicateWantedRef { name } => write!(formatter, "duplicate wanted ref {name:?}"),
             Self::TooManyObjectIds { field, limit } => {
                 write!(formatter, "too many {field} IDs; limit {limit}")
             }
@@ -1098,6 +1113,8 @@ pub enum ObjectFilter {
     BlobLimit(u64),
     /// Include trees and blobs with depth strictly below this cutoff.
     TreeDepth(u32),
+    /// Include only this native Git type, except explicitly requested objects.
+    ObjectType(ObjectType),
     /// Request a sparse path expression.
     SparsePath(Vec<u8>),
     /// Request a sparse specification object.
@@ -1301,12 +1318,47 @@ impl AdvertisedRef {
 pub trait UploadPackRepository {
     /// The native object format of this repository.
     fn object_format(&self) -> GitObjectFormat;
-    /// Deterministically ordered advertised refs, with no duplicate name or OID.
+    /// Deterministically ordered advertised refs, with unique names. Different
+    /// names may share an object (for example HEAD and its target branch).
     fn advertised_refs(&self) -> &[AdvertisedRef];
     /// Whether a v2 non-advertised want is in the canonical permitted closure.
     fn contains_want(&self, oid: AnyGitOid) -> bool;
     /// Whether a client `have` is already common with the advertised closure.
     fn is_common(&self, oid: AnyGitOid) -> bool;
+    /// Check the live request before negotiation-only work or disclosure.
+    /// Called for absent/hidden haves and empty rounds too. Static repository
+    /// views need no deadline; live adapters preserve their original scope.
+    fn negotiation_checkpoint(&self) -> Result<(), WireError> {
+        Ok(())
+    }
+    /// Whether this view supplies exact visible refs from one authenticated
+    /// snapshot. Parser support alone must not advertise `ref-in-want`.
+    fn supports_ref_in_want(&self) -> bool {
+        false
+    }
+    /// Check the live request scope before resolving and returning wanted refs.
+    /// Called for hidden, absent and duplicate names as well as successful ones.
+    fn ref_in_want_checkpoint(&self) -> Result<(), WireError> {
+        Ok(())
+    }
+    /// Whether this view supplies authorized object-size metadata. A transport
+    /// must not advertise `object-info` from parser support alone.
+    fn supports_object_info(&self) -> bool {
+        false
+    }
+    /// Check the request's live scope without looking up any object. The wire
+    /// machine calls this for hidden/unknown IDs and attribute-free requests
+    /// too, so neither case bypasses cancellation or an expired deadline.
+    fn object_info_checkpoint(&self) -> Result<(), WireError> {
+        Ok(())
+    }
+    /// Exact uncompressed native object size at this immutable authorized view.
+    /// The wire machine checks `contains_want` before this metadata lookup.
+    /// Hidden and unknown objects both produce the protocol's missing value;
+    /// storage/cache presence alone must never authorize disclosure.
+    fn object_info_size(&self, _oid: AnyGitOid) -> Result<Option<u64>, WireError> {
+        Err(WireError::PackSourceRefused)
+    }
     /// Whether this immutable repository view can resolve actual shallow updates.
     /// A transport must not advertise shallow serving from parser support alone.
     fn supports_shallow(&self) -> bool {
@@ -1455,6 +1507,13 @@ pub enum WireEvent {
         peel: bool,
         /// Whether the client requested unborn-head attributes.
         unborn: bool,
+    },
+    /// A complete protocol-v2 metadata query, with no pack-construction handoff.
+    ObjectInfo {
+        /// Number of OID arguments, including repetitions, in the response.
+        object_count: usize,
+        /// Whether the response includes object sizes.
+        size: bool,
     },
     /// A common object was observed during negotiation.
     Common(AnyGitOid),
@@ -1785,9 +1844,9 @@ fn oid_hex(oid: AnyGitOid) -> String {
     }
 }
 
-/// Request-body framing of one upload-pack machine. Only a stateless HTTP
-/// request can end a negotiation round with acknowledgments and no pack, so
-/// "round complete" exists only inside that variant.
+/// Request-body framing of one upload-pack machine. HTTP owns one negotiation
+/// round per request. Connection-framed v2 commands can also finish with only
+/// acknowledgments, then reset their arguments for another command.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RequestFraming {
     /// One connection carries every negotiation round (git://, SSH, file).
@@ -1865,12 +1924,12 @@ pub struct LegacyUploadPack {
     decoder: PktLineDecoder,
     server_capabilities: Capabilities,
     state: LegacyState,
-    wants: Vec<AnyGitOid>,
-    haves: Vec<AnyGitOid>,
-    shallows: Vec<AnyGitOid>,
+    wants: RequestObjectIds,
+    haves: RequestObjectIds,
+    shallows: RequestObjectIds,
     deepen: Option<u32>,
     deepen_since: Option<i64>,
-    deepen_not: Vec<AnyGitOid>,
+    deepen_not: RequestObjectIds,
     filter: Option<ObjectFilter>,
     ack_mode: AckMode,
     options: PackOptions,
@@ -2047,12 +2106,12 @@ impl LegacyUploadPack {
             decoder,
             server_capabilities,
             state: LegacyState::AwaitWant,
-            wants: Vec::new(),
-            haves: Vec::new(),
-            shallows: Vec::new(),
+            wants: RequestObjectIds::default(),
+            haves: RequestObjectIds::default(),
+            shallows: RequestObjectIds::default(),
             deepen: None,
             deepen_since: None,
-            deepen_not: Vec::new(),
+            deepen_not: RequestObjectIds::default(),
             filter: None,
             ack_mode: AckMode::None,
             options: PackOptions::NONE,
@@ -2176,7 +2235,8 @@ impl LegacyUploadPack {
         if let Some(rest) = line.strip_prefix(b"shallow ") {
             self.require_capability(b"shallow")?;
             let oid = parse_object_id(rest, repository.object_format())?;
-            push_deduplicated_oid("shallow", oid, &mut self.shallows, self.limits.max_shallows)?;
+            self.shallows
+                .insert("shallow", oid, self.limits.max_shallows)?;
             return Ok(Transition::empty());
         }
         if let Some(rest) = line.strip_prefix(b"deepen ") {
@@ -2202,12 +2262,8 @@ impl LegacyUploadPack {
         if let Some(rest) = line.strip_prefix(b"deepen-not ") {
             self.require_capability(b"shallow")?;
             let oid = cutoff_ref::resolve(repository, rest, &self.limits)?;
-            push_deduplicated_oid(
-                "deepen-not",
-                oid,
-                &mut self.deepen_not,
-                self.limits.max_shallows,
-            )?;
+            self.deepen_not
+                .insert("deepen-not", oid, self.limits.max_shallows)?;
             return Ok(Transition::empty());
         }
         if let Some(rest) = line.strip_prefix(b"filter ") {
@@ -2241,14 +2297,19 @@ impl LegacyUploadPack {
                 (&rest[..offset], Some(&rest[offset + 1..]))
             });
         let oid = parse_object_id(oid_text, repository.object_format())?;
-        if !repository
-            .advertised_refs()
-            .iter()
-            .any(|reference| reference.oid == oid)
-            && !(self
-                .server_capabilities
-                .contains(b"allow-reachable-sha1-in-want")
-                && repository.contains_want(oid))
+        // Production views already index the authorized closure, including all
+        // advertised tips. Consult it first when the extension is enabled so a
+        // many-ref clone does not rescan the entire advertisement for each want.
+        // Keep the exact advertised-tip fallback for strict profiles and for
+        // low-level repositories whose closure omits an advertised object.
+        if !(self
+            .server_capabilities
+            .contains(b"allow-reachable-sha1-in-want")
+            && repository.contains_want(oid))
+            && !repository
+                .advertised_refs()
+                .iter()
+                .any(|reference| reference.oid == oid)
         {
             return Err(WireError::WantNotAdvertised { oid });
         }
@@ -2262,7 +2323,7 @@ impl LegacyUploadPack {
             self.accept_request_capabilities(&requested, repository.object_format())?;
             self.saw_want_capabilities = true;
         }
-        push_deduplicated_oid("want", oid, &mut self.wants, self.limits.max_wants)?;
+        self.wants.insert("want", oid, self.limits.max_wants)?;
         Ok(Transition::empty())
     }
 
@@ -2310,7 +2371,7 @@ impl LegacyUploadPack {
         let line = request_line(line)?;
         if let Some(rest) = line.strip_prefix(b"have ") {
             let oid = parse_object_id(rest, repository.object_format())?;
-            push_deduplicated_oid("have", oid, &mut self.haves, self.limits.max_haves)?;
+            self.haves.insert("have", oid, self.limits.max_haves)?;
             if repository.is_common(oid) {
                 let first_common = self.last_common.is_none();
                 self.last_common = Some(oid);
@@ -2349,13 +2410,8 @@ impl LegacyUploadPack {
     ) -> Result<Transition, WireError> {
         // Readiness is conservative: exact wanted tips must be in the client's
         // common have set. A mere unrelated common object never proves ready.
-        // Sorting a bounded vector avoids a wants-times-haves scan.
-        let mut common = Vec::new();
-        common
-            .try_reserve_exact(self.haves.len())
-            .map_err(|_| WireError::AllocationFailure)?;
-        common.extend_from_slice(&self.haves);
-        common.sort_unstable();
+        // The request-local membership index avoids rescanning or sorting the
+        // ordered have list; it cannot replace the repository's common check.
         let ready = self.ack_mode == AckMode::MultiAckDetailed
             && self.last_common.is_some()
             && self.shallows.is_empty()
@@ -2364,8 +2420,9 @@ impl LegacyUploadPack {
             && self.deepen_not.is_empty()
             && self
                 .wants
+                .as_slice()
                 .iter()
-                .all(|oid| common.binary_search(oid).is_ok() && repository.is_common(*oid));
+                .all(|oid| self.haves.contains(oid) && repository.is_common(*oid));
         let mut transition = Transition::empty();
         if ready && let Some(oid) = self.last_common {
             transition
@@ -2494,12 +2551,12 @@ impl LegacyUploadPack {
     fn pack_request(&self) -> PackRequest {
         PackRequest {
             version: self.version,
-            wants: self.wants.clone(),
-            haves: self.haves.clone(),
-            shallows: self.shallows.clone(),
+            wants: self.wants.as_slice().to_vec(),
+            haves: self.haves.as_slice().to_vec(),
+            shallows: self.shallows.as_slice().to_vec(),
             deepen: self.deepen,
             deepen_since: self.deepen_since,
-            deepen_not: self.deepen_not.clone(),
+            deepen_not: self.deepen_not.as_slice().to_vec(),
             filter: self.filter.clone(),
             options: self.options,
         }
@@ -2510,40 +2567,11 @@ fn line_packet(line: impl Into<Vec<u8>>) -> Packet {
     Packet::Data(line.into())
 }
 
-/// Adds one object id to a request-side collection as a SET member.
-///
-/// A repeated `want`, `have`, or shallow identity is idempotent rather than
-/// fatal: upstream `git upload-pack` treats these collections as sets and
-/// accepts repeated lines (verified differentially against pinned
-/// git-2.54.0, which answers a duplicate-want request with NAK and a pack).
-/// Real clients rely on this -- a branch and a lightweight tag sharing one
-/// tip make `git clone` emit the same want once per advertised ref.
-///
-/// The bound still counts DISTINCT identities only; a repeat neither grows
-/// the collection nor consumes budget.
-fn push_deduplicated_oid(
-    field: &'static str,
-    oid: AnyGitOid,
-    target: &mut Vec<AnyGitOid>,
-    limit: usize,
-) -> Result<(), WireError> {
-    if target.contains(&oid) {
-        return Ok(());
-    }
-    if target.len() == limit {
-        return Err(WireError::TooManyObjectIds { field, limit });
-    }
-    target
-        .try_reserve(1)
-        .map_err(|_| WireError::AllocationFailure)?;
-    target.push(oid);
-    Ok(())
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum V2Command {
     LsRefs,
     Fetch,
+    ObjectInfo,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum V2State {
@@ -2572,7 +2600,7 @@ impl LsRefsOptions {
     }
 }
 
-/// SANS-I/O protocol-v2 upload-pack command machine for `ls-refs` and `fetch`.
+/// SANS-I/O protocol-v2 machine for `ls-refs`, `fetch` and `object-info`.
 #[derive(Clone, Debug)]
 pub struct V2UploadPack {
     limits: WireLimits,
@@ -2580,12 +2608,16 @@ pub struct V2UploadPack {
     server_capabilities: Capabilities,
     state: V2State,
     request_capabilities: Capabilities,
-    wants: Vec<AnyGitOid>,
-    haves: Vec<AnyGitOid>,
-    shallows: Vec<AnyGitOid>,
+    wants: RequestObjectIds,
+    // The pack wants deduplicate resolved object IDs; selector accounting must
+    // separately retain explicit OIDs so aliases cannot bypass max_wants.
+    explicit_wants: RequestObjectIds,
+    wanted_refs: wanted_refs::WantedRefs,
+    haves: RequestObjectIds,
+    shallows: RequestObjectIds,
     deepen: Option<u32>,
     deepen_since: Option<i64>,
-    deepen_not: Vec<AnyGitOid>,
+    deepen_not: RequestObjectIds,
     filter: Option<ObjectFilter>,
     options: PackOptions,
     done: bool,
@@ -2594,6 +2626,8 @@ pub struct V2UploadPack {
     automatic_shallow_updates: bool,
     framing: RequestFraming,
     wait_for_done: bool,
+    completed_negotiation: bool,
+    object_info: object_info::ObjectInfoRequest,
 }
 
 impl V2UploadPack {
@@ -2631,12 +2665,14 @@ impl V2UploadPack {
             server_capabilities,
             state: V2State::AwaitCommand,
             request_capabilities: Capabilities::default(),
-            wants: Vec::new(),
-            haves: Vec::new(),
-            shallows: Vec::new(),
+            wants: RequestObjectIds::default(),
+            explicit_wants: RequestObjectIds::default(),
+            wanted_refs: wanted_refs::WantedRefs::default(),
+            haves: RequestObjectIds::default(),
+            shallows: RequestObjectIds::default(),
             deepen: None,
             deepen_since: None,
-            deepen_not: Vec::new(),
+            deepen_not: RequestObjectIds::default(),
             filter: None,
             options: PackOptions::NONE,
             done: false,
@@ -2645,7 +2681,17 @@ impl V2UploadPack {
             automatic_shallow_updates: false,
             framing: RequestFraming::Connection,
             wait_for_done: false,
+            completed_negotiation: false,
+            object_info: object_info::ObjectInfoRequest::default(),
         })
+    }
+
+    /// Whether this machine has completed an acknowledgment-only fetch round.
+    /// A connection may then end cleanly or carry a new independent command.
+    /// Pair with `is_awaiting_command` and `finish` before accepting EOF.
+    #[must_use]
+    pub const fn has_completed_negotiation(&self) -> bool {
+        self.completed_negotiation
     }
 
     /// Whether no command is in progress. Pair with `finish` to detect a
@@ -2729,6 +2775,7 @@ impl V2UploadPack {
         let command = match command {
             b"ls-refs" => V2Command::LsRefs,
             b"fetch" => V2Command::Fetch,
+            b"object-info" => V2Command::ObjectInfo,
             _ => {
                 return Err(WireError::UnsupportedCommand {
                     command: command.to_vec(),
@@ -2738,6 +2785,7 @@ impl V2UploadPack {
         let capability: &[u8] = match command {
             V2Command::LsRefs => b"ls-refs",
             V2Command::Fetch => b"fetch",
+            V2Command::ObjectInfo => b"object-info",
         };
         if !self.server_capabilities.contains(capability) {
             return Err(WireError::UnsupportedCommand {
@@ -2790,17 +2838,34 @@ impl V2UploadPack {
                 match command {
                     V2Command::LsRefs => self.accept_ls_refs_argument(line),
                     V2Command::Fetch => self.accept_fetch_argument(line, repository),
+                    V2Command::ObjectInfo => {
+                        self.object_info
+                            .accept(line, repository.object_format(), &self.limits)?;
+                        Ok(Transition::empty())
+                    }
                 }
             }
             Packet::Flush => match command {
                 V2Command::LsRefs => self.finish_ls_refs(repository),
                 V2Command::Fetch => self.finish_fetch(repository),
+                V2Command::ObjectInfo => self.finish_object_info(repository),
             },
             Packet::Delimiter | Packet::ResponseEnd => Err(WireError::IllegalTransition {
                 state: "v2 argument phase",
                 packet: packet_name(packet),
             }),
         }
+    }
+
+    fn finish_object_info(
+        &mut self,
+        repository: &impl UploadPackRepository,
+    ) -> Result<Transition, WireError> {
+        let response = self.object_info.finish(repository, &self.limits)?;
+        self.object_info = object_info::ObjectInfoRequest::default();
+        self.request_capabilities = Capabilities::default();
+        self.state = V2State::AwaitCommand;
+        Ok(response)
     }
 
     fn accept_ls_refs_argument(&mut self, line: &[u8]) -> Result<Transition, WireError> {
@@ -2844,21 +2909,45 @@ impl V2UploadPack {
             if !repository.contains_want(oid) {
                 return Err(WireError::WantNotReachable { oid });
             }
-            push_deduplicated_oid("want", oid, &mut self.wants, self.limits.max_wants)?;
+            if !self.explicit_wants.contains(&oid)
+                && self.explicit_wants.as_slice().len()
+                    >= self.limits.max_wants.saturating_sub(self.wanted_refs.len())
+            {
+                return Err(WireError::TooManyObjectIds {
+                    field: "want",
+                    limit: self.limits.max_wants,
+                });
+            }
+            self.explicit_wants
+                .insert("want", oid, self.limits.max_wants)?;
+            self.wants.insert("want", oid, self.limits.max_wants)?;
+            return Ok(Transition::empty());
+        }
+        if let Some(name) = line.strip_prefix(b"want-ref ") {
+            self.require_fetch_feature(b"ref-in-want")?;
+            self.wanted_refs.accept(
+                name,
+                repository,
+                &self.limits,
+                self.explicit_wants.as_slice().len(),
+                &mut self.wants,
+            )?;
             return Ok(Transition::empty());
         }
         if let Some(rest) = line.strip_prefix(b"have ") {
-            if self.wants.is_empty() {
-                return Err(WireError::MissingWant);
-            }
+            // V2 arguments are not ordered: a negotiation-only request may
+            // name its haves before wait-for-done. Validate the complete
+            // no-want shape at the flush, before any ACK can escape.
+            repository.negotiation_checkpoint()?;
             let oid = parse_object_id(rest, repository.object_format())?;
-            push_deduplicated_oid("have", oid, &mut self.haves, self.limits.max_haves)?;
+            self.haves.insert("have", oid, self.limits.max_haves)?;
             return Ok(Transition::empty());
         }
         if let Some(rest) = line.strip_prefix(b"shallow ") {
             self.require_fetch_feature(b"shallow")?;
             let oid = parse_object_id(rest, repository.object_format())?;
-            push_deduplicated_oid("shallow", oid, &mut self.shallows, self.limits.max_shallows)?;
+            self.shallows
+                .insert("shallow", oid, self.limits.max_shallows)?;
             return Ok(Transition::empty());
         }
         if let Some(rest) = line.strip_prefix(b"deepen ") {
@@ -2884,12 +2973,8 @@ impl V2UploadPack {
         if let Some(rest) = line.strip_prefix(b"deepen-not ") {
             self.require_fetch_feature(b"shallow")?;
             let oid = cutoff_ref::resolve(repository, rest, &self.limits)?;
-            push_deduplicated_oid(
-                "deepen-not",
-                oid,
-                &mut self.deepen_not,
-                self.limits.max_shallows,
-            )?;
+            self.deepen_not
+                .insert("deepen-not", oid, self.limits.max_shallows)?;
             return Ok(Transition::empty());
         }
         if let Some(rest) = line.strip_prefix(b"filter ") {
@@ -2935,8 +3020,9 @@ impl V2UploadPack {
         ) {
             return Ok(Transition::empty());
         }
-        if line == b"wait-for-done" && self.framing.is_stateless_http() {
+        if line == b"wait-for-done" {
             self.require_fetch_feature(b"wait-for-done")?;
+            repository.negotiation_checkpoint()?;
             if self.wait_for_done {
                 return Err(WireError::MalformedRequestLine {
                     line: line.to_vec(),
@@ -3105,24 +3191,28 @@ impl V2UploadPack {
         &mut self,
         repository: &impl UploadPackRepository,
     ) -> Result<Transition, WireError> {
-        if self.wants.is_empty() {
+        // Have-only negotiation is an explicit wait-for-done operation. A
+        // pack-producing request still requires at least one authorized want.
+        if self.wants.is_empty() && (!self.wait_for_done || self.done) {
             return Err(WireError::MissingWant);
         }
+        repository.negotiation_checkpoint()?;
         let request = PackRequest {
             version: UploadPackVersion::V2,
-            wants: self.wants.clone(),
-            haves: self.haves.clone(),
-            shallows: self.shallows.clone(),
+            wants: self.wants.as_slice().to_vec(),
+            haves: self.haves.as_slice().to_vec(),
+            shallows: self.shallows.as_slice().to_vec(),
             deepen: self.deepen,
             deepen_since: self.deepen_since,
-            deepen_not: self.deepen_not.clone(),
+            deepen_not: self.deepen_not.as_slice().to_vec(),
             filter: self.filter.clone(),
             options: self.options.with(PackOptions::SIDE_BAND_64K.0),
         };
         shallow_response::validate_relative_depth(&request)?;
+        self.wanted_refs.validate(repository)?;
         let mut output = Vec::new();
+        let mut used_bytes = 0;
         if !self.done && (!self.haves.is_empty() || self.wait_for_done) {
-            let mut used_bytes = 0;
             add_output_packet(
                 &mut output,
                 line_packet(b"acknowledgments\n"),
@@ -3131,7 +3221,8 @@ impl V2UploadPack {
                 &self.limits,
             )?;
             let mut any_common = false;
-            for &have in &self.haves {
+            for &have in self.haves.as_slice() {
+                repository.negotiation_checkpoint()?;
                 if repository.is_common(have) {
                     let line = format!("ACK {}\n", oid_hex(have)).into_bytes();
                     let count = line.len() + 4;
@@ -3157,30 +3248,33 @@ impl V2UploadPack {
             // Without an ancestry oracle, only exact wanted common tips prove
             // a sufficient cut. Conservatively ask for another round otherwise;
             // the client's explicit `done` can always terminate negotiation.
-            let ready = if self.framing.is_stateless_http() {
-                let mut sorted = Vec::new();
-                sorted
-                    .try_reserve_exact(self.haves.len())
-                    .map_err(|_| WireError::AllocationFailure)?;
-                sorted.extend_from_slice(&self.haves);
-                sorted.sort_unstable();
-                !self.wait_for_done
-                    && any_common
+            let ready = if self.wait_for_done {
+                false
+            } else if self.framing.is_stateless_http() {
+                any_common
                     && self.shallows.is_empty()
                     && self.deepen.is_none()
                     && self.deepen_since.is_none()
                     && self.deepen_not.is_empty()
                     && self
                         .wants
+                        .as_slice()
                         .iter()
-                        .all(|oid| sorted.binary_search(oid).is_ok() && repository.is_common(*oid))
+                        .all(|oid| self.haves.contains(oid) && repository.is_common(*oid))
             } else {
                 true
             };
             if !ready {
                 add_output_packet(&mut output, Packet::Flush, 4, &mut used_bytes, &self.limits)?;
-                self.framing.complete_round();
-                self.state = V2State::Complete;
+                validate_response_packet_sizes(&output, &self.limits)?;
+                repository.negotiation_checkpoint()?;
+                self.completed_negotiation = true;
+                if self.framing.is_stateless_http() {
+                    self.framing.complete_round();
+                    self.state = V2State::Complete;
+                } else {
+                    self.reset_fetch_command();
+                }
                 return Ok(Transition {
                     output,
                     events: Vec::new(),
@@ -3202,27 +3296,75 @@ impl V2UploadPack {
             )?;
         }
         if self.automatic_shallow_updates && shallow_response::has_controls(&request) {
-            output.extend(shallow_response::response(
-                repository,
-                &request,
-                &self.limits,
-            )?);
+            for packet in shallow_response::response(repository, &request, &self.limits)? {
+                let bytes = match &packet {
+                    Packet::Data(line) => line.len() + 4,
+                    _ => 4,
+                };
+                add_output_packet(&mut output, packet, bytes, &mut used_bytes, &self.limits)?;
+            }
         }
-        output.push(line_packet(b"packfile\n"));
-        if self.automatic_shallow_updates && shallow_response::has_controls(&request) {
-            let _ = encode_packets(&output, &self.limits)?;
-        }
+        self.wanted_refs
+            .append_response(repository, &mut output, &mut used_bytes, &self.limits)?;
+        add_output_packet(
+            &mut output,
+            line_packet(b"packfile\n"),
+            b"packfile\n".len() + 4,
+            &mut used_bytes,
+            &self.limits,
+        )?;
+        // Keep the complete-prefix packet ceiling without allocating a second
+        // encoded copy of ACKs, shallow data and wanted-ref receipts.
+        validate_response_packet_sizes(&output, &self.limits)?;
+        repository.negotiation_checkpoint()?;
         self.state = V2State::Complete;
         Ok(Transition {
             output,
             events: vec![WireEvent::PackRequested(request)],
         })
     }
+
+    /// V2 negotiation rounds are independent requests on every transport.
+    /// Preserve the packet decoder: it can already own a partial next command.
+    /// No have, want-ref, filter, shallow or pack option may leak into it.
+    fn reset_fetch_command(&mut self) {
+        self.request_capabilities = Capabilities::default();
+        self.wants = RequestObjectIds::default();
+        self.explicit_wants = RequestObjectIds::default();
+        self.wanted_refs = wanted_refs::WantedRefs::default();
+        self.haves = RequestObjectIds::default();
+        self.shallows = RequestObjectIds::default();
+        self.deepen = None;
+        self.deepen_since = None;
+        self.deepen_not = RequestObjectIds::default();
+        self.filter = None;
+        self.options = PackOptions::NONE;
+        self.done = false;
+        self.wait_for_done = false;
+        self.state = V2State::AwaitCommand;
+    }
+}
+
+fn validate_response_packet_sizes(output: &[Packet], limits: &WireLimits) -> Result<(), WireError> {
+    for packet in output {
+        let bytes = match packet {
+            Packet::Data(line) => line.len() + 4,
+            _ => 4,
+        };
+        if bytes > limits.max_packet_bytes {
+            return Err(WireError::PacketTooLarge {
+                declared: bytes,
+                limit: limits.max_packet_bytes,
+            });
+        }
+    }
+    Ok(())
 }
 
 const fn command_name(command: V2Command) -> &'static [u8] {
     match command {
         V2Command::LsRefs => b"ls-refs",
         V2Command::Fetch => b"fetch",
+        V2Command::ObjectInfo => b"object-info",
     }
 }

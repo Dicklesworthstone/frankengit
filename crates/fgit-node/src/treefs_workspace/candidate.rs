@@ -1,4 +1,4 @@
-//! Node-owned, pinned export of file and inert symlink edits. No publication authority.
+//! Node-owned, pinned export of entry edits. No publication authority.
 
 use super::{NodeTreeSource, NodeWorkspaceRefusal};
 use crate::{NodeRequestContext, OneNode};
@@ -11,6 +11,14 @@ use fgit_treefs::{
 use fgit_types::{GitOid as AnyOid, RefName, RepositoryCommitId};
 use fgit_wire::visibility::RefVisibility;
 use std::collections::{BTreeMap, BTreeSet};
+
+/// Entry kinds admitted by one explicit native editing boundary. The ordinary
+/// profile stays closed when a caller has not opted into opaque gitlink edits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum EditProfile {
+    FilesAndSymlinks,
+    Gitlinks,
+}
 
 /// A candidate tree and its exact source coordinates. This is not a commit.
 #[derive(Debug)]
@@ -57,8 +65,67 @@ impl OneNode {
         now: u64,
         limits: ExportLimits,
     ) -> Result<WorkspaceEditExport<A>, NodeWorkspaceRefusal> {
+        self.export_workspace_edits_profile_in(
+            request,
+            reference,
+            expected_commit,
+            visibility,
+            capability,
+            log,
+            now,
+            limits,
+            EditProfile::FilesAndSymlinks,
+        )
+        .await
+    }
+
+    /// Explicitly add, update or delete opaque submodule commit pointers beside
+    /// ordinary file and inert symlink edits. Pointers use this repository's
+    /// native hash width and must be nonzero; no foreign object is ever read.
+    ///
+    /// A path cannot change between a gitlink and another entry kind, even via
+    /// a delete/recreate sequence. Gitlink renames, chmod, descendant access and
+    /// directory edits refuse. The independently selected commit binds every
+    /// original pointer and the normal capability/disclosure checks still apply.
+    pub async fn export_workspace_gitlink_edits_in<A: GitHashAlgorithm>(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        expected_commit: AnyOid,
+        visibility: &RefVisibility,
+        capability: &mut TreeCapability,
+        log: &IntentLog,
+        now: u64,
+        limits: ExportLimits,
+    ) -> Result<WorkspaceEditExport<A>, NodeWorkspaceRefusal> {
+        self.export_workspace_edits_profile_in(
+            request,
+            reference,
+            expected_commit,
+            visibility,
+            capability,
+            log,
+            now,
+            limits,
+            EditProfile::Gitlinks,
+        )
+        .await
+    }
+
+    async fn export_workspace_edits_profile_in<A: GitHashAlgorithm>(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        expected_commit: AnyOid,
+        visibility: &RefVisibility,
+        capability: &mut TreeCapability,
+        log: &IntentLog,
+        now: u64,
+        limits: ExportLimits,
+        profile: EditProfile,
+    ) -> Result<WorkspaceEditExport<A>, NodeWorkspaceRefusal> {
         // Validate shape and byte budgets before evaluating/copying bodies.
-        validate_log(log, capability, now, limits)?;
+        validate_log_profile(log, capability, now, limits, profile, A::DIGEST_LEN)?;
         self.with_workspace_base_in(
             request,
             reference,
@@ -66,7 +133,7 @@ impl OneNode {
             capability,
             now,
             |base, source, capability| {
-                export_from_base(
+                export_owned_from_base_profile(
                     base,
                     source,
                     capability,
@@ -75,7 +142,9 @@ impl OneNode {
                     now,
                     limits,
                     &|| !super::workspace_request_live(request),
+                    profile,
                 )
+                .map(|(export, _)| export)
             },
         )
         .await
@@ -119,7 +188,31 @@ pub(super) fn export_owned_from_base<A: GitHashAlgorithm>(
     limits: ExportLimits,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<(WorkspaceEditExport<A>, fgit_treefs::Overlay), NodeWorkspaceRefusal> {
-    validate_log(log, capability, now, limits)?;
+    export_owned_from_base_profile(
+        base,
+        source,
+        capability,
+        log,
+        expected_commit,
+        now,
+        limits,
+        cancelled,
+        EditProfile::FilesAndSymlinks,
+    )
+}
+
+pub(super) fn export_owned_from_base_profile<A: GitHashAlgorithm>(
+    base: &BaseView<A>,
+    source: &NodeTreeSource<'_>,
+    capability: &mut TreeCapability,
+    log: &IntentLog,
+    expected_commit: AnyOid,
+    now: u64,
+    limits: ExportLimits,
+    cancelled: &dyn Fn() -> bool,
+    profile: EditProfile,
+) -> Result<(WorkspaceEditExport<A>, fgit_treefs::Overlay), NodeWorkspaceRefusal> {
+    validate_log_profile(log, capability, now, limits, profile, A::DIGEST_LEN)?;
     if expected_commit.as_bytes() != base.base_commit_oid().digest_bytes() {
         return Err(NodeWorkspaceRefusal::StaleWorkspaceBase);
     }
@@ -140,6 +233,9 @@ pub(super) fn export_owned_from_base<A: GitHashAlgorithm>(
             Ok(entry @ (BaseEntry::File { .. } | BaseEntry::Symlink { .. })) => {
                 existing.insert(path.clone(), entry);
             }
+            Ok(entry @ BaseEntry::Submodule { .. }) if profile == EditProfile::Gitlinks => {
+                existing.insert(path.clone(), entry);
+            }
             Err(BaseError::NotFound { .. }) => {}
             Ok(_) => return Err(NodeWorkspaceRefusal::UnsupportedWorkspaceEdit),
             Err(error) => {
@@ -148,6 +244,9 @@ pub(super) fn export_owned_from_base<A: GitHashAlgorithm>(
                 ));
             }
         }
+    }
+    if profile == EditProfile::Gitlinks {
+        validate_gitlink_kinds(log, &existing, cancelled)?;
     }
     validate_source_bases(log, &existing, cancelled)?;
     let (overlay, evaluation) = log.evaluate_with_base_entries(&|path| existing.get(path).cloned());
@@ -169,11 +268,13 @@ pub(super) fn export_owned_from_base<A: GitHashAlgorithm>(
     ))
 }
 
-pub(super) fn validate_log(
+pub(super) fn validate_log_profile(
     log: &IntentLog,
     capability: &TreeCapability,
     now: u64,
     limits: ExportLimits,
+    profile: EditProfile,
+    native_width: usize,
 ) -> Result<(), NodeWorkspaceRefusal> {
     if log.len() > limits.max_objects {
         return Err(NodeWorkspaceRefusal::WorkspaceEditLimit);
@@ -197,6 +298,17 @@ pub(super) fn validate_log(
                     .ok_or(NodeWorkspaceRefusal::WorkspaceEditLimit)?;
             }
             TreeEditIntent::Delete { .. } => {}
+            TreeEditIntent::UpdateSubmodule { after_oid, .. }
+                if profile == EditProfile::Gitlinks =>
+            {
+                if after_oid.len() != native_width || after_oid.iter().all(|byte| *byte == 0) {
+                    return Err(NodeWorkspaceRefusal::ObjectFormatMismatch);
+                }
+                bytes = bytes
+                    .checked_add(after_oid.len())
+                    .filter(|total| *total <= limits.max_total_bytes)
+                    .ok_or(NodeWorkspaceRefusal::WorkspaceEditLimit)?;
+            }
             TreeEditIntent::Rename {
                 from,
                 to,
@@ -216,6 +328,56 @@ pub(super) fn validate_log(
             capability.authorize_write(path, now).map_err(|error| {
                 NodeWorkspaceRefusal::Manifest(fgit_treefs::SparseRefusal::Capability(error))
             })?;
+        }
+    }
+    Ok(())
+}
+
+/// The evaluator owns source-order effects. This guard only closes the node's
+/// declared entry-kind boundary: a gitlink never becomes a local file, symlink
+/// or traversable directory, including through a later session append.
+/// Inspecting the complete retained log prevents deletion from erasing that
+/// provenance. The set and ancestor walks are bounded by the ordinary edit and
+/// path-component limits; no foreign object lookup is needed.
+fn validate_gitlink_kinds<A: GitHashAlgorithm>(
+    log: &IntentLog,
+    existing: &BTreeMap<TreePath, BaseEntry<A>>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), NodeWorkspaceRefusal> {
+    let mut gitlinks = BTreeSet::new();
+    for (path, entry) in existing {
+        check_cancelled(cancelled)?;
+        if matches!(entry, BaseEntry::Submodule { .. }) {
+            gitlinks.insert(path.clone());
+        }
+    }
+    for intent in log.intents() {
+        check_cancelled(cancelled)?;
+        if let TreeEditIntent::UpdateSubmodule { path, .. } = intent {
+            if existing
+                .get(path)
+                .is_some_and(|entry| !matches!(entry, BaseEntry::Submodule { .. }))
+            {
+                return Err(NodeWorkspaceRefusal::UnsupportedWorkspaceEdit);
+            }
+            gitlinks.insert(path.clone());
+        }
+    }
+    for intent in log.intents() {
+        check_cancelled(cancelled)?;
+        for path in edit_paths(intent) {
+            if path
+                .ancestors()
+                .iter()
+                .any(|ancestor| gitlinks.contains(ancestor))
+                || (gitlinks.contains(path)
+                    && !matches!(
+                        intent,
+                        TreeEditIntent::UpdateSubmodule { .. } | TreeEditIntent::Delete { .. }
+                    ))
+            {
+                return Err(NodeWorkspaceRefusal::UnsupportedWorkspaceEdit);
+            }
         }
     }
     Ok(())
@@ -255,7 +417,9 @@ fn validate_source_bases<A: GitHashAlgorithm>(
     for intent in log.intents() {
         check_cancelled(cancelled)?;
         match intent {
-            TreeEditIntent::Write { path, .. } | TreeEditIntent::CreateSymlink { path, .. } => {
+            TreeEditIntent::Write { path, .. }
+            | TreeEditIntent::CreateSymlink { path, .. }
+            | TreeEditIntent::UpdateSubmodule { path, .. } => {
                 staged.insert(path.clone());
             }
             TreeEditIntent::Delete { path } => {

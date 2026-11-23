@@ -35,6 +35,14 @@ pub struct Envelope<'a> {
     pub(super) authorization: Option<&'a str>,
     range: Result<Option<&'a str>, HttpError>,
     if_range: Result<Option<&'a str>, HttpError>,
+    tus_resumable: Result<Option<&'a str>, HttpError>,
+    upload_offset: Result<Option<&'a str>, HttpError>,
+    upload_length: Result<Option<&'a str>, HttpError>,
+    upload_checksum: Result<Option<&'a str>, HttpError>,
+    upload_concat: Result<Option<&'a str>, HttpError>,
+    upload_defer_length: Result<Option<&'a str>, HttpError>,
+    upload_metadata: Result<Option<&'a str>, HttpError>,
+    method_override: Result<Option<&'a str>, HttpError>,
 }
 
 impl Envelope<'_> {
@@ -52,6 +60,46 @@ impl Envelope<'_> {
     /// Borrowed If-Range metadata; only an endpoint serving ranges evaluates it.
     pub const fn if_range(&self) -> Result<Option<&str>, HttpError> {
         self.if_range
+    }
+
+    /// Borrowed Tus protocol version; the authenticated endpoint selects support.
+    pub const fn tus_resumable(&self) -> Result<Option<&str>, HttpError> {
+        self.tus_resumable
+    }
+
+    /// Borrowed Tus offset; no numeric conversion or upload lookup occurs here.
+    pub const fn upload_offset(&self) -> Result<Option<&str>, HttpError> {
+        self.upload_offset
+    }
+
+    /// Borrowed declared upload length, with duplicate policy deferred.
+    pub const fn upload_length(&self) -> Result<Option<&str>, HttpError> {
+        self.upload_length
+    }
+
+    /// Borrowed optional checksum metadata; its presence grants no extension.
+    pub const fn upload_checksum(&self) -> Result<Option<&str>, HttpError> {
+        self.upload_checksum
+    }
+
+    /// Borrowed optional concatenation metadata; only the endpoint interprets it.
+    pub const fn upload_concat(&self) -> Result<Option<&str>, HttpError> {
+        self.upload_concat
+    }
+
+    /// Borrowed deferred-length metadata, without admitting creation extensions.
+    pub const fn upload_defer_length(&self) -> Result<Option<&str>, HttpError> {
+        self.upload_defer_length
+    }
+
+    /// Borrowed optional creation metadata; never decoded or reflected here.
+    pub const fn upload_metadata(&self) -> Result<Option<&str>, HttpError> {
+        self.upload_metadata
+    }
+
+    /// Borrowed method override. The envelope's actual HTTP method is unchanged.
+    pub const fn method_override(&self) -> Result<Option<&str>, HttpError> {
+        self.method_override
     }
 }
 
@@ -119,6 +167,10 @@ pub(super) fn parse_with<'a, T>(
     let (mut encoding, mut expectation, mut connection) = (None, None, None);
     let (mut origin, mut sec_fetch_site) = (None, None);
     let (mut range, mut if_range) = (Ok(None), Ok(None));
+    let (mut tus_resumable, mut upload_offset, mut upload_length) = (Ok(None), Ok(None), Ok(None));
+    let (mut upload_checksum, mut upload_concat, mut upload_defer_length) =
+        (Ok(None), Ok(None), Ok(None));
+    let (mut upload_metadata, mut method_override) = (Ok(None), Ok(None));
     for (index, line) in lines.enumerate() {
         if index >= limits.max_headers {
             return Err(HttpError::TooManyHeaders);
@@ -159,6 +211,22 @@ pub(super) fn parse_with<'a, T>(
             deferred_unique(&mut range, value);
         } else if name.eq_ignore_ascii_case("if-range") {
             deferred_unique(&mut if_range, value);
+        } else if name.eq_ignore_ascii_case("tus-resumable") {
+            deferred_unique(&mut tus_resumable, value);
+        } else if name.eq_ignore_ascii_case("upload-offset") {
+            deferred_unique(&mut upload_offset, value);
+        } else if name.eq_ignore_ascii_case("upload-length") {
+            deferred_unique(&mut upload_length, value);
+        } else if name.eq_ignore_ascii_case("upload-checksum") {
+            deferred_unique(&mut upload_checksum, value);
+        } else if name.eq_ignore_ascii_case("upload-concat") {
+            deferred_unique(&mut upload_concat, value);
+        } else if name.eq_ignore_ascii_case("upload-defer-length") {
+            deferred_unique(&mut upload_defer_length, value);
+        } else if name.eq_ignore_ascii_case("upload-metadata") {
+            deferred_unique(&mut upload_metadata, value);
+        } else if name.eq_ignore_ascii_case("x-http-method-override") {
+            deferred_unique(&mut method_override, value);
         } else if name.eq_ignore_ascii_case("trailer") {
             return Err(HttpError::TrailersNotSupported);
         }
@@ -241,13 +309,21 @@ pub(super) fn parse_with<'a, T>(
             authorization,
             range,
             if_range,
+            tus_resumable,
+            upload_offset,
+            upload_length,
+            upload_checksum,
+            upload_concat,
+            upload_defer_length,
+            upload_metadata,
+            method_override,
         },
         selected,
     )))
 }
 
-// Range is endpoint policy, not message framing. Remember ambiguity without
-// rejecting requests to endpoints which previously ignored these fields.
+// Range and Tus are endpoint policy, not message framing. Remember ambiguity
+// without rejecting requests to endpoints which previously ignored these fields.
 fn deferred_unique<'a>(field: &mut Result<Option<&'a str>, HttpError>, value: &'a str) {
     *field = match *field {
         Ok(None) => Ok(Some(value)),
@@ -258,6 +334,153 @@ fn deferred_unique<'a>(field: &mut Result<Option<&'a str>, HttpError>, value: &'
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TUS_HEADERS: [&str; 8] = [
+        "Tus-Resumable",
+        "Upload-Offset",
+        "Upload-Length",
+        "Upload-Checksum",
+        "Upload-Concat",
+        "Upload-Defer-Length",
+        "Upload-Metadata",
+        "X-HTTP-Method-Override",
+    ];
+
+    fn tus_fields<'a>(head: &'a Envelope<'_>) -> [Result<Option<&'a str>, HttpError>; 8] {
+        [
+            head.tus_resumable(),
+            head.upload_offset(),
+            head.upload_length(),
+            head.upload_checksum(),
+            head.upload_concat(),
+            head.upload_defer_length(),
+            head.upload_metadata(),
+            head.method_override(),
+        ]
+    }
+
+    #[test]
+    fn tus_metadata_is_borrowed_without_reading_body_or_changing_actual_method() {
+        let values = [
+            "1.0.0",
+            "7",
+            "13",
+            "sha256 private-checksum",
+            "partial",
+            "1",
+            "filename private-metadata",
+            "PATCH",
+        ];
+        let mut input = String::from(
+            "POST /repo.git/info/lfs/uploads/id/13 HTTP/1.1\r\nHost: local\r\nAuthorization: Bearer top-secret\r\nContent-Length: 3\r\n",
+        );
+        for (name, value) in TUS_HEADERS.iter().zip(values) {
+            input.push_str(&format!("{}: \t{value}\t \r\n", name.to_ascii_lowercase()));
+        }
+        input.push_str("\r\n");
+        let header_len = input.len();
+        let mut bytes = input.into_bytes();
+        bytes.extend_from_slice(&[0xff, 0, 0xfe]);
+        let head = parse(&bytes, HttpLimits::default()).unwrap().unwrap();
+        assert_eq!(head.method, "POST");
+        assert_eq!(head.body, BodyFraming::ContentLength(3));
+        assert_eq!(head.consumed, header_len);
+        assert_eq!(&bytes[head.consumed..], &[0xff, 0, 0xfe]);
+        assert_eq!(head.authorization(), Some("Bearer top-secret"));
+        for (actual, expected) in tus_fields(&head).into_iter().zip(values) {
+            let actual = actual.unwrap().unwrap();
+            assert_eq!(actual, expected);
+            // The accessor points into the original request's bounded head,
+            // not a reconstructed value or retained copy of the upload body.
+            let start = actual.as_ptr() as usize;
+            let request_start = bytes.as_ptr() as usize;
+            assert!(start >= request_start);
+            assert!(start + actual.len() <= request_start + head.consumed);
+        }
+        let debug = format!("{head:?}");
+        for private in ["top-secret", "private-checksum", "private-metadata"] {
+            assert!(!debug.contains(private));
+        }
+    }
+
+    #[test]
+    fn tus_duplicates_remain_endpoint_policy_and_do_not_change_git_routes() {
+        for (selected, name) in TUS_HEADERS.iter().enumerate() {
+            let bytes = format!(
+                "GET /repo.git/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: local\r\n{name}: first\r\n{}: second\r\n{name}: third\r\n\r\n",
+                name.to_ascii_lowercase()
+            );
+            let head = parse(bytes.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            for (index, field) in tus_fields(&head).into_iter().enumerate() {
+                assert_eq!(
+                    field,
+                    if index == selected {
+                        Err(HttpError::DuplicateHeader)
+                    } else {
+                        Ok(None)
+                    }
+                );
+            }
+            assert_eq!(head.range(), Ok(None));
+            assert_eq!(head.if_range(), Ok(None));
+            let git = super::super::parse_head(bytes.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                git.operation,
+                super::super::Operation::Discover(super::super::Service::UploadPack)
+            );
+        }
+    }
+
+    #[test]
+    fn tus_values_are_deferred_but_framing_and_header_bounds_remain_mandatory() {
+        let values = [
+            "unknown-version",
+            "-1",
+            "18446744073709551616",
+            "unsupported-algorithm not-base64",
+            "final;arbitrary",
+            "unsupported",
+            "unparsed metadata",
+            "unsupported-method",
+        ];
+        let mut bytes = String::from(
+            "GET /repo.git/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: local\r\n",
+        );
+        for (name, value) in TUS_HEADERS.iter().zip(values) {
+            bytes.push_str(&format!("{name}: {value}\r\n"));
+        }
+        bytes.push_str("\r\n");
+        let limits = HttpLimits {
+            max_headers: TUS_HEADERS.len() + 1,
+            ..HttpLimits::default()
+        };
+        let head = parse(bytes.as_bytes(), limits).unwrap().unwrap();
+        assert_eq!(tus_fields(&head), values.map(|value| Ok(Some(value))));
+        assert!(super::super::parse_head(bytes.as_bytes(), limits).is_ok());
+        assert!(matches!(
+            parse(
+                bytes.as_bytes(),
+                HttpLimits {
+                    max_headers: limits.max_headers - 1,
+                    ..limits
+                }
+            ),
+            Err(HttpError::TooManyHeaders)
+        ));
+        for name in TUS_HEADERS {
+            let invalid = format!(
+                "PATCH /repo.git/info/lfs/uploads/id/13 HTTP/1.1\r\nHost: local\r\n{name}: invalid\u{1f}value\r\n\r\n"
+            );
+            assert!(matches!(
+                parse(invalid.as_bytes(), HttpLimits::default()),
+                Err(HttpError::InvalidHeader)
+            ));
+        }
+    }
 
     #[test]
     fn range_metadata_is_borrowed_and_duplicate_policy_is_deferred_to_the_endpoint() {

@@ -26,6 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod agent;
 mod binary;
+mod gitlink;
 mod prepared_agent;
 pub use prepared_agent::{
     AgentWorkspacePatchInput, AgentWorkspacePatchRefusal, PreparedAgentPatchCandidate,
@@ -41,6 +42,7 @@ enum PatchProfile {
     Regular,
     BinaryRefactor,
     Symlinks,
+    Gitlinks,
 }
 
 impl PatchProfile {
@@ -56,13 +58,18 @@ impl PatchProfile {
                 UnifiedPatch::parse_with_binary_renames(input, limits, cancelled)
             }
             Self::Symlinks => UnifiedPatch::parse_with_symlinks(input, limits, cancelled),
+            Self::Gitlinks => UnifiedPatch::parse_with_gitlinks(input, limits, cancelled),
         }
     }
 }
 
-/// Verified before/after file identities. Paths are raw repository bytes.
+/// Verified before/after tree-entry targets. Paths are raw repository bytes.
 /// A rename contributes two entries: deletion at the source and creation at
 /// the destination. Receipts are sorted by raw path and cover every tree effect.
+/// The legacy `old_blob`/`new_blob` field spellings carry blob IDs for ordinary
+/// profiles and opaque external commit IDs for explicitly opted-in gitlinks.
+/// New gitlink-profile transport receipts name these fields `old_object` and
+/// `new_object`; these IDs never imply permission to load a foreign object.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PatchPathReceipt {
     pub path: Vec<u8>,
@@ -273,6 +280,36 @@ impl OneNode {
         .await
     }
 
+    /// Prepare explicit gitlink add/update/delete records and ordinary text
+    /// edits under an existing capability. Each pointer is exact parent-tree
+    /// data; no submodule commit is fetched or granted parent authorization.
+    pub async fn prepare_workspace_gitlink_patch_in<A: GitHashAlgorithm>(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        expected_commit: GitOid,
+        visibility: &RefVisibility,
+        capability: &mut TreeCapability,
+        patch_bytes: &[u8],
+        now: u64,
+        metadata: &MergeMetadata,
+        limits: PatchLimits,
+    ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
+        self.prepare_workspace_patch_profile_in::<A>(
+            request,
+            reference,
+            expected_commit,
+            visibility,
+            capability,
+            patch_bytes,
+            now,
+            metadata,
+            limits,
+            PatchProfile::Gitlinks,
+        )
+        .await
+    }
+
     async fn prepare_workspace_patch_profile_in<A: GitHashAlgorithm>(
         &self,
         request: &NodeRequestContext,
@@ -291,6 +328,7 @@ impl OneNode {
         let patch = profile
             .parse(patch_bytes, limits, &cancelled)
             .map_err(patch_error)?;
+        gitlink::preflight(&patch, self.object_format, &cancelled).map_err(patch_error)?;
         let paths = paths(&patch)?;
         authorize_patch(&patch, capability, now)?;
         self.with_workspace_base_in::<A, _>(
@@ -404,6 +442,34 @@ impl OneNode {
         .await
     }
 
+    /// Trusted local-owner opt-in for exact submodule pointer patches. Ordinary
+    /// text edits may update `.gitmodules` in the same candidate, but its text
+    /// never initiates a fetch or delegates repository credentials.
+    pub async fn prepare_trusted_gitlink_patch_in(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        expected_commit: GitOid,
+        workspace_id: [u8; 16],
+        patch_bytes: &[u8],
+        metadata: &MergeMetadata,
+        limits: PatchLimits,
+    ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
+        self.prepare_repository_patch_profile_in(
+            request,
+            reference,
+            expected_commit,
+            workspace_id,
+            patch_bytes,
+            metadata,
+            limits,
+            PatchProfile::Gitlinks,
+            0,
+            None,
+        )
+        .await
+    }
+
     // Callers must independently establish repository source disclosure rights.
     // The operator adapter and verified sponsored-candidate adapter share only
     // bounded native construction, never credential verification or publication.
@@ -472,6 +538,7 @@ impl OneNode {
         let patch = profile
             .parse(patch_bytes, limits, &cancelled)
             .map_err(patch_error)?;
+        gitlink::preflight(&patch, self.object_format, &cancelled).map_err(patch_error)?;
         let paths = paths(&patch)?;
         let touched = touched_paths(&patch)?;
         let top = touched
@@ -645,6 +712,44 @@ fn prepare_owned_at_base<A: GitHashAlgorithm>(
         live(request)?;
         let source_path = TreePath::parse_default(file.source_path())
             .map_err(|_| patch_error(PatchError::InvalidPath))?;
+        if file.is_gitlink() {
+            let old = match base.resolve(source, capability, &source_path, now) {
+                Ok(BaseEntry::Submodule { oid }) => {
+                    Some(native_id(source.inner.object_format, oid.digest_bytes())?)
+                }
+                Err(BaseError::NotFound { .. }) => None,
+                Ok(_) => return Err(NodeWorkspaceRefusal::UnsupportedWorkspaceEdit),
+                Err(error) => {
+                    return Err(NodeWorkspaceRefusal::Manifest(
+                        fgit_treefs::SparseRefusal::Base(error),
+                    ));
+                }
+            };
+            let (new, output_bytes) =
+                gitlink::apply(file, old, source.inner.object_format, limits, &|| {
+                    !workspace_request_live(request)
+                })
+                .map_err(patch_error)?;
+            total = total
+                .checked_add(output_bytes)
+                .filter(|bytes| *bytes <= limits.max_output_bytes)
+                .ok_or_else(|| patch_error(PatchError::Budget("aggregate result bytes")))?;
+            receipts.push(PatchPathReceipt {
+                path: path.as_bytes().to_vec(),
+                old_blob: old,
+                new_blob: new,
+                new_mode: new.map(|_| 0o160000),
+                hunks: file.hunk_count(),
+            });
+            log.push(match new {
+                Some(oid) => TreeEditIntent::UpdateSubmodule {
+                    path: path.clone(),
+                    after_oid: oid.as_bytes().to_vec(),
+                },
+                None => TreeEditIntent::Delete { path: path.clone() },
+            });
+            continue;
+        }
         if file.renamed_from().is_some() {
             match base.resolve(source, capability, path, now) {
                 Err(BaseError::NotFound { .. }) => {}
@@ -802,7 +907,12 @@ fn prepare_owned_at_base<A: GitHashAlgorithm>(
     }
     live(request)?;
     receipts.sort_by(|left, right| left.path.cmp(&right.path));
-    let (export, overlay) = candidate::export_owned_from_base(
+    let edit_profile = if patch.files().iter().any(|file| file.allows_gitlinks()) {
+        candidate::EditProfile::Gitlinks
+    } else {
+        candidate::EditProfile::FilesAndSymlinks
+    };
+    let (export, overlay) = candidate::export_owned_from_base_profile(
         base,
         source,
         capability,
@@ -811,6 +921,7 @@ fn prepare_owned_at_base<A: GitHashAlgorithm>(
         now,
         export_limits,
         &|| !workspace_request_live(request),
+        edit_profile,
     )?;
     if export.plan.root_tree() == base.base_tree_oid() {
         return Err(invalid(

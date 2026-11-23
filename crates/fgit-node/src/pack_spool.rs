@@ -189,6 +189,53 @@ pub struct SpooledPack {
 }
 
 impl SpooledPack {
+    /// Copies an eligible completed representation without advancing its
+    /// response cursor. The caller reserves custody before this allocation;
+    /// optional scratch I/O/allocation failures only lose the cache candidate.
+    /// Cancellation remains the original request's stop condition.
+    pub(crate) fn copy_for_custody(
+        &mut self,
+        expected_bytes: usize,
+        maximum_bytes: usize,
+        deadline: &mut impl fgit_pack::Deadline,
+    ) -> Result<Option<Vec<u8>>, fgit_pack::PackError> {
+        if !deadline.checkpoint() {
+            return Err(fgit_pack::PackError::DeadlineExceeded);
+        }
+        if expected_bytes > maximum_bytes || self.len != expected_bytes as u64 {
+            return Ok(None);
+        }
+        let mut stopped = false;
+        let copied = (|| -> io::Result<Option<Vec<u8>>> {
+            if self.scratch.file.metadata()?.len() != self.len {
+                return Ok(None);
+            }
+            let mut bytes = Vec::new();
+            if bytes.try_reserve_exact(expected_bytes).is_err()
+                || bytes.capacity() != expected_bytes
+            {
+                return Ok(None);
+            }
+            bytes.resize(expected_bytes, 0);
+            self.scratch.file.seek(SeekFrom::Start(0))?;
+            for chunk in bytes.chunks_mut(64 * 1024) {
+                if !deadline.checkpoint() {
+                    stopped = true;
+                    return Ok(None);
+                }
+                self.scratch.file.read_exact(chunk)?;
+            }
+            if self.scratch.file.metadata()?.len() != self.len {
+                return Ok(None);
+            }
+            Ok(Some(bytes))
+        })();
+        if stopped || !deadline.checkpoint() {
+            return Err(fgit_pack::PackError::DeadlineExceeded);
+        }
+        Ok(copied.ok().flatten())
+    }
+
     /// The next at most `maximum` bytes, or `None` after the trailer.
     pub(crate) fn next_chunk(&mut self, maximum: usize) -> io::Result<Option<Vec<u8>>> {
         if self.offset == self.len {
@@ -362,6 +409,58 @@ mod tests {
         assert_eq!(read, expected);
         assert_eq!(pack.into_bytes().unwrap(), expected);
         assert_eq!(root.names(), 0);
+    }
+
+    #[test]
+    fn custody_copy_preserves_the_response_cursor_and_refuses_optional_size_limits() {
+        let root = Root::new();
+        let mut sink = PackSpool::new(&root.0);
+        let mut temporary = sink.create_temporary().unwrap();
+        let expected: Vec<u8> = (0..150_000).map(|index| (index * 31) as u8).collect();
+        sink.write_temporary(&mut temporary, &expected).unwrap();
+        sink.promote_temporary(&mut temporary).unwrap();
+        let mut pack = sink.into_promoted().unwrap();
+        assert_eq!(pack.next_chunk(17).unwrap().unwrap(), expected[..17]);
+        assert_eq!(
+            pack.copy_for_custody(expected.len(), expected.len(), &mut || true)
+                .unwrap(),
+            Some(expected.clone())
+        );
+        assert_eq!(pack.next_chunk(37).unwrap().unwrap(), expected[17..54]);
+        assert!(
+            pack.copy_for_custody(expected.len(), expected.len() - 1, &mut || true)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            pack.copy_for_custody(expected.len() + 1, expected.len() + 1, &mut || true)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(pack.next_chunk(41).unwrap().unwrap(), expected[54..95]);
+        assert_eq!(pack.into_bytes().unwrap(), expected);
+    }
+
+    #[test]
+    fn custody_copy_keeps_a_one_shot_cancellation_terminal_without_consuming_output() {
+        let root = Root::new();
+        let mut sink = PackSpool::new(&root.0);
+        let mut temporary = sink.create_temporary().unwrap();
+        let expected = vec![b'p'; 150_000];
+        sink.write_temporary(&mut temporary, &expected).unwrap();
+        sink.promote_temporary(&mut temporary).unwrap();
+        let mut pack = sink.into_promoted().unwrap();
+        let mut polls = 0;
+        let result = pack.copy_for_custody(expected.len(), expected.len(), &mut || {
+            polls += 1;
+            polls != 3
+        });
+        assert!(matches!(
+            result,
+            Err(fgit_pack::PackError::DeadlineExceeded)
+        ));
+        assert_eq!(pack.next_chunk(17).unwrap().unwrap(), expected[..17]);
+        assert_eq!(pack.into_bytes().unwrap(), expected);
     }
 
     /// An object spool creates no file until its first append, reads every

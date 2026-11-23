@@ -76,6 +76,11 @@ pub static CONSTRUCTS: &[Construct] = &[
         reason: "turns a failed job into a passing one, which is gate self-weakening expressed as configuration",
     },
     Construct {
+        key: "job.defaults",
+        status: ConstructStatus::Normalized,
+        reason: "closed run defaults select literal sh/bash and workspace-relative working-directory per field; whole-value matrix directory inputs resolve before validation; every source layer validates before overrides and inherited path copies are bounded",
+    },
+    Construct {
         key: "job.env",
         status: ConstructStatus::Normalized,
         reason: "validated literal job values override workflow defaults and lower into each effective step environment; whole-value matrix inputs are resolved before validation and inherited copies are bounded",
@@ -123,12 +128,17 @@ pub static CONSTRUCTS: &[Construct] = &[
     Construct {
         key: "job.strategy",
         status: ConstructStatus::Normalized,
-        reason: "bounded static matrices require explicit fail-fast: false; literal axes and include/exclude records become native jobs; other strategy forms remain refused",
+        reason: "bounded static matrices lower literal axes and include/exclude records to native jobs; omitted or true fail-fast skips unstarted siblings after a group failure, false continues them, and other strategy forms refuse",
     },
     Construct {
         key: "job.timeout-minutes",
         status: ConstructStatus::Normalized,
         reason: "a literal integer from 1 through 60 only tightens the operator's absolute run budget; startup, steps and artifact capture share the job deadline, and cleanup remains mandatory",
+    },
+    Construct {
+        key: "step.continue-on-error",
+        status: ConstructStatus::Normalized,
+        reason: "literal true tolerates only a fully observed ordinary nonzero process exit while preserving the raw failed step; false and omission retain failure semantics, and cancellation, resource limits and containment failure never become success",
     },
     Construct {
         key: "step.env",
@@ -149,6 +159,11 @@ pub static CONSTRUCTS: &[Construct] = &[
         key: "step.run",
         status: ConstructStatus::Accepted,
         reason: "the command line, preserved verbatim; the lowering does not interpret shell syntax",
+    },
+    Construct {
+        key: "step.shell",
+        status: ConstructStatus::Normalized,
+        reason: "closed literal sh or bash profiles select fixed native interpreter arguments; bash enables pipefail, the absent field retains the original sh/nounset profile, and paths, custom templates and expressions refuse",
     },
     Construct {
         key: "step.timeout-minutes",
@@ -204,6 +219,11 @@ pub static CONSTRUCTS: &[Construct] = &[
         key: "workflow.concurrency",
         status: ConstructStatus::Unsupported,
         reason: "a concurrency group cancels in-flight runs, and cancellation semantics are request-drain-finalize rather than a YAML string",
+    },
+    Construct {
+        key: "workflow.defaults",
+        status: ConstructStatus::Normalized,
+        reason: "closed literal run shell and working-directory defaults lower into effective step context with job then step precedence; expressions and unknown fields refuse, and explicit dot resets an inherited directory to the workspace root",
     },
     Construct {
         key: "workflow.env",

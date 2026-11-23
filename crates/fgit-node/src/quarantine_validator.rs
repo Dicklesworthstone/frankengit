@@ -7,6 +7,8 @@
 //! the exact closure witness for admission; staging itself never publishes a
 //! ref.
 
+#[cfg(unix)]
+mod lfs;
 mod received_pack_restore;
 mod reused_targets;
 mod typed_closure;
@@ -928,6 +930,15 @@ impl QuarantineValidator for ProductionQuarantineValidator<'_> {
             &independent,
             deadline,
         )?;
+        // The complete requested graph has passed native-kind and original
+        // visibility checks. An operator may additionally require verified LFS
+        // payload custody before any of this receive's objects are staged.
+        #[cfg(unix)]
+        self.validate_lfs_payloads(request, &verified, &mut spool, deadline)?;
+        #[cfg(not(unix))]
+        if self.node.service_config.receive_lfs_root().is_some() {
+            return Err(RefusalCode::DurabilityProfileUnavailable);
+        }
         // Native-verified custody remains ineligible until placement's strong
         // payload collision defense succeeds, including its final concurrent
         // link check. Unreachable raw extras never pass placement and therefore

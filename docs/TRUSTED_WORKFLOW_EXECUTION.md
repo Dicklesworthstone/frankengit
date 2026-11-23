@@ -136,8 +136,11 @@ Source manifests are limited to 10,000 entries, 16 MiB per source object/file an
 fetch accounting additionally limits source reads. Symlink materialization,
 gitlink materialization, and unsupported host paths refuse before execution.
 
-The process adapter runs `/bin/sh -eu -c` with `PATH=/usr/bin:/bin`, `LANG=C`, and
-no inherited environment variables. Tools must be installed in that profile or
+The process adapter defaults to `/bin/sh -eu -c`. Steps can explicitly select
+`shell: sh` or `shell: bash` through the
+[native shell profile](NATIVE_WORKFLOW_SHELLS.md), including Bash pipeline failure
+handling and versioned per-step execution reports. Every profile starts with
+`PATH=/usr/bin:/bin`, `LANG=C`, and no inherited environment variables. Tools must be installed in that profile or
 named explicitly in trusted scripts. Captures are private, file-backed streams;
 the retained-output bounds are **not** enforced OS disk/CPU/memory/network quotas.
 A killed/reaped direct child is not proof that all descendants are gone.

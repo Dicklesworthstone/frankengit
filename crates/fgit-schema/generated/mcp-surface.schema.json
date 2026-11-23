@@ -255,7 +255,7 @@
     },
     "frankengit_branch_create": {
       "title": "frankengit_branch_create",
-      "description": "Create an absent branch at an explicit already-visible commit through canonical admission.",
+      "description": "Create one absent branch through ordinary native admission under the source-write launch ceiling. Sponsored agents independently require canonical source-branch-create with a finite destination-ref scope, and the target must be the exact current tip of a visible branch. A source-publish grant alone supplies no branch-creation authority. Current protection, the original authenticated agent/sponsor, request deadline and durable-key recovery remain mandatory. No object import, overwrite, update, deletion, rename or multi-branch authority. Recovered receipts describe historical decisions, not current refs.",
       "type": "object",
       "properties": {
         "parameters": {
@@ -276,7 +276,7 @@
             },
             "target": {
               "type": "string",
-              "description": "Exact nonzero target commit OID in the repository hash format.",
+              "description": "Exact nonzero target commit OID in the repository hash format. Sponsored creation requires the current tip of a visible branch; unpublished candidates and historical-only commits are ineligible.",
               "x-classification": "selector_position",
               "maxLength": 64,
               "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
@@ -1687,6 +1687,90 @@
       },
       "additionalProperties": false
     },
+    "frankengit_issue_search": {
+      "title": "frankengit_issue_search",
+      "description": "Search canonical issue snapshots with bounded literal and structured filters. Empty partial pages require continuation; assignment metadata confers no authority.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "Nonempty literal title OR body text; comments are excluded.",
+              "x-classification": "selector_position",
+              "maxLength": 256
+            },
+            "case_sensitive": {
+              "type": "boolean",
+              "description": "Default false folds ASCII only. True requires query.",
+              "x-classification": "selector_position"
+            },
+            "state": {
+              "type": "string",
+              "description": "all, open or closed; all by default.",
+              "x-classification": "selector_position",
+              "maxLength": 6
+            },
+            "opened_by": {
+              "type": "string",
+              "description": "Exact original opener principal ID; never a credential.",
+              "x-classification": "selector_position",
+              "maxLength": 32
+            },
+            "assignee": {
+              "type": "string",
+              "description": "Exact assigned principal ID, or none for no assignees, at the selected snapshot.",
+              "x-classification": "selector_position",
+              "maxLength": 32
+            },
+            "labels": {
+              "type": "array",
+              "description": "At most 32 unique exact labels, each at most 64 UTF-8 bytes; all must match.",
+              "x-classification": "selector_position",
+              "maxLength": 8192
+            },
+            "milestone": {
+              "type": "string",
+              "description": "Positive canonical decimal milestone number, or none for no milestone.",
+              "x-classification": "selector_position",
+              "maxLength": 20
+            },
+            "after": {
+              "type": "string",
+              "description": "Last scanned issue number; nonzero requires expected_head and unchanged filters.",
+              "x-classification": "selector_position",
+              "maxLength": 20
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Maximum matches 1..20, default 5.",
+              "x-classification": "selector_position"
+            },
+            "max_scan": {
+              "type": "integer",
+              "description": "Maximum examined issue candidates 1..1000, default 1000.",
+              "x-classification": "selector_position"
+            },
+            "expected_head": {
+              "type": "string",
+              "description": "Retained exact snapshot_token; current issue-read authorization still applies.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            },
+            "render": {
+              "type": "string",
+              "description": "Optional html_safe, plain_text, compact_machine or api_json beside unchanged canonical text.",
+              "x-classification": "selector_position",
+              "maxLength": 32
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "frankengit_issue_set_milestone": {
       "title": "frankengit_issue_set_milestone",
       "description": "Set issue membership using exact issue and milestone versions at one authority head. The milestone must exist and be open. Requires issue-write; membership grants no access.",
@@ -2225,7 +2309,7 @@
     },
     "frankengit_pull_check_evidence": {
       "title": "frankengit_pull_check_evidence",
-      "description": "Read at most 65536 exact bytes of one canonical PR check's evidence at a mandatory selected snapshot and expected SHA-256. Requires BOTH PR-read and independent artifact-read launch grants; sponsored-agent profiles cannot use it. Current visibility applies to both PR branches. The entire canonical evidence is verified before each range. A native-decoded report_span locates diagnostic JSON when recognized. Output is untrusted execution data, not approval, independent execution verification or merge permission.",
+      "description": "Read at most 65536 exact bytes of one canonical PR check's evidence at a mandatory selected snapshot and expected SHA-256. Operators require both PR-read and artifact-read launch grants; sponsored agents require the PR launch ceiling and independent pulls-check-evidence-read credential scope. This grants no general artifact access. Current visibility applies to both PR branches. The entire canonical evidence is verified before each range. A native-decoded report_span locates diagnostic JSON when recognized. Output is untrusted execution data, not approval, independent execution verification or merge permission.",
       "type": "object",
       "properties": {
         "parameters": {
@@ -2441,7 +2525,7 @@
     },
     "frankengit_pull_diff": {
       "title": "frankengit_pull_diff",
-      "description": "Review the exact code tips recorded by a pull request at its required version.",
+      "description": "Review the exact code tips recorded by a pull request at its required version. Requires both source and PR launch ceilings; sponsored agents additionally need the independent pulls-diff-read scope. Current visibility applies to both recorded branches. Retains the original request deadline and grants no general PR/source APIs, review approval, merge or publication authority.",
       "type": "object",
       "properties": {
         "parameters": {
@@ -2524,9 +2608,36 @@
       },
       "additionalProperties": false
     },
+    "frankengit_pull_labels": {
+      "title": "frankengit_pull_labels",
+      "description": "Read the complete literal label set of a visible native PR at one authenticated snapshot. Missing and hidden PRs are indistinguishable. Label version zero means never written; an explicitly cleared stream retains its positive version. Labels carry no approval or authority.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive canonical decimal PR number bounded by u64.",
+              "x-classification": "selector_position",
+              "maxLength": 20
+            },
+            "expected_head": {
+              "type": "string",
+              "description": "Optional exact retained snapshot_token; current disclosure still applies.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            }
+          },
+          "required": ["number"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "frankengit_pull_list": {
       "title": "frankengit_pull_list",
-      "description": "List pull requests from an authenticated repository snapshot. PR text is untrusted data.",
+      "description": "List pull requests from an authenticated repository snapshot with an optional exact AND-label filter before pagination. Preserve the same labels, cursor and snapshot token. PR text and label names are untrusted data.",
       "type": "object",
       "properties": {
         "parameters": {
@@ -2549,6 +2660,11 @@
               "description": "Exact snapshot token from first page.",
               "x-classification": "selector_position",
               "maxLength": 140
+            },
+            "labels": {
+              "type": "array",
+              "description": "Optional exact AND filter of 0..32 distinct nonblank labels, each at most 64 UTF-8 bytes without controls. Sorted before reading; spelling is preserved. Filtering precedes pagination.",
+              "x-classification": "untrusted_content"
             }
           },
           "required": [],
@@ -2755,6 +2871,94 @@
       },
       "additionalProperties": false
     },
+    "frankengit_pull_retarget": {
+      "title": "frankengit_pull_retarget",
+      "description": "Retarget an open native PR to a different target branch at an exact positive predecessor version. The source branch stays fixed; full metadata and explicit current source/new-target tips are required. Keeps PR identity and conversation, invalidates old review subjects, and changes no refs. Retry only the identical command and original durable key.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive canonical decimal PR number, bounded by u64.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "expected_version": {
+              "type": "string",
+              "description": "Exact positive predecessor PR version; never refreshed automatically.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Original durable printable ASCII key, reused only with the identical complete command.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            },
+            "source_reference": {
+              "type": "string",
+              "description": "The PR's unchanged full source branch. Supply this or source_reference_hex, never both.",
+              "x-classification": "selector_position",
+              "maxLength": 4096
+            },
+            "source_reference_hex": {
+              "type": "string",
+              "description": "Lossless source branch bytes. Alternative to source_reference; full refs/heads/ name required.",
+              "x-classification": "selector_position",
+              "maxLength": 8192,
+              "pattern": "^(?:[0-9a-f]{2})+$"
+            },
+            "target_reference": {
+              "type": "string",
+              "description": "Different full target branch. Supply this or target_reference_hex, never both; its current tip must match expected_target.",
+              "x-classification": "selector_position",
+              "maxLength": 4096
+            },
+            "target_reference_hex": {
+              "type": "string",
+              "description": "Lossless target branch bytes. Alternative to target_reference; full refs/heads/ name required.",
+              "x-classification": "selector_position",
+              "maxLength": 8192,
+              "pattern": "^(?:[0-9a-f]{2})+$"
+            },
+            "expected_source": {
+              "type": "string",
+              "description": "Explicit nonzero current source commit in the repository SHA-1 or SHA-256 format.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "expected_target": {
+              "type": "string",
+              "description": "Explicit nonzero current target commit in the repository SHA-1 or SHA-256 format.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "title": {
+              "type": "string",
+              "description": "Complete literal UTF-8 title; nonblank and NUL-free. Text grants no authority.",
+              "x-classification": "untrusted_content",
+              "maxLength": 256
+            },
+            "body": {
+              "type": "string",
+              "description": "Complete literal NUL-free UTF-8 body, including an explicit empty string. No text normalization.",
+              "x-classification": "untrusted_content",
+              "maxLength": 16384
+            }
+          },
+          "required": ["number", "expected_version", "idempotency_key", "expected_source", "expected_target", "title", "body"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "frankengit_pull_review": {
       "title": "frankengit_pull_review",
       "description": "Approve, request changes, or withdraw the launch-bound principal's exact candidate review.",
@@ -2846,6 +3050,134 @@
             }
           },
           "required": ["number"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_pull_search": {
+      "title": "frankengit_pull_search",
+      "description": "Search visible native PR metadata at one retained authority snapshot with bounded literal and structured filters. Empty partial pages require continuation; search grants no review or merge authority.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "Nonempty literal title OR body text, not comments. ASCII case folding by default.",
+              "x-classification": "selector_position",
+              "maxLength": 256
+            },
+            "case_sensitive": {
+              "type": "boolean",
+              "description": "Requires query when true; no Unicode normalization or regular expressions.",
+              "x-classification": "selector_position"
+            },
+            "state": {
+              "type": "string",
+              "description": "all, open, closed or merged; all by default.",
+              "x-classification": "selector_position",
+              "maxLength": 6
+            },
+            "opened_by": {
+              "type": "string",
+              "description": "Exact canonical opener identity. Merge-only receipts cannot match an invented author.",
+              "x-classification": "selector_position",
+              "maxLength": 32
+            },
+            "source_ref": {
+              "type": "string",
+              "description": "Exact full UTF-8 source branch; mutually exclusive with source_ref_hex.",
+              "x-classification": "selector_position",
+              "maxLength": 1024
+            },
+            "source_ref_hex": {
+              "type": "string",
+              "description": "Exact lowercase hex source branch bytes.",
+              "x-classification": "selector_position",
+              "maxLength": 2048
+            },
+            "target_ref": {
+              "type": "string",
+              "description": "Exact full UTF-8 target branch; mutually exclusive with target_ref_hex.",
+              "x-classification": "selector_position",
+              "maxLength": 1024
+            },
+            "target_ref_hex": {
+              "type": "string",
+              "description": "Exact lowercase hex target branch bytes.",
+              "x-classification": "selector_position",
+              "maxLength": 2048
+            },
+            "after": {
+              "type": "string",
+              "description": "Last scanned PR number as canonical u64 decimal; nonzero requires expected_head and unchanged filters.",
+              "x-classification": "selector_position",
+              "maxLength": 20
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Result count ceiling 1..20, default 5.",
+              "x-classification": "selector_position"
+            },
+            "max_scan": {
+              "type": "integer",
+              "description": "Visible candidate ceiling 1..1000, default 1000. Independent of matches.",
+              "x-classification": "selector_position"
+            },
+            "expected_head": {
+              "type": "string",
+              "description": "Retained exact snapshot_token; current disclosure policy still applies.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            },
+            "render": {
+              "type": "string",
+              "description": "Optional html_safe, plain_text, compact_machine or api_json presentation beside unchanged canonical body.",
+              "x-classification": "selector_position",
+              "maxLength": 32
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_pull_set_labels": {
+      "title": "frankengit_pull_set_labels",
+      "description": "Replace an existing visible PR's complete labels using the exact independent label version, including closed and merged PRs. Empty labels explicitly clears. No PR content version, refs or review freshness changes. Retry the identical complete command and original durable key; receipts describe original outcomes, not today's state.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive canonical decimal PR number bounded by u64.",
+              "x-classification": "selector_position",
+              "maxLength": 20
+            },
+            "expected_version": {
+              "type": "string",
+              "description": "Exact independent label version: zero only for a never-written label stream. Never refreshed during retry.",
+              "x-classification": "selector_position",
+              "maxLength": 20
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Original durable printable ASCII key, reused only with the identical complete command.",
+              "x-classification": "selector_position",
+              "maxLength": 256
+            },
+            "labels": {
+              "type": "array",
+              "description": "Complete desired set: 0..32 unique nonblank literal labels, each at most 64 UTF-8 bytes without controls. Order is canonicalized; spelling is preserved.",
+              "x-classification": "untrusted_content"
+            }
+          },
+          "required": ["number", "expected_version", "idempotency_key", "labels"],
           "additionalProperties": false
         }
       },
@@ -3758,7 +4090,7 @@
     },
     "frankengit_source_candidate": {
       "title": "frankengit_source_candidate",
-      "description": "Prepare or inspect bounded native Git candidate bundles and PR candidates without publishing. prepare_patch optionally selects exact-symlink-v1 for inert Git symlink blobs; omission retains regular-file behavior. prepare_replay and resolve_replay apply one exact cherry-pick or revert through path-v1. prepare_rebase and resolve_rebase reconstruct the entire linear-v1 suffix with original-commit-bound resolutions and explicit empty policy; inspect_rebase independently reviews the uploaded series and net change. Complete rebase results carry exact handoffs to the dedicated source rebase publisher; stopped results expose no partial bundle. Replay and rebase require source read and remain outside the sponsored-agent profile. prepare_queue_merge requires source, PR and queue read grants with exact queue and PR version guards.",
+      "description": "Prepare or inspect bounded native Git candidate bundles and PR candidates without publishing. prepare_patch optionally selects exact-tree-binary-v1 for edited binary renames or exact-symlink-v1 for inert Git symlink blobs; omission retains regular-file behavior. prepare_replay and resolve_replay apply one exact cherry-pick or revert through path-v1. prepare_rebase and resolve_rebase reconstruct the entire linear-v1 suffix with original-commit-bound resolutions and explicit empty policy; inspect_rebase independently reviews the uploaded series and net change. Complete rebase results carry exact handoffs to the dedicated source rebase publisher; stopped results expose no partial bundle. Replay and rebase require source read and remain outside the sponsored-agent profile. prepare_queue_merge requires source, PR and queue read grants with exact queue and PR version guards.",
       "type": "object",
       "properties": {
         "parameters": {
@@ -3805,10 +4137,10 @@
             },
             "profile": {
               "type": "string",
-              "description": "For prepare_patch, optional exact-tree-v1 retains regular-file behavior and exact-symlink-v1 explicitly permits inert Git symlink blobs; omission keeps the original profile. Required for replay: path-v1. Required for prepare_rebase, resolve_rebase and inspect_rebase: linear-v1.",
+              "description": "For prepare_patch, optional exact-tree-v1 retains regular-file behavior, exact-tree-binary-v1 explicitly permits edited binary renames with verified identities and reverse members, and exact-symlink-v1 explicitly permits inert Git symlink blobs; omission keeps the original profile. Required for replay: path-v1. Required for prepare_rebase, resolve_rebase and inspect_rebase: linear-v1.",
               "x-classification": "selector_position",
-              "maxLength": 16,
-              "pattern": "^(path-v1|linear-v1|exact-tree-v1|exact-symlink-v1)$"
+              "maxLength": 20,
+              "pattern": "^(path-v1|linear-v1|exact-tree-v1|exact-tree-binary-v1|exact-symlink-v1)$"
             },
             "direction": {
               "type": "string",
@@ -4357,7 +4689,7 @@
     },
     "frankengit_source_publish": {
       "title": "frankengit_source_publish",
-      "description": "Publish a reviewed native Git bundle and advance or initialize a branch atomically.",
+      "description": "Publish one reviewed native Git bundle under the independent source-write launch ceiling. Sponsored agents require canonical source-publish with immutable finite ref/path limits and may only advance an exact single-parent candidate. The ordinary operator profile also supports explicit initial history. Native quarantine, current protection, original agent/sponsor evidence, request deadline and durable-key recovery remain authoritative; no review or merge approval.",
       "type": "object",
       "properties": {
         "parameters": {
@@ -4369,9 +4701,21 @@
               "x-classification": "selector_position",
               "maxLength": 4096
             },
+            "reference_hex": {
+              "type": "string",
+              "description": "Lossless lowercase native ref bytes; exactly one of reference and reference_hex is required.",
+              "x-classification": "selector_position",
+              "maxLength": 8192,
+              "pattern": "^(?:[0-9a-f]{2})+$"
+            },
+            "initial": {
+              "type": "boolean",
+              "description": "Ordinary operator profile only: true explicitly selects absent-branch zero-parent publication and excludes expected_base. Sponsored discovery omits this field and dispatch refuses it.",
+              "x-classification": "selector_position"
+            },
             "expected_base": {
               "type": "string",
-              "description": "Exact predecessor tip commit ID.",
+              "description": "Exact predecessor tip commit ID, mandatory for sponsored single-parent publication. No current-tip refresh or inferred base.",
               "x-classification": "selector_position",
               "maxLength": 64,
               "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
@@ -4390,15 +4734,13 @@
               "maxLength": 256,
               "pattern": "^[!-~]+$"
             },
-            "bundle_hex": {
-              "type": "string",
-              "description": "Hex-encoded pack/object bundle (bounded 24 KiB across chunks).",
-              "x-classification": "untrusted_content",
-              "maxLength": 49152,
-              "pattern": "^[0-9a-f]+$"
+            "bundle_hex_chunks": {
+              "type": "array",
+              "description": "One complete native Git bundle in 1..3 ordered lowercase-hex chunks, at most 8192 decoded bytes each and 24576 bytes total. No host path or URL.",
+              "x-classification": "untrusted_content"
             }
           },
-          "required": ["expected_candidate", "idempotency_key", "bundle_hex"],
+          "required": ["expected_candidate", "idempotency_key", "bundle_hex_chunks"],
           "additionalProperties": false
         }
       },
@@ -4789,7 +5131,7 @@
     },
     "frankengit_source_verified_blob": {
       "title": "frankengit_source_verified_blob",
-      "description": "Read a complete visible ref-anchored blob and its original canonical proof at an independently trusted exact authority head. Ordinary source-read grant only; sponsored profiles exclude full-tree proof disclosure. Native Merkle-layout proof, verifier and canonical codec are unchanged. Bounded complete chunks, no range, truncation, legacy fallback, publication authority, freshness claim or server-selected client trust root. The smaller MCP output limits apply after native construction within its fixed finite v1 budgets.",
+      "description": "Read a complete visible ref-anchored blob and its original canonical proof at an independently trusted exact authority head. Requires the source launch ceiling and, for sponsored agents, the independent source-verified-read scope authorizing original tree-witness disclosure. Native Merkle-layout proof, verifier and canonical codec are unchanged. Bounded complete chunks, no range, truncation, legacy fallback, publication authority, freshness claim or server-selected client trust root. The smaller MCP output limits apply after native construction within its fixed finite v1 budgets.",
       "type": "object",
       "properties": {
         "parameters": {

@@ -1,0 +1,150 @@
+{
+  "baseline": "e9de858ed5e05f33f78fba86ec60e3b400879ad6",
+  "capture": {
+    "schema": "frankengit-github-issue-capture-v2",
+    "consistency": "two-equal-observations-not-atomic",
+    "source": {
+      "repository": "owner/project",
+      "repository_id": "42"
+    },
+    "issues": [
+      {
+        "number": 3,
+        "id": "30",
+        "html_url": "https://github.com/owner/project/issues/3",
+        "title": "Source 3",
+        "body": "Original source body\r\n",
+        "state": "closed",
+        "state_reason": "completed",
+        "user": {
+          "id": "11",
+          "login": "original-source-author"
+        },
+        "created_at": "2026-10-01T10:00:00Z",
+        "updated_at": "2026-10-01T10:00:00Z",
+        "closed_at": "2026-10-01T10:00:00Z",
+        "labels": [
+          {
+            "id": "1",
+            "name": "bug",
+            "color": "abcdef",
+            "description": null
+          }
+        ],
+        "assignees": [
+          {
+            "id": "11",
+            "login": "original-source-author"
+          }
+        ],
+        "milestone": null,
+        "locked": true,
+        "comment_count": 2,
+        "comments": [
+          {
+            "id": "301",
+            "html_url": "https://github.com/owner/project/issues/3#issuecomment-301",
+            "issue_url": "https://api.github.com/repos/owner/project/issues/3",
+            "user": {
+              "id": "11",
+              "login": "original-source-author"
+            },
+            "created_at": "2026-10-01T10:00:00Z",
+            "updated_at": "2026-10-01T10:00:00Z",
+            "body": "Exact source comment 1\r\n%26=+"
+          },
+          {
+            "id": "302",
+            "html_url": "https://github.com/owner/project/issues/3#issuecomment-302",
+            "issue_url": "https://api.github.com/repos/owner/project/issues/3",
+            "user": {
+              "id": "11",
+              "login": "original-source-author"
+            },
+            "created_at": "2026-10-01T10:00:00Z",
+            "updated_at": "2026-10-01T10:00:00Z",
+            "body": "Exact source comment 2\r\n%26=+"
+          }
+        ]
+      },
+      {
+        "number": 5,
+        "id": "50",
+        "html_url": "https://github.com/owner/project/issues/5",
+        "title": "Source 5",
+        "body": "Original source body\r\n",
+        "state": "open",
+        "state_reason": null,
+        "user": {
+          "id": "11",
+          "login": "original-source-author"
+        },
+        "created_at": "2026-10-01T10:00:00Z",
+        "updated_at": "2026-10-01T10:00:00Z",
+        "closed_at": null,
+        "labels": [
+          {
+            "id": "1",
+            "name": "bug",
+            "color": "abcdef",
+            "description": null
+          }
+        ],
+        "assignees": [
+          {
+            "id": "11",
+            "login": "original-source-author"
+          }
+        ],
+        "milestone": null,
+        "locked": true,
+        "comment_count": 2,
+        "comments": [
+          {
+            "id": "501",
+            "html_url": "https://github.com/owner/project/issues/5#issuecomment-501",
+            "issue_url": "https://api.github.com/repos/owner/project/issues/5",
+            "user": {
+              "id": "11",
+              "login": "original-source-author"
+            },
+            "created_at": "2026-10-01T10:00:00Z",
+            "updated_at": "2026-10-01T10:00:00Z",
+            "body": "Exact source comment 1\r\n%26=+"
+          },
+          {
+            "id": "502",
+            "html_url": "https://github.com/owner/project/issues/5#issuecomment-502",
+            "issue_url": "https://api.github.com/repos/owner/project/issues/5",
+            "user": {
+              "id": "11",
+              "login": "original-source-author"
+            },
+            "created_at": "2026-10-01T10:00:00Z",
+            "updated_at": "2026-10-01T10:00:00Z",
+            "body": "Exact source comment 2\r\n%26=+"
+          }
+        ]
+      }
+    ]
+  },
+  "golden": {
+    "capture_sha256": "7b583426f9d188debe22d7a16f60adee8290f4de6326b5cbbcef695443b2809e",
+    "steps_sha256": "6207f2b21707d70641721fbfe65366aaff224778ec39502ef941848b3e52d442",
+    "plan_sha256": "d4440b1152b24f5e74ffd6b5edbde6561b85119a4d1525f77acf4124b110d3a0",
+    "nonce_count": 9,
+    "hashes": {
+      "capture.json": "7b583426f9d188debe22d7a16f60adee8290f4de6326b5cbbcef695443b2809e",
+      "manifest.json": "d4440b1152b24f5e74ffd6b5edbde6561b85119a4d1525f77acf4124b110d3a0",
+      "step-000000.request.json": "c71bbbe40cfc36434ae25b8a620808067cedaf428e40b2cf8d24d0bc13b62144",
+      "step-000001.request.json": "dcc8b86be30e62ab0cc5d2b9b8c9f6f069f0625e36abc91ab3bafb6971fa23a0",
+      "step-000002.request.json": "b79cbf8ce2d7c5170888294876de5f98f83b1e984aa9a3a5db2f79143e725e0e",
+      "step-000003.request.json": "7772fcd6872b33a94f2fe72a7fa4ad069c78a48f58f8b08322ade252243c9b01",
+      "step-000004.request.json": "608dfde0701d68390a54d81f1e603a4b44b56dca34dc822cbdb6525db35c129b",
+      "step-000005.request.json": "4b45d6e9ab1b1ac1dad2b3ee573d08ce5629b0ea50c7d46370136353016069d1",
+      "step-000006.request.json": "7adc9c8dc625b7de2526e030411c0a8fae2f35553c9afc8899311f87bce3e64e",
+      "step-000007.request.json": "b7ce2d3742ff19a68ced1952d8fb54cbfb7bd265b873868ffef33360d55a0109",
+      "step-000008.request.json": "8c953c1f4dea9d4a739b4deb3713dca14e8211c789292bcb6642f1a14cd37746"
+    }
+  }
+}

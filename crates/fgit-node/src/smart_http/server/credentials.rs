@@ -30,6 +30,9 @@ const MAX_GRANTS: usize = 256;
 const HEADER: &str = "frankengit-http-credentials-v1";
 const HEADER_V2: &str = "frankengit-http-credentials-v2";
 
+#[cfg(all(test, unix))]
+mod file_open_tests;
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) struct Binding {
     pub tenant: TenantId,
@@ -83,6 +86,13 @@ enum Scope {
     SourceRead,
     SourceHistoryRead,
     SourceCandidates,
+    SourcePublish,
+    DefaultBranchWrite,
+    SourceVerifiedRead,
+    PullsDiffRead,
+    PullsFeedbackRead,
+    SourceBranchCreate,
+    PullsCheckEvidenceRead,
 }
 
 impl Scope {
@@ -109,6 +119,7 @@ impl Scope {
             "notifications-write" => Ok(Self::NotificationsWrite),
             "discussions-read" => Ok(Self::DiscussionsRead),
             "discussions-write" => Ok(Self::DiscussionsWrite),
+            "default-branch-write" => Ok(Self::DefaultBranchWrite),
             _ => Err(CredentialFailure::InvalidFile),
         }
     }
@@ -147,8 +158,9 @@ impl Grant {
     pub(super) fn agent(request: &crate::agent_credentials::AgentRequest) -> Self {
         use fgit_identity::agent::{
             DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, MILESTONES_READ,
-            MILESTONES_WRITE, OUTCOMES_READ, PULLS_READ, PULLS_WRITE, SOURCE_CANDIDATES,
-            SOURCE_HISTORY_READ, SOURCE_READ,
+            MILESTONES_WRITE, OUTCOMES_READ, PULLS_CHECK_EVIDENCE_READ, PULLS_DIFF_READ,
+            PULLS_FEEDBACK_READ, PULLS_READ, PULLS_WRITE, SOURCE_BRANCH_CREATE, SOURCE_CANDIDATES,
+            SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ, SOURCE_VERIFIED_READ,
         };
         let mut scopes = Scopes::default();
         let scope = match request.operation {
@@ -166,6 +178,12 @@ impl Grant {
             SOURCE_READ => Scope::SourceRead,
             SOURCE_HISTORY_READ => Scope::SourceHistoryRead,
             SOURCE_CANDIDATES => Scope::SourceCandidates,
+            SOURCE_PUBLISH => Scope::SourcePublish,
+            SOURCE_BRANCH_CREATE => Scope::SourceBranchCreate,
+            SOURCE_VERIFIED_READ => Scope::SourceVerifiedRead,
+            PULLS_DIFF_READ => Scope::PullsDiffRead,
+            PULLS_FEEDBACK_READ => Scope::PullsFeedbackRead,
+            PULLS_CHECK_EVIDENCE_READ => Scope::PullsCheckEvidenceRead,
             _ => unreachable!("node authenticated a closed operation"),
         };
         scopes.insert(scope);
@@ -195,10 +213,40 @@ impl Grant {
     pub const fn permits_source_history_read(&self) -> bool {
         self.scopes.contains(Scope::Read) || self.scopes.contains(Scope::SourceHistoryRead)
     }
+    /// Original tree witnesses disclose sibling names. Sponsored proofs need
+    /// their own grant; existing ordinary repository reads retain this API.
+    pub const fn permits_source_verified_read(&self) -> bool {
+        self.scopes.contains(Scope::Read) || self.scopes.contains(Scope::SourceVerifiedRead)
+    }
+    /// Only the sponsored exact-PR comparison operation. Ordinary credentials
+    /// continue through their independently checked source and PR read grants.
+    pub const fn permits_pull_diff_read(&self) -> bool {
+        self.scopes.contains(Scope::PullsDiffRead)
+    }
+    /// Sponsored review pages and check summaries, without general PR reads,
+    /// review writes, execution-output disclosure or merge authority.
+    pub const fn permits_pull_feedback_read(&self) -> bool {
+        self.scopes.contains(Scope::PullsFeedbackRead)
+    }
+    /// Exact canonical check evidence only, without general artifact custody,
+    /// PR metadata, review approval, execution or merge authority.
+    pub const fn permits_pull_check_evidence_read(&self) -> bool {
+        self.scopes.contains(Scope::PullsCheckEvidenceRead)
+    }
     /// Candidate preparation and inspection disclose source through a separate
     /// sponsored scope. They confer neither current-source APIs nor publication.
     pub const fn permits_source_candidates(&self) -> bool {
         self.scopes.contains(Scope::Read) || self.scopes.contains(Scope::SourceCandidates)
+    }
+    /// A sponsored publisher may only enter the exact candidate Apply route.
+    /// This does not confer receive-pack or other source writes.
+    pub const fn permits_source_publication(&self) -> bool {
+        self.scopes.contains(Scope::Receive) || self.scopes.contains(Scope::SourcePublish)
+    }
+    /// Sponsored branch creation has its own explicit grant. It never implies
+    /// candidate publication, other branch mutations, or receive-pack access.
+    pub const fn permits_source_branch_creation(&self) -> bool {
+        self.scopes.contains(Scope::Receive) || self.scopes.contains(Scope::SourceBranchCreate)
     }
     pub const fn permits_issues(&self, mutation: bool) -> bool {
         if mutation {
@@ -285,6 +333,14 @@ impl Grant {
         } else {
             self.scopes.contains(Scope::ProtectionRead)
         }
+    }
+    /// Canonical symbolic HEAD is repository administration, not a ref write
+    /// or a side effect of policy editing. Only an explicit, unscoped operator
+    /// HTTP grant may enter the separate native administrator profile.
+    pub const fn permits_default_branch_write(&self) -> bool {
+        self.scopes.contains(Scope::DefaultBranchWrite)
+            && self.ref_write_scope.is_none()
+            && matches!(self.authentication, AdmissionAuthentication::HttpToken)
     }
     /// Recovery is separately grantable after write access has been withdrawn.
     /// It never permits inspecting another principal's transaction namespace.
@@ -515,13 +571,27 @@ fn safe_metadata(metadata: &Metadata) -> Result<(), CredentialFailure> {
     Ok(())
 }
 
-fn load(path: &Path, binding: Binding) -> Result<Vec<Entry>, CredentialFailure> {
-    // Operator-controlled local path, not a hostile-filesystem containment API.
-    // Update it with atomic rename, not in-place edits. The opened file owns
-    // this request's snapshot; a later replacement applies to the next request.
-    let before = fs::symlink_metadata(path).map_err(|_| CredentialFailure::Unavailable)?;
-    safe_metadata(&before)?;
-    let mut file = File::open(path).map_err(|_| CredentialFailure::Unavailable)?;
+fn open_credential_file(
+    path: &Path,
+    before: &Metadata,
+) -> Result<(File, Metadata), CredentialFailure> {
+    #[cfg(unix)]
+    let file = {
+        use rustix::fs::{Mode, OFlags};
+        // The entry can change after lstat. Refuse a substituted symlink and
+        // never wait for a substituted FIFO's writer before checking fstat.
+        // Parent directories remain operator-owned; these flags do not impose
+        // a kernel-level deadline on an unavailable filesystem.
+        let descriptor = rustix::fs::open(
+            path,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            Mode::empty(),
+        )
+        .map_err(|_| CredentialFailure::Unavailable)?;
+        File::from(descriptor)
+    };
+    #[cfg(not(unix))]
+    let file = File::open(path).map_err(|_| CredentialFailure::Unavailable)?;
     let opened = file
         .metadata()
         .map_err(|_| CredentialFailure::Unavailable)?;
@@ -533,6 +603,18 @@ fn load(path: &Path, binding: Binding) -> Result<Vec<Entry>, CredentialFailure> 
             return Err(CredentialFailure::UnsafeFile);
         }
     }
+    #[cfg(not(unix))]
+    let _ = before;
+    Ok((file, opened))
+}
+
+fn load(path: &Path, binding: Binding) -> Result<Vec<Entry>, CredentialFailure> {
+    // Operator-controlled local path, not a hostile-filesystem containment API.
+    // Update it with atomic rename, not in-place edits. The opened file owns
+    // this request's snapshot; a later replacement applies to the next request.
+    let before = fs::symlink_metadata(path).map_err(|_| CredentialFailure::Unavailable)?;
+    safe_metadata(&before)?;
+    let (mut file, opened) = open_credential_file(path, &before)?;
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(MAX_FILE_BYTES + 1)
@@ -662,6 +744,92 @@ fn parse(bytes: &[u8], binding: Binding) -> Result<Vec<Entry>, CredentialFailure
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_publish_permission_never_grants_git_or_other_source_operations() {
+        let principal = PrincipalId::from_bytes([7; 16]);
+        let mut value = grant(principal, "receive").unwrap();
+        assert!(value.permits_source_publication());
+        value.scopes = Scopes(Scope::SourcePublish.mask());
+        assert!(value.permits_source_publication());
+        assert!(!value.permits_source_branch_creation());
+        assert!(!value.permits(Service::UploadPack));
+        assert!(!value.permits(Service::ReceivePack));
+        assert!(!value.permits_source_read());
+        assert!(!value.permits_source_history_read());
+        assert!(!value.permits_source_verified_read());
+        assert!(!value.permits_source_candidates());
+        assert!(!value.permits_pull_diff_read());
+        assert!(!value.permits_pull_feedback_read());
+        assert!(!value.permits_reviewed_merge());
+        assert!(!value.permits_queue_landing());
+        assert!(!value.permits_outcomes());
+        for mutation in [false, true] {
+            assert!(!value.permits_issues(mutation));
+            assert!(!value.permits_pulls(mutation));
+            assert!(!value.permits_reviews(mutation));
+            assert!(!value.permits_protection(mutation));
+            assert!(!value.permits_queues(mutation));
+            assert!(!value.permits_discussions(mutation));
+        }
+        for scope in [
+            Scope::Read,
+            Scope::SourceRead,
+            Scope::SourceHistoryRead,
+            Scope::SourceCandidates,
+            Scope::SourceVerifiedRead,
+            Scope::PullsDiffRead,
+            Scope::PullsFeedbackRead,
+            Scope::SourceBranchCreate,
+        ] {
+            value.scopes = Scopes(scope.mask());
+            assert!(!value.permits_source_publication());
+        }
+        // A file grant cannot synthesize canonical sponsorship and path scope.
+        assert!(Scope::parse("source-publish").is_err());
+    }
+
+    #[test]
+    fn source_branch_creation_permission_is_independent_of_publication_and_git() {
+        let mut value = grant(PrincipalId::from_bytes([7; 16]), "receive").unwrap();
+        assert!(value.permits_source_branch_creation());
+        value.scopes = Scopes(Scope::SourceBranchCreate.mask());
+        assert!(value.permits_source_branch_creation());
+        assert!(!value.permits_source_publication());
+        assert!(!value.permits(Service::UploadPack));
+        assert!(!value.permits(Service::ReceivePack));
+        assert!(!value.permits_source_read());
+        assert!(!value.permits_source_history_read());
+        assert!(!value.permits_source_verified_read());
+        assert!(!value.permits_source_candidates());
+        assert!(!value.permits_pull_diff_read());
+        assert!(!value.permits_pull_feedback_read());
+        assert!(!value.permits_outcomes());
+        assert!(!value.permits_reviewed_merge());
+        assert!(!value.permits_queue_landing());
+        for mutation in [false, true] {
+            assert!(!value.permits_issues(mutation));
+            assert!(!value.permits_pulls(mutation));
+            assert!(!value.permits_reviews(mutation));
+            assert!(!value.permits_protection(mutation));
+            assert!(!value.permits_queues(mutation));
+            assert!(!value.permits_discussions(mutation));
+        }
+        for scope in [
+            Scope::Read,
+            Scope::SourceRead,
+            Scope::SourceHistoryRead,
+            Scope::SourceCandidates,
+            Scope::SourcePublish,
+            Scope::SourceVerifiedRead,
+            Scope::PullsDiffRead,
+            Scope::PullsFeedbackRead,
+        ] {
+            value.scopes = Scopes(scope.mask());
+            assert!(!value.permits_source_branch_creation());
+        }
+        assert!(Scope::parse("source-branch-create").is_err());
+    }
 
     #[test]
     fn source_read_permission_does_not_grant_git_or_metadata_services() {
@@ -1624,6 +1792,40 @@ mod tests {
         .unwrap();
         assert!(!legacy.permits_protection(false) && !legacy.permits_protection(true));
     }
+    #[test]
+    fn default_branch_grant_is_independent_and_never_widens_ref_scoped_credentials() {
+        let principal = PrincipalId::from_bytes([7; 16]);
+        for old in [
+            "read",
+            "receive",
+            "protection-write",
+            "merges-write",
+            "outcomes-read",
+        ] {
+            assert!(
+                !grant(principal, old)
+                    .unwrap()
+                    .permits_default_branch_write()
+            );
+        }
+        let selected = grant(principal, "default-branch-write").unwrap();
+        assert!(selected.permits_default_branch_write());
+        assert!(!selected.permits_source_read() && !selected.permits_outcomes());
+        assert!(!selected.permits(Service::ReceivePack) && !selected.permits_protection(true));
+        assert!(grant(principal, "read,outcomes-read,default-branch-write").is_ok());
+        assert!(grant(principal, "default-branch-write,read").is_err());
+        assert!(grant(principal, "default-branch-write,default-branch-write").is_err());
+        for references in ["all", "none", "exact:726566732f68656164732f6d61696e"] {
+            let text =
+                scoped_header() + &scoped_row(&"a".repeat(64), "default-branch-write", references);
+            let entries = parse(text.as_bytes(), binding()).unwrap();
+            assert_eq!(
+                entries[0].grant.permits_default_branch_write(),
+                references == "all"
+            );
+        }
+    }
+
     #[test]
     fn duplicate_tokens_bad_scopes_and_foreign_bindings_fail_closed() {
         let row = row(&"a".repeat(64), 4, "read");

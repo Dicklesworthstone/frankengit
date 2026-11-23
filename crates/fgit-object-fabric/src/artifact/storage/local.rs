@@ -70,6 +70,28 @@ impl LocalArtifactStore {
     pub const fn scope(&self) -> &ArtifactScope {
         &self.scope
     }
+    pub(super) fn root(&self) -> &Path {
+        &self.root
+    }
+    /// Settle a previously visible publication after exact identity readback.
+    /// Inspection alone does not establish durability after an uncertain link.
+    pub(super) fn sync_namespace(
+        &self,
+        op: &ArtifactOperation<'_>,
+    ) -> Result<(), ArtifactStorageError> {
+        op.checkpoint()?;
+        private_directory(&self.root)?;
+        let directory = self.directory();
+        private_directory(&directory)?;
+        sync(&directory).map_err(|_| ArtifactStorageError::PublicationUncertain {
+            operation: "confirm artifact namespace durability",
+        })?;
+        op.checkpoint()?;
+        sync(&self.root).map_err(|_| ArtifactStorageError::PublicationUncertain {
+            operation: "confirm artifact root durability",
+        })?;
+        op.checkpoint()
+    }
     fn directory(&self) -> PathBuf {
         self.root
             .join(format!("scope-{}", hex(&self.scope.commitment())))
@@ -293,7 +315,7 @@ impl LocalArtifactStore {
 fn sync(path: &Path) -> std::io::Result<()> {
     File::open(path)?.sync_all()
 }
-fn private_directory(path: &Path) -> Result<(), ArtifactStorageError> {
+pub(super) fn private_directory(path: &Path) -> Result<(), ArtifactStorageError> {
     if !path.is_absolute() {
         return Err(ArtifactStorageError::UnsafePath);
     }

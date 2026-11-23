@@ -1,10 +1,13 @@
 # Native pull-request CLI: recovered workflow guide
 
-The PR CLI exposes `fg pr open`, `update`, `close`, `list`, and `show` over
+The PR CLI exposes `fg pr open`, `update`, `close`, `reopen`, `list`, `show`, and `search` over
 `OneNode`'s canonical PR admission and authenticated reads. It does not own a
 second PR database, call Git in production, or turn metadata into a ref update.
 The current command contract is also documented in
 [`NATIVE_PULL_REQUEST_COMMAND.md`](NATIVE_PULL_REQUEST_COMMAND.md).
+
+Use [`fg pr search`](PULL_REQUEST_SEARCH.md) for literal title/body, lifecycle,
+opener and exact branch filters with bounded snapshot-pinned pagination.
 
 This guide reconciles the saved seven-file PR CLI patch with the implementation
 that landed concurrently on `main`. The existing implementation, tests, JSON

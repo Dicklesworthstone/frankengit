@@ -75,10 +75,17 @@ Proof requests use the existing source-read deployment switch and repository
 for credential rotation and the incarnation-bound credential table. A receive
 or metadata grant does not imply source read access.
 
-The verified-blob endpoint uses the repository `read` credential. Canonical
-sponsored `SOURCE_READ` credentials retain their existing closed route set;
-supporting revocation-aware proof configuration does not add this endpoint to
-that set or bypass current credential revocation.
+The verified-blob endpoint also accepts an explicitly issued canonical
+`source-verified-read` agent credential, with the same `--allow-source` server
+switch. This independent scope includes original tree-witness disclosure;
+`source-read`, `source-history-read`, candidate and metadata credentials do not
+imply it. Canonical authentication runs anew on every request, checks current
+revocation, and retains the original agent/sponsor/run witness and request
+deadline through output. The exact proof operation cannot create a general
+source-read context or grant Git transport. The same independent head pin,
+complete frame, hidden-ref policy and native verifier apply to both credential
+profiles. Expired request custody returns 408; exhausted output bounds return
+413 before a success body is sent.
 
 For new private credential files, the following creates a read-only token and
 binds its hash to the chosen principal. The credential parent directory must

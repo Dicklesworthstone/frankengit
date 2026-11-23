@@ -1,12 +1,174 @@
 use super::*;
 use fgit_identity::agent::{
-    ISSUES_READ, ISSUES_WRITE, MILESTONES_READ, MILESTONES_WRITE, PULLS_WRITE, SOURCE_CANDIDATES,
-    SOURCE_HISTORY_READ, SOURCE_READ, SponsorKind,
+    ISSUES_READ, ISSUES_WRITE, MILESTONES_READ, MILESTONES_WRITE, PULLS_CHECK_EVIDENCE_READ,
+    PULLS_DIFF_READ, PULLS_FEEDBACK_READ, PULLS_READ, PULLS_WRITE, SOURCE_BRANCH_CREATE,
+    SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ, SOURCE_VERIFIED_READ,
+    SponsorKind,
 };
 use std::path::PathBuf;
 
 fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).into()).collect()
+}
+
+#[test]
+fn task_branch_issuance_is_independent_and_requires_an_explicit_source_ceiling() {
+    for (operations, expected) in [
+        ("source-branch-create", SOURCE_BRANCH_CREATE),
+        (
+            "source-branch-create,source-publish",
+            SOURCE_BRANCH_CREATE | SOURCE_PUBLISH,
+        ),
+        (
+            "source-read,source-branch-create",
+            SOURCE_READ | SOURCE_BRANCH_CREATE,
+        ),
+    ] {
+        let mut input = issue();
+        replace(&mut input, "--operations", operations);
+        assert!(options::parse(&input).is_err());
+        input.extend(strings(&[
+            "--source-ref-scope",
+            "prefix:726566732f68656164732f6167656e742f",
+        ]));
+        assert!(options::parse(&input).is_err());
+        input.extend(strings(&["--source-path-hex", "737263"]));
+        let Options::Repository(parsed) = options::parse(&input).unwrap() else {
+            panic!()
+        };
+        let Operation::Issue {
+            grant,
+            source_scope: Some(scope),
+            ..
+        } = parsed.operation
+        else {
+            panic!()
+        };
+        assert_eq!(grant.operations, expected);
+        for operation in [
+            SOURCE_BRANCH_CREATE,
+            SOURCE_PUBLISH,
+            SOURCE_READ,
+            SOURCE_CANDIDATES,
+        ] {
+            assert_eq!(grant.permits(operation), expected & operation != 0);
+        }
+        assert!(
+            scope.permits_ref(&fgit_types::RefName::try_new(b"refs/heads/agent/task-1").unwrap())
+        );
+        assert!(
+            !scope.permits_ref(
+                &fgit_types::RefName::try_new(b"refs/heads/agent-other/task-1").unwrap()
+            )
+        );
+        assert!(!scope.permits_ref(&fgit_types::RefName::try_new(b"refs/heads/main").unwrap()));
+        assert_eq!(scope.path_prefixes(), &[b"src".to_vec()]);
+
+        for unsupported in [
+            "source-branch-create,source-branch-create",
+            "source-branch-create,receive",
+            "source-branch-write",
+            "source-branch-create,",
+        ] {
+            let mut invalid = input.clone();
+            replace(&mut invalid, "--operations", unsupported);
+            assert!(options::parse(&invalid).is_err(), "{unsupported}");
+        }
+    }
+}
+
+#[test]
+fn source_publication_issuance_requires_explicit_native_ref_and_path_ceilings() {
+    let mut input = issue();
+    replace(&mut input, "--operations", "source-publish");
+    assert!(options::parse(&input).is_err());
+    input.extend(strings(&[
+        "--source-ref-scope",
+        "exact:726566732f68656164732f6167656e74",
+    ]));
+    assert!(options::parse(&input).is_err());
+    input.extend(strings(&[
+        "--source-path-hex",
+        "737263",
+        "--source-path-hex",
+        "646174612fff",
+    ]));
+    let Options::Repository(parsed) = options::parse(&input).unwrap() else {
+        panic!()
+    };
+    let Operation::Issue {
+        grant,
+        source_scope: Some(scope),
+        ..
+    } = parsed.operation
+    else {
+        panic!()
+    };
+    assert_eq!(grant.operations, SOURCE_PUBLISH);
+    assert!(!grant.permits(SOURCE_BRANCH_CREATE));
+    assert!(!grant.permits(SOURCE_READ | SOURCE_CANDIDATES | ISSUES_WRITE));
+    assert_eq!(
+        scope.path_prefixes(),
+        &[b"data/\xff".to_vec(), b"src".to_vec()]
+    );
+    assert!(scope.permits_ref(&fgit_types::RefName::try_new(b"refs/heads/agent").unwrap()));
+    assert!(!scope.permits_ref(&fgit_types::RefName::try_new(b"refs/heads/main").unwrap()));
+    assert!(scope.permits_path(b"src/file.rs"));
+    assert!(!scope.permits_path(b"src-other/file.rs"));
+    for operation in ["source-read", "source-candidates", "issues-write"] {
+        let mut changed = input.clone();
+        replace(&mut changed, "--operations", operation);
+        assert!(options::parse(&changed).is_err());
+    }
+    for field in [
+        "all",
+        "none",
+        "exact:726566732f68656164732f61,exact:726566732f68656164732f61",
+    ] {
+        let mut changed = input.clone();
+        replace(&mut changed, "--source-ref-scope", field);
+        assert!(options::parse(&changed).is_err());
+    }
+    for path in [
+        "0",
+        "FF",
+        "2e676974",
+        "7372632f2e2e2f78",
+        "7372632f",
+        "7372632f00",
+        "646174612fff",
+    ] {
+        let mut changed = input.clone();
+        replace(&mut changed, "--source-path-hex", path);
+        assert!(options::parse(&changed).is_err(), "path {path}");
+    }
+}
+
+#[test]
+fn whole_tree_source_ceiling_requires_an_explicit_empty_path_argument() {
+    let mut input = issue();
+    replace(&mut input, "--operations", "source-publish");
+    input.extend(strings(&[
+        "--source-ref-scope",
+        "prefix:726566732f68656164732f6167656e742f",
+        "--source-path-hex",
+        "",
+    ]));
+    let Options::Repository(parsed) = options::parse(&input).unwrap() else {
+        panic!()
+    };
+    let Operation::Issue {
+        source_scope: Some(scope),
+        ..
+    } = parsed.operation
+    else {
+        panic!()
+    };
+    assert_eq!(scope.path_prefixes(), &[Vec::<u8>::new()]);
+    assert!(scope.permits_path(b"README.md"));
+    assert!(!scope.permits_path(b".git/config"));
+    input.extend(strings(&["--source-path-hex", "737263"]));
+    assert!(options::parse(&input).is_err());
 }
 
 #[test]
@@ -351,4 +513,207 @@ fn generated_token_is_private_bounded_never_printed_and_never_overwrites() {
     }
     std::fs::write(&path, &bearer).unwrap();
     assert_eq!(token::read(&path).unwrap(), bearer);
+}
+
+#[test]
+fn complete_proof_and_pull_diff_scopes_are_independent_explicit_cli_grants() {
+    for (scopes, expected) in [
+        ("source-verified-read", SOURCE_VERIFIED_READ),
+        ("pulls-diff-read", PULLS_DIFF_READ),
+        (
+            "source-verified-read,pulls-diff-read",
+            SOURCE_VERIFIED_READ | PULLS_DIFF_READ,
+        ),
+        (
+            "source-read,source-verified-read",
+            SOURCE_READ | SOURCE_VERIFIED_READ,
+        ),
+    ] {
+        let mut input = issue();
+        replace(&mut input, "--operations", scopes);
+        let Options::Repository(parsed) = options::parse(&input).unwrap() else {
+            panic!()
+        };
+        let Operation::Issue {
+            grant,
+            source_scope,
+            ..
+        } = parsed.operation
+        else {
+            panic!()
+        };
+        assert_eq!(grant.operations, expected);
+        assert!(source_scope.is_none());
+        assert!(!grant.permits(SOURCE_PUBLISH));
+        for scope in [
+            SOURCE_READ,
+            SOURCE_HISTORY_READ,
+            SOURCE_CANDIDATES,
+            SOURCE_VERIFIED_READ,
+            PULLS_DIFF_READ,
+        ] {
+            assert_eq!(grant.permits(scope), expected & scope != 0);
+        }
+    }
+    for scopes in [
+        "source-verified-read,source-verified-read",
+        "pulls-diff-read,pulls-diff-read",
+        "proof-read",
+        "pulls-diff-read,receive",
+    ] {
+        let mut input = issue();
+        replace(&mut input, "--operations", scopes);
+        assert!(options::parse(&input).is_err());
+    }
+}
+
+#[test]
+fn check_evidence_cli_issuance_preserves_its_independent_disclosure_scope() {
+    for (scopes, expected) in [
+        ("pulls-check-evidence-read", PULLS_CHECK_EVIDENCE_READ),
+        (
+            "pulls-feedback-read,pulls-check-evidence-read",
+            PULLS_FEEDBACK_READ | PULLS_CHECK_EVIDENCE_READ,
+        ),
+        (
+            "source-read,pulls-check-evidence-read",
+            SOURCE_READ | PULLS_CHECK_EVIDENCE_READ,
+        ),
+    ] {
+        let mut input = issue();
+        replace(&mut input, "--operations", scopes);
+        let Options::Repository(parsed) = options::parse(&input).unwrap() else {
+            panic!()
+        };
+        let Operation::Issue {
+            grant,
+            source_scope,
+            ..
+        } = parsed.operation
+        else {
+            panic!()
+        };
+        assert_eq!(grant.operations, expected);
+        assert!(source_scope.is_none());
+        for operation in (0..18).map(|bit| 1u32 << bit) {
+            assert_eq!(grant.permits(operation), expected & operation != 0);
+        }
+        input.extend(strings(&[
+            "--source-ref-scope",
+            "exact:726566732f68656164732f6167656e74",
+            "--source-path-hex",
+            "737263",
+        ]));
+        assert!(options::parse(&input).is_err());
+    }
+    for scopes in [
+        "pulls-check-evidence-read,pulls-check-evidence-read",
+        "pulls-check-evidence-read,",
+        "check-evidence-read",
+        "pulls-check-evidence-read,artifacts-read",
+        "pulls-check-evidence-read,checks-write",
+    ] {
+        let mut input = issue();
+        replace(&mut input, "--operations", scopes);
+        assert!(options::parse(&input).is_err(), "{scopes}");
+    }
+    // Explicitly composing source publication keeps its separate immutable
+    // ceiling; diagnostic disclosure alone never creates one.
+    let mut combined = issue();
+    replace(
+        &mut combined,
+        "--operations",
+        "source-publish,pulls-check-evidence-read",
+    );
+    assert!(options::parse(&combined).is_err());
+    combined.extend(strings(&[
+        "--source-ref-scope",
+        "exact:726566732f68656164732f6167656e74",
+        "--source-path-hex",
+        "737263",
+    ]));
+    let Options::Repository(parsed) = options::parse(&combined).unwrap() else {
+        panic!()
+    };
+    let Operation::Issue {
+        grant,
+        source_scope,
+        ..
+    } = parsed.operation
+    else {
+        panic!()
+    };
+    assert_eq!(grant.operations, SOURCE_PUBLISH | PULLS_CHECK_EVIDENCE_READ);
+    assert!(source_scope.is_some());
+    let mut output = Vec::new();
+    assert_eq!(run_to(&strings(&["issue", "--help"]), &mut output), Ok(0));
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("pulls-check-evidence-read permits bounded evidence"));
+    assert!(output.contains("expected head and evidence digest"));
+    assert!(output.contains("no generic artifact access"));
+}
+
+#[test]
+fn feedback_cli_issuance_is_explicit_and_never_implies_source_or_write_scopes() {
+    for (scopes, expected) in [
+        ("pulls-feedback-read", PULLS_FEEDBACK_READ),
+        (
+            "pulls-read,pulls-feedback-read",
+            PULLS_READ | PULLS_FEEDBACK_READ,
+        ),
+        (
+            "pulls-diff-read,pulls-feedback-read",
+            PULLS_DIFF_READ | PULLS_FEEDBACK_READ,
+        ),
+        (
+            "source-read,pulls-feedback-read",
+            SOURCE_READ | PULLS_FEEDBACK_READ,
+        ),
+    ] {
+        let mut input = issue();
+        replace(&mut input, "--operations", scopes);
+        let Options::Repository(parsed) = options::parse(&input).unwrap() else {
+            panic!()
+        };
+        let Operation::Issue {
+            grant,
+            source_scope,
+            ..
+        } = parsed.operation
+        else {
+            panic!()
+        };
+        assert_eq!(grant.operations, expected);
+        assert!(source_scope.is_none());
+        for operation in (0..18).map(|bit| 1u32 << bit) {
+            assert_eq!(grant.permits(operation), expected & operation != 0);
+        }
+        input.extend(strings(&[
+            "--source-ref-scope",
+            "exact:726566732f68656164732f6167656e74",
+            "--source-path-hex",
+            "737263",
+        ]));
+        assert!(options::parse(&input).is_err());
+    }
+    for scopes in [
+        "pulls-feedback-read,pulls-feedback-read",
+        "pulls-feedback-read,",
+        "feedback-read",
+        "pulls-feedback-read,reviews-write",
+        "pulls-feedback-read,checks-write",
+        "pulls-feedback-read,artifacts-read",
+    ] {
+        let mut input = issue();
+        replace(&mut input, "--operations", scopes);
+        assert!(options::parse(&input).is_err(), "{scopes}");
+    }
+    let mut output = Vec::new();
+    assert_eq!(run_to(&strings(&["issue", "--help"]), &mut output), Ok(0));
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("pulls-feedback-read permits bounded review pages"));
+    assert!(output.contains("canonical check summaries"));
+    assert!(output.contains(
+        "Check evidence bodies and logs require this separate authority from feedback summaries."
+    ));
 }

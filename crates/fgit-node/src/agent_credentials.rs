@@ -1,8 +1,15 @@
 //! Canonical sponsored agent credentials and bounded request authentication.
 //!
 //! Issuance is an explicit trusted-local administration operation. Credential
-//! holders receive finite metadata, source reads and explicit candidate scopes,
-//! never source publication, review, merge, process execution or administration.
+//! holders receive finite metadata, source reads, explicit candidate scopes and
+//! independently scoped single-parent publication. Review decisions, merge, arbitrary Git
+//! transport, process execution and administration remain separate authorities.
+
+mod branch_creation;
+mod source_publication;
+pub use branch_creation::SourceBranchCreationRequest;
+pub use source_publication::SourcePublicationRequest;
+pub(crate) use source_publication::{SourcePublicationChange, SourcePublicationProof};
 
 use crate::source_retrieval::authorization::SourceReadContext;
 use crate::treefs_workspace::native_merge::NodeNativeMergeProjection;
@@ -14,7 +21,7 @@ use fgit_agent::{AuthorityReadReceipt, ClassSet, IntentRun, LogicalTime, Operati
 use fgit_authority::{IdempotencyKey, OutcomeLookup, TerminalOutcome};
 use fgit_crypto::sha256_digest;
 use fgit_graph::lexical::LexicalNamespace;
-use fgit_identity::agent::{ALL_OPERATIONS, AgentCredentialCommand, AgentCredentialId};
+use fgit_identity::agent::{AgentCredentialCommand, AgentCredentialId};
 use fgit_resource::{ResourceVector, algebra::Grade};
 use fgit_types::{RefusalCode, TxId};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -188,15 +195,17 @@ impl OneNode {
         request: &NodeRequestContext,
         bearer: &[u8],
         key: &IdempotencyKey,
-        operation: u16,
+        operation: u32,
         request_commitment: [u8; 32],
         input_limit: u64,
         output_limit: u64,
     ) -> Result<AgentRequest, NodeReceiveTransportRefusal> {
         use fgit_identity::agent::{
-            DISCUSSIONS_WRITE, ISSUES_WRITE, MILESTONES_WRITE, PULLS_WRITE, SOURCE_CANDIDATES,
-            SOURCE_READ, agent_credential_id, authenticate_agent_credential,
+            ALL_OPERATIONS, DISCUSSIONS_WRITE, ISSUES_WRITE, MILESTONES_WRITE, PULLS_WRITE,
+            SOURCE_BRANCH_CREATE, SOURCE_CANDIDATES, SOURCE_PUBLISH, SOURCE_READ,
+            agent_credential_id, authenticate_agent_credential,
         };
+        // One request selects exactly one known independently granted operation.
         if !valid_agent_credential_token(bearer)
             || operation.count_ones() != 1
             || operation & !ALL_OPERATIONS != 0
@@ -268,6 +277,8 @@ impl OneNode {
                 OperationClass::TreeFsWorkspace,
                 OperationClass::CreateCandidateObject,
             ])
+        } else if operation == SOURCE_PUBLISH || operation == SOURCE_BRANCH_CREATE {
+            ClassSet::from_classes(&[OperationClass::PublishRefTransaction])
         } else {
             ClassSet::from_classes(&[class])
         };
@@ -287,7 +298,16 @@ impl OneNode {
             LogicalTime::new(expiry),
         )
         .map_err(|_| refused(RefusalCode::EvidenceInvalid))?;
-        let mut identity = Vec::from(b"frankengit/agent-metadata/run-id/v1\0".as_slice());
+        // Preserve the original commitment bytes for every historical
+        // operation. Wider independently granted operations have their own
+        // domain and cannot silently change the v1 scalar representation.
+        let legacy_operation = u16::try_from(operation).ok();
+        let domain = if legacy_operation.is_some() {
+            b"frankengit/agent-metadata/run-id/v1\0"
+        } else {
+            b"frankengit/agent-metadata/run-id/v2\0"
+        };
+        let mut identity = Vec::from(domain.as_slice());
         identity.extend_from_slice(
             seed.commitment()
                 .map_err(|_| refused(RefusalCode::EvidenceInvalid))?
@@ -296,7 +316,11 @@ impl OneNode {
         identity.extend_from_slice(id.as_bytes());
         identity.extend_from_slice(state.grant.agent.as_bytes());
         identity.extend_from_slice(state.grant.sponsor.as_bytes());
-        identity.extend_from_slice(&operation.to_be_bytes());
+        if let Some(legacy_operation) = legacy_operation {
+            identity.extend_from_slice(&legacy_operation.to_be_bytes());
+        } else {
+            identity.extend_from_slice(&operation.to_be_bytes());
+        }
         identity.extend_from_slice(&request_commitment);
         identity.extend_from_slice(key.as_bytes());
         let hash = sha256_digest(&identity);
@@ -352,7 +376,7 @@ impl OneNode {
 pub struct AgentRequest {
     pub(crate) authentication: AgentAuthentication,
     run: IntentRun,
-    pub(crate) operation: u16,
+    pub(crate) operation: u32,
     namespace: LexicalNamespace,
     key: IdempotencyKey,
     deadline: Instant,
@@ -369,6 +393,22 @@ impl AgentRequest {
         self.deadline = self.deadline.min(deadline);
     }
 
+    /// Require this request's one authenticated operation and exact repository
+    /// namespace before a native adapter reads data. This check does not mint a
+    /// different read grant or refresh the original request lifetime. Hosts
+    /// must still enforce their launch ceiling, selected-content visibility,
+    /// byte limits and response-time checks.
+    pub fn check_operation(
+        &self,
+        node: &OneNode,
+        operation: u32,
+    ) -> Result<(), NodeReceiveTransportRefusal> {
+        if self.operation != operation || !self.matches_namespace(node) {
+            return Err(refused(RefusalCode::CapabilityScopeViolation));
+        }
+        self.check(0, 0)
+    }
+
     /// Retain independently granted candidate authority for this request only.
     /// A public provenance record, source-read grant or metadata grant cannot
     /// construct this boundary. Native adapters still enforce the exact source
@@ -379,12 +419,7 @@ impl AgentRequest {
         &self,
         node: &OneNode,
     ) -> Result<SourceCandidateRequest<'_>, NodeReceiveTransportRefusal> {
-        if self.operation != fgit_identity::agent::SOURCE_CANDIDATES
-            || !self.matches_namespace(node)
-        {
-            return Err(refused(RefusalCode::CapabilityScopeViolation));
-        }
-        self.check(0, 0)?;
+        self.check_operation(node, fgit_identity::agent::SOURCE_CANDIDATES)?;
         Ok(SourceCandidateRequest(self))
     }
 

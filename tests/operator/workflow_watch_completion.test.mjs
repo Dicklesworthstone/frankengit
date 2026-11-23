@@ -18,6 +18,9 @@ const hex = value => Buffer.from(value).toString('hex');
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 const encode = value => Buffer.from(`${JSON.stringify(value)}\n`);
 const outcomes = ['succeeded', 'skipped', 'failed', 'cancelled', 'timed_out', 'output_limit', 'refused'];
+const LEGACY_SHELL = { shell: '/bin/sh', shell_flags: ['-eu', '-c'] };
+const SH = { shell: '/bin/sh', shell_flags: ['-e', '-c'] };
+const BASH = { shell: '/bin/bash', shell_flags: ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c'] };
 
 function job(id, outcome = 'succeeded') {
   return { id, outcome, failure: null, steps: outcome === 'skipped' || outcome === 'refused' ? [] : [{
@@ -25,6 +28,23 @@ function job(id, outcome = 'succeeded') {
     exit_code: outcome === 'succeeded' ? 0 : outcome === 'failed' ? 7 : null,
     stdout_hex: '', stderr_hex: '', elapsed_millis: 1, output_complete: true, workspace_retained: false,
   }] };
+}
+function shellJob(id, selections) {
+  const value = job(id), { index: _index, name, script, ...completion } = value.steps[0];
+  value.steps = selections.map((selection, index) => ({ index, name, script, ...structuredClone(selection), ...completion }));
+  return value;
+}
+function shellReport(value, jobs = [shellJob('mixed', [LEGACY_SHELL, SH, BASH])]) {
+  const report = structuredClone(value);
+  Object.assign(report.runs[0].execution, { schema_version: 2, shell: null, shell_flags: null, jobs });
+  return report;
+}
+function toleratedReport(value, selections = [LEGACY_SHELL, SH]) {
+  const report = shellReport(value, [shellJob('optional', selections)]), execution = report.runs[0].execution;
+  execution.schema_version = 3;
+  for (const step of execution.jobs[0].steps) Object.assign(step, { continue_on_error: false, outcome_tolerated: false });
+  Object.assign(execution.jobs[0].steps[0], { continue_on_error: true, outcome_tolerated: true, outcome: 'failed', exit_code: 7 });
+  return report;
 }
 const mixedJobs = () => [job('build__matrix_000'), job('build__matrix_001'), job('diagnostics', 'skipped'), job('package')];
 function reportPatch(jobs, succeeded, stopped = false) {
@@ -75,6 +95,111 @@ async function newReader(config) {
 }
 
 for (const format of ['sha1', 'sha256']) {
+  test(`${format}: optional failed steps preserve raw evidence while completing the watcher successfully`, LINUX_WORKFLOW, async t => {
+    const f = await fixture(t, format); await once(f.config);
+    const saved = await f.saved();
+    for (const selections of [[LEGACY_SHELL], [SH], [BASH], [LEGACY_SHELL, SH, BASH]]) {
+      const report = toleratedReport(saved.report, selections), before = encode(report);
+      const result = dispatchReport(f.config, saved.intent, report);
+      assert.equal(result.outcome, 'observed_succeeded');
+      assert.equal(result.report_sha256, sha256(before));
+      assert.deepEqual(encode(report), before);
+      assert.equal(report.runs[0].execution.jobs[0].steps[0].outcome, 'failed');
+      assert.equal(report.runs[0].execution.jobs[0].steps[0].exit_code, 7);
+    }
+    const succeeded = toleratedReport(saved.report);
+    Object.assign(succeeded.runs[0].execution.jobs[0].steps[0], { outcome: 'succeeded', exit_code: 0, outcome_tolerated: false });
+    assert.equal(dispatchReport(f.config, saved.intent, succeeded).outcome, 'observed_succeeded');
+  });
+
+  test(`${format}: optional failure metadata cannot disguise stops, incomplete output or failed cleanup`, LINUX_WORKFLOW, async t => {
+    const f = await fixture(t, format); await once(f.config);
+    const saved = await f.saved(), valid = toleratedReport(saved.report);
+    for (const mutate of [
+      r => { r.schema_version = 2; }, r => { r.schema_version = 4; },
+      r => { r.jobs[0].steps[0].continue_on_error = false; },
+      r => { r.jobs[0].steps[0].continue_on_error = 'true'; },
+      r => { r.jobs[0].steps[0].outcome_tolerated = false; },
+      r => { delete r.jobs[0].steps[1].continue_on_error; },
+      r => { delete r.jobs[0].steps[1].outcome_tolerated; },
+      r => { r.jobs[0].steps[0].exit_code = 0; }, r => { r.jobs[0].steps[0].exit_code = null; },
+      r => { r.jobs[0].steps[0].output_complete = false; }, r => { r.jobs[0].steps[0].workspace_retained = true; },
+      r => { r.jobs[0].failure = { detail: 'failed cleanup', workspace_retained: false }; },
+      ...['succeeded', 'cancelled', 'timed_out', 'output_limit', 'containment_failure'].map(outcome => r => { r.jobs[0].steps[0].outcome = outcome; }),
+    ]) {
+      const changed = structuredClone(valid); mutate(changed.runs[0].execution);
+      assert.throws(() => dispatchReport(f.config, saved.intent, changed), undefined, mutate.toString());
+    }
+    const noPolicy = toleratedReport(saved.report);
+    Object.assign(noPolicy.runs[0].execution.jobs[0].steps[0], { continue_on_error: false, outcome_tolerated: false, outcome: 'succeeded', exit_code: 0 });
+    assert.throws(() => dispatchReport(f.config, saved.intent, noPolicy), /schema three/);
+    for (const report of [structuredClone(saved.report), shellReport(saved.report)]) {
+      Object.assign(report.runs[0].execution.jobs[0].steps[0], { continue_on_error: false, outcome_tolerated: false });
+      assert.throws(() => dispatchReport(f.config, saved.intent, report), /schema three/);
+    }
+  });
+
+  test(`${format}: explicit shell reports retain exact watcher evidence and accept mixed legacy steps`, LINUX_WORKFLOW, async t => {
+    const f = await fixture(t, format); await once(f.config);
+    const saved = await f.saved(), legacyBytes = encode(saved.report);
+    assert.equal(dispatchReport(f.config, saved.intent, saved.report).report_sha256, sha256(legacyBytes));
+    for (const jobs of [[shellJob('sh', [SH])], [shellJob('bash', [BASH])],
+      [shellJob('mixed', [LEGACY_SHELL, SH, BASH])], [shellJob('legacy', [LEGACY_SHELL]), shellJob('explicit', [SH])]]) {
+      const report = shellReport(saved.report, jobs), before = encode(report);
+      const result = dispatchReport(f.config, saved.intent, report);
+      assert.equal(result.outcome, 'observed_succeeded');
+      assert.equal(result.report_sha256, sha256(before)); assert.equal(result.authoritative_check, false);
+      assert.deepEqual(encode(report), before, 'shell validation must not normalize retained evidence');
+    }
+    assert.deepEqual(encode(saved.report), legacyBytes);
+  });
+
+  test(`${format}: watcher rejects missing, changed and misversioned step shell selections`, LINUX_WORKFLOW, async t => {
+    const f = await fixture(t, format); await once(f.config);
+    const saved = await f.saved(), valid = shellReport(saved.report);
+    const cases = [
+      r => { r.schema_version = 3; }, r => { r.schema_version = '2'; },
+      r => { r.shell = '/bin/sh'; }, r => { r.shell_flags = ['-eu', '-c']; },
+      r => { delete r.shell; }, r => { delete r.shell_flags; },
+      r => { delete r.jobs[0].steps[0].shell; }, r => { delete r.jobs[0].steps[0].shell_flags; },
+      r => { r.jobs[0].steps[1].shell = '/usr/bin/sh'; },
+      r => { r.jobs[0].steps[1].shell = '/bin/bash'; },
+      r => { r.jobs[0].steps[1].shell_flags = ['-ec']; },
+      r => { r.jobs[0].steps[2].shell_flags = ['-e', '-o', 'pipefail', '-c']; },
+      r => { r.jobs[0].steps[2].shell_flags.reverse(); },
+      r => { r.jobs[0].steps[2].shell_flags.push('--login'); },
+      r => { r.jobs[0].steps[2].shell_flags = null; },
+      r => { r.jobs[0].steps[2].shell_flags = '--noprofile --norc -e -o pipefail -c'; },
+      r => { r.jobs = [shellJob('legacy', [LEGACY_SHELL])]; },
+      r => { r.jobs[0].steps = []; },
+      r => { r.schema_version = 1; Object.assign(r, structuredClone(LEGACY_SHELL)); },
+    ];
+    for (const mutate of cases) {
+      const report = structuredClone(valid); mutate(report.runs[0].execution);
+      assert.throws(() => dispatchReport(f.config, saved.intent, report), undefined, mutate.toString());
+    }
+    for (const selection of [{ shell: SH.shell }, { shell_flags: SH.shell_flags }, SH, BASH, LEGACY_SHELL]) {
+      const report = structuredClone(saved.report);
+      Object.assign(report.runs[0].execution.jobs[0].steps[0], structuredClone(selection));
+      assert.throws(() => dispatchReport(f.config, saved.intent, report), /shell/i, 'schema one cannot carry per-step shell fields');
+    }
+  });
+
+  test(`${format}: shell schema two preserves output, graph, success and containment checks`, LINUX_WORKFLOW, async t => {
+    const f = await fixture(t, format); await once(f.config);
+    const saved = await f.saved(), valid = shellReport(saved.report);
+    for (const mutate of [r => { r.authoritative_check = true; },
+      r => { r.workflow_graph = `alg:2:${'9'.repeat(64)}`; },
+      r => { r.environment.PATH = '/tmp'; }, r => { r.total_output_bytes = 1; },
+      r => { r.jobs[0].steps[1].stdout_hex = '00'.repeat(r.stream_bytes + 1); },
+      r => { r.jobs[0].steps[1].workspace_retained = true; },
+      r => { r.jobs[0].steps[1].output_complete = false; },
+      r => { r.jobs[0].steps[1].exit_code = 1; }]) {
+      const report = structuredClone(valid); mutate(report.runs[0].execution);
+      assert.throws(() => dispatchReport(f.config, saved.intent, report), undefined, mutate.toString());
+    }
+  });
+
   test(`${format}: conditional success reaches durable watcher completion without changing legacy evidence`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t, format, reportPatch(mixedJobs(), true));
     const result = await once(f.config);

@@ -1,9 +1,15 @@
 #![forbid(unsafe_code)]
 //! Canonical sponsored credentials cross the real HTTP/source/index boundary.
 
+mod branch_creation;
 mod candidates;
+#[cfg(target_os = "linux")]
+mod check_evidence;
 mod commit;
 mod history;
+mod pull_diff;
+mod pull_feedback;
+mod verified_blob;
 
 use super::*;
 use fgit_crypto::{GitObjectKind, git_object_id};
@@ -75,7 +81,17 @@ struct Fixture {
 
 impl Fixture {
     fn new(root: &Scratch, format: GitHashAlgorithm) -> Self {
-        let config = root.config("repository").with_object_format(format);
+        Self::with_layout(root, format, fgit_types::RootLayoutVersion::LegacyWholeBody)
+    }
+    fn with_layout(
+        root: &Scratch,
+        format: GitHashAlgorithm,
+        layout: fgit_types::RootLayoutVersion,
+    ) -> Self {
+        let config = root
+            .config("repository")
+            .with_object_format(format)
+            .with_root_layout(layout);
         let (mut node, _) = OneNode::init(config.clone()).unwrap();
         node.bring_into_service(HeadGeneration::FIRST).unwrap();
         let config = config.with_expected_repository_incarnation(node.repository_incarnation_id());

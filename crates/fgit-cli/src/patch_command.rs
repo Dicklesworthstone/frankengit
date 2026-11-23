@@ -12,7 +12,7 @@ use options::{Operation, Options, Profile, hex};
 use std::io::{Read, Write};
 
 const USAGE: &str = "usage: fg patch prepare <storage-root> <tenant-id> <repository-id> <branch-ref> <patch-file> <new-bundle>
-  --trusted-local --profile <exact-v1|exact-binary-v1|exact-tree-v1|exact-tree-binary-v1|exact-symlink-v1> --workspace-id <32-hex> --expected-base <native-commit-id>
+  --trusted-local --profile <exact-v1|exact-binary-v1|exact-tree-v1|exact-tree-binary-v1|exact-symlink-v1|exact-gitlink-v1> --workspace-id <32-hex> --expected-base <native-commit-id>
   --author <name-and-email> [--committer <name-and-email>] --timestamp <unix-seconds>
   (--message <text> | --message-file <raw-file>) [--ref-hex]
   [--expected-result-tree <independently-chosen-native-tree-id>]
@@ -49,6 +49,14 @@ replace, edit, delete and original-coordinate rename operate on inert link-text
 blob bytes. No link target is traversed or materialized on the host. Regular-file
 changes and binary decoding keep their existing bounds; compressed edited renames,
 directories and gitlinks still refuse. Every older profile keeps refusing symlinks.
+
+exact-gitlink-v1 permits canonical mode 160000 submodule pointer additions,
+updates and deletions alongside regular-file text changes such as .gitmodules.
+Use full native index IDs and exact Subproject commit lines. Targets are opaque
+external commit IDs: no submodule is fetched, read or materialized. Binary,
+symlink, rename, dirty-submodule and implicit entry-kind changes refuse.
+Its path receipts use old_object/new_object for both blobs and commit pointers;
+all older profiles retain their original old_blob/new_blob fields and grammar.
 
 Optional --expected-result-tree binds the complete intended root, including
 unchanged siblings and file modes. A mismatch refuses before publishing a bundle.
@@ -125,6 +133,17 @@ pub fn run(args: &[String]) -> Result<u8, String> {
                 let candidate = if *profile == Profile::ExactTreeBinary {
                     node.runtime()
                         .block_on(node.prepare_trusted_binary_refactor_in(
+                            &request,
+                            &options.reference,
+                            options.base,
+                            *workspace_id,
+                            &input,
+                            metadata,
+                            *limits,
+                        ))
+                } else if *profile == Profile::ExactGitlink {
+                    node.runtime()
+                        .block_on(node.prepare_trusted_gitlink_patch_in(
                             &request,
                             &options.reference,
                             options.base,
@@ -273,11 +292,16 @@ fn prepared_receipt(
         .map(|pin| pin.receipt_field(candidate.root_tree))
         .transpose()?
         .unwrap_or_default();
+    let (old_key, new_key) = if profile == Profile::ExactGitlink {
+        ("old_object", "new_object")
+    } else {
+        ("old_blob", "new_blob")
+    };
     let paths = candidate.paths.iter().map(|path| {
         let old = path.old_blob.map_or_else(|| "null".into(), |id| quote(&id.to_string()));
         let new = path.new_blob.map_or_else(|| "null".into(), |id| quote(&id.to_string()));
         let mode = path.new_mode.map_or_else(|| "null".into(), |mode| quote(&format!("{mode:o}")));
-        format!("{{\"path_hex\":{},\"old_blob\":{old},\"new_blob\":{new},\"new_mode\":{mode},\"hunks\":{}}}", quote(&hex(&path.path)), path.hunks)
+        format!("{{\"path_hex\":{},\"{old_key}\":{old},\"{new_key}\":{new},\"new_mode\":{mode},\"hunks\":{}}}", quote(&hex(&path.path)), path.hunks)
     }).collect::<Vec<_>>().join(",");
     Ok(format!(
         concat!(

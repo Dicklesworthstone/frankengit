@@ -80,6 +80,32 @@ pub(super) fn execute(
     let (subject, candidate) = request.command(command, node.object_format)?;
     let options = ReviewOptions::default();
     let visibility = RefVisibility::new();
+    if request.rebase {
+        let inspected = drive_request_while(
+            node,
+            &context,
+            node.inspect_pull_request_rebase_bundle_in(
+                &context,
+                &subject,
+                candidate.merge_base,
+                candidate.commit,
+                bundle,
+                &visibility,
+                None,
+                &options,
+            ),
+            &mut live,
+        )
+        .map_err(|error| inspection_error(error.into()))?;
+        drop(bytes);
+        let maximum = usize::try_from(maximum_response).unwrap_or(usize::MAX);
+        let body = output::build_rebase(node, &subject, candidate, &inspected, maximum, &mut live)?;
+        return Ok(Reply {
+            status: Status::Success,
+            body,
+            terminal: None,
+        });
+    }
     let inspected = drive_request_while(
         node,
         &context,

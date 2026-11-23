@@ -1,4 +1,4 @@
-//! Bounded, single-repository HTTP gateway (frankengit-asa3).
+//! Bounded HTTP gateway with explicit, incarnation-bound repository routes.
 //!
 //! This is an explicit loopback capability profile, not organization/team IAM.
 //! Operators grant principals independent Git, issue, PR and outcome scopes
@@ -14,6 +14,8 @@ mod agent;
 mod artifacts;
 mod browser;
 mod credentials;
+mod default_branch;
+mod discovery;
 mod discussions;
 mod events;
 mod issues;
@@ -29,6 +31,8 @@ mod source;
 #[cfg(target_os = "linux")]
 mod workflow;
 pub use source::{source_agent_context_json, source_index_json, source_retrieval_json};
+mod routing;
+pub use routing::{HttpRepositoryRoute, HttpRepositoryServices, MAX_HTTP_REPOSITORY_ROUTES};
 mod stock_receive;
 mod upload_liveness;
 
@@ -561,22 +565,22 @@ impl OneNode {
                 "invalid bounded Smart HTTP service limits",
             ));
         }
-        let controller_count = controllers
-            .maintenance
-            .as_ref()
-            .map_or(0, |group| group.configs().len());
-        #[cfg(target_os = "linux")]
-        let controller_count = controller_count + usize::from(controllers.workflow.is_some());
-        validate_controller_capacity(
-            self.runtime().identity().blocking_max_threads,
-            controller_count,
-        )?;
-        #[cfg(target_os = "linux")]
-        if controllers.workflow.is_some() && controllers.on_workflow_drained.is_none() {
-            return Err(invalid_configuration(
-                "workflow service requires a terminal observation callback",
-            ));
-        }
+        let profile = self.smart_http_profile(credentials, services, max_in_flight)?;
+        self.serve_smart_http_profiles_lifetime(
+            listener,
+            max_in_flight,
+            routing::Profiles::single(profile),
+            acceptance,
+            controllers,
+        )
+    }
+
+    fn smart_http_profile(
+        &self,
+        credentials: CredentialSource,
+        services: RepositoryHttpServices,
+        idle_capacity: usize,
+    ) -> Result<Profile, NodeSmartHttpRefusal> {
         credentials.validate().map_err(credential_error)?;
         self.validate_smart_http_lfs_storage()?;
         #[cfg(unix)]
@@ -625,8 +629,8 @@ impl OneNode {
             .service_config
             .clone()
             .with_expected_repository_incarnation(self.repository_incarnation_id());
-        let profile = Arc::new(Profile {
-            nodes: Arc::new(NodeLanes::new(config.clone(), max_in_flight, "Smart HTTP")),
+        Ok(Profile {
+            nodes: Arc::new(NodeLanes::new(config.clone(), idle_capacity, "Smart HTTP")),
             config,
             route: self.git_daemon_repository_path().as_bytes().to_vec(),
             credentials,
@@ -640,7 +644,52 @@ impl OneNode {
             outcome_quota: Arc::new(PushQuota::default()),
             source_quota: Arc::new(PushQuota::default()),
             writers: Arc::new(WriterGate::new(MAX_CONCURRENT_WRITERS)),
-        });
+        })
+    }
+
+    fn serve_smart_http_profiles_lifetime(
+        &self,
+        listener: &TcpListener,
+        max_in_flight: usize,
+        profiles: routing::Profiles,
+        acceptance: lifetime::Acceptance<'_>,
+        controllers: Controllers<'_>,
+    ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
+        let address = listener
+            .local_addr()
+            .map_err(|source| io_error("inspect HTTP listener", source))?;
+        if !address.ip().is_loopback() {
+            return Err(invalid_configuration(
+                "Smart HTTP requires a loopback listener",
+            ));
+        }
+        if self.cell_state() != CellState::Serving {
+            return Err(invalid_configuration(
+                "bring the HTTP node into service before listening",
+            ));
+        }
+        if !(1..=MAX_IN_FLIGHT).contains(&max_in_flight) || !acceptance.valid() {
+            return Err(invalid_configuration(
+                "invalid bounded Smart HTTP service limits",
+            ));
+        }
+        let controller_count = controllers
+            .maintenance
+            .as_ref()
+            .map_or(0, |group| group.configs().len());
+        #[cfg(target_os = "linux")]
+        let controller_count = controller_count + usize::from(controllers.workflow.is_some());
+        validate_controller_capacity(
+            self.runtime().identity().blocking_max_threads,
+            controller_count,
+        )?;
+        #[cfg(target_os = "linux")]
+        if controllers.workflow.is_some() && controllers.on_workflow_drained.is_none() {
+            return Err(invalid_configuration(
+                "workflow service requires a terminal observation callback",
+            ));
+        }
+        let profiles = Arc::new(profiles);
         listener
             .set_nonblocking(true)
             .map_err(|source| io_error("configure HTTP listener", source))?;
@@ -784,8 +833,10 @@ impl OneNode {
             last_activity = Instant::now();
             // Queue time counts against ingress: a queued peer does not acquire
             // a new wall-clock allowance when a blocking worker becomes free.
-            let deadline =
-                GitDaemonSessionDeadline::new(profile.timeout, GitDaemonSessionWorkScaling::FLAT);
+            let deadline = GitDaemonSessionDeadline::new(
+                profiles.first().timeout,
+                GitDaemonSessionWorkScaling::FLAT,
+            );
             let finished = Arc::new(AtomicBool::new(false));
             let completion = Completion {
                 finished: Arc::clone(&finished),
@@ -793,10 +844,15 @@ impl OneNode {
                 refused: Arc::clone(&refused),
                 success: false,
             };
-            let child_profile = Arc::clone(&profile);
+            let child_profiles = Arc::clone(&profiles);
             match self.runtime.submit_blocking(move || {
                 let mut completion = completion;
-                completion.success = serve_connection(stream, deadline, &child_profile);
+                completion.success = serve_connection_with_routes(
+                    stream,
+                    deadline,
+                    child_profiles.first(),
+                    Some(&child_profiles),
+                );
             }) {
                 Ok(task) => pending.push(PendingSession {
                     finished,
@@ -846,7 +902,7 @@ impl OneNode {
                 None => error,
             });
         }
-        if let Err(error) = profile.nodes.close() {
+        if let Err(error) = profiles.close() {
             log_cleanup(&error);
             failure.get_or_insert_with(|| {
                 io_error(
@@ -899,12 +955,14 @@ const fn io_error(operation: &'static str, source: io::Error) -> NodeSmartHttpRe
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Status {
     Success,
+    NoContent,
     PartialContent,
     BadRequest,
     Unauthorized,
     Forbidden,
     NotFound,
     Conflict,
+    Precondition,
     TooLarge,
     HeaderTooLarge,
     MediaType,
@@ -921,12 +979,14 @@ impl Status {
     const fn line(self) -> &'static str {
         match self {
             Self::Success => "200 OK",
+            Self::NoContent => "204 No Content",
             Self::PartialContent => "206 Partial Content",
             Self::BadRequest => "400 Bad Request",
             Self::Unauthorized => "401 Unauthorized",
             Self::Forbidden => "403 Forbidden",
             Self::NotFound => "404 Not Found",
             Self::Conflict => "409 Conflict",
+            Self::Precondition => "412 Precondition Failed",
             Self::TooLarge => "413 Content Too Large",
             Self::HeaderTooLarge => "431 Request Header Fields Too Large",
             Self::MediaType => "415 Unsupported Media Type",
@@ -1236,7 +1296,11 @@ fn refuses_cross_site(
     local: Option<SocketAddr>,
     trusted: Option<&HttpTrustedOrigin>,
 ) -> bool {
-    if matches!(envelope.method, "GET" | "HEAD") {
+    #[cfg(unix)]
+    let overridden_upload = lfs::overrides_read_method(envelope);
+    #[cfg(not(unix))]
+    let overridden_upload = false;
+    if matches!(envelope.method, "GET" | "HEAD") && !overridden_upload {
         return false;
     }
     let site = envelope.sec_fetch_site;
@@ -1301,10 +1365,20 @@ pub(super) fn bearer_only(authorization: Option<&str>) -> Option<&str> {
     })
 }
 
+#[cfg(test)]
 fn serve_connection(
-    mut stream: TcpStream,
+    stream: TcpStream,
     deadline: GitDaemonSessionDeadline,
     profile: &Profile,
+) -> bool {
+    serve_connection_with_routes(stream, deadline, profile, None)
+}
+
+fn serve_connection_with_routes(
+    mut stream: TcpStream,
+    deadline: GitDaemonSessionDeadline,
+    ingress: &Profile,
+    routes: Option<&routing::Profiles>,
 ) -> bool {
     if stream.set_nonblocking(false).is_err() {
         return false;
@@ -1317,7 +1391,7 @@ fn serve_connection(
     let mut reader = DeadlineTcpStream::new(&mut stream, deadline.clone());
     let mut writer = ResponseWriter {
         inner: DeadlineTcpStream::new(&mut output, deadline),
-        timeout: profile.timeout,
+        timeout: ingress.timeout,
         started: false,
         preserve_request_deadline: false,
         agent: None,
@@ -1327,6 +1401,7 @@ fn serve_connection(
     let mut native = false;
     let mut native_mutation = false;
     let mut protection_api = false;
+    let mut default_branch_api = false;
     let mut pull_api = false;
     let mut milestone_api = false;
     let mut discussion_api = false;
@@ -1336,29 +1411,40 @@ fn serve_connection(
     let mut recovery = false;
     let mut recovery_error = None;
     let served = (|| -> Result<(), Status> {
-        let bytes = read_head(&mut reader, profile.http)?;
+        let limits = routes.map_or(ingress.http, routing::Profiles::http_limits);
+        let bytes = read_head(&mut reader, limits)?;
         // This shared policy precedes every adapter return, including an
         // authentication/key refusal or a discovery redirect. Otherwise an
         // adapter can reveal whether the configured repository route matched.
-        let envelope = head::parse(&bytes, profile.http)?.ok_or(Status::BadRequest)?;
+        let envelope = head::parse(&bytes, limits)?.ok_or(Status::BadRequest)?;
         version = envelope.version;
-        if refuses_cross_site(&envelope, local, profile.config.http_trusted_origin()) {
+        if refuses_cross_site(&envelope, local, ingress.config.http_trusted_origin()) {
             return Err(Status::CrossSite);
         }
-        let Some(bytes) = stock_receive::adapt(bytes, profile, &mut version, &mut writer)? else {
-            return Ok(());
-        };
-        let envelope = head::parse(&bytes, profile.http)?.ok_or(Status::BadRequest)?;
-        version = envelope.version;
-        // Select the response contract before canonical bearer verification.
-        // Rejected agent credentials must preserve native JSON errors and the
-        // Bearer-only challenge, including outcome-recovery uncertainty.
+        // The deployment home is outside any individual repository route.
+        // Discovery authenticates every catalog member independently and does
+        // not lease a node or grant publication. Keep the original read deadline.
+        if discovery::is_route(envelope.target) {
+            writer.preserve_request_deadline = true;
+            return discovery::serve(
+                ingress,
+                routes,
+                &envelope,
+                &bytes[envelope.consumed..],
+                &mut writer,
+                &admission_deadline,
+            );
+        }
+        // Select the response contracts handled below before route lookup or
+        // authentication. Unknown catalog routes preserve these typed native
+        // refusals, including canonical agent outcome-recovery uncertainty.
         recovery = envelope
             .target
             .split('?')
             .next()
             .is_some_and(|path| path.contains("/api/v1/outcomes"));
         protection_api = protection::is_route(envelope.target);
+        default_branch_api = default_branch::is_route(envelope.target);
         queue_api = queues::is_route(envelope.target);
         discussion_api = discussions::is_route(envelope.target);
         source_api = envelope
@@ -1377,6 +1463,7 @@ fn serve_connection(
             .next()
             .is_some_and(|path| path.contains("/api/v1/milestones"));
         native = protection_api
+            || default_branch_api
             || queue_api
             || discussion_api
             || source_api
@@ -1393,6 +1480,19 @@ fn serve_connection(
                 .next()
                 .is_some_and(|path| path.contains("/api/v1/issues"));
         native_mutation = native && envelope.method == "POST" && !source_api;
+        let profile = match routes {
+            Some(routes) => routes.select(envelope.target).ok_or(Status::Unauthorized)?,
+            None => ingress,
+        };
+        // The catalog's header parser admits the largest configured body
+        // envelope only for routing. The selected repository's own tighter
+        // limits apply before any authentication, redirect, or body read.
+        head::parse(&bytes, profile.http)?.ok_or(Status::BadRequest)?;
+        let Some(bytes) = stock_receive::adapt(bytes, profile, &mut version, &mut writer)? else {
+            return Ok(());
+        };
+        let envelope = head::parse(&bytes, profile.http)?.ok_or(Status::BadRequest)?;
+        version = envelope.version;
         let agent_profile = agent::authenticate(
             profile,
             &envelope,
@@ -1456,7 +1556,21 @@ fn serve_connection(
                 error.status
             });
         }
-        let protection_request = if protection_api {
+        let default_branch_request = if default_branch_api {
+            Some(default_branch::Request::parse(&envelope).map_err(|error| {
+                api_error = Some(error);
+                error.status
+            })?)
+        } else {
+            None
+        };
+        if let Some(request) = &default_branch_request {
+            native_mutation = request.is_mutation();
+            if !request.is_mutation() {
+                writer.preserve_request_deadline = true;
+            }
+        }
+        let protection_request = if default_branch_request.is_none() && protection_api {
             Some(protection::Request::parse(&envelope).map_err(|error| {
                 api_error = Some(error);
                 error.status
@@ -1467,30 +1581,40 @@ fn serve_connection(
         if let Some(request) = &protection_request {
             native_mutation = request.is_mutation();
         }
-        let queue_request = if protection_request.is_none() && queue_api {
-            Some(queues::Request::parse(&envelope).map_err(|error| {
-                api_error = Some(error);
-                error.status
-            })?)
-        } else {
-            None
-        };
-        if let Some(request) = &queue_request {
-            native_mutation = request.is_mutation();
-        }
-        let source_request =
-            if protection_request.is_none() && queue_request.is_none() && source_api {
-                Some(source::Request::parse(&envelope).map_err(|error| {
+        let queue_request =
+            if default_branch_request.is_none() && protection_request.is_none() && queue_api {
+                Some(queues::Request::parse(&envelope).map_err(|error| {
                     api_error = Some(error);
                     error.status
                 })?)
             } else {
                 None
             };
-        if let Some(request) = &source_request {
+        if let Some(request) = &queue_request {
             native_mutation = request.is_mutation();
         }
-        let pull_request = if protection_request.is_none()
+        let source_request = if default_branch_request.is_none()
+            && protection_request.is_none()
+            && queue_request.is_none()
+            && source_api
+        {
+            Some(source::Request::parse(&envelope).map_err(|error| {
+                api_error = Some(error);
+                error.status
+            })?)
+        } else {
+            None
+        };
+        if let Some(request) = &source_request {
+            native_mutation = request.is_mutation();
+            // A complete archive may spend most of its lifetime collecting
+            // source. Starting its binary response cannot renew that budget.
+            if request.is_archive() {
+                writer.preserve_request_deadline = true;
+            }
+        }
+        let pull_request = if default_branch_request.is_none()
+            && protection_request.is_none()
             && queue_request.is_none()
             && source_request.is_none()
         {
@@ -1503,8 +1627,12 @@ fn serve_connection(
         };
         if let Some(request) = &pull_request {
             native_mutation = request.is_mutation();
+            if request.preserves_deadline() {
+                writer.preserve_request_deadline = true;
+            }
         }
-        let discussion_request = if protection_request.is_none()
+        let discussion_request = if default_branch_request.is_none()
+            && protection_request.is_none()
             && queue_request.is_none()
             && source_request.is_none()
             && pull_request.is_none()
@@ -1520,7 +1648,8 @@ fn serve_connection(
         if let Some(request) = &discussion_request {
             native_mutation = request.is_mutation();
         }
-        let issue_request = if protection_request.is_none()
+        let issue_request = if default_branch_request.is_none()
+            && protection_request.is_none()
             && queue_request.is_none()
             && source_request.is_none()
             && pull_request.is_none()
@@ -1536,7 +1665,8 @@ fn serve_connection(
         if let Some(request) = &issue_request {
             native_mutation = request.is_mutation();
         }
-        let git_request = if protection_request.is_none()
+        let git_request = if default_branch_request.is_none()
+            && protection_request.is_none()
             && queue_request.is_none()
             && source_request.is_none()
             && discussion_request.is_none()
@@ -1548,61 +1678,73 @@ fn serve_connection(
             None
         };
         let mut source_read_grant = None;
-        let session =
-            if let Some(request) = &protection_request {
-                protection::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
-                    .map_err(|error| {
+        let session = if let Some(request) = &default_branch_request {
+            default_branch::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
+                .map_err(|error| {
+                api_error = Some(error);
+                error.status
+            })?
+        } else if let Some(request) = &protection_request {
+            protection::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
+                .map_err(|error| {
                     api_error = Some(error);
                     error.status
                 })?
-            } else if let Some(request) = &queue_request {
-                queues::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
-                    .map_err(|error| {
-                        api_error = Some(error);
-                        error.status
-                    })?
-            } else if let Some(request) = &source_request {
-                source::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
-                    .map(|(session, read)| {
-                        source_read_grant = read;
-                        session
-                    })
-                    .map_err(|error| {
-                        api_error = Some(error);
-                        error.status
-                    })?
-            } else if let Some(request) = &pull_request {
-                pulls::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
-                    .map_err(|error| {
-                        api_error = Some(error);
-                        error.status
-                    })?
-            } else if let Some(request) = &discussion_request {
-                discussions::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
-                    .map_err(|error| {
-                        api_error = Some(error);
-                        error.status
-                    })?
-            } else if let Some(request) = &issue_request {
-                issues::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
-                    .map_err(|error| {
-                        api_error = Some(error);
-                        error.status
-                    })?
-            } else {
-                authenticated_session(
-                    git_request.as_ref().ok_or(Status::BadRequest)?,
-                    &bytes[..envelope.consumed],
-                    profile,
-                )?
-            };
+        } else if let Some(request) = &queue_request {
+            queues::authenticate(request, &envelope, &bytes[..envelope.consumed], profile).map_err(
+                |error| {
+                    api_error = Some(error);
+                    error.status
+                },
+            )?
+        } else if let Some(request) = &source_request {
+            source::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
+                .map(|(session, read)| {
+                    source_read_grant = read;
+                    session
+                })
+                .map_err(|error| {
+                    api_error = Some(error);
+                    error.status
+                })?
+        } else if let Some(request) = &pull_request {
+            pulls::authenticate(request, &envelope, &bytes[..envelope.consumed], profile).map_err(
+                |error| {
+                    api_error = Some(error);
+                    error.status
+                },
+            )?
+        } else if let Some(request) = &discussion_request {
+            discussions::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
+                .map_err(|error| {
+                    api_error = Some(error);
+                    error.status
+                })?
+        } else if let Some(request) = &issue_request {
+            issues::authenticate(request, &envelope, &bytes[..envelope.consumed], profile).map_err(
+                |error| {
+                    api_error = Some(error);
+                    error.status
+                },
+            )?
+        } else {
+            authenticated_session(
+                git_request.as_ref().ok_or(Status::BadRequest)?,
+                &bytes[..envelope.consumed],
+                profile,
+            )?
+        };
         let mutation = native_mutation
             || git_request
                 .as_ref()
                 .is_some_and(|request| request.operation == Operation::Rpc(Service::ReceivePack));
-        if (protection_request.is_some()
+        if (default_branch_request.is_some()
+            || protection_request.is_some()
             || queue_request.is_some()
             || source_request.is_some()
+            || pull_request
+                .as_ref()
+                .is_some_and(|request| request.uses_read_quota())
             || discussion_request.is_some()
             || issue_request
                 .as_ref()
@@ -1658,9 +1800,12 @@ fn serve_connection(
             None
         };
         let initial = &bytes[envelope.consumed..];
-        let body_not_allowed = protection_request
+        let body_not_allowed = default_branch_request
             .as_ref()
             .is_some_and(|request| !request.is_mutation())
+            || protection_request
+                .as_ref()
+                .is_some_and(|request| !request.is_mutation())
             || queue_request
                 .as_ref()
                 .is_some_and(|request| !request.accepts_body())
@@ -1688,7 +1833,25 @@ fn serve_connection(
                 writer.inner.flush()?;
             }
             let mut body = io::Cursor::new(initial).chain(&mut reader);
-            if let Some(request) = &protection_request {
+            if let Some(request) = &default_branch_request {
+                let reply = default_branch::execute(
+                    &node,
+                    request,
+                    &session,
+                    envelope.body,
+                    &mut body,
+                    profile.http,
+                    profile.maximum_response_bytes,
+                    &admission_deadline,
+                )
+                .map_err(|error| {
+                    api_error = Some(error);
+                    error.status
+                })?;
+                reply
+                    .send(&mut writer, version)
+                    .map_err(|_| Status::Unavailable)?;
+            } else if let Some(request) = &protection_request {
                 let reply = protection::execute(
                     &node,
                     request,
@@ -1733,6 +1896,7 @@ fn serve_connection(
                     &mut body,
                     profile.http,
                     profile.maximum_response_bytes,
+                    &admission_deadline,
                 )
                 .map_err(|error| {
                     api_error = Some(error);
@@ -1750,6 +1914,7 @@ fn serve_connection(
                     &mut body,
                     profile.http,
                     profile.maximum_response_bytes,
+                    &admission_deadline,
                 )
                 .map_err(|error| {
                     api_error = Some(error);
@@ -1894,7 +2059,9 @@ fn serve_connection(
             } else if native {
                 let error = api_error
                     .unwrap_or_else(|| issues::ApiError::from_status(status, native_mutation));
-                if protection_api {
+                if default_branch_api {
+                    let _ = error.send_named(&mut writer, version, "default_branch_error");
+                } else if protection_api {
                     let _ = error.send_named(&mut writer, version, "protection_error");
                 } else if queue_api {
                     let _ = error.send_named(&mut writer, version, "merge_queue_error");
@@ -1941,6 +2108,7 @@ fn log_cleanup(error: &NodeRefusal) {
 mod tests {
     mod agent_credentials;
     mod issue_search;
+    mod pull_search;
     mod queue_preparation;
 
     #[test]
@@ -2446,6 +2614,49 @@ mod tests {
             "Origin: http://127.0.0.1:8123\r\n"
         ));
         assert!(!refuses(None, "POST", own, ""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tus_method_override_cannot_bypass_the_cross_site_upload_guard() {
+        let local = Some(SocketAddr::from(([127, 0, 0, 1], 8123)));
+        let refuses = |method: &str, target: &str, overrides: &str, origin: &str| {
+            let bytes = format!(
+                "{method} {target} HTTP/1.1\r\nHost: 127.0.0.1:8123\r\nOrigin: {origin}\r\n{overrides}\r\n"
+            );
+            let envelope = head::parse(bytes.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            refuses_cross_site(&envelope, local, None)
+        };
+        let tus = format!("/repo.git/info/lfs/objects/{}/12/tus", "a".repeat(64));
+        for method in ["GET", "HEAD", "POST", "PATCH"] {
+            assert!(refuses(
+                method,
+                &tus,
+                "X-HTTP-Method-Override: PATCH\r\n",
+                "https://evil.example",
+            ));
+            assert!(!refuses(
+                method,
+                &tus,
+                "X-HTTP-Method-Override: PATCH\r\n",
+                "http://127.0.0.1:8123",
+            ));
+        }
+        assert!(refuses(
+            "HEAD",
+            &tus,
+            "X-HTTP-Method-Override: HEAD\r\nX-HTTP-Method-Override: PATCH\r\n",
+            "https://evil.example",
+        ));
+        assert!(!refuses("HEAD", &tus, "", "https://evil.example"));
+        assert!(!refuses(
+            "GET",
+            "/repo.git/info/refs?service=git-upload-pack",
+            "X-HTTP-Method-Override: PATCH\r\n",
+            "https://evil.example",
+        ));
     }
 
     /// An external TLS terminator's public origin is accepted only when the

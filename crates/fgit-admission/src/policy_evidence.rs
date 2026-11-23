@@ -45,6 +45,9 @@ mod authentication;
 pub use authentication::{
     AgentAuthenticationPolicyDecisionEvidence, AuthenticationPolicyDecisionEvidence,
 };
+#[path = "policy_evidence/principal_kind.rs"]
+mod principal_kind;
+pub use principal_kind::PrincipalKindPolicyDecisionEvidence;
 
 /// Exact supported policy-evidence minor. The legacy variant is not a claim
 /// that the historical record retained an evaluated compiled snapshot.
@@ -56,6 +59,7 @@ pub enum PolicyDecisionRecord {
     ActorActivated(Box<ActorPolicyDecisionEvidence>),
     AuthenticationActivated(Box<AuthenticationPolicyDecisionEvidence>),
     AgentAuthenticationActivated(Box<AgentAuthenticationPolicyDecisionEvidence>),
+    PrincipalKindActivated(Box<PrincipalKindPolicyDecisionEvidence>),
 }
 
 impl PolicyDecisionRecord {
@@ -68,6 +72,7 @@ impl PolicyDecisionRecord {
             Self::ActorActivated(body) => &body.0.references.base,
             Self::AuthenticationActivated(body) => &body.0.references.base,
             Self::AgentAuthenticationActivated(body) => &body.0.references.base,
+            Self::PrincipalKindActivated(body) => &body.0.references.base,
         }
     }
 
@@ -79,6 +84,7 @@ impl PolicyDecisionRecord {
             Self::ActorActivated(body) => evidence_root(body.as_ref()),
             Self::AuthenticationActivated(body) => evidence_root(body.as_ref()),
             Self::AgentAuthenticationActivated(body) => evidence_root(body.as_ref()),
+            Self::PrincipalKindActivated(body) => evidence_root(body.as_ref()),
         }
     }
 
@@ -106,6 +112,11 @@ impl PolicyDecisionRecord {
                 Ok(bytes)
             }
             Self::AgentAuthenticationActivated(body) => {
+                let bytes = encode_body(body.as_ref())?;
+                bound("policy_decision.frame", bytes.len(), MAX_FRAME_BYTES)?;
+                Ok(bytes)
+            }
+            Self::PrincipalKindActivated(body) => {
                 let bytes = encode_body(body.as_ref())?;
                 bound("policy_decision.frame", bytes.len(), MAX_FRAME_BYTES)?;
                 Ok(bytes)
@@ -156,11 +167,17 @@ impl PolicyDecisionRecord {
                     AgentAuthenticationPolicyDecisionEvidence,
                 >(bytes, limits)?))
             }
+            6 => {
+                bound("policy_decision.frame", bytes.len(), MAX_FRAME_BYTES)?;
+                Self::PrincipalKindActivated(Box::new(decode_body::<
+                    PrincipalKindPolicyDecisionEvidence,
+                >(bytes, limits)?))
+            }
             minor => {
                 return Err(CodecRefusal::schema_minor_unsupported(
                     PolicyDecisionEvidence::DOMAIN,
                     minor,
-                    5,
+                    6,
                 ));
             }
         };
@@ -180,6 +197,7 @@ impl PolicyDecisionRecord {
             Self::ActorActivated(body) => Some(&body.0.references),
             Self::AuthenticationActivated(body) => Some(&body.0.references),
             Self::AgentAuthenticationActivated(body) => Some(&body.0.references),
+            Self::PrincipalKindActivated(body) => Some(&body.0.references),
         }
     }
 
@@ -190,6 +208,7 @@ impl PolicyDecisionRecord {
         match self {
             Self::AuthenticationActivated(body) => Some(body.authentication()),
             Self::AgentAuthenticationActivated(body) => Some(body.authentication()),
+            Self::PrincipalKindActivated(body) => Some(body.authentication()),
             _ => None,
         }
     }
@@ -207,6 +226,7 @@ impl PolicyDecisionRecord {
             Self::ActorActivated(body) => body.verify_decision(context, basis, fold),
             Self::AuthenticationActivated(body) => body.verify_decision(context, basis, fold),
             Self::AgentAuthenticationActivated(body) => body.verify_decision(context, basis, fold),
+            Self::PrincipalKindActivated(body) => body.verify_decision(context, basis, fold),
         }
     }
 }
@@ -329,6 +349,20 @@ impl RefPolicyEvaluation {
             return Err(RefusalCode::EvidenceInvalid);
         }
         let evaluation = match (profile, authentication) {
+            (
+                Profile::RepositoryPrincipalKindV1,
+                Some(AdmissionAuthentication::AgentCredential(agent)),
+            ) => {
+                agent.validate()?;
+                if agent.agent() != principal {
+                    return Err(RefusalCode::EvidenceInvalid);
+                }
+                let input =
+                    fgit_policy::reference_profile::AgentReferenceInput::try_new(principal, inputs)
+                        .map_err(|_| RefusalCode::EvidenceInvalid)?;
+                fgit_policy::reference_profile::evaluate_agent(&snapshot, &input)
+                    .map_err(|_| RefusalCode::ProtectedRefTransitionDenied)?
+            }
             (Profile::RepositoryAuthenticationV1, Some(authentication)) => {
                 let input = fgit_policy::reference_profile::AuthenticatedReferenceInput::try_new(
                     principal,
@@ -339,7 +373,8 @@ impl RefPolicyEvaluation {
                 fgit_policy::reference_profile::evaluate_authenticated(&snapshot, &input)
                     .map_err(|_| RefusalCode::ProtectedRefTransitionDenied)?
             }
-            (Profile::RepositoryAuthenticationV1, None) | (_, Some(_)) => {
+            (Profile::RepositoryAuthenticationV1 | Profile::RepositoryPrincipalKindV1, None)
+            | (_, Some(_)) => {
                 return Err(RefusalCode::EvidenceInvalid);
             }
             (_, None) => {
@@ -562,7 +597,8 @@ impl EvaluatedPolicyDecisionEvidence {
                 Profile::DirectReviewV1 => self.review_branches.binary_search(fact.name()).is_ok(),
                 Profile::RepositoryRefV1
                 | Profile::RepositoryActorIdV1
-                | Profile::RepositoryAuthenticationV1 => true,
+                | Profile::RepositoryAuthenticationV1
+                | Profile::RepositoryPrincipalKindV1 => true,
             })
             .map(RefPolicyInput::evaluator_fact)
             .collect()
@@ -614,6 +650,7 @@ enum Profile {
     RepositoryRefV1,
     RepositoryActorIdV1,
     RepositoryAuthenticationV1,
+    RepositoryPrincipalKindV1,
 }
 
 impl Profile {
@@ -627,6 +664,9 @@ impl Profile {
             Self::RepositoryAuthenticationV1 => {
                 Some(ReferencePolicyProfile::ReferenceAuthenticationV1)
             }
+            Self::RepositoryPrincipalKindV1 => {
+                Some(ReferencePolicyProfile::ReferencePrincipalKindV1)
+            }
             Self::HeadDeletionV1 | Self::DirectReviewV1 => None,
         }
     }
@@ -637,6 +677,7 @@ impl Profile {
             Self::RepositoryRefV1 => 3,
             Self::RepositoryActorIdV1 => 4,
             Self::RepositoryAuthenticationV1 => 5,
+            Self::RepositoryPrincipalKindV1 => 6,
         }
     }
     const fn name(self) -> &'static str {
@@ -646,6 +687,7 @@ impl Profile {
             Self::RepositoryRefV1 => "repository_ref_v1",
             Self::RepositoryActorIdV1 => "repository_ref_actor_id_v1",
             Self::RepositoryAuthenticationV1 => "repository_ref_authentication_v1",
+            Self::RepositoryPrincipalKindV1 => "repository_ref_principal_kind_v1",
         }
     }
     const fn reason(self) -> &'static str {
@@ -654,7 +696,8 @@ impl Profile {
             Self::DirectReviewV1 => "direct update requires canonical review",
             Self::RepositoryRefV1
             | Self::RepositoryActorIdV1
-            | Self::RepositoryAuthenticationV1 => "repository policy",
+            | Self::RepositoryAuthenticationV1
+            | Self::RepositoryPrincipalKindV1 => "repository policy",
         }
     }
     const fn predicate(self) -> Predicate {
@@ -663,7 +706,8 @@ impl Profile {
             Self::DirectReviewV1 => Predicate::Always,
             Self::RepositoryRefV1
             | Self::RepositoryActorIdV1
-            | Self::RepositoryAuthenticationV1 => Predicate::Never,
+            | Self::RepositoryAuthenticationV1
+            | Self::RepositoryPrincipalKindV1 => Predicate::Never,
         }
     }
 
@@ -900,3 +944,7 @@ mod tests;
 #[cfg(test)]
 #[path = "policy_evidence/authentication_tests.rs"]
 mod authentication_tests;
+
+#[cfg(test)]
+#[path = "policy_evidence/principal_kind_tests.rs"]
+mod principal_kind_tests;

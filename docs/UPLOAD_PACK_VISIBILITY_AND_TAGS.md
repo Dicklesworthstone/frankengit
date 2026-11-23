@@ -23,7 +23,39 @@ revocation of a transfer when another transaction changes policy after the
 snapshot was selected. The current profile eagerly verifies the complete
 visible graph before advertising and retains the existing finite node, edge,
 byte and deadline envelopes. It is not a streaming large-repository or latency
-optimization. No performance or side-channel-freedom claim is made.
+optimization by itself. No end-to-end throughput or side-channel-freedom claim
+is made.
+
+## Shared immutable upload indexes
+
+Sessions opened from the same service configuration reuse a complete visible
+projection only when its authenticated basis, advertised roots, object format,
+and limits match. They now also share the projection's immutable membership
+and path-hint allocations. Previously, even a warm `ls-remote` or fetch copied
+the full visible membership twice and its path-hint map once; cloning the
+repository adapter copied membership again. The selected session and its
+negotiation adapter now pin the same membership, alongside the already shared
+native object and edge facts.
+
+The ownership change removes those history-sized copies. It does not remove
+the initial graph verification, per-request ref processing, want/have traversal,
+pack selection, or payload verification. There is no new persistent index,
+storage format, protocol, or authority source.
+
+A later head creates a separate immutable projection, even when its refs have
+returned to the same values. Existing transfers keep their previously selected
+graph; it cannot satisfy a materialization at another basis. New sessions
+obtain independent deadline and work counters. Replacing membership through
+the public adapter builder clears its shallow, object-info, and ref-in-want
+proofs, without changing another adapter. Failed or cancelled preparation does
+not publish a projection.
+
+The native projection-cache tests cover SHA-1 and SHA-256 session/child reuse,
+deleted-ref and changed-generation isolation, strict-limit refusal, cancellation,
+adapter replacement, and independent deadlines. A component test builds a
+4,096-commit native history and verifies that 64 cloned adapters retain one
+membership allocation; it is an ownership check, not a transport throughput or
+process-RSS measurement.
 
 ## Partial-clone extension
 
@@ -34,6 +66,63 @@ behavior described below is the earlier implementation's measured baseline,
 not the current production capability set. The strict no-capability refusal
 remains covered in wire tests. Current visibility and historical-retention
 boundaries are unchanged.
+
+## Protocol-v2 object-size queries
+
+`serve`, `serve-ssh` and `serve-http` advertise `object-info` after preparing
+their exact authorized visible graph. A v2 client can send
+`command=object-info`, the capability/argument delimiter, `size`, one or more
+`oid <full-native-id>` arguments, and the request flush. It receives the size
+attribute, one size row for each requested identity, and a response flush.
+This metadata-only command does not construct or transmit a pack and can
+precede `ls-refs`, another metadata query or `fetch` on the same connection.
+Each HTTP RPC remains one independent command.
+
+The implemented profile follows Git **2.54.0**
+[`protocol-caps.c`](https://github.com/git/git/blob/v2.54.0/protocol-caps.c) and
+its [`pkt-line.c`](https://github.com/git/git/blob/v2.54.0/pkt-line.c) writer:
+textual response payloads omit the optional terminal LF, duplicate OIDs retain
+their order, repeated `size` arguments are idempotent, and a request with no
+OID arguments returns only the flush. Omitting `size` echoes the requested
+identities without querying metadata. Later Git object-type attributes and
+other unknown arguments return a typed refusal; they are not silently ignored.
+
+Sizes report uncompressed native object-body lengths from the authenticated
+visible projection. Commit, tree and tag lengths come from the verified native
+body walk. Blob lengths come from bounded envelope reads that check the fabric
+namespace and requested OID, and compare the declared payload length with the
+stored file's payload length. Blob payloads are not read or rehashed. A size
+response does not establish that
+a stored blob payload still matches its OID. Body-serving paths retain their
+verification checks and refuse corrupted payloads. The query performs no
+additional graph walk or blob-body read. A visible blob larger than the selected
+pack's per-blob payload ceiling remains queryable, without authorizing a later
+fetch beyond that ceiling.
+
+Hidden-only, deleted-only and unknown objects all receive the same empty size
+value: the supplied OID followed by one space. An empty visible blob instead
+returns numeric `0`. Authorization is checked before metadata lookup; physical
+storage, a historical admission inventory or a prior visibility cache cannot
+disclose size. The generic hidden-ref wrapper also guards its metadata seam.
+Replacing the node view's disclosure closure clears its metadata proof, so a
+caller-supplied object list cannot inherit the capability.
+
+Every OID argument, including repetitions, consumes the existing `max_wants`
+allowance (16,384 by default). Responses retain the existing pkt-line and total
+outbound byte limits. The provider checks the original connection deadline
+before and after response work, including hidden-object and attribute-free
+queries; errors release no partial command response. The operation inherits
+the existing exact-snapshot revocation boundary above and grants no write or
+retention authority.
+
+Regressions live in
+[`fgit-wire/tests/object_info.rs`](../crates/fgit-wire/tests/object_info.rs)
+and
+[`upload_visibility/tests/object_info.rs`](../crates/fgit-node/src/upload_visibility/tests/object_info.rs).
+They cover both native object formats, packet fragmentation, repetitions,
+resource-boundary twins, cancellation, stateless HTTP framing and real native
+TCP disclosure before and after policy changes and reopening. Their existence
+does not imply a current executed compatibility or release gate.
 
 ## Verified basename grouping for served packs
 

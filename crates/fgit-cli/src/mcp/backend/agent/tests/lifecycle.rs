@@ -228,7 +228,10 @@ fn mcp_agent_publishes_metadata_and_recovers_original_sponsored_evidence_after_r
         let replacement_id = issue(
             &backend.node,
             &token(0xbb),
-            grant(&backend.node, ALL_OPERATIONS),
+            grant(
+                &backend.node,
+                ALL_OPERATIONS & !(SOURCE_PUBLISH | SOURCE_BRANCH_CREATE),
+            ),
             "issue-replacement",
         );
         let mut foreign = grant(&backend.node, OUTCOMES_READ);

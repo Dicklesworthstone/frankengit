@@ -117,6 +117,62 @@ fn symlink_profile_is_explicit_and_reuses_the_same_input_and_output_limits() {
     }
 }
 #[test]
+fn gitlink_profile_is_explicit_and_retains_full_identity_and_input_bounds() {
+    for width in [40, 64] {
+        let old = "a".repeat(width);
+        let new = "b".repeat(width);
+        let patch = format!(
+            "diff --git a/vendor/lib b/vendor/lib\nindex {old}..{new} 160000\n--- a/vendor/lib\n+++ b/vendor/lib\n@@ -1 +1 @@\n-Subproject commit {old}\n+Subproject commit {new}\n"
+        );
+        let mut args = prepare_args(width);
+        replace(&mut args, "--profile", "exact-gitlink-v1");
+        let Operation::Prepare {
+            profile, limits, ..
+        } = options::parse(&args).unwrap().operation
+        else {
+            panic!("expected preparation");
+        };
+        assert_eq!(profile, Profile::ExactGitlink);
+        assert_eq!(profile.token(), "exact-gitlink-v1");
+        profile.preflight(patch.as_bytes(), limits).unwrap();
+        let smaller = fgit_forge::patch::PatchLimits {
+            max_patch_bytes: patch.len() - 1,
+            ..limits
+        };
+        assert!(profile.preflight(patch.as_bytes(), smaller).is_err());
+        assert!(
+            profile
+                .preflight(patch.replace(&new, &new[..7]).as_bytes(), limits)
+                .is_err()
+        );
+        assert!(
+            profile
+                .preflight(
+                    patch
+                        .replace(
+                            &format!("+Subproject commit {new}\n"),
+                            &format!("+Subproject commit {new}-dirty\n")
+                        )
+                        .as_bytes(),
+                    limits
+                )
+                .is_err()
+        );
+        for legacy in [
+            Profile::Exact,
+            Profile::ExactBinary,
+            Profile::ExactTree,
+            Profile::ExactTreeBinary,
+            Profile::ExactSymlink,
+        ] {
+            assert!(legacy.preflight(patch.as_bytes(), limits).is_err());
+        }
+        args.extend(["--profile".into(), "exact-gitlink-v1".into()]);
+        assert!(options::parse(&args).is_err());
+    }
+}
+
+#[test]
 fn missing_duplicate_and_cross_operation_fields_refuse_before_io() {
     for args in [prepare_args(40), apply_args(40)] {
         let mut no_trust = args.clone();

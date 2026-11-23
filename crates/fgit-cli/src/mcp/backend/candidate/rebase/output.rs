@@ -109,13 +109,15 @@ fn shared_error(error: ToolError) -> ToolError {
         invalid_report()
     }
 }
-fn resolutions(
-    input: &input::Input,
+pub(in super::super) fn resolutions(
+    recipes: Option<&[RebaseCommitResolution]>,
+    format: GitHashAlgorithm,
+    limits: PreparationLimits,
     outcome: &RebasePreparation,
     observed: &[RebaseResolvedStep],
     live: &mut impl FnMut() -> bool,
 ) -> Result<Value, ToolError> {
-    let Some(recipes) = input.resolutions.as_deref() else {
+    let Some(recipes) = recipes else {
         return if observed.is_empty() {
             Ok(Value::Array(Vec::new()))
         } else {
@@ -176,8 +178,8 @@ fn resolutions(
         let paths = super::super::replay::output::receipts(
             supplied.get(&row.original).ok_or_else(invalid_report)?,
             &row.paths,
-            input.request.source_tip.algorithm(),
-            input.limits,
+            format,
+            limits,
             live,
         )
         .map_err(shared_error)?;
@@ -215,7 +217,14 @@ pub(super) fn render(
         return Err(invalid_report());
     }
     validate_steps(input, steps)?;
-    let decisions = resolutions(input, report.outcome, report.resolutions, live)?;
+    let decisions = resolutions(
+        input.resolutions.as_deref(),
+        input.request.source_tip.algorithm(),
+        input.limits,
+        report.outcome,
+        report.resolutions,
+        live,
+    )?;
     let mut fields = backend.header(report.head);
     fields.extend(binding(backend));
     fields.extend([

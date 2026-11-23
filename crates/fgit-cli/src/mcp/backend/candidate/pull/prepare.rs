@@ -76,6 +76,7 @@ pub(super) fn configuration(args: &Object, format: GitHashAlgorithm) -> Result<I
     let profile = match string(args, "merge_profile")?.unwrap_or("path-merge-v1") {
         "path-merge-v1" => MergeProfile::PathMergeV1,
         "exact-renames-v1" => MergeProfile::ExactRenamesV1,
+        "builtin-attributes-v1" => MergeProfile::BuiltinAttributesV1,
         _ => return Err(ToolError::invalid("invalid_merge_profile")),
     };
     let style = match string(args, "method")?.unwrap_or("merge-commit") {
@@ -117,7 +118,11 @@ pub(super) fn properties(operation: &str) -> Object {
             ("default", text("path-merge-v1")),
             (
                 "enum",
-                Value::Array(vec![text("path-merge-v1"), text("exact-renames-v1")]),
+                Value::Array(vec![
+                    text("path-merge-v1"),
+                    text("exact-renames-v1"),
+                    text("builtin-attributes-v1"),
+                ]),
             ),
         ]),
     );
@@ -192,6 +197,7 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
             text(match input.profile {
                 MergeProfile::PathMergeV1 => "path-merge-v1",
                 MergeProfile::ExactRenamesV1 => "exact-renames-v1",
+                MergeProfile::BuiltinAttributesV1 => "builtin-attributes-v1",
             }),
         ),
         ("method".into(), text(merge_method_name(input.style))),
@@ -387,7 +393,7 @@ pub(super) fn render_with_publication(
     Ok(result)
 }
 
-fn valid_path(path: &[u8]) -> bool {
+pub(super) fn valid_path(path: &[u8]) -> bool {
     path.len() <= 4096
         && !path.contains(&0)
         && (path.is_empty()
@@ -395,7 +401,10 @@ fn valid_path(path: &[u8]) -> bool {
                 .split(|b| *b == b'/')
                 .all(|p| !p.is_empty() && p != b"." && p != b".."))
 }
-fn entry(entry: Option<&MergeEntry>, format: GitHashAlgorithm) -> Result<Value, ToolError> {
+pub(super) fn entry(
+    entry: Option<&MergeEntry>,
+    format: GitHashAlgorithm,
+) -> Result<Value, ToolError> {
     let Some(entry) = entry else {
         return Ok(Value::Null);
     };

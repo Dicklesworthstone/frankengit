@@ -24,7 +24,7 @@ usage: fg pr review <storage-root> <tenant-id> <repository-id> <pr-number> --tru
   --review-version <own-stream-version; 0=new> --decision approve|request-changes|withdraw
   --source-ref <branch> --target-ref <branch> --source-tip <oid> --target-tip <oid>
   --merge-base <oid> --candidate <oid> --policy-epoch <n> [--reason <text>]
-  [--bundle <path>; required except withdrawal]
+  [--bundle <path>; required except withdrawal] [--method rebase]
 usage: fg pr reviews <storage-root> <tenant-id> <repository-id> <pr-number> --trusted-local
   [--object-format sha1|sha256] [--limit <1..100>]
   [--after <reviewer-id> --expected-head <snapshot-token>]
@@ -32,9 +32,11 @@ usage: fg merge apply-reviewed <storage-root> <tenant-id> <repository-id> <pr-nu
   --principal <submitter-id> --idempotency-key <key> --expected-version <pr-version>
   --source-ref <branch> --target-ref <branch> --source-tip <oid> --target-tip <oid>
   --merge-base <oid> --candidate <oid> --policy-epoch <n> --bundle <path>
-  --require-reviewer <id> [--require-reviewer <id> ...] [--method merge-commit|squash]
+  --require-reviewer <id> [--require-reviewer <id> ...] [--method merge-commit|squash|rebase]
 
-Reviews bind the actual merge commit, not merely its source branch. Every named
+Reviews bind the actual candidate commit. --method rebase inspects every rewritten
+commit and its diff before recording a review; use it for prepared PR rebase bundles.
+Every named
 reviewer must approve that exact candidate and current PR/policy version. Opener
 and submitter votes cannot satisfy apply-reviewed. This is an explicit sealed
 request precondition, NOT repository-wide protected-ref configuration; existing
@@ -106,15 +108,26 @@ pub fn run(args: &[String], mode: Mode) -> Result<u8, String> {
                 options.principal,
                 IdempotencyKey::new(options.key.clone()).map_err(|e| e.to_string())?,
             );
-            node.runtime()
-                .block_on(node.admit_candidate_review_durable_in(
-                    &request,
-                    &session,
-                    &options.command,
-                    input.as_deref(),
-                    Default::default(),
-                ))
-                .map_err(|e| e.to_string())
+            let result = if options.method == NativeMergeMethod::Rebase {
+                node.runtime()
+                    .block_on(node.admit_rebase_candidate_review_durable_in(
+                        &request,
+                        &session,
+                        &options.command,
+                        input.as_deref(),
+                        Default::default(),
+                    ))
+            } else {
+                node.runtime()
+                    .block_on(node.admit_candidate_review_durable_in(
+                        &request,
+                        &session,
+                        &options.command,
+                        input.as_deref(),
+                        Default::default(),
+                    ))
+            };
+            result.map_err(|e| e.to_string())
         } else {
             let subject = &options.command.review.subject;
             node.runtime()
@@ -215,9 +228,10 @@ fn flags(
                         | "--candidate"
                         | "--policy-epoch"
                         | "--bundle"
+                        | "--method"
                 ) || (mode == Mode::Review
                     && matches!(flag, "--review-version" | "--decision" | "--reason"))
-                    || (mode == Mode::Apply && matches!(flag, "--require-reviewer" | "--method"))
+                    || (mode == Mode::Apply && flag == "--require-reviewer")
             };
         if !allowed {
             return Err(format!("unknown or inapplicable option {flag:?}"));
@@ -261,6 +275,15 @@ fn parse_mutation(args: &[String], mode: Mode) -> Result<Mutation, String> {
         return Err("read mode is not a mutation".into());
     }
     let (scope, flags, reviewers) = flags(args, mode)?;
+    if mode == Mode::Review
+        && flags
+            .get("--method")
+            .is_some_and(|method| *method != "rebase")
+    {
+        return Err(
+            "review --method accepts rebase; omit it for a merge or squash candidate".into(),
+        );
+    }
     let principal =
         PrincipalId::from_hex(required(&flags, "--principal")?).map_err(|_| "invalid principal")?;
     let key = required(&flags, "--idempotency-key")?.as_bytes().to_vec();
@@ -591,7 +614,7 @@ fn render_terminal(
         } else {
             "named-candidate-reviewers-v1"
         }),
-        if mode == Mode::Apply {
+        if mode == Mode::Apply || options.method == NativeMergeMethod::Rebase {
             quote(super::merge_apply::method_name(options.method))
         } else {
             "null".into()
@@ -808,7 +831,7 @@ mod tests {
             let mut review = args(width, Mode::Review);
             review.extend(["--method".into(), "squash".into()]);
             assert!(parse_mutation(&review, Mode::Review).is_err());
-            for method in ["auto", "rebase", "fast-forward-only", ""] {
+            for method in ["auto", "rebase-and-merge", "fast-forward-only", ""] {
                 let mut invalid = args(width, Mode::Apply);
                 invalid.extend(["--method".into(), method.into()]);
                 assert!(parse_mutation(&invalid, Mode::Apply).is_err(), "{method}");
@@ -837,6 +860,26 @@ mod tests {
         let mut apply = args(40, Mode::Apply);
         apply.truncate(apply.len() - 2);
         assert!(parse_mutation(&apply, Mode::Apply).is_err());
+    }
+
+    #[test]
+    fn rebase_reviews_and_publication_select_complete_series_validation_explicitly() {
+        for width in [40, 64] {
+            for mode in [Mode::Review, Mode::Apply] {
+                let defaults = parse_mutation(&args(width, mode), mode).unwrap();
+                let mut selected = args(width, mode);
+                selected.extend(["--method".into(), "rebase".into()]);
+                let rebase = parse_mutation(&selected, mode).unwrap();
+                assert_eq!(rebase.method, NativeMergeMethod::Rebase);
+                assert_eq!(rebase.command.candidate, defaults.command.candidate);
+                assert_eq!(
+                    rebase.command.review.subject,
+                    defaults.command.review.subject
+                );
+                selected.extend(["--method".into(), "rebase".into()]);
+                assert!(parse_mutation(&selected, mode).is_err());
+            }
+        }
     }
     #[test]
     fn continuations_require_the_original_head_and_tokens_roundtrip() {
@@ -886,6 +929,13 @@ mod tests {
         assert!(text.contains("close\\u000afailed"));
         assert!(!text.contains("private-key"));
         assert!(text.contains("\"repository_wide_branch_protection\":false"));
+        let mut selected = args(40, Mode::Review);
+        selected.extend(["--method".into(), "rebase".into()]);
+        let review = parse_mutation(&selected, Mode::Review).unwrap();
+        let receipt = render_terminal(&review, Mode::Review, tx, &terminal, None);
+        assert!(receipt.contains("\"method\":\"rebase\""));
+        assert!(receipt.contains("\"git_refs_changed\":false"));
+        assert!(!receipt.contains("private-key"));
         struct Fail;
         impl Write for Fail {
             fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {

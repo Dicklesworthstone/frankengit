@@ -12,11 +12,19 @@ or dispatches a change, or modifies an unresolved request/recovery receipt.
 Search cancellation uses the existing read controllers, not the write controller.
 
 The closed predicate supports `state` (null, open or closed), `opened_by` (a
-canonical principal ID), all required `labels`, literal `text` (up to 256 UTF-8
-bytes), and `case_sensitive`. Matching folds only ASCII when case-insensitive;
+canonical principal ID), `assignee` (an exact principal ID or `none`),
+`milestone` (a positive number or `none`), all required `labels`, literal `text`
+(up to 256 UTF-8 bytes), and `case_sensitive`. Matching folds only ASCII when case-insensitive;
 it tests title and body separately and does not search comments. Label sets use
 native UTF-8 ordering without mutating the caller's input. The client freezes
 its predicate before awaiting transport.
+
+A blank assignment filter accepts assigned and unassigned issues. `none`
+selects issues with no assignees at the selected snapshot. An exact principal
+matches any member of that issue's assignment set. The client checks both the
+echoed predicate and each returned row's assignments, including when combined
+with the other filters. Historical responses may omit the assignment echo only
+for an unfiltered request; they cannot satisfy a selected assignment predicate.
 
 The existing safe-integer browser profile is retained. Result limits are 1..100,
 scan limits 1..1000 (default 200), and every nonzero `after` requires the original
@@ -38,6 +46,11 @@ an explicit per-page scan ceiling. Submit starts a fresh query. Applied filters
 are shown with the results so later edits to the form cannot mislabel the page.
 The continuation button captures the original predicate, exact snapshot,
 last-examined cursor and scan bound, rather than reading the edited form.
+Issue history offers shortcuts for each displayed assignee and for an
+unassigned issue. These searches retain that history's snapshot and leave any
+prepared change available for its original explicit send or recovery. Detached
+shortcuts cannot restore an older view after navigation or disconnect.
+
 Selecting a matching issue opens its canonical history at the same snapshot;
 new comments use `append-comment` and new assignee additions use `add-assignees`,
 both without an expected version. Edit, assignee removal, close and reopen

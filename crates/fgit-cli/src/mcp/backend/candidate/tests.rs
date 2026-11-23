@@ -42,30 +42,41 @@ fn both_hash_domains_and_raw_branch_patch_and_message_bytes_are_preserved() {
 }
 
 #[test]
-fn symlink_patch_selection_is_explicit_and_cannot_expand_the_transport_envelope() {
+fn patch_profile_selection_is_explicit_and_cannot_expand_the_transport_envelope() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let mut input = valid(format);
-        assert!(!prepare::parse(&input, format).unwrap().symlinks);
-        input.insert("profile".into(), text("exact-tree-v1"));
-        assert!(!prepare::parse(&input, format).unwrap().symlinks);
-        input.insert("profile".into(), text("exact-symlink-v1"));
-        assert!(prepare::parse(&input, format).unwrap().symlinks);
-        let mut oversized = input.clone();
-        oversized.insert("patch".into(), text("a".repeat(16 * 1024 + 1)));
         assert_eq!(
-            prepare::parse(&oversized, format).err().unwrap().code,
-            "patch_byte_limit"
+            prepare::parse(&input, format).unwrap().profile,
+            prepare::PatchProfile::Regular
         );
-        oversized.remove("patch");
-        oversized.insert(
-            "patch_hex_chunks".into(),
-            Value::Array(vec![text("61".repeat(CHUNK_BYTES)); MAX_CHUNKS + 1]),
-        );
-        assert_eq!(
-            prepare::parse(&oversized, format).err().unwrap().code,
-            "candidate_chunk_limit"
-        );
-        for profile in ["path-v1", "linear-v1", "exact-tree-binary-v1", "fuzzy", ""] {
+        for (name, profile) in [
+            ("exact-tree-v1", prepare::PatchProfile::Regular),
+            (
+                "exact-tree-binary-v1",
+                prepare::PatchProfile::BinaryRefactor,
+            ),
+            ("exact-symlink-v1", prepare::PatchProfile::Symlinks),
+            ("exact-gitlink-v1", prepare::PatchProfile::Gitlinks),
+        ] {
+            input.insert("profile".into(), text(name));
+            assert_eq!(prepare::parse(&input, format).unwrap().profile, profile);
+            let mut oversized = input.clone();
+            oversized.insert("patch".into(), text("a".repeat(16 * 1024 + 1)));
+            assert_eq!(
+                prepare::parse(&oversized, format).err().unwrap().code,
+                "patch_byte_limit"
+            );
+            oversized.remove("patch");
+            oversized.insert(
+                "patch_hex_chunks".into(),
+                Value::Array(vec![text("61".repeat(CHUNK_BYTES)); MAX_CHUNKS + 1]),
+            );
+            assert_eq!(
+                prepare::parse(&oversized, format).err().unwrap().code,
+                "candidate_chunk_limit"
+            );
+        }
+        for profile in ["path-v1", "linear-v1", "exact-tree-binary-v2", "fuzzy", ""] {
             input.insert("profile".into(), text(profile));
             assert_eq!(
                 prepare::parse(&input, format).err().unwrap().code,
@@ -80,7 +91,25 @@ fn symlink_patch_selection_is_explicit_and_cannot_expand_the_transport_envelope(
     let profile = properties["profile"].object().unwrap();
     assert_eq!(
         profile["enum"],
-        Value::Array(vec![text("exact-tree-v1"), text("exact-symlink-v1")])
+        Value::Array(vec![
+            text("exact-tree-v1"),
+            text("exact-tree-binary-v1"),
+            text("exact-symlink-v1"),
+            text("exact-gitlink-v1"),
+        ])
+    );
+    let agent_schema = prepare::agent_schema();
+    let properties = agent_schema.object().unwrap()["properties"]
+        .object()
+        .unwrap();
+    assert_eq!(
+        properties["profile"].object().unwrap()["enum"],
+        Value::Array(vec![
+            text("exact-tree-v1"),
+            text("exact-tree-binary-v1"),
+            text("exact-symlink-v1"),
+            text("exact-gitlink-v1"),
+        ])
     );
 }
 #[test]

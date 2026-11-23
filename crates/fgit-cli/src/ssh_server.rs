@@ -21,10 +21,14 @@ use fgit_node::{
 use fgit_ssh::{SigningKey, SshCommandAuthorizer, StaticDeployKeyAuthorizer};
 use fgit_types::{PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
 
+#[path = "ssh_server/repositories.rs"]
+mod repositories;
+
 const USAGE: &str = "usage: fg serve-ssh <storage-root> <tenant-id> <repository-id> <listen-address>
   --host-key-file <path>
   (--deploy-key <pubkey-hex> --principal <principal-id-hex> --scopes <read|write|read,write> | --deploy-keys-file <path>)
   [--allow-receive]
+  [--require-lfs-payloads <absolute-private-directory>]
   [--expected-incarnation <id>]
   [--max-sessions <1..1000000>]
   [--max-in-flight <1..16>]
@@ -36,7 +40,11 @@ Deploy-key files retain the three-column legacy format. To limit native ref writ
 start the file with frankengit-ssh-deploy-keys-v2 and give every row a fourth field:
 all | none | exact:<lowercase-ref-hex> | prefix:<lowercase-namespace-hex>.
 Separate multiple selectors with commas; prefix namespaces must end in a slash.
-The complete file is reloaded at each command; see docs/SSH_REF_WRITE_SCOPES.md.";
+The complete file is reloaded at each command; see docs/SSH_REF_WRITE_SCOPES.md.
+
+For multiple repositories on one listener, use:
+  fg serve-ssh <listen-address> --repositories-file <absolute-private-file> --host-key-file <path>
+See docs/MULTI_REPOSITORY_SSH.md for the bounded, incarnation-pinned route table.";
 
 struct Prepared {
     configuration: NodeConfig,
@@ -272,7 +280,14 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
 }
 
 pub fn run(arguments: &[String]) -> Result<CliOutcome, String> {
+    if arguments
+        .iter()
+        .any(|argument| argument == "--repositories-file")
+    {
+        return repositories::run(arguments);
+    }
     let prepared = parse(arguments)?;
+    let lfs_payloads_required = prepared.configuration.receive_lfs_root().is_some();
     let stop = prepared
         .stop_file
         .as_ref()
@@ -284,6 +299,8 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, String> {
     let mut node = OneNode::open_existing(prepared.configuration).map_err(|e| e.to_string())?;
 
     let serving: Result<SshServerReceipt, String> = (|| {
+        node.validate_receive_lfs_storage()
+            .map_err(|code| format!("cannot open required LFS custody: {code:?}"))?;
         let selected = node
             .runtime()
             .block_on(node.authenticate_authority_head())
@@ -295,7 +312,7 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, String> {
         let mut out = io::stdout().lock();
         writeln!(
             out,
-            "{{\"type\":\"ssh_listening\",\"schema_version\":1,\"address\":\"{}\",\"allow_receive\":{},\"repository_incarnation\":\"{}\",\"lifetime\":\"{}\"}}",
+            "{{\"type\":\"ssh_listening\",\"schema_version\":1,\"address\":\"{}\",\"allow_receive\":{},\"lfs_payloads_required\":{lfs_payloads_required},\"repository_incarnation\":\"{}\",\"lifetime\":\"{}\"}}",
             listen_address,
             prepared.allow_receive,
             node.repository_incarnation_id(),
@@ -420,6 +437,39 @@ mod tests {
             .collect()
         };
         let default = format!("{:?}", parse(&arguments(&[])).unwrap().configuration);
+        assert!(
+            parse(&arguments(&[]))
+                .unwrap()
+                .configuration
+                .receive_lfs_root()
+                .is_none()
+        );
+        #[cfg(unix)]
+        {
+            let selected = parse(&arguments(&[
+                "--require-lfs-payloads",
+                "/operator/lfs-custody",
+            ]))
+            .unwrap();
+            assert!(!selected.allow_receive);
+            assert!(selected.configuration.http_lfs_root().is_none());
+            assert_eq!(
+                selected.configuration.receive_lfs_root(),
+                Some(Path::new("/operator/lfs-custody"))
+            );
+        }
+        for extra in [
+            vec!["--require-lfs-payloads"],
+            vec!["--require-lfs-payloads", "relative-custody"],
+            vec![
+                "--require-lfs-payloads",
+                "/one",
+                "--require-lfs-payloads",
+                "/two",
+            ],
+        ] {
+            assert!(parse(&arguments(&extra)).is_err(), "{extra:?}");
+        }
         assert_eq!(
             parse(&arguments(&[]))
                 .unwrap()

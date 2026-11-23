@@ -239,6 +239,7 @@ impl<A: GitHashAlgorithm> SessionState<A> {
             let added = match intent {
                 TreeEditIntent::Write { content, .. } => content.len(),
                 TreeEditIntent::CreateSymlink { link_target, .. } => link_target.len(),
+                TreeEditIntent::UpdateSubmodule { after_oid, .. } => after_oid.len(),
                 TreeEditIntent::RecordConflictMarkers { marker, .. } => marker.len(),
                 _ => 0,
             };

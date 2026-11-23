@@ -1,12 +1,17 @@
 // FG-049: bounded GitHub issue capture and translation into the shipped native
 // issue commands. Imported actors are attribution, never local principals.
+// Explicit V3 assignment maps select destination IDs without enrolling accounts.
 import { mutationRequest, natural } from '../../crates/fgit-node/src/smart_http/server/browser/issues.mjs';
 import { recordDigest, operatorError, parseOperatorJson } from './forge-operator-io.mjs';
 import { createGithubSource, githubIdentity as id, githubRepository, GITHUB_API as API } from './github-source-http.mjs';
+import { parseExactJson } from '../operator/workflow_json.mjs';
 export { API_VERSION, githubRepository } from './github-source-http.mjs';
 
 export const CAPTURE_SCHEMA = 'frankengit-github-issue-capture-v1';
 export const CAPTURE_SCHEMA_V2 = 'frankengit-github-issue-capture-v2';
+export const CAPTURE_SCHEMA_V3 = 'frankengit-github-issue-capture-v3';
+export const ASSIGNEE_MAP_SCHEMA = 'frankengit-github-assignee-map-v1';
+export const ASSIGNEE_MAP_LIMIT = 256 * 1024;
 export const CAPTURE_LIMIT = 1024 * 1024;
 export const ISSUE_LIMIT = 100;
 export const COMMENT_LIMIT = 2000;
@@ -80,14 +85,50 @@ function selectedNumbers(v) {
   return numbers;
 }
 function encode(value) { return Buffer.from(JSON.stringify(value) + '\n'); }
-function selectedCaptureSchema(value) {
-  if (value !== CAPTURE_SCHEMA && value !== CAPTURE_SCHEMA_V2) fail('capture_schema');
+function selectedCaptureSchema(value, mapped = false) {
+  if (value !== CAPTURE_SCHEMA && value !== CAPTURE_SCHEMA_V2 && !(mapped && value === CAPTURE_SCHEMA_V3)) fail('capture_schema');
   return value;
+}
+function mapFields(value, names) {
+  object(value);
+  if (![Object.prototype, null].includes(Object.getPrototypeOf(value)) ||
+      Object.keys(value).length !== names.length || names.some(name => !Object.hasOwn(value, name)) ||
+      Object.values(Object.getOwnPropertyDescriptors(value)).some(d => !Object.hasOwn(d, 'value'))) fail('assignee_map_fields');
+}
+function assigneeMap(value, capture, originalDigest) {
+  mapFields(value, ['schema', 'capture_sha256', 'mappings']);
+  if (value.schema !== ASSIGNEE_MAP_SCHEMA) fail('assignee_map_schema');
+  if (typeof value.capture_sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(value.capture_sha256) ||
+      value.capture_sha256 !== originalDigest) fail('assignee_map_capture_changed');
+  if (!Array.isArray(value.mappings) || value.mappings.length > ISSUE_LIMIT * 16) fail('assignee_map_limit');
+  const selected = new Set();
+  for (const issue of capture.issues) {
+    // The native limit applies to the final assignment set, not each request.
+    // Attribution-only V1/V2 retain their original, larger source allowance.
+    if (issue.assignees.length > 16) fail('native_assignee_limit');
+    for (const actor of issue.assignees) selected.add(actor.id);
+  }
+  const sources = new Set(), destinations = new Set();
+  const mappings = value.mappings.map(row => {
+    mapFields(row, ['source_user_id', 'destination_principal_id']);
+    if (typeof row.source_user_id !== 'string') fail('assignee_map_source_id');
+    const source = id(row.source_user_id), destination = row.destination_principal_id;
+    if (typeof destination !== 'string' || !/^[0-9a-f]{32}$/.test(destination)) fail('assignee_map_principal');
+    if (sources.has(source) || destinations.has(destination)) fail('assignee_map_duplicate');
+    sources.add(source); destinations.add(destination);
+    if (!selected.has(source)) fail('assignee_map_population');
+    return { source_user_id: source, destination_principal_id: destination };
+  }).sort((a, b) => BigInt(a.source_user_id) < BigInt(b.source_user_id) ? -1 : 1);
+  if (sources.size !== selected.size) fail('assignee_map_population');
+  const checked = { schema: ASSIGNEE_MAP_SCHEMA, capture_sha256: originalDigest, mappings };
+  if (encode(checked).length > ASSIGNEE_MAP_LIMIT) fail('assignee_map_limit');
+  return checked;
 }
 export function captureBytes(value) {
   object(value); const source = object(value.source), repository = githubRepository(source.repository);
-  const schema = selectedCaptureSchema(value.schema), issues = value.issues;
-  if (value.consistency !== CONSISTENCY || !Array.isArray(issues)) fail('capture_schema');
+  const schema = selectedCaptureSchema(value.schema, true), issues = value.issues;
+  if (value.consistency !== CONSISTENCY || !Array.isArray(issues) ||
+      (schema === CAPTURE_SCHEMA_V3 && !Object.hasOwn(value, 'assignee_map'))) fail('capture_schema');
   const numbers = selectedNumbers(issues.map(v => object(v).number));
   let count = 0; const ids = new Set(), comments = new Set();
   const checked = { schema, consistency: CONSISTENCY,
@@ -106,6 +147,12 @@ export function captureBytes(value) {
       });
       return issue;
     }) };
+  if (schema === CAPTURE_SCHEMA_V3) {
+    // Reconstruct the original canonical V2 capture on every read. A changed
+    // source, issue population or comment cannot reuse an old mapping consent.
+    const original = encode({ ...checked, schema: CAPTURE_SCHEMA_V2 });
+    checked.assignee_map = assigneeMap(value.assignee_map, checked, recordDigest(original));
+  }
   const bytes = encode(checked);
   if (bytes.length > CAPTURE_LIMIT) fail('capture_bytes');
   // Canonical source packages have no hidden fields or alternate representations.
@@ -117,6 +164,28 @@ export function parseCapture(bytes) {
   const v = parseOperatorJson(bytes, 'github_import_capture_json');
   if (!captureBytes(v).equals(Buffer.from(bytes))) fail('noncanonical_capture');
   return v;
+}
+// Offline, create-only callers save the returned bytes under a NEW pin. Neither
+// a source login nor an imported actor can choose a native assignment implicitly.
+export function mapGithubIssueAssignees(input, mappingInput) {
+  if (!(input instanceof Uint8Array) || !(input.buffer instanceof ArrayBuffer) || input.length > CAPTURE_LIMIT) fail('capture_bytes');
+  if (!(mappingInput instanceof Uint8Array) || !(mappingInput.buffer instanceof ArrayBuffer) ||
+      !mappingInput.length || mappingInput.length > ASSIGNEE_MAP_LIMIT) fail('assignee_map_limit');
+  const originalBytes = Buffer.from(input), original = parseCapture(originalBytes);
+  if (original.schema !== CAPTURE_SCHEMA_V2) fail('assignee_map_requires_v2');
+  let supplied;
+  try {
+    // Reuse the closed custody parser: duplicate decoded keys and inexact
+    // counters must not disappear before mapping validation. Pretty JSON works.
+    supplied = parseExactJson(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(Buffer.from(mappingInput)));
+  } catch { fail('assignee_map_json'); }
+  const mapping = assigneeMap(supplied, original, recordDigest(originalBytes));
+  const capture = { ...original, schema: CAPTURE_SCHEMA_V3, assignee_map: mapping };
+  const bytes = captureBytes(capture), steps = issueImportSteps(capture);
+  // Validate native command, cardinality and whole-plan byte/work bounds before
+  // publishing any usable mapped capture. Offset limits are rechecked at prepare.
+  return { bytes, capture, steps: steps.length,
+    assignmentCommands: steps.filter(step => step.action === 'assign').length };
 }
 function provenance(source, issue, comment = null) {
   const row = comment ?? issue;
@@ -131,6 +200,8 @@ function provenance(source, issue, comment = null) {
 }
 export function issueImportSteps(value, offset = 0) {
   captureBytes(value); natural(offset, 'target number offset');
+  const assignees = value.schema === CAPTURE_SCHEMA_V3
+    ? new Map(value.assignee_map.mappings.map(row => [row.source_user_id, row.destination_principal_id])) : null;
   const steps = [];
   for (const issue of value.issues) {
     const number = natural(issue.number + offset, 'target issue number', 1);
@@ -141,12 +212,15 @@ export function issueImportSteps(value, offset = 0) {
       if (steps.length > MAX_STEPS) fail('native_plan_steps');
     };
     add('open', { title: issue.title, body: provenance(value.source, issue), labels: issue.labels.map(l => l.name) }, issue.html_url);
+    if (assignees && issue.assignees.length) add('assign', {
+      assignees: issue.assignees.map(actor => assignees.get(actor.id)),
+    }, issue.html_url);
     for (const comment of issue.comments) add('comment', { body: provenance(value.source, issue, comment) }, comment.html_url);
     if (issue.state === 'closed') add('close', {}, issue.html_url);
     // V1's commands, provenance and retry identities are frozen. New V2
     // captures preserve final moderation only after all discussion is copied;
     // applying the lock earlier would prevent the imported comments.
-    if (value.schema === CAPTURE_SCHEMA_V2 && issue.locked) add('lock', {}, issue.html_url);
+    if (value.schema !== CAPTURE_SCHEMA && issue.locked) add('lock', {}, issue.html_url);
   }
   if (encode(steps).length > CAPTURE_LIMIT) fail('native_plan_bytes');
   return steps;

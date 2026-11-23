@@ -1574,6 +1574,15 @@ pub trait AsyncAdmissionProjection<Authority>: Sync
 where
     Authority: AsyncAuthorityStore + ?Sized,
 {
+    /// Recheck request-owned publication authority after terminal recovery and
+    /// immediately before starting publication of a new decision. This does not
+    /// replace exact-basis policy or grant validation, or a context deadline
+    /// which continues to govern awaited authority work. Historical terminal
+    /// outcomes must remain recoverable without this publication permission.
+    fn publication_checkpoint(&self, _cx: &Authority::Context) -> Result<(), RefusalCode> {
+        Ok(())
+    }
+
     /// Collects authority-owned outcome leaves for this publication attempt.
     ///
     /// Hosts with a checkpoint fabric may select the chronicle's verified
@@ -4751,6 +4760,9 @@ where
             Some(OutcomeLookup::Undecided) => {}
             None => continue,
         }
+        projection
+            .publication_checkpoint(cx)
+            .map_err(AdmissionError::AsyncProjectionUnavailable)?;
         let preparation = prepare_publication_async(
             projection,
             store,
@@ -4785,6 +4797,9 @@ where
             }
             PublicationPreparation::Refuse(code) => PlannedPublication::Refuse(code),
         };
+        projection
+            .publication_checkpoint(cx)
+            .map_err(AdmissionError::AsyncProjectionUnavailable)?;
         let terminal = match planned {
             PlannedPublication::Refuse(code) => {
                 publish_refusal_async(
@@ -4948,6 +4963,9 @@ where
     store.put_if_absent(cx, &key, &bytes).await?;
 
     let publication = seal_refusal_publication(basis, &refusal, cumulative_outcomes, expected)?;
+    projection
+        .publication_checkpoint(cx)
+        .map_err(AdmissionError::AsyncProjectionUnavailable)?;
     outcome_after_publish_async(
         store,
         cx,

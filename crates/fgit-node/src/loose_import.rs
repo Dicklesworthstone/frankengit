@@ -1,7 +1,8 @@
 //! Bounded staging of an ordinary local Git directory.
 //!
 //! This module owns only the pre-publication half of import: it validates a
-//! local Git directory, follows the closure named by its direct refs, resolves
+//! local Git directory, resolves its selected refs into a direct snapshot, follows
+//! the closure named by that snapshot, resolves
 //! those objects from checksum-bound loose or idx/pack storage, and retains
 //! verified immutable object bodies in the node's fabric. Standalone staging
 //! links their immutable names; durable import keeps synced private custody
@@ -21,6 +22,7 @@ mod layout;
 mod metadata;
 mod packed_sources;
 mod placement;
+mod refs;
 mod refusal;
 mod source_io;
 pub use refusal::LooseGitImportRefusal;
@@ -42,8 +44,6 @@ use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::io;
-#[cfg(test)]
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use fgit_admission::{CanonicalRefState, PermittedObjectClosure};
@@ -114,7 +114,7 @@ pub struct StagedLooseGitImport {
 }
 
 impl StagedLooseGitImport {
-    /// Candidate canonical refs copied from the source's direct refs.
+    /// Candidate direct refs, including resolved source symbolic-ref aliases.
     #[must_use]
     pub const fn refs(&self) -> &CanonicalRefState {
         &self.refs
@@ -145,9 +145,11 @@ impl OneNode {
     /// This accepts a bare directory or a worktree directory containing a
     /// `.git` directory or bounded `gitdir:` file. Linked worktrees select
     /// their own HEAD and private refs while sharing objects and ordinary refs
-    /// through `commondir`. Direct refs may reach loose objects or objects in
-    /// checksum-bound idx-v2/pack-v2 pairs. Alternates, symbolic refs, symlinks,
-    /// malformed indirection and a changed source layout are typed refusals.
+    /// through `commondir`. Symbolic refs resolve within that selected namespace
+    /// and become independent direct snapshot refs. Refs may reach loose objects
+    /// or objects in checksum-bound idx-v2/pack-v2 pairs. Alternates, filesystem
+    /// symlinks, broken ref aliases, malformed indirection and a changed source
+    /// layout are typed refusals.
     ///
     /// Success proves that every returned closure member was native-hash
     /// verified with a complete required-kind graph before the first placement.

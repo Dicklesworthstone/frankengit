@@ -454,7 +454,7 @@ fn sponsored_source_tools_read_real_objects_and_indexes_in_both_formats() {
 #[test]
 fn source_and_agent_context_launch_grants_are_independent() {
     let fixture = SourceFixture::new(GitHashAlgorithm::Sha256, true);
-    for (source, context, count) in [(true, false, 15), (false, true, 1)] {
+    for (source, context, count) in [(true, false, 16), (false, true, 1)] {
         let mut options = fixture.options.clone();
         options.source = source;
         options.agent_context = context;

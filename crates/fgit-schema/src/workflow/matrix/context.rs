@@ -1,10 +1,16 @@
-//! Resolve only whole-value matrix lookups in job/step environment and step directory.
+//! Resolve only whole-value matrix lookups in job/step environment and directories.
 //! In particular, no matrix data is ever interpolated into executable scripts.
 use super::{Variables, invalid};
 use crate::workflow::{Node, WorkflowRefusal};
 
 pub(super) fn resolve(job: &mut Node, variables: &Variables) -> Result<(), WorkflowRefusal> {
     environment(job, variables)?;
+    if let Some(directory) = field(job, "defaults")
+        .and_then(|defaults| field(defaults, "run"))
+        .and_then(|run| field(run, "working-directory"))
+    {
+        scalar(directory, variables)?;
+    }
     let Some(Node::Sequence { items, .. }) = field(job, "steps") else {
         return Ok(());
     };

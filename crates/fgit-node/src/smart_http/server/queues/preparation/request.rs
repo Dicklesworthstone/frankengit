@@ -133,6 +133,7 @@ pub(in crate::smart_http::server::queues) fn profile(
     let profile = match fields.remove("profile").as_deref() {
         None | Some("path-merge-v1") => MergeProfile::PathMergeV1,
         Some("exact-renames-v1") => MergeProfile::ExactRenamesV1,
+        Some("builtin-attributes-v1") => MergeProfile::BuiltinAttributesV1,
         Some(_) => return Err(ApiError::bad("unsupported_merge_profile")),
     };
     match fields.remove("method").as_deref() {

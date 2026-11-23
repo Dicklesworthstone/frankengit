@@ -2,9 +2,11 @@
 //! Every reopened node uses a NEW configuration, not a shared in-memory cache.
 use super::*;
 
+mod warm;
+
 const CACHE_BYTES: usize = 2 * 1024 * 1024;
 
-fn reopen(scratch: &Scratch, format: GitHashAlgorithm, cache_bytes: usize) -> OneNode {
+pub(super) fn reopen(scratch: &Scratch, format: GitHashAlgorithm, cache_bytes: usize) -> OneNode {
     reopen_at(scratch.0.clone(), format, cache_bytes)
 }
 
@@ -256,6 +258,12 @@ fn corrupt_or_missing_custody_falls_back_without_changing_the_selected_objects()
             selective::assert_exact_selected_bytes(&output, format, &selection, &BTreeMap::new());
             reopened.shutdown().unwrap();
 
+            // The fallback may retain its independently verified native
+            // representation. Isolate recovery of the saved ingress bytes by
+            // discarding those optional alternatives before the permitted twin.
+            for alternative in durable_slots(&scratch) {
+                std::fs::remove_file(alternative).unwrap();
+            }
             // The same canonical repository and the same original custody form
             // the permitted twin. A miss must not damage canonical state.
             std::fs::write(&slot, original).unwrap();

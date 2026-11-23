@@ -1,8 +1,9 @@
-//! Canonical sponsored authentication for bounded source reads and forge metadata.
+//! Canonical sponsored authentication for bounded source work and forge metadata.
 //!
 //! These immutable grants identify an agent and its operator-attested sponsor.
-//! They do not authorize code publication, reviews, merges, administration, or an
-//! agent run.
+//! Source publication additionally requires an explicit immutable ref/path
+//! ceiling. Grants never authorize review decisions, merges, administration, or an agent
+//! run by themselves.
 //! A host must additionally establish and enforce its sponsored IntentRun before
 //! using any granted operation. Issuance and revocation become authoritative
 //! only when ordinary repository admission selects these events.
@@ -12,34 +13,66 @@ use crate::{AggregateId, AggregateVersion, ExpectedVersion};
 use fgit_codec::{CodecRefusal, Decoder, Encoder};
 use fgit_types::{PrincipalId, RefusalCode, RepositoryId, RepositoryIncarnationId, TenantId};
 
-pub const ISSUES_READ: u16 = 1 << 0;
-pub const ISSUES_WRITE: u16 = 1 << 1;
-pub const PULLS_READ: u16 = 1 << 2;
-pub const PULLS_WRITE: u16 = 1 << 3;
-pub const DISCUSSIONS_READ: u16 = 1 << 4;
-pub const DISCUSSIONS_WRITE: u16 = 1 << 5;
-pub const OUTCOMES_READ: u16 = 1 << 6;
+mod source_scope;
+pub use source_scope::{MAX_SOURCE_PATH_BYTES, MAX_SOURCE_PATH_PREFIXES, SourcePublicationScope};
+
+pub const ISSUES_READ: u32 = 1 << 0;
+pub const ISSUES_WRITE: u32 = 1 << 1;
+pub const PULLS_READ: u32 = 1 << 2;
+pub const PULLS_WRITE: u32 = 1 << 3;
+pub const DISCUSSIONS_READ: u32 = 1 << 4;
+pub const DISCUSSIONS_WRITE: u32 = 1 << 5;
+pub const OUTCOMES_READ: u32 = 1 << 6;
 /// Bounded current source, search and context reads through the native API.
 /// The host must enforce its closed read-route profile and canonical visibility;
 /// this flag does not grant Git transport, history snapshots or candidate work.
-pub const SOURCE_READ: u16 = 1 << 7;
+pub const SOURCE_READ: u32 = 1 << 7;
 /// Bounded history, blame, historical tree/blob and reference-diff reads.
 /// This is independently granted from current-source and metadata operations. Hosts must select
 /// only their closed read-only history routes and retain canonical visibility;
 /// it grants no arbitrary-object access, candidate work or review mutation.
-pub const SOURCE_HISTORY_READ: u16 = 1 << 8;
+pub const SOURCE_HISTORY_READ: u32 = 1 << 8;
 /// Prepare exact-patch candidates and inspect supplied single-parent bundles
 /// against an explicitly selected current branch. This independently grants
 /// source disclosure through those operations and finite in-memory TreeFS work,
 /// never durable staging, ref publication, review, merge or process execution.
-pub const SOURCE_CANDIDATES: u16 = 1 << 9;
+pub const SOURCE_CANDIDATES: u32 = 1 << 9;
 /// Native milestone summaries, exact lifecycle history and same-snapshot issue
 /// counts. This does not grant issue text, source access or milestone mutations.
-pub const MILESTONES_READ: u16 = 1 << 10;
+pub const MILESTONES_READ: u32 = 1 << 10;
 /// Open, edit, close and reopen native milestones. Issue membership changes
 /// still require ISSUES_WRITE; this scope grants neither issue nor milestone reads.
-pub const MILESTONES_WRITE: u16 = 1 << 11;
-pub const ALL_OPERATIONS: u16 = (1 << 12) - 1;
+pub const MILESTONES_WRITE: u32 = 1 << 11;
+/// Apply an inspected single-parent source candidate within the explicit
+/// immutable ref/path ceiling. This grants no arbitrary Git push or merge.
+pub const SOURCE_PUBLISH: u32 = 1 << 12;
+/// Complete ref-anchored blob proofs at an independently selected authority
+/// head. Original tree witnesses disclose sibling entries, so current-source
+/// and history grants do not imply this separate proof-disclosure permission.
+pub const SOURCE_VERIFIED_READ: u32 = 1 << 13;
+/// Read the exact code comparison selected by a native pull request. This
+/// independently grants its necessary PR/source disclosure, not general PR or
+/// source APIs, review approval, candidate work or code publication.
+pub const PULLS_DIFF_READ: u32 = 1 << 14;
+/// Read bounded pull-request review pages and canonical check summaries. This
+/// independently grants their necessary PR feedback disclosure, not review or
+/// check writes, evidence bodies, logs, artifacts, code diffs or publication.
+pub const PULLS_FEEDBACK_READ: u32 = 1 << 15;
+/// Create an absent task branch at an exact currently visible branch tip.
+/// The immutable source ref ceiling is mandatory. This does not grant source
+/// edits, arbitrary Git receive, updates, deletion, force, reviews or merges.
+/// Grants containing this bit use scoped action codes 5/6 and a u32 mask;
+/// historical action codes 1..4 retain their exact u16 operation bytes.
+pub const SOURCE_BRANCH_CREATE: u32 = 1 << 16;
+/// Read bounded evidence for one canonical pull-request check, pinned to its
+/// exact head and evidence digest. This independently grants that diagnostic
+/// disclosure, never generic artifact access, check execution, source writes,
+/// review decisions or merges. Evidence-only grants need no source ceiling.
+pub const PULLS_CHECK_EVIDENCE_READ: u32 = 1 << 17;
+/// Closed known operation vocabulary. No existing bit or retained credential
+/// is reinterpreted when an independently granted operation is added.
+pub const ALL_OPERATIONS: u32 = (1 << 18) - 1;
+const LEGACY_OPERATION_MASK: u32 = 0xffff;
 /// A grant cannot survive indefinitely without a new sponsor decision.
 pub const MAX_LIFETIME_SECONDS: u64 = 30 * 24 * 60 * 60;
 const LABEL_ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
@@ -165,7 +198,7 @@ pub struct AgentCredentialGrant {
     pub issued_at: u64,
     pub expires_at: u64,
     /// Independent explicit flags. Write never grants read or another effect.
-    pub operations: u16,
+    pub operations: u32,
 }
 
 impl AgentCredentialGrant {
@@ -195,17 +228,32 @@ impl AgentCredentialGrant {
         Ok(())
     }
 
-    /// Every requested flag must be explicit and known. Zero grants nothing.
+    /// Every requested flag must be explicit and known. Zero or a malformed
+    /// grant never authorizes an operation, including an otherwise known bit.
     #[must_use]
-    pub const fn permits(&self, operation: u16) -> bool {
+    pub const fn permits(&self, operation: u32) -> bool {
         operation != 0
             && operation & !ALL_OPERATIONS == 0
             && self.operations & !ALL_OPERATIONS == 0
             && self.operations & operation == operation
     }
 
-    fn write(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+    /// Both source-changing and task-branch grants require the explicit
+    /// canonical reference ceiling. Older unscoped grants keep their bytes.
+    #[must_use]
+    pub const fn requires_source_scope(&self) -> bool {
+        self.operations & (SOURCE_PUBLISH | SOURCE_BRANCH_CREATE) != 0
+    }
+
+    const fn extended_operations(&self) -> bool {
+        self.operations & !LEGACY_OPERATION_MASK != 0
+    }
+
+    fn write(&self, out: &mut Encoder, extended: bool) -> Result<(), CodecRefusal> {
         self.validate()?;
+        if extended != self.extended_operations() {
+            return Err(invalid_native("agent_credential.operation_encoding"));
+        }
         out.write_opaque_id(self.agent.as_bytes());
         out.write_opaque_id(self.sponsor.as_bytes());
         out.write_scalar(self.sponsor_kind.code_point());
@@ -214,11 +262,18 @@ impl AgentCredentialGrant {
         out.write_opaque_id(self.incarnation.as_bytes());
         out.write_scalar(self.issued_at);
         out.write_scalar(self.expires_at);
-        out.write_scalar(self.operations);
+        if extended {
+            out.write_scalar(self.operations);
+        } else {
+            out.write_scalar(
+                u16::try_from(self.operations)
+                    .map_err(|_| invalid_native("agent_credential.operation_encoding"))?,
+            );
+        }
         Ok(())
     }
 
-    fn read(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+    fn read(input: &mut Decoder<'_>, extended: bool) -> Result<Self, CodecRefusal> {
         let agent = PrincipalId::from_bytes(input.read_opaque_id("agent_credential.agent")?);
         let sponsor = PrincipalId::from_bytes(input.read_opaque_id("agent_credential.sponsor")?);
         let offset = input.offset();
@@ -242,30 +297,90 @@ impl AgentCredentialGrant {
             ),
             issued_at: input.read_scalar("agent_credential.issued_at")?,
             expires_at: input.read_scalar("agent_credential.expires_at")?,
-            operations: input.read_scalar("agent_credential.operations")?,
+            operations: if extended {
+                input.read_scalar::<u32>("agent_credential.operations")?
+            } else {
+                u32::from(input.read_scalar::<u16>("agent_credential.operations")?)
+            },
         };
         value.validate()?;
+        // Codes 5..8 are not alternate spellings of old grants. A canonical
+        // extended action must actually need at least one known high bit.
+        if extended != value.extended_operations() {
+            return Err(invalid_native("agent_credential.operation_encoding"));
+        }
         Ok(value)
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AgentCredentialAction {
+    /// Unscoped issuance. Code 1 retains its u16 mask; code 7 requires a known
+    /// high operation bit and encodes a u32 mask without a source ceiling.
     Issue(AgentCredentialGrant),
     /// Permanent tombstone retaining the original grant at the current frontier.
+    /// Codes 2/8 use the same legacy/extended distinction as issuance.
     Revoke(AgentCredentialGrant),
+    /// Scoped issuance. Codes 3/4 retain u16 masks; codes 5/6 require a known
+    /// high operation bit and encode u32 masks. Existing bytes stay unchanged.
+    IssueSource {
+        grant: AgentCredentialGrant,
+        scope: SourcePublicationScope,
+    },
+    /// Permanent revocation retains the complete original source ceiling.
+    RevokeSource {
+        grant: AgentCredentialGrant,
+        scope: SourcePublicationScope,
+    },
 }
 
 impl AgentCredentialAction {
     #[must_use]
     pub const fn grant(&self) -> &AgentCredentialGrant {
         match self {
-            Self::Issue(grant) | Self::Revoke(grant) => grant,
+            Self::Issue(grant)
+            | Self::Revoke(grant)
+            | Self::IssueSource { grant, .. }
+            | Self::RevokeSource { grant, .. } => grant,
+        }
+    }
+
+    #[must_use]
+    pub const fn source_scope(&self) -> Option<&SourcePublicationScope> {
+        match self {
+            Self::IssueSource { scope, .. } | Self::RevokeSource { scope, .. } => Some(scope),
+            Self::Issue(_) | Self::Revoke(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_issue(&self) -> bool {
+        matches!(self, Self::Issue(_) | Self::IssueSource { .. })
+    }
+
+    #[must_use]
+    pub const fn is_revocation(&self) -> bool {
+        matches!(self, Self::Revoke(_) | Self::RevokeSource { .. })
+    }
+
+    #[must_use]
+    pub fn issuance(grant: AgentCredentialGrant, scope: Option<SourcePublicationScope>) -> Self {
+        match scope {
+            Some(scope) => Self::IssueSource { grant, scope },
+            None => Self::Issue(grant),
+        }
+    }
+
+    #[must_use]
+    pub fn revocation(grant: AgentCredentialGrant, scope: Option<SourcePublicationScope>) -> Self {
+        match scope {
+            Some(scope) => Self::RevokeSource { grant, scope },
+            None => Self::Revoke(grant),
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NativeAgentCredentialEvent {
     pub actor: PrincipalId,
     pub action: AgentCredentialAction,
@@ -277,10 +392,14 @@ impl NativeAgentCredentialEvent {
             return Err(invalid_native("agent_credential.actor"));
         }
         self.action.grant().validate()?;
-        if let AgentCredentialAction::Issue(grant) = self.action {
-            if self.actor != grant.sponsor {
-                return Err(invalid_native("agent_credential.sponsor_actor"));
-            }
+        if self.action.grant().requires_source_scope() != self.action.source_scope().is_some() {
+            return Err(invalid_native("agent_credential.source_scope_required"));
+        }
+        if let Some(scope) = self.action.source_scope() {
+            scope.validate()?;
+        }
+        if self.action.is_issue() && self.actor != self.action.grant().sponsor {
+            return Err(invalid_native("agent_credential.sponsor_actor"));
         }
         Ok(())
     }
@@ -288,14 +407,28 @@ impl NativeAgentCredentialEvent {
     pub(super) fn write(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
         self.validate()?;
         out.write_opaque_id(self.actor.as_bytes());
-        match self.action {
+        match &self.action {
             AgentCredentialAction::Issue(grant) => {
-                out.write_scalar(1u32);
-                grant.write(out)?;
+                let extended = grant.extended_operations();
+                out.write_scalar(if extended { 7u32 } else { 1 });
+                grant.write(out, extended)?;
             }
             AgentCredentialAction::Revoke(grant) => {
-                out.write_scalar(2u32);
-                grant.write(out)?;
+                let extended = grant.extended_operations();
+                out.write_scalar(if extended { 8u32 } else { 2 });
+                grant.write(out, extended)?;
+            }
+            AgentCredentialAction::IssueSource { grant, scope } => {
+                let extended = grant.extended_operations();
+                out.write_scalar(if extended { 5u32 } else { 3 });
+                grant.write(out, extended)?;
+                scope.write(out)?;
+            }
+            AgentCredentialAction::RevokeSource { grant, scope } => {
+                let extended = grant.extended_operations();
+                out.write_scalar(if extended { 6u32 } else { 4 });
+                grant.write(out, extended)?;
+                scope.write(out)?;
             }
         }
         Ok(())
@@ -305,8 +438,26 @@ impl NativeAgentCredentialEvent {
         let actor = PrincipalId::from_bytes(input.read_opaque_id("agent_credential.actor")?);
         let offset = input.offset();
         let action = match input.read_scalar::<u32>("agent_credential.action")? {
-            1 => AgentCredentialAction::Issue(AgentCredentialGrant::read(input)?),
-            2 => AgentCredentialAction::Revoke(AgentCredentialGrant::read(input)?),
+            1 => AgentCredentialAction::Issue(AgentCredentialGrant::read(input, false)?),
+            2 => AgentCredentialAction::Revoke(AgentCredentialGrant::read(input, false)?),
+            3 => AgentCredentialAction::IssueSource {
+                grant: AgentCredentialGrant::read(input, false)?,
+                scope: SourcePublicationScope::read(input)?,
+            },
+            4 => AgentCredentialAction::RevokeSource {
+                grant: AgentCredentialGrant::read(input, false)?,
+                scope: SourcePublicationScope::read(input)?,
+            },
+            5 => AgentCredentialAction::IssueSource {
+                grant: AgentCredentialGrant::read(input, true)?,
+                scope: SourcePublicationScope::read(input)?,
+            },
+            6 => AgentCredentialAction::RevokeSource {
+                grant: AgentCredentialGrant::read(input, true)?,
+                scope: SourcePublicationScope::read(input)?,
+            },
+            7 => AgentCredentialAction::Issue(AgentCredentialGrant::read(input, true)?),
+            8 => AgentCredentialAction::Revoke(AgentCredentialGrant::read(input, true)?),
             observed => {
                 return Err(CodecRefusal::VariantUnknown {
                     field: "agent_credential.action",
@@ -321,7 +472,7 @@ impl NativeAgentCredentialEvent {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentCredentialCommand {
     pub id: AgentCredentialId,
     pub expected_version: ExpectedVersion,
@@ -341,7 +492,7 @@ impl AgentCredentialCommand {
             version,
             payload: ForgeEventPayload::AgentCredentialChangedNative(NativeAgentCredentialEvent {
                 actor,
-                action: self.action,
+                action: self.action.clone(),
             }),
         };
         validate_event(&event).map_err(|_| RefusalCode::EvidenceInvalid)?;
@@ -350,11 +501,12 @@ impl AgentCredentialCommand {
 }
 
 /// Derived state of exactly one canonical issue/revoke stream.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentCredentialSnapshot {
     pub id: AgentCredentialId,
     pub version: AggregateVersion,
     pub grant: AgentCredentialGrant,
+    pub source_scope: Option<SourcePublicationScope>,
     pub revoked: bool,
     pub last_actor: PrincipalId,
 }
@@ -370,10 +522,7 @@ pub(super) fn validate_event(event: &ForgeEvent) -> Result<(), CodecRefusal> {
     }
     if let ForgeEventPayload::AgentCredentialChangedNative(change) = &event.payload {
         change.validate()?;
-        let required_version = match change.action {
-            AgentCredentialAction::Issue(_) => 1,
-            AgentCredentialAction::Revoke(_) => 2,
-        };
+        let required_version = if change.action.is_issue() { 1 } else { 2 };
         if event.version.get() != required_version {
             return Err(invalid_native("agent_credential.aggregate_version"));
         }
@@ -393,25 +542,28 @@ pub fn apply_event(
     else {
         return Err(RefusalCode::EvidenceInvalid);
     };
-    match (previous, change.action) {
-        (None, AgentCredentialAction::Issue(grant)) => Ok(AgentCredentialSnapshot {
+    match previous {
+        None if change.action.is_issue() => Ok(AgentCredentialSnapshot {
             id,
             version: event.version,
-            grant,
+            grant: *change.action.grant(),
+            source_scope: change.action.source_scope().cloned(),
             revoked: false,
             last_actor: change.actor,
         }),
-        (Some(previous), AgentCredentialAction::Revoke(grant))
-            if previous.id == id
+        Some(previous)
+            if change.action.is_revocation()
+                && previous.id == id
                 && !previous.revoked
-                && previous.grant == grant
+                && previous.grant == *change.action.grant()
+                && previous.source_scope.as_ref() == change.action.source_scope()
                 && previous.version.is_immediate_predecessor_of(event.version) =>
         {
             Ok(AgentCredentialSnapshot {
                 version: event.version,
                 revoked: true,
                 last_actor: change.actor,
-                ..*previous
+                ..previous.clone()
             })
         }
         _ => Err(RefusalCode::EvidenceStale),

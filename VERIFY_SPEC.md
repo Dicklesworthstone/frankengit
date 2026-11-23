@@ -340,6 +340,10 @@ Maintain a versioned upstream-Git matrix and source-derived/adversarial corpus.
 - depth/fan-out/expanded-byte/ratio/aggregate work bounds;
 - streaming/cancellation and partial input;
 - deterministic pack construction profiles where claimed;
+- hybrid retained/native packs: exact selected complements, independent delta
+  graphs, same-basis held proofs, combined envelopes, source and final checksums,
+  stopped work and private-spool cleanup; absence of historical object files
+  after preflight must demonstrate that only uncovered bodies are loaded;
 - fuzz and decompression-bomb corpus.
 
 ### 11.3 Wire/services

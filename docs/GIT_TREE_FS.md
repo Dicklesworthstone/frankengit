@@ -179,6 +179,33 @@ Node shutdown drains and closes these leases before closing authority. If
 workspace drain fails, `WorkspaceShutdownBlocked` returns ownership of the
 complete node for recovery, without fabricating abort or quiescence.
 
+### 6.2 Explicit opaque gitlink editing
+
+`OneNode::export_workspace_gitlink_edits_in` and
+`OneNode::open_gitlink_merge_workspace_in` explicitly add submodule-pointer
+creation, update and deletion to the entry-edit profile above. They consume
+`UpdateSubmodule` and `Delete` intents and emit ordinary Git tree entries with
+mode `160000`. Each pointer must be nonzero and have the selected repository's
+native SHA-1 or SHA-256 width. The source pointer comes from the authenticated
+base tree; the foreign commit is opaque and is never loaded, imported or added
+to the candidate object closure. Ordinary file and inert symlink edits can be
+included in the same export, including a `.gitmodules` change.
+
+Gitlinks cannot be renamed, chmodded, traversed as directories or implicitly
+converted to or from another entry kind. Validation retains each path's kind
+across the complete intent log: deleting an entry does not authorize recreating
+it as another kind, including across separate session edit calls. The session
+retains its chosen profile; the original opening and export methods continue to
+refuse gitlink mutations. Pointer bytes count against the same cumulative edit
+budget as file and symlink data.
+
+The existing exact-base check, complete-directory disclosure, read/write scope,
+cancellation, epoch and publication boundaries remain in force. Export and
+session edits alone never publish a ref, and session state remains process-local.
+`cargo test --locked -p fgit-node --test workspace_gitlink_edits` exercises both
+native hash domains, independent tree identities, absent foreign objects,
+profile separation, scope, cancellation, kind provenance and cumulative limits.
+
 ## 7. Intent log and net-effect normal form
 
 Every user/tool operation is recorded as a typed `TreeEditIntent` before final commit construction:

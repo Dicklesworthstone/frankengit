@@ -1,7 +1,9 @@
 //! Repository source reads, ref lifecycle and exact candidate operations.
-//! Read grants never imply publication. Branch/tag mutation and bundle
-//! application require receive scope and the explicit Git-write switch.
+//! Read grants never imply publication. Exact candidate Apply and task-branch
+//! creation accept independent live scoped sponsored proofs; other branch/tag
+//! mutations require receive scope. All retain the explicit Git-write switch.
 
+mod archive;
 mod artifact;
 mod bundles;
 mod changes;
@@ -11,6 +13,7 @@ mod indexed;
 mod initial;
 mod output;
 mod rebase;
+pub(super) use rebase::{append_rebase_resolution_receipts, decode_rebase_resolution_recipes};
 mod refs;
 mod regex;
 mod replay;
@@ -108,6 +111,14 @@ impl<'a> Request<'a> {
         }
         request::Request::parse(envelope).map(|request| Self(RequestKind::Read(request)))
     }
+    /// Archive intake, collection and delivery share the connection's original
+    /// lifetime. No later phase may mint a fresh budget for this complete read.
+    pub(super) fn is_archive(&self) -> bool {
+        matches!(
+            &self.0,
+            RequestKind::Read(request) if request.operation == request::Operation::Archive
+        )
+    }
     pub(super) fn is_mutation(&self) -> bool {
         match &self.0 {
             RequestKind::Read(_)
@@ -128,31 +139,45 @@ impl<'a> Request<'a> {
             RequestKind::Initial(request) => request.is_mutation(),
         }
     }
-    /// Closed source-understanding profiles for sponsored credentials. Several
+    /// Closed source profiles for sponsored credentials. Several
     /// other nonmutating routes prepare candidate objects or disclose historical
     /// bundles; classifying every read as source access would widen this grant.
     /// The current-commit reader belongs to the same ref-selected source surface
     /// as tree/blob; it cannot traverse parents or select an arbitrary object.
-    pub(super) fn agent_operation(&self) -> Option<u16> {
-        use fgit_identity::agent::{SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_READ};
+    pub(super) fn agent_operation(&self) -> Option<u32> {
+        use fgit_identity::agent::{
+            SOURCE_BRANCH_CREATE, SOURCE_CANDIDATES, SOURCE_HISTORY_READ, SOURCE_PUBLISH,
+            SOURCE_READ, SOURCE_VERIFIED_READ,
+        };
         match &self.0 {
             RequestKind::Read(_)
             | RequestKind::Regex(_)
             | RequestKind::Indexed(_)
             | RequestKind::Symbols(_)
             | RequestKind::Retrieval(_) => Some(SOURCE_READ),
+            RequestKind::Refs(request) if request.is_create() => Some(SOURCE_BRANCH_CREATE),
             RequestKind::Refs(request) => (!request.is_mutation()).then_some(SOURCE_READ),
             RequestKind::Tags(request) => (!request.is_mutation()).then_some(SOURCE_READ),
             RequestKind::History(_) | RequestKind::Historical(_) | RequestKind::Review(_) => {
                 Some(SOURCE_HISTORY_READ)
             }
-            RequestKind::Change(request) => (!request.is_mutation()).then_some(SOURCE_CANDIDATES),
+            RequestKind::Change(request) => Some(if request.is_mutation() {
+                SOURCE_PUBLISH
+            } else {
+                SOURCE_CANDIDATES
+            }),
+            RequestKind::VerifiedBlob(_) => Some(SOURCE_VERIFIED_READ),
             RequestKind::Initial(_)
             | RequestKind::Replay(_)
             | RequestKind::Rebase(_)
-            | RequestKind::Bundle(_)
-            | RequestKind::VerifiedBlob(_) => None,
+            | RequestKind::Bundle(_) => None,
         }
+    }
+    fn requires_verified_read(&self) -> bool {
+        matches!(&self.0, RequestKind::VerifiedBlob(_))
+    }
+    fn is_branch_creation(&self) -> bool {
+        matches!(&self.0, RequestKind::Refs(request) if request.is_create())
     }
     fn requires_history_read(&self) -> bool {
         matches!(
@@ -165,6 +190,16 @@ impl<'a> Request<'a> {
     pub(super) fn candidate_upload_maximum(&self) -> Option<u64> {
         match &self.0 {
             RequestKind::Change(request) if !request.is_mutation() => {
+                Some(request.kind().maximum() as u64)
+            }
+            _ => None,
+        }
+    }
+    /// Only Apply enters scoped source publication. Initial commits, ref
+    /// administration, replay, rebase and raw Git intake remain separate.
+    pub(super) fn publication_upload_maximum(&self) -> Option<u64> {
+        match &self.0 {
+            RequestKind::Change(request) if request.is_mutation() => {
                 Some(request.kind().maximum() as u64)
             }
             _ => None,
@@ -200,6 +235,7 @@ enum ReplyBody {
     Candidate(artifact::PreparedReply),
     BundleExport(bundles::Export),
     VerifiedBlob(verified_blob::Reply),
+    Archive(archive::Reply),
 }
 impl Reply {
     const fn json(reply: JsonReply) -> Self {
@@ -225,6 +261,7 @@ impl Reply {
             ReplyBody::Candidate(reply) => reply.send(writer, version),
             ReplyBody::BundleExport(reply) => reply.send(writer, version),
             ReplyBody::VerifiedBlob(reply) => reply.send(writer, version),
+            ReplyBody::Archive(reply) => reply.send(writer, version),
         }
     }
 }
@@ -268,10 +305,16 @@ pub(super) fn authenticate(
     if request.route().as_bytes() != profile.route {
         return Err(ApiError::not_found());
     }
-    let permitted = if request.is_mutation() {
+    let permitted = if request.publication_upload_maximum().is_some() {
+        profile.allow_receive() && grant.permits_source_publication()
+    } else if request.is_branch_creation() {
+        profile.allow_receive() && grant.permits_source_branch_creation()
+    } else if request.is_mutation() {
         profile.allow_receive() && grant.permits(Service::ReceivePack)
     } else if request.requires_history_read() {
         grant.permits_source_history_read()
+    } else if request.requires_verified_read() {
+        grant.permits_source_verified_read()
     } else if request.candidate_upload_maximum().is_some() {
         grant.permits_source_candidates()
     } else {
@@ -304,6 +347,9 @@ pub(super) fn authenticate(
                     fgit_identity::agent::SOURCE_READ
                         | fgit_identity::agent::SOURCE_HISTORY_READ
                         | fgit_identity::agent::SOURCE_CANDIDATES
+                        | fgit_identity::agent::SOURCE_PUBLISH
+                        | fgit_identity::agent::SOURCE_BRANCH_CREATE
+                        | fgit_identity::agent::SOURCE_VERIFIED_READ
                 )
             ) {
                 return Err(ApiError::new(Status::Forbidden, "forbidden"));
@@ -324,12 +370,35 @@ pub(super) fn authenticate(
     // authenticated reservation at execution, not just session provenance.
     let read = (!request.is_mutation()
         && !request.requires_history_read()
+        && !request.requires_verified_read()
         && request.candidate_upload_maximum().is_none())
     .then_some(HttpReadGrant {
         principal: grant.principal,
         agent,
     });
     Ok((session, read))
+}
+
+// The normal source phase helper gives operator requests a fresh work budget.
+// Archives instead keep the remaining connection lifetime inside awaited
+// authority work too, so cancellation does not depend on another poll of the
+// transport's liveness closure. Sponsored requests retain their earlier ceiling.
+fn archive_request_context(
+    node: &OneNode,
+    deadline: &GitDaemonSessionDeadline,
+    session: &LoopbackReceiveSession,
+) -> crate::NodeRequestContext {
+    if session
+        .authenticated_session()
+        .is_some_and(|session| session.authentication().agent_provenance().is_some())
+    {
+        // This helper already intersects the remaining transport clock with
+        // the verifier-owned agent deadline, and fails closed if it is absent.
+        return node.authenticated_session_request_context(deadline, session);
+    }
+    node.session_request_context_with_timeout(
+        deadline.remaining().unwrap_or(std::time::Duration::ZERO),
+    )
 }
 
 pub(super) fn execute(
@@ -342,10 +411,11 @@ pub(super) fn execute(
     reader: &mut impl Read,
     http: HttpLimits,
     maximum_response: u64,
+    admission_deadline: &GitDaemonSessionDeadline,
 ) -> Result<Reply, ApiError> {
     let request = match &request.0 {
         RequestKind::VerifiedBlob(request) => {
-            return verified_blob::execute(node, request, session, maximum_response)
+            return verified_blob::execute(node, request, session, agent_request, maximum_response)
                 .map(|reply| Reply(ReplyBody::VerifiedBlob(reply)));
         }
         RequestKind::Retrieval(request) => {
@@ -498,10 +568,12 @@ pub(super) fn execute(
                 node,
                 request,
                 session,
+                agent_request,
                 framing,
                 reader,
                 http,
                 maximum_response,
+                admission_deadline,
             )
             .map(Reply::json);
         }
@@ -515,6 +587,7 @@ pub(super) fn execute(
                 reader,
                 http,
                 maximum_response,
+                admission_deadline,
             );
         }
         RequestKind::Read(request) => request,
@@ -523,11 +596,21 @@ pub(super) fn execute(
         return Err(ApiError::new(Status::Unauthorized, "unauthorized"));
     }
     let command = request.command(&read_form(reader, framing, http)?, node.object_format)?;
-    let deadline = GitDaemonSessionDeadline::new(
-        node.git_daemon_session_timeout,
-        GitDaemonSessionWorkScaling::FLAT,
-    );
-    let context = node.authenticated_session_request_context(&deadline, session);
+    let deadline = if request.operation == request::Operation::Archive {
+        // Body intake already used this connection clock. The original
+        // remaining budget also bounds all collection reads and encoding.
+        admission_deadline.clone()
+    } else {
+        GitDaemonSessionDeadline::new(
+            node.git_daemon_session_timeout,
+            GitDaemonSessionWorkScaling::FLAT,
+        )
+    };
+    let context = if request.operation == request::Operation::Archive {
+        archive_request_context(node, &deadline, session)
+    } else {
+        node.authenticated_session_request_context(&deadline, session)
+    };
     let mut live = || !deadline.expired() && context.is_live();
     let maximum = usize::try_from(maximum_response)
         .unwrap_or(usize::MAX)
@@ -537,6 +620,22 @@ pub(super) fn execute(
     // repository boundary; query paths only narrow selection. Current canonical
     // hidden refs remain undisclosable.
     let body = match &command {
+        Command::Archive {
+            selection,
+            query,
+            archive_format,
+        } => {
+            return archive::produce(
+                node,
+                &context,
+                selection,
+                query,
+                *archive_format,
+                maximum_response,
+                &mut live,
+            )
+            .map(|reply| Reply(ReplyBody::Archive(reply)));
+        }
         Command::Commit { selection } => {
             let report = drive_request_while(
                 node,

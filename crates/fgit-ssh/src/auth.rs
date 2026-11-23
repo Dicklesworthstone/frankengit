@@ -6,12 +6,13 @@
 use core::fmt::{self, Display, Formatter};
 use std::sync::Arc;
 
+use fgit_crypto::sha256_digest;
 use fgit_identity::deploy_key::{DeployKeyBinding, DeployKeyRefusal, DeployKeyScope};
 use fgit_identity::revocation::RevocationEvidence;
 use fgit_types::ref_write_scope::RefWriteScope;
 use fgit_types::{PrincipalId, RepositoryId};
 
-use crate::command::SshGitService;
+use crate::command::{SshGitCommand, SshGitService};
 use crate::crypto::{CryptoError, parse_ed25519_public_key, verify_ed25519};
 use crate::wire::WireWriter;
 
@@ -145,6 +146,41 @@ impl SshCommandGrant {
 /// consult their source again, so a live source can observe revocation,
 /// rotation and scope changes without altering an already admitted command.
 pub trait SshCommandAuthorizer: Send + Sync {
+    /// Authorize the complete parsed repository path and service for one
+    /// cryptographically authenticated key. The session invokes this boundary
+    /// before installing an active command or reporting exec success.
+    ///
+    /// A multi-repository transport overrides this method to resolve the exact
+    /// normalized path against its route catalog. It must preserve the selected
+    /// tenant, repository and incarnation through dispatch; a path-derived
+    /// identifier is never authority for a different repository. Wrappers must
+    /// forward this method rather than independently deriving a repository ID.
+    ///
+    /// The default preserves the single-repository deploy-key convention:
+    /// hexadecimal repository IDs may have a `.git` suffix; other paths use
+    /// their historical truncated SHA-256 alias. Existing grant implementations
+    /// still select the principal and full ref-write ceiling together.
+    fn authorize_repository_command(
+        &self,
+        authenticated_key: &[u8; 32],
+        command: &SshGitCommand,
+    ) -> Result<SshCommandGrant, AuthRefusal> {
+        let clean_path = command
+            .repository_path()
+            .trim_start_matches('/')
+            .strip_suffix(".git")
+            .unwrap_or_else(|| command.repository_path().trim_start_matches('/'));
+        let repository = if let Ok(id) = RepositoryId::from_hex(&clean_path.to_ascii_lowercase()) {
+            id
+        } else {
+            let digest = sha256_digest(command.repository_path().as_bytes());
+            let mut bytes = [0_u8; 16];
+            bytes.copy_from_slice(&digest[..16]);
+            RepositoryId::from_bytes(bytes)
+        };
+        self.authorize_command_grant(authenticated_key, repository, command.service())
+    }
+
     fn authorize_command(
         &self,
         authenticated_key: &[u8; 32],

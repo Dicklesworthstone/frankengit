@@ -169,6 +169,21 @@ fn real_two_pr_prefix_preserves_original_subjects_and_exports_one_deterministic_
             Some(id),
             "the selected profile is committed"
         );
+        let attributes = prepare(
+            &f,
+            2,
+            &entries,
+            &RefVisibility::new(),
+            MergeProfile::BuiltinAttributesV1,
+        )
+        .unwrap();
+        assert_eq!(attributes.outcome, prepared.outcome);
+        assert_eq!(attributes.bundle, prepared.bundle);
+        assert_ne!(attributes.preparation_id, Some(id));
+        assert_ne!(
+            attributes.preparation_id, renamed.preparation_id,
+            "identical candidate bytes still bind the selected attribute policy"
+        );
         let mut changed = entries.clone();
         changed[1].metadata.message = b"different explicit second commit message\n".to_vec();
         let changed = prepare(

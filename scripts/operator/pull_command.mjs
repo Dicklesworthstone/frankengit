@@ -6,7 +6,7 @@ import { isCredentialToken, isAgentCredentialToken } from './credential_token.mj
 import { normalizePullCommentAnchor, pullCommentAnchorFields, PullAnchorError } from './pull_comment_anchor.mjs';
 
 export const PULL_LIMITS = Object.freeze({ form: 256 * 1024, reply: 32 * 1024, intent: 1024 * 1024, bundle: 16 * 1024 * 1024 });
-export const PULL_ACTIONS = Object.freeze(['open', 'update', 'close', 'reopen', 'comment', 'append-comment', 'fast-forward']);
+export const PULL_ACTIONS = Object.freeze(['open', 'update', 'close', 'reopen', 'retarget', 'comment', 'append-comment', 'fast-forward']);
 // Form-only operations retain their saved-intent schema. Candidate operations
 // are a distinct profile with independently bound bundle bytes.
 export const PULL_REVIEW_ACTIONS = Object.freeze(['approve', 'request-changes', 'withdraw', 'merge']);
@@ -55,7 +55,7 @@ export function pullTokenFingerprint(value) {
   return pullHash(value);
 }
 export function requireAgentMetadataOperation(action, token) {
-  if (isAgentCredentialToken(token) && !['open', 'update', 'close', 'reopen', 'comment', 'append-comment'].includes(action)) {
+  if (isAgentCredentialToken(token) && !['open', 'update', 'close', 'reopen', 'retarget', 'comment', 'append-comment'].includes(action)) {
     failPull('agent_metadata_operation_unsupported');
   }
 }

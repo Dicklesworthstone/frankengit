@@ -97,6 +97,24 @@ With the separately granted outcome tool, recover the ORIGINAL key after a
 lost reply. Disconnects and infrastructure failures are not evidence of rollback.
 The existing protocol's terminal-outcome and broken-output handling is reused.
 
+## Independently granted candidate reviews and PR rebases
+
+PR lifecycle writes do not grant candidate review or merge publication.
+`frankengit_pull_review` requires the separate review-write launch grant and
+`frankengit_pull_merge_reviewed` requires the reviewed-merge grant. For a
+prepared and inspected PR rebase, preserve `method: "rebase"` in both calls.
+Review dispatch then validates the entire native series; publication advances
+the target and records the PR merge event in one canonical decision while
+preserving the source branch. Existing merge-commit/squash inputs and method
+defaults retain their behavior.
+
+See [PR candidate preparation](MCP_PULL_CANDIDATES.md) and
+[whole-series inspection](MCP_PULL_INSPECTION.md#inspect-a-pr-rebase-series) for
+the exact subject, bounded bundle and separate handoffs. Review withdrawal
+still uses the original exact subject with no bundle. Terminal retries use the
+original key and recover the historical decision before current-branch or
+bundle validation; changing the merge method under that key is refused.
+
 ## Verification scope
 
 Parser/schema tests cover both native domains, lossless ref bytes, complete
@@ -114,3 +132,15 @@ Run `cargo test --locked -p fgit-cli --bin fg-mcp` on the pinned toolchain.
 Rust/Cargo are unavailable in the session introducing this implementation;
 these Rust tests have been written, not executed. No full FG-096, hosted
 multi-principal, CI-check or merge-publication acceptance is claimed.
+
+## Explicit target switching
+
+An open native PR can change its target branch through the explicit `retarget`
+action, preserving the source branch and requiring a different target, exact
+positive PR version and current source/new-target tips. HTTP exposes
+`POST /REPOSITORY_ROUTE/api/v1/pulls/NUMBER/retarget`; MCP exposes
+`frankengit_pull_retarget` under the independent PR-write grant; the browser's
+metadata form offers **Change target branch**. Existing Update/Reopen actions
+still cannot change branch identities. Conversation and labels remain; old
+reviews become stale. See [the complete retarget contract](PULL_REQUEST_RETARGET.md)
+for exact input, current visibility, original-key recovery and reader upgrades.

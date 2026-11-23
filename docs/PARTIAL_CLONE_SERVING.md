@@ -21,25 +21,70 @@ packs as promisor packs on the client. Subsequent explicit object requests use
 normal upload-pack negotiation and the native pack writer; there is no foreign
 Git process in production and no alternative object-disclosure route.
 
-The server supports `blob:none`, `blob:limit=<n>`, `tree:<depth>`, exact visible-blob
-`sparse:oid=<OID>` and `combine:`
+The server supports `blob:none`, `blob:limit=<n>`, `tree:<depth>`,
+`object:type=<commit|tree|blob|tag>`, visible-blob `sparse:oid=<OID>` or
+`sparse:oid=<ref>:<path>`, and `combine:`
 conjunctions, including percent-encoded compound terms. Blob-size suffixes
 `k`, `m`, and `g` (and uppercase forms) use checked binary scaling. Oversized,
 overflowing, malformed, over-nested or over-budget filters are typed refusals.
 Unsupported filter grammar and semantics remain typed refusals.
 
+### Object kinds
+
+`object:type=commit` requests history without ordinary trees or file bodies;
+`object:type=tree` requests tree structure, and `object:type=blob` requests file
+content. `object:type=tag` restricts ordinary selection to annotated tag objects.
+The four lowercase names are exact; unknown types and trailing data refuse.
+
+Explicitly requested objects are still sent even when their kind differs from
+the filter. For example, a commit wanted with `object:type=blob` is included
+alongside its reachable blobs, while ordinary ancestor commits and trees are
+omitted. The selector continues through those omitted commits and trees to
+reach matching descendants. An explicitly requested annotated tag retains its
+intermediate tag chain and terminal object, with the terminal object's ordinary
+descendants subject to the filter. These are Git's
+[provided-object and type-filter semantics](https://git-scm.com/docs/git-rev-list/).
+
+Type filters intersect with size, depth and sparse filters, including encoded
+compound terms such as `combine:object%3Atype%3Dblob+blob%3Alimit%3D1m`.
+Two different type terms intersect to an empty ordinary selection; explicit
+wants still bypass the combined predicate. Complete visible-graph and traversal
+bounds continue to apply even when the resulting pack is small. The type
+predicate reads the graph's verified kind metadata and requires no object body
+reads of its own.
+
+Omitted ancestor commits remain available through later authorized requests.
+[Git's promisor fetch](https://github.com/git/git/blob/v2.54.0/promisor-remote.c)
+disables have negotiation when retrieving missing objects. Ordinary commit-have
+semantics remain intact: declaring a descendant commit as held excludes its
+ancestors. Type filtering does not restore commit history across a shallow cut
+or reinterpret those have declarations.
+
 ### Sparse pattern blobs
 
-Commit a sparse-checkout pattern file to a visible branch, independently obtain
-its complete native blob OID, and pass that OID to the clone:
+Commit a sparse-checkout pattern file to a visible branch and name it through
+that branch, or independently obtain its complete native blob OID:
 
 ```sh
 git clone --no-checkout --filter=sparse:oid=<full-blob-oid> <repository-url> partial
+git clone --no-checkout --filter=sparse:oid=main:.sparse-patterns <repository-url> partial
 ```
 
-The server accepts only an exact SHA-1 or SHA-256 OID in the repository's native
-domain. The pattern must be a blob in the current authenticated visible graph.
-Symbolic blob expressions such as `main:.sparse-patterns` and `sparse:path=`
+The pattern must be a blob in the current authenticated visible graph. An exact
+SHA-1 or SHA-256 OID must use the repository's native domain. A symbolic name
+resolves `HEAD`, a full advertised ref, or an unambiguous short branch or tag
+name, then traverses its repository path through verified tree names. Annotated
+tag chains peel to a commit or tree; direct tree refs also work. Resolution uses
+the same session's authorized advertisement and graph as want admission, even
+when the pattern is outside the selected shallow history or pack. It performs
+no additional object-store lookup and no host-filesystem lookup.
+
+Short names shared by a branch and tag refuse even if their current targets
+match; use the full ref name. Hidden, deleted, missing, ambiguous and non-blob
+paths return the same opaque refusal without reading any pattern body. Names
+and repository paths preserve raw bytes. Paths are nonempty, at most 4,096
+bytes, and reject empty, `.` and `..` components, NUL, CR and LF. Revision
+operators (`~`, `^`, reflogs), abbreviated object expressions and `sparse:path=`
 remain explicitly unsupported. No pattern can name a host filesystem path.
 
 Matching preserves raw path bytes and ordered sparse-checkout rules: anchored
@@ -64,7 +109,9 @@ aggregate rules, and 4,096 bytes per pattern line or complete repository path
 are admitted. Lower operator object/expanded-byte limits also apply. All pattern
 identities, kinds and sizes are checked before the first pattern body read.
 Reads use the original Database context and session deadline; compilation and
-every wildcard transition consume the existing selection work ledger. Tree
+every wildcard transition consume the existing selection work ledger. Symbolic
+resolution charges each inspected ref, tag, commit edge and tree entry to that
+same ledger and polls cancellation at each step. Tree
 traversal keeps one path buffer and a bounded frame stack. Verified local names
 are shared with the disposable projection and bounded by its charged tree bytes.
 
@@ -85,7 +132,7 @@ Compound filters intersect their predicates.
 
 Explicitly requested objects bypass omission predicates, matching Git's
 provided-object semantics. An explicitly requested annotated tag passes that
-status through its verified tag chain to the terminal blob or tree; descendants
+status through every intermediate tag to the terminal object; descendants
 remain filtered, and directly held tags/targets retain their have exclusions.
 A partial client's `have` commit does not prove that
 an explicitly requested blob or tree is present. The selector restores such
@@ -118,6 +165,15 @@ only after the whole selection succeeds. Pack planning and writing retain their
 native checksum, selected-object, byte, delta and deadline limits. No dependency,
 lockfile, schema or Beads closure is introduced by this implementation.
 
+Object-type regression coverage exercises exact filtered pack bodies over native
+Git-daemon v0/v1/v2 and smart HTTP, both hash formats, and a reopened node. It also
+covers explicit tag chains and lazy roots, compound sparse/size/depth selection,
+every selector cancellation checkpoint, graph bounds and unchanged canonical
+retention. The storage-free closure helper commits object-type omissions with a
+distinct reason and permits authenticated lazy retrieval of omitted commits as
+well as blobs. This helper continues to accept commit roots; the native selector
+handles the complete Git object-root surface.
+
 The profile verifies visible commit/tree/tag bodies and blob metadata before
 advertising, with authenticated projection reuse. Sparse selection additionally
 reads its bounded pattern blobs; selected payloads are verified during pack
@@ -129,9 +185,13 @@ minimum shared-tree depth, exclusive blob thresholds, compound grammar,
 explicit lazy retrieval, common haves, unsupported controls, current visibility,
 read-only retention, inclusive resource limits and cancellation before output.
 Sparse-specific targets are `fgit-wire`'s `sparse_patterns` and
-`sparse_path_context`, and `fgit-node`'s `upload_visibility::tests::partial_clone::sparse`.
+`sparse_path_context`, and `fgit-node`'s `upload_visibility::tests::partial_clone::sparse`
+and `upload_visibility::tests::partial_clone::sparse_names`.
 They include shared subtrees, combined filters, native Git/HTTP pack bodies,
 restart, hidden/unknown pattern refusal and original Database cancellation.
+The symbolic suite additionally compares exact-OID and ref/path selection in
+both hash domains, nested raw-byte paths, HEAD and branch aliases, tag peeling,
+ambiguous names, gitlink boundaries, and each selector cancellation checkpoint.
 The optional pinned-Git campaign additionally checks real `.promisor` files,
 initial missing-object sets, exact lazy blob hydration and `fsck --strict`.
 It requires the repository-verified Git 2.54.0 oracle and Bubblewrap; unavailable

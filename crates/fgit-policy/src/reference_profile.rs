@@ -25,12 +25,14 @@ pub const MAX_REFERENCE_POLICY_TRACE_BYTES: usize = 2 * 1024 * 1024;
 /// Closed factual profiles. Historical ref-only decisions never learn new
 /// facts; the actor profile additionally observes only the principal identifier
 /// bound to the sealed transaction. Authentication has a separately activated
-/// profile; none of these profiles observes principal kind or membership.
+/// profile. The principal-kind profile observes an authenticated agent kind;
+/// none of these profiles observes membership or infers a kind from an ID.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReferencePolicyProfile {
     ReferenceFactsV1,
     ReferenceActorIdV1,
     ReferenceAuthenticationV1,
+    ReferencePrincipalKindV1,
 }
 impl ReferencePolicyProfile {
     #[must_use]
@@ -39,6 +41,7 @@ impl ReferencePolicyProfile {
             Self::ReferenceFactsV1 => "reference_facts_v1",
             Self::ReferenceActorIdV1 => "reference_actor_id_v1",
             Self::ReferenceAuthenticationV1 => "reference_authentication_v1",
+            Self::ReferencePrincipalKindV1 => "reference_principal_kind_v1",
         }
     }
 }
@@ -53,6 +56,7 @@ pub fn classify(
         ReferencePolicyProfile::ReferenceFactsV1,
         ReferencePolicyProfile::ReferenceActorIdV1,
         ReferencePolicyProfile::ReferenceAuthenticationV1,
+        ReferencePolicyProfile::ReferencePrincipalKindV1,
     ] {
         match validate_for(profile, snapshot) {
             Ok(_) => return Ok(profile),
@@ -123,6 +127,53 @@ impl AuthenticatedReferenceInput {
     pub fn updates(&self) -> &[RefUpdateFact] {
         &self.updates
     }
+}
+
+/// Facts established by an authenticated native agent credential. The caller
+/// must verify that credential and bind its agent to this principal before
+/// constructing the input. A sponsor does not change the agent's kind, and
+/// possession of this credential establishes single-factor authentication only.
+/// There are no constructors for unproved human, machine or service kinds.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentReferenceInput(AuthenticatedReferenceInput);
+
+impl AgentReferenceInput {
+    pub fn try_new(
+        principal: PrincipalId,
+        updates: Vec<RefUpdateFact>,
+    ) -> Result<Self, PolicyInputRefusal> {
+        AuthenticatedReferenceInput::try_new(
+            principal,
+            AuthenticationStrength::SingleFactor,
+            updates,
+        )
+        .map(Self)
+    }
+
+    #[must_use]
+    pub const fn principal(&self) -> PrincipalId {
+        self.0.principal()
+    }
+
+    #[must_use]
+    pub fn updates(&self) -> &[RefUpdateFact] {
+        self.0.updates()
+    }
+}
+
+/// Evaluate the separately versioned principal-kind profile with a known
+/// authenticated agent. Missing membership, clocks and evidence remain absent,
+/// including in negated or unreachable predicates and with no ref subjects.
+pub fn evaluate_agent(
+    snapshot: &PolicySnapshot,
+    input: &AgentReferenceInput,
+) -> Result<PolicyEvaluation, ReferencePolicyRefusal> {
+    validate_evaluation_for(
+        ReferencePolicyProfile::ReferencePrincipalKindV1,
+        snapshot,
+        input.updates().iter().map(RefUpdateFact::name),
+    )?;
+    Ok(crate::eval::evaluate_agent_reference(snapshot, input))
 }
 
 /// Validate the whole program, even with no subjects, before the ordinary
@@ -291,9 +342,27 @@ fn inspect(
         Predicate::UpdateKindEquals(kind) if structural(*kind) => Ok(()),
         Predicate::UpdateKindIn(kinds) if kinds.iter().all(|kind| structural(*kind)) => Ok(()),
         Predicate::AuthenticationCompare { .. }
-            if profile == ReferencePolicyProfile::ReferenceAuthenticationV1 =>
+            if matches!(
+                profile,
+                ReferencePolicyProfile::ReferenceAuthenticationV1
+                    | ReferencePolicyProfile::ReferencePrincipalKindV1
+            ) =>
         {
             Ok(())
+        }
+        Predicate::PrincipalKindEquals(_)
+            if profile == ReferencePolicyProfile::ReferencePrincipalKindV1 =>
+        {
+            Ok(())
+        }
+        Predicate::PrincipalKindIn(kinds)
+            if profile == ReferencePolicyProfile::ReferencePrincipalKindV1 =>
+        {
+            if kinds.len() > MAX_SET_ELEMENTS || kinds.len() > *remaining {
+                return Err(ReferencePolicyRefusal::ResourceLimit);
+            }
+            *remaining -= kinds.len();
+            reserve_bytes(bytes, kinds.len())
         }
         _ => Err(ReferencePolicyRefusal::UnsupportedFacts),
     }
@@ -305,6 +374,7 @@ const fn text_selector(profile: ReferencePolicyProfile, selector: Selector) -> b
             profile,
             ReferencePolicyProfile::ReferenceActorIdV1
                 | ReferencePolicyProfile::ReferenceAuthenticationV1
+                | ReferencePolicyProfile::ReferencePrincipalKindV1
         ) && matches!(selector, Selector::ActorId))
 }
 

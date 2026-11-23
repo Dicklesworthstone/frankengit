@@ -42,7 +42,7 @@ fn inbox(
 /// Like hidden_ref_policy_end_to_end, stage actual canonical bodies and select
 /// the configuration with an authenticated 1-decision policy-epoch advance.
 /// All existing committed source/forge roots are carried forward unchanged.
-fn hide(node: &OneNode, reference: &RefName) -> RepositoryAuthorityHeadId {
+pub(super) fn hide(node: &OneNode, reference: &RefName) -> RepositoryAuthorityHeadId {
     let request = node.request_context();
     node.runtime().block_on(async {
         let authenticated = node.authenticate_authority_head_in(&request).await.unwrap();
@@ -163,6 +163,88 @@ fn current_source_or_target_policy_hides_fresh_and_retained_pull_request_notific
             assert_eq!(snapshot(&reopened).basis().id(), current);
             reopened.shutdown().unwrap();
         }
+    }
+}
+
+#[test]
+fn retarget_keeps_old_target_disclosure_on_inbox_reads_and_preferences() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let node = node(&scratch, format);
+        let fixture = fixture(&node, &scratch, format);
+        let request = node.request_context();
+        let release = RefName::try_new(b"refs/heads/release").unwrap();
+        let created = node
+            .runtime()
+            .block_on(node.admit_branch_updates_durable_in(
+                &request,
+                &session("inbox-release-branch"),
+                &[fgit_authority::RefCommand {
+                    name: release.clone(),
+                    expected_old: fgit_authority::ExpectedOld::Absent,
+                    proposed_new: fgit_authority::ProposedNew::Update(fixture.data.target_tip),
+                    force: false,
+                }],
+                Default::default(),
+            ))
+            .unwrap();
+        assert!(matches!(
+            created.commands[0].terminal.outcome,
+            DecisionOutcome::Committed { .. }
+        ));
+        let open = command(&fixture, 1);
+        accepted(apply(&node, &open, "open-retarget-inbox"));
+        let mut changed = open.clone();
+        changed.action = PullRequestAction::Retarget;
+        changed.expected_version = ExpectedVersion::Exactly(AggregateVersion::FIRST);
+        changed.data.target_ref = release.clone();
+        accepted(apply(&node, &changed, "change-inbox-target"));
+        let visible = inbox(&node, None, false).unwrap();
+        assert_eq!(visible.threads.len(), 1, "visible retargeted positive twin");
+        assert_eq!(visible.threads[0].thread_version.get(), 2);
+        let hidden_head = hide(&node, &target());
+        let before = snapshot(&node);
+        assert!(!before.snapshot().hidden_refs.hides(source_ref().as_bytes()));
+        assert!(!before.snapshot().hidden_refs.hides(release.as_bytes()));
+        assert_hidden(&node, visible.binding.authority_head, hidden_head);
+        let refused = node
+            .runtime()
+            .block_on(node.admit_notification_durable_in(
+                &request,
+                &session("mark-hidden-retarget-inbox"),
+                &NotificationCommand {
+                    target: NotificationTarget::PullRequest(open.number),
+                    expected_version: ExpectedVersion::NewStream,
+                    action: NotificationAction::SetReadThrough(Some(
+                        AggregateVersion::try_new(2).unwrap(),
+                    )),
+                },
+                Default::default(),
+            ))
+            .unwrap();
+        assert!(matches!(
+            refused.1.outcome,
+            DecisionOutcome::Refused {
+                code: RefusalCode::HiddenRefUnauthorized,
+                ..
+            }
+        ));
+        assert_eq!(before.snapshot().refs, snapshot(&node).snapshot().refs);
+        assert_eq!(
+            before.basis().body().forge_position_root,
+            snapshot(&node).basis().body().forge_position_root
+        );
+        node.shutdown().unwrap();
+        let mut reopened = OneNode::open_existing(scratch.config(format)).unwrap();
+        let head = reopened
+            .runtime()
+            .block_on(reopened.authenticate_authority_head())
+            .unwrap();
+        reopened
+            .bring_into_service(head.receipt().generation())
+            .unwrap();
+        assert_hidden(&reopened, visible.binding.authority_head, hidden_head);
+        reopened.shutdown().unwrap();
     }
 }
 

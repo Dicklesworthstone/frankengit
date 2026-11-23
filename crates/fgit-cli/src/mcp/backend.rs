@@ -18,6 +18,7 @@ mod notifications;
 mod outcomes;
 pub(super) mod protection;
 mod pull_comments;
+mod pull_labels;
 mod pull_reviews;
 mod pull_writes;
 mod pulls;
@@ -239,10 +240,11 @@ pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
     if options.pulls {
         tools.extend(pulls::tools());
         tools.push(checks::tool());
-        if options.artifacts {
+        if options.artifacts || options.agent_token_file.is_some() {
             tools.push(check_evidence::tool());
         }
         tools.push(pull_comments::read_tool());
+        tools.push(pull_labels::read_tool());
         tools.push(pull_reviews::tool());
     }
     if options.source {
@@ -269,10 +271,16 @@ pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
         tools.extend(pull_writes::tools());
         tools.push(pull_comments::write_tool());
         tools.push(pull_comments::append_tool());
+        tools.push(pull_labels::write_tool());
     }
     if options.writes.source {
-        tools.extend(source_writes::tools());
-        tools.extend(tags::write_tools());
+        if options.agent_token_file.is_some() {
+            tools.push(source_writes::agent_tool());
+            tools.push(source_writes::agent_branch_tool());
+        } else {
+            tools.extend(source_writes::tools());
+            tools.extend(tags::write_tools());
+        }
     }
     if options.writes.reviews {
         tools.extend(review_writes::tools());
@@ -379,7 +387,10 @@ impl ReadTools for NodeTools {
             || (self.options.writes.discussions && discussions::is_write(name))
             || (self.options.writes.pulls && pull_writes::is_tool(name))
             || (self.options.writes.pulls
-                && matches!(name, pull_comments::WRITE | pull_comments::APPEND))
+                && matches!(
+                    name,
+                    pull_comments::WRITE | pull_comments::APPEND | pull_labels::WRITE
+                ))
             || (self.options.writes.source && source_writes::is_tool(name))
             || (self.options.writes.source && tags::is_write(name))
             || (self.options.writes.reviews && name == review_writes::NAME)
@@ -438,6 +449,9 @@ impl NodeTools {
         if self.options.writes.pulls && name == pull_comments::APPEND {
             return pull_comments::append_comment(self, args);
         }
+        if self.options.writes.pulls && name == pull_labels::WRITE {
+            return pull_labels::write(self, args);
+        }
         if self.options.writes.source && source_writes::is_tool(name) {
             return source_writes::call(self, name, args);
         }
@@ -459,7 +473,11 @@ impl NodeTools {
         if self.options.artifacts && artifacts::is_tool(name) {
             return artifacts::call(self, name, args);
         }
-        if self.options.issues && matches!(name, "frankengit_issue_list" | "frankengit_issue_show")
+        if self.options.issues
+            && matches!(
+                name,
+                "frankengit_issue_list" | "frankengit_issue_show" | "frankengit_issue_search"
+            )
         {
             return issues::call(self, name, args);
         }
@@ -469,10 +487,18 @@ impl NodeTools {
         if self.options.discussions && discussions::is_read(name) {
             return discussions::read(self, name, args);
         }
-        if self.options.pulls && matches!(name, "frankengit_pull_list" | "frankengit_pull_show") {
+        if self.options.pulls
+            && matches!(
+                name,
+                "frankengit_pull_list" | "frankengit_pull_show" | "frankengit_pull_search"
+            )
+        {
             return pulls::call(self, name, args);
         }
-        if self.options.pulls && self.options.artifacts && name == check_evidence::NAME {
+        if self.options.pulls
+            && (self.options.artifacts || self.options.agent_token_file.is_some())
+            && name == check_evidence::NAME
+        {
             return check_evidence::call(self, args);
         }
         if self.options.pulls && name == checks::NAME {
@@ -480,6 +506,9 @@ impl NodeTools {
         }
         if self.options.pulls && name == pull_comments::READ {
             return pull_comments::read(self, args);
+        }
+        if self.options.pulls && name == pull_labels::READ {
+            return pull_labels::read(self, args);
         }
         if self.options.pulls && name == pull_reviews::NAME {
             return pull_reviews::call(self, args);
@@ -718,8 +747,12 @@ mod tests {
     #[test]
     fn server_tool_catalog_matches_fgit_schema_registry_and_refuses_planted_drift() {
         let server_names = all_registered_tool_names();
-        assert_eq!(server_names.len(), 97);
+        assert_eq!(server_names.len(), 102);
+        assert!(server_names.contains(&pull_labels::READ));
+        assert!(server_names.contains(&pull_labels::WRITE));
+        assert!(server_names.contains(&"frankengit_pull_search"));
         assert!(server_names.contains(&pull_writes::REOPEN));
+        assert!(server_names.contains(&pull_writes::RETARGET));
         assert!(server_names.contains(&source::HISTORICAL_TREE));
         assert!(server_names.contains(&source::HISTORICAL_BLOB));
         assert!(server_names.contains(&pull_comments::APPEND));

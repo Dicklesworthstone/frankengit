@@ -168,6 +168,13 @@ export function mountIssues(document, location, options = {}) {
           node('p', `Opened by ${issue.opened_by} · last changed by ${issue.last_actor}`),
           node('p', `Labels: ${issue.labels.join(', ') || '(none)'}`),
           node('p', `Assigned principals: ${(issue.assignees ?? []).join(', ') || '(none)'}`), body(issue));
+        const assignments = node('div');
+        for (const assignee of issue.assignees?.length ? issue.assignees : ['none']) {
+          assignments.append(button(assignee === 'none' ? 'Find unassigned issues' : `Find issues assigned to ${assignee}`, () => {
+            if (session === currentSession && view === currentView) void search({ assignee }, 0, result.head);
+          }));
+        }
+        content.append(assignments);
         const membership = node('p', `Milestone: ${issue.milestone == null ? '(none)' : `#${issue.milestone}`}`);
         if (issue.milestone != null) membership.append(button('Show milestone issues', () => {
           if (session === currentSession && view === currentView) void search({ milestone: issue.milestone }, 0, result.head);
@@ -246,7 +253,7 @@ export function mountIssues(document, location, options = {}) {
   function disconnect() {
     session += 1; view += 1; client.disconnect(); milestones.disconnect(); clearView();
     for (const id of ['issue-token', 'change-title', 'change-body', 'change-labels', 'change-assignees', 'change-number', 'change-version', 'show-number', 'restore-receipt',
-      'issue-search-query', 'issue-search-labels', 'issue-search-opener', 'issue-search-milestone']) byId(id).value = '';
+      'issue-search-query', 'issue-search-labels', 'issue-search-opener', 'issue-search-milestone', 'issue-search-assignee']) byId(id).value = '';
     byId('issue-search-state').value = 'all'; byId('issue-search-case').checked = false;
     byId('issue-search-scan').value = '200';
     status(client.pending ? 'Disconnected. An unresolved request is retained locally; save its recovery receipt before leaving.' : 'Disconnected. Token and displayed issue data discarded.');
@@ -279,6 +286,7 @@ export function mountIssues(document, location, options = {}) {
       void search({ state: state === 'all' ? null : state,
         text: byId('issue-search-query').value || null,
         opened_by: byId('issue-search-opener').value || null,
+        assignee: byId('issue-search-assignee').value || null,
         labels: labels === '' ? [] : labels.split('\n'),
         case_sensitive: byId('issue-search-case').checked,
         ...(milestone === '' ? {} : { milestone: milestone === 'none' ? 'none' : decimal(milestone, 'milestone number', 1) }) }, 0, null,

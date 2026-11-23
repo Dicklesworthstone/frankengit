@@ -18,8 +18,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod append_comments;
+mod labels;
 mod notifications;
 mod outbox_history;
+mod retarget;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Scratch(PathBuf);
@@ -651,6 +653,9 @@ mod snapshot_tests;
 
 #[path = "metadata_read_tests.rs"]
 mod metadata_read_tests;
+
+#[path = "search_tests.rs"]
+mod search_tests;
 
 #[test]
 fn named_object_closure_commits_only_selected_named_objects() {

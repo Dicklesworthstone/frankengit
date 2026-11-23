@@ -82,7 +82,7 @@
           <label>Commit timestamp (Unix seconds)<input id="candidate-timestamp" inputmode="numeric" autocomplete="off" required></label>
           <label>Commit message format<select id="candidate-message-kind"><option value="text">Text</option><option value="hex">Native bytes as lowercase hex</option></select></label>
           <label>Explicit commit message<textarea id="candidate-message" rows="5" maxlength="131072" autocomplete="off" spellcheck="false" required></textarea></label>
-          <label>Native merge profile<select id="candidate-profile"><option value="path-merge-v1">Direct path merge</option><option value="exact-renames-v1">Exact rename detection</option></select></label>
+          <label>Native merge profile<select id="candidate-profile"><option value="path-merge-v1">Direct path merge</option><option value="exact-renames-v1">Exact rename detection</option><option value="builtin-attributes-v1">Built-in attribute drivers</option></select></label>
           <button id="candidate-prepare" type="button">Prepare and inspect complete candidate</button>
           <p class="hint">Preparation requires independent repository read, PR-read and queue-read grants. It preserves the selected queue version, head, refs, tips and policy epoch. It creates no transaction and grants no landing permission. Conflicts stop here; update the source explicitly and reselect the queue.</p>
         </fieldset>

@@ -19,6 +19,7 @@ pub struct Request<'a> {
     pub repository_route: &'a str,
     pub number: PullRequestNumber,
     pub resolution: bool,
+    pub rebase: bool,
     pub boundary: Option<&'a str>,
 }
 
@@ -53,14 +54,20 @@ impl<'a> Request<'a> {
         let Some((number, action)) = suffix.split_once('/') else {
             return Ok(None);
         };
-        if !matches!(action, "prepare" | "resolve")
-            && !action.starts_with("prepare/")
+        if !matches!(
+            action,
+            "prepare" | "resolve" | "prepare-rebase" | "resolve-rebase"
+        ) && !action.starts_with("prepare/")
             && !action.starts_with("resolve/")
+            && !action.starts_with("prepare-rebase/")
+            && !action.starts_with("resolve-rebase/")
         {
             return Ok(None);
         }
-        if !matches!(action, "prepare" | "resolve")
-            || repository_route.len() < 2
+        if !matches!(
+            action,
+            "prepare" | "resolve" | "prepare-rebase" | "resolve-rebase"
+        ) || repository_route.len() < 2
             || !repository_route.starts_with('/')
             || repository_route[1..].split('/').any(|part| {
                 part.is_empty()
@@ -81,7 +88,7 @@ impl<'a> Request<'a> {
         if head.git_protocol.is_some() {
             return Err(ApiError::bad("git_protocol_not_applicable"));
         }
-        let resolution = action == "resolve";
+        let resolution = matches!(action, "resolve" | "resolve-rebase");
         let content = head.content_type.ok_or_else(ApiError::media)?;
         let boundary = if content.eq_ignore_ascii_case("application/x-www-form-urlencoded")
             || content.eq_ignore_ascii_case("application/x-www-form-urlencoded; charset=utf-8")
@@ -106,6 +113,7 @@ impl<'a> Request<'a> {
             repository_route,
             number,
             resolution,
+            rebase: matches!(action, "prepare-rebase" | "resolve-rebase"),
             boundary,
         }))
     }
@@ -116,13 +124,14 @@ impl<'a> Request<'a> {
         format: GitHashAlgorithm,
     ) -> Result<PreparationCommand, ApiError> {
         // A resolution can never fall back to automatic construction.
-        if self.resolution {
+        if self.resolution || self.rebase {
             return Err(ApiError::bad("resolution_choices_required"));
         }
         let (mut fields, _) = self.fields(bytes)?;
         let profile = match fields.remove("profile").as_deref() {
             None | Some("path-merge-v1") => MergeProfile::PathMergeV1,
             Some("exact-renames-v1") => MergeProfile::ExactRenamesV1,
+            Some("builtin-attributes-v1") => MergeProfile::BuiltinAttributesV1,
             Some(_) => return Err(ApiError::bad("unsupported_merge_profile")),
         };
         let style = match fields.remove("method").as_deref() {
@@ -145,7 +154,7 @@ impl<'a> Request<'a> {
         mut files: FileParts<'_>,
         format: GitHashAlgorithm,
     ) -> Result<ResolutionCommand, ApiError> {
-        if !self.resolution {
+        if !self.resolution || self.rebase {
             return Err(ApiError::bad("not_a_resolution_request"));
         }
         let (mut fields, descriptors) = self.fields(bytes)?;
@@ -379,6 +388,7 @@ mod tests {
             repository_route: "/r.git",
             number: PullRequestNumber::FIRST,
             resolution,
+            rebase: false,
             boundary: None,
         }
     }
@@ -672,6 +682,28 @@ mod tests {
                     "{}",
                     error.code
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn builtin_attributes_selection_preserves_subject_metadata_and_commit_style() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let baseline = request(false)
+                .command(form(format).as_bytes(), format)
+                .unwrap();
+            for (method, style) in [
+                ("merge-commit", MergeCommitStyle::TwoParent),
+                ("squash", MergeCommitStyle::Squash),
+            ] {
+                let bytes =
+                    form(format) + &format!("&profile=builtin-attributes-v1&method={method}");
+                let selected = request(false).command(bytes.as_bytes(), format).unwrap();
+                assert_eq!(selected.profile, MergeProfile::BuiltinAttributesV1);
+                assert_eq!(selected.subject, baseline.subject);
+                assert_eq!(selected.metadata, baseline.metadata);
+                assert_eq!(selected.style, style);
+                assert!(request(true).command(bytes.as_bytes(), format).is_err());
             }
         }
     }

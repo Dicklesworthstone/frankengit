@@ -2,6 +2,7 @@
 //! grants are required on one credential. No candidate is staged or approved.
 
 mod output;
+mod rebase;
 mod request;
 
 use super::super::issues::{ApiError, read_form};
@@ -82,6 +83,9 @@ pub(super) fn execute(
         .unwrap_or(usize::MAX)
         .min(output::MAX_REPLY_BYTES);
     let visibility = RefVisibility::new();
+    if request.rebase {
+        return rebase::execute(node, request, bytes, &context, maximum, &mut live);
+    }
     if request.resolution {
         let command = {
             let upload = if let Some(boundary) = request.boundary {

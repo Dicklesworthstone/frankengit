@@ -1,4 +1,5 @@
-//! Authenticated Git LFS basic transfer over the immutable artifact fabric.
+//! Authenticated Git LFS basic and resumable Tus transfers over the immutable
+//! artifact fabric.
 //! Uploading bytes grants custody only: this adapter never publishes a Git ref,
 //! artifact alias, retention decision, or second repository authority. The
 //! existing permanent-retention profile applies until pointer-aware GC exists.
@@ -8,6 +9,7 @@ mod protocol;
 mod range;
 #[cfg(test)]
 mod tests;
+mod tus;
 
 use std::io::{self, Read, Write};
 use std::net::SocketAddr;
@@ -18,7 +20,7 @@ use fgit_object_fabric::artifact::storage::lfs::{LfsObject, LfsStore, MAX_OBJECT
 use fgit_object_fabric::artifact::storage::{
     ArtifactOperation, ArtifactStorageError, VerifiedArtifactReader,
 };
-use fgit_types::{RepositoryId, RepositoryIncarnationId, TenantId};
+use fgit_types::{PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
 use fgit_wire::smart_http::{BodyFraming, HttpError, HttpVersion, head::Envelope};
 
 use super::credentials::Grant;
@@ -57,6 +59,10 @@ pub(super) fn is_route(target: &str, repository_route: &[u8]) -> bool {
             .strip_prefix(repository_route)
             .is_some_and(|suffix| suffix == b"/info/lfs" || suffix.starts_with(ROUTE.as_bytes()))
     })
+}
+
+pub(super) fn overrides_read_method(envelope: &Envelope<'_>) -> bool {
+    tus::overrides_read_method(envelope)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -131,6 +137,7 @@ enum Endpoint {
     Batch,
     Object(LfsObject),
     Verify(LfsObject),
+    Tus(LfsObject),
 }
 
 struct Request<'a> {
@@ -163,6 +170,7 @@ impl<'a> Request<'a> {
             let endpoint = match parts.next() {
                 None => Endpoint::Object(object),
                 Some("verify") => Endpoint::Verify(object),
+                Some("tus") => Endpoint::Tus(object),
                 _ => return Err(Failure::not_found()),
             };
             if parts.next().is_some() {
@@ -170,16 +178,23 @@ impl<'a> Request<'a> {
             }
             endpoint
         };
+        if let Endpoint::Object(object) | Endpoint::Verify(object) | Endpoint::Tus(object) =
+            endpoint
+            && object.size > MAX_OBJECT_BYTES
+        {
+            return Err(Failure::new(Status::TooLarge, "lfs_object_size_limit"));
+        }
+        if let Endpoint::Tus(_) = endpoint {
+            return Ok(Self {
+                repository_route,
+                endpoint,
+            });
+        }
         if !matches!(
             (endpoint, envelope.method),
             (Endpoint::Batch | Endpoint::Verify(_), "POST") | (Endpoint::Object(_), "GET" | "PUT")
         ) {
             return Err(Failure::new(Status::Method, "lfs_method_not_allowed"));
-        }
-        if let Endpoint::Object(object) | Endpoint::Verify(object) = endpoint
-            && object.size > MAX_OBJECT_BYTES
-        {
-            return Err(Failure::new(Status::TooLarge, "lfs_object_size_limit"));
         }
         if envelope.method == "GET" {
             if !matches!(
@@ -261,7 +276,7 @@ fn authorize(
     let permitted = match request.endpoint {
         Endpoint::Batch => grant.permits_lfs(false) || grant.permits_lfs(true),
         Endpoint::Object(_) => grant.permits_lfs(envelope.method == "PUT"),
-        Endpoint::Verify(_) => grant.permits_lfs(true),
+        Endpoint::Verify(_) | Endpoint::Tus(_) => grant.permits_lfs(true),
     };
     if !permitted {
         return Err(Failure::new(Status::Forbidden, "lfs_scope_not_granted"));
@@ -302,6 +317,7 @@ fn batch_reply(
     service: &Service,
     request: &protocol::Batch,
     base: &str,
+    principal: PrincipalId,
     op: &ArtifactOperation<'_>,
     live: &dyn Fn() -> bool,
 ) -> Result<Vec<u8>, Failure> {
@@ -321,7 +337,7 @@ fn batch_reply(
             continue;
         }
         inspected += object.size;
-        let present = match service.store.contains(*object, op) {
+        let mut present = match service.store.contains(*object, op) {
             Ok(present) => present,
             Err(ArtifactStorageError::Cancelled | ArtifactStorageError::Deadline) => {
                 return Err(Failure::new(Status::Timeout, "lfs_request_expired"));
@@ -335,13 +351,40 @@ fn batch_reply(
             entries.push(object_error(*object, 404, "lfs_object_not_found"));
             continue;
         }
+        if request.operation == protocol::Operation::Upload
+            && request.transfer == protocol::Transfer::Tus
+            && !present
+        {
+            match service.store.begin_upload(*object, principal, op) {
+                Ok(state) => present = state.complete,
+                Err(error) => {
+                    let error = tus::custody_failure(error);
+                    let code = match error.status {
+                        Status::BadRequest => 400,
+                        Status::NotFound => 404,
+                        Status::Conflict => 409,
+                        Status::TooLarge => 413,
+                        Status::RateLimited => 429,
+                        Status::Timeout => return Err(error),
+                        _ => 503,
+                    };
+                    entries.push(object_error(*object, code, error.message));
+                    continue;
+                }
+            }
+        }
         let actions = match request.operation {
             protocol::Operation::Upload if present => String::new(),
             protocol::Operation::Upload => {
                 let path = format!("{base}/objects/{}/{}", object.oid, object.size);
+                let upload = if request.transfer == protocol::Transfer::Tus {
+                    format!("{path}/tus")
+                } else {
+                    path.clone()
+                };
                 format!(
                     ",\"actions\":{{\"upload\":{},\"verify\":{}}}",
-                    action(&path),
+                    action(&upload),
                     action(&format!("{path}/verify")),
                 )
             }
@@ -357,7 +400,8 @@ fn batch_reply(
         ));
     }
     let body = format!(
-        "{{\"transfer\":\"basic\",\"hash_algo\":\"sha256\",\"objects\":[{}]}}",
+        "{{\"transfer\":{},\"hash_algo\":\"sha256\",\"objects\":[{}]}}",
+        quote(request.transfer.token()),
         entries.join(",")
     );
     if body.len() > MAX_RESPONSE_BYTES {
@@ -368,6 +412,7 @@ fn batch_reply(
 
 enum Response<'operation, 'live> {
     Bytes(&'static str, Vec<u8>),
+    Tus(tus::Reply),
     Download {
         payload: VerifiedArtifactReader<'operation, 'live>,
         range: Option<(u64, u64)>,
@@ -392,12 +437,15 @@ fn execute<'operation, 'live>(
     let request = Request::parse(envelope)?;
     let grant = authorize(profile, envelope, &request)?;
     let service = profile.lfs.as_ref().ok_or_else(Failure::unavailable)?;
-    if envelope.method == "GET" && !prefix.is_empty() {
+    if envelope.method == "GET"
+        && !matches!(request.endpoint, Endpoint::Tus(_))
+        && !prefix.is_empty()
+    {
         return Err(Failure::bad("lfs_download_body_not_allowed"));
     }
     // Authentication, endpoint scope and declared framing/size are checked
     // before this interim response permits the peer to send upload bytes.
-    if envelope.expect_continue {
+    if envelope.expect_continue && !matches!(request.endpoint, Endpoint::Tus(_)) {
         writer
             .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
             .and_then(|()| writer.flush())
@@ -412,7 +460,7 @@ fn execute<'operation, 'live>(
             }
             let origin = action_origin(profile, local)?;
             let base = format!("{origin}{}/info/lfs", request.repository_route);
-            batch_reply(service, &batch, &base, op, live)
+            batch_reply(service, &batch, &base, grant.principal, op, live)
                 .map(|bytes| Response::Bytes(JSON_MEDIA, bytes))
         }
         Endpoint::Object(object) if envelope.method == "PUT" => {
@@ -469,6 +517,19 @@ fn execute<'operation, 'live>(
             }
             Ok(Response::Bytes(JSON_MEDIA, b"{}".to_vec()))
         }
+        Endpoint::Tus(object) => tus::execute(
+            profile,
+            service,
+            object,
+            grant.principal,
+            envelope,
+            prefix,
+            reader,
+            writer,
+            op,
+            live,
+        )
+        .map(Response::Tus),
     }
 }
 
@@ -497,7 +558,7 @@ pub(super) fn serve(
         });
     let op = match op {
         Ok(op) => op,
-        Err(error) => return refuse(writer, envelope.version, error),
+        Err(error) => return refuse_request(writer, envelope, error),
     };
     match execute(
         profile, envelope, read_ahead, reader, writer, &op, &live, local,
@@ -505,6 +566,9 @@ pub(super) fn serve(
         Ok(Response::Bytes(media, bytes)) => {
             send(writer, envelope.version, Status::Success, media, &bytes)
                 .map_err(|_| Status::Unavailable)
+        }
+        Ok(Response::Tus(reply)) => {
+            tus::send(writer, envelope.version, reply).map_err(Status::from)
         }
         // Complete verification already succeeded. Once headers start, any
         // read/write/flush failure terminates the response; no error document
@@ -526,7 +590,19 @@ pub(super) fn serve(
             send_unsatisfiable(writer, envelope.version, size, &etag).map_err(Status::from)?;
             Err(Status::RangeNotSatisfiable)
         }
-        Err(error) => refuse(writer, envelope.version, error),
+        Err(error) => refuse_request(writer, envelope, error),
+    }
+}
+
+fn refuse_request(
+    writer: &mut impl Write,
+    envelope: &Envelope<'_>,
+    error: Failure,
+) -> Result<(), Status> {
+    if tus::is_route(envelope.target) {
+        tus::refuse(writer, envelope, error)
+    } else {
+        refuse(writer, envelope.version, error)
     }
 }
 

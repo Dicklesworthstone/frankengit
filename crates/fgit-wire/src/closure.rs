@@ -168,6 +168,8 @@ pub enum OmissionReason {
     BlobFilter,
     /// A tree or descendant was excluded by `tree:<depth>`.
     TreeDepth,
+    /// A native object kind was excluded by `object:type=<kind>`.
+    ObjectTypeFilter,
 }
 
 /// A single authenticated partial-clone omission.
@@ -489,8 +491,7 @@ pub fn compute_pack_closure(
     let (commits, boundaries) =
         collect_commits(repository, request, &shallow_request, &excluded, limits)?;
     let shallow_update = shallow_update(&shallow_request, &commits, &boundaries);
-    let (objects, omissions) =
-        collect_objects(repository, &commits, request.filter.as_ref(), limits)?;
+    let (objects, omissions) = collect_objects(repository, &commits, request, limits)?;
     Ok(PackClosure {
         objects,
         shallow_update,
@@ -714,7 +715,7 @@ fn shallow_update(
 fn collect_objects(
     repository: &impl ObjectClosureRepository,
     commits: &BTreeMap<AnyGitOid, CommitNode>,
-    filter: Option<&ObjectFilter>,
+    request: &PackRequest,
     limits: &ClosureLimits,
 ) -> Result<(Vec<ClosureObjectId>, Vec<PromisorOmission>), ClosureError> {
     if commits.len() > limits.max_objects {
@@ -728,16 +729,48 @@ fn collect_objects(
     root_trees
         .try_reserve(commits.len())
         .map_err(|_| limit_error("object frontier", limits.max_objects))?;
+    let filter = request.filter.as_ref();
+    // This API walks commit roots. Only requested commits that survived the
+    // shallow/exclusion walk are provided objects; their ordinary ancestors
+    // remain eligible for object-type omission. The set is bounded by commits.
+    let provided: BTreeSet<_> = request
+        .wants
+        .iter()
+        .filter(|id| commits.contains_key(*id))
+        .copied()
+        .collect();
+    let mut omissions = Vec::new();
     for (commit, node) in commits {
-        objects.push(ClosureObjectId {
-            oid: *commit,
-            object_type: ObjectType::Commit,
-        });
+        if !provided.contains(commit)
+            && filter.is_some_and(|filter| !object_type_permits(filter, ObjectType::Commit))
+        {
+            omissions
+                .try_reserve(1)
+                .map_err(|_| limit_error("promisor omissions", limits.max_objects))?;
+            omissions.push(PromisorOmission {
+                oid: *commit,
+                object_type: ObjectType::Commit,
+                parent: None,
+                depth: 0,
+                reason: OmissionReason::ObjectTypeFilter,
+            });
+        } else {
+            objects.push(ClosureObjectId {
+                oid: *commit,
+                object_type: ObjectType::Commit,
+            });
+        }
+        // Omitting a commit never prunes its tree: a blob/tree request still
+        // needs selected descendants from every admitted history generation.
         root_trees.push((node.tree, Some(*commit), 0_u32));
     }
-    let (tree_objects, omissions) =
-        collect_object_frontier(repository, root_trees, filter, limits)?;
+    // Commits and descendant facts share one object ledger, including facts
+    // omitted by the filter. Keep the original limits for refusal diagnostics.
+    let remaining_objects = limits.max_objects - commits.len();
+    let (tree_objects, tree_omissions) =
+        collect_object_frontier(repository, root_trees, filter, remaining_objects, limits)?;
     objects.extend(tree_objects);
+    omissions.extend(tree_omissions);
     objects.sort_by(compare_object_ids);
     Ok((objects, omissions))
 }
@@ -755,13 +788,14 @@ fn collect_objects_from_roots(
     for oid in roots.iter().rev() {
         frontier.push((*oid, None, 0_u32));
     }
-    collect_object_frontier(repository, frontier, filter, limits)
+    collect_object_frontier(repository, frontier, filter, limits.max_objects, limits)
 }
 
 fn collect_object_frontier(
     repository: &impl ObjectClosureRepository,
     mut frontier: Vec<(AnyGitOid, Option<AnyGitOid>, u32)>,
     filter: Option<&ObjectFilter>,
+    remaining_objects: usize,
     limits: &ClosureLimits,
 ) -> Result<(Vec<ClosureObjectId>, Vec<PromisorOmission>), ClosureError> {
     let mut paths = BTreeMap::<AnyGitOid, ObjectPath>::new();
@@ -774,7 +808,7 @@ fn collect_object_frontier(
         if existing.is_some_and(|path| !is_preferred_path(depth, parent, path)) {
             continue;
         }
-        if existing.is_none() && paths.len() == limits.max_objects {
+        if existing.is_none() && paths.len() >= remaining_objects {
             return Err(limit_error("objects", limits.max_objects));
         }
         let object = repository.object(oid)?;
@@ -884,6 +918,9 @@ fn omission_reason(
     depth: u32,
 ) -> Option<OmissionReason> {
     let filter = filter?;
+    if !object_type_permits(filter, object.object_type()) {
+        return Some(OmissionReason::ObjectTypeFilter);
+    }
     if matches!(object, ClosureObject::Tree(_) | ClosureObject::Blob { .. })
         && !tree_depth_permits(filter, depth)
     {
@@ -895,12 +932,26 @@ fn omission_reason(
     None
 }
 
+fn object_type_permits(filter: &ObjectFilter, kind: ObjectType) -> bool {
+    match filter {
+        ObjectFilter::ObjectType(requested) => kind == *requested,
+        ObjectFilter::Combine(parts) => parts.iter().all(|part| object_type_permits(part, kind)),
+        ObjectFilter::BlobNone
+        | ObjectFilter::BlobLimit(_)
+        | ObjectFilter::TreeDepth(_)
+        | ObjectFilter::SparsePath(_)
+        | ObjectFilter::SparseObject(_)
+        | ObjectFilter::SparseObjectName(_) => true,
+    }
+}
+
 fn tree_depth_permits(filter: &ObjectFilter, depth: u32) -> bool {
     match filter {
         ObjectFilter::TreeDepth(exclusive_depth) => depth < *exclusive_depth,
         ObjectFilter::Combine(parts) => parts.iter().all(|part| tree_depth_permits(part, depth)),
         ObjectFilter::BlobNone
         | ObjectFilter::BlobLimit(_)
+        | ObjectFilter::ObjectType(_)
         | ObjectFilter::SparsePath(_)
         | ObjectFilter::SparseObject(_)
         | ObjectFilter::SparseObjectName(_) => true,
@@ -915,6 +966,7 @@ fn blob_permits(filter: &ObjectFilter, object: &ClosureObject) -> bool {
         ObjectFilter::BlobNone => false,
         ObjectFilter::BlobLimit(limit) => *size < *limit,
         ObjectFilter::TreeDepth(_)
+        | ObjectFilter::ObjectType(_)
         | ObjectFilter::SparsePath(_)
         | ObjectFilter::SparseObject(_)
         | ObjectFilter::SparseObjectName(_) => true,
@@ -963,6 +1015,7 @@ const fn omission_reason_code(reason: OmissionReason) -> u8 {
     match reason {
         OmissionReason::BlobFilter => 1,
         OmissionReason::TreeDepth => 2,
+        OmissionReason::ObjectTypeFilter => 3,
     }
 }
 

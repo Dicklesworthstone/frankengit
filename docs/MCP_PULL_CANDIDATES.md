@@ -8,6 +8,12 @@ Source-write, review-write and merge-write grants do not imply either read grant
 This is an operator-sponsored local surface, not an IntentRun capability issuer
 or the complete FG-096 / x2mv.4.24 agent execution path.
 
+The same independently granted read surface supports **PR rebase-and-merge**
+with `operation: "prepare_pull_rebase"`. This selects the dedicated native PR
+planner, keeps the original source branch intact, and produces a target-named
+bundle for atomic PR landing. It is distinct from `prepare_rebase`, whose
+source-branch publication does not merge a PR.
+
 For a queued PR, [`prepare_queue_merge`](MCP_QUEUE_CANDIDATES.md) additionally
 requires the queue read grant and exact queue number/version. It constructs the
 canonical queue-head candidate and returns arguments for
@@ -64,6 +70,41 @@ separately false for conflicts and already-integrated history. Every preparation
 result identifies its selected `method`, including conflicts and no-op results;
 all three argument objects are null when no candidate is available.
 
+## Prepare a complete PR rebase series
+
+Use the same exact PR/version/policy/ref/tip coordinates, plus explicit
+`profile: "path-v1"`, `upstream`, `committer`, `timestamp`, and `empty` (`stop`,
+`drop`, or `keep`). The upstream must also be an ancestor of the target.
+Original authors and messages are retained; rewritten commits use the supplied
+committer/time and omit original signatures. Author strings do not authenticate
+the author. The original and rewritten series must each be nonempty and contain
+at most 256 single-parent commits. An entirely dropped series refuses.
+
+A clean result contains the original-to-rewritten `steps`, exact candidate,
+and three separate handoffs. `candidate_arguments` and `publication_arguments`
+both carry `method: "rebase"`; `inspection_arguments` selects
+`inspect_pull_rebase` and pins the snapshot and bundle digest. No handoff supplies
+a retry key or reviewer identity. Conflicts or a newly empty change under
+`empty: "stop"` return the exact stopped commit with `complete: false` and no
+partial bundle, review arguments, or publication arguments. This PR profile
+does not accept merge commits. To resolve a stopped series explicitly, use
+`resolve_pull_rebase` with the same exact inputs, the stopped response's
+`snapshot_token` as required `expected_head`, and original-commit-bound
+`resolutions`. The [resolution guide](MCP_PULL_RESOLUTION.md#rebase-conflict-resolution)
+specifies the bounded choices and per-step receipts. Preparation never guesses
+a resolution or changes the selected empty policy.
+
+`max_commits` (256), `max_edges` (16,384), `max_tree_entries` (100,000), and
+`max_preparation_bytes` (256 KiB default, 1 MiB maximum) narrow the preparation
+envelope. The 24 KiB complete bundle envelope remains unchanged. The full
+rebase tool result is bounded to 1 MiB. Preparation never stages objects or
+creates a transaction, including on interruption or resource refusal.
+Resolution uses the same envelope. All paths and replacement bytes across all
+recipes additionally share one 24 KiB allowance, with at most 64 total paths.
+Both preparation and resolution return separate `inspect_pull_rebase` arguments;
+neither claims inspection or approval has occurred. Sponsored agent credentials
+cannot invoke either PR rebase operation.
+
 ## Separate inspection, review and publication
 
 Preparation is not a full-tree review or an approval. The existing native
@@ -89,7 +130,10 @@ adds the exact method to the shared candidate coordinates and original bundle.
 The publication tool defaults an omitted method to `merge-commit`; a squash
 caller must preserve `method: "squash"`. The native publication driver rechecks
 actual parent shape, current reviews and protection, and seals the method into
-retry identity. Review arguments omit method because the vote binds the commit.
+retry identity. Ordinary merge/squash review arguments omit method because the
+vote binds the commit. PR rebase review arguments must retain `method: "rebase"`
+so the reviewer adapter verifies every intermediate commit through the dedicated
+native series validator; the existing candidate-review event identity is unchanged.
 
 No read changes a ref, imports an object, seals a request,
 records a vote, or grants permission to merge. A clean automatic candidate may
@@ -117,5 +161,10 @@ persisted SHA-1/SHA-256 protocol preparation with exact-head repetition, unchang
 authority/object placement, conflicts, stale inputs and separate read/write grants.
 The squash tests additionally carry real candidates through preparation,
 inspection, independently sponsored review, method-bound publication and restart.
+PR rebase tests additionally carry a two-commit series through actual JSON-RPC
+preparation, per-commit inspection, independent review and atomic landing,
+preserve the original source ref, and recover the same terminal outcome after
+restart without a usable bundle. Stale inputs, aggregate limits, wrong review
+profiles, missing read grants and conflict stops have adjacent permitted cases.
 These Rust test definitions are not a passing execution claim. Run them on the
 pinned toolchain and record the actual revision and result.

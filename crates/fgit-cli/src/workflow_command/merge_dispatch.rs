@@ -53,7 +53,7 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
     let (options, merge, style, event) = parse(args)?;
     #[cfg(target_os = "linux")]
     {
-        super::execute_selected(options, Some((merge, style)), Some(&event))
+        super::execute_selected(options, Some((merge, style)), Some(&event), None)
     }
     #[cfg(not(target_os = "linux"))]
     {

@@ -179,6 +179,11 @@ pub(super) fn prepared(
         bytes.len(),
         quote(&digest)
     );
+    let (old_key, new_key) = if matches!(profile, Some(PatchProfile::Gitlinks)) {
+        ("old_object", "new_object")
+    } else {
+        ("old_blob", "new_blob")
+    };
     for (index, path) in candidate.paths.iter().enumerate() {
         checkpoint(live)?;
         if path.path.is_empty() || path.path.len() > 4096 {
@@ -187,7 +192,7 @@ pub(super) fn prepared(
         append(
             &mut metadata,
             &format!(
-                "{}{{\"path_hex\":{},\"old_blob\":{},\"new_blob\":{},\"new_mode\":{},\"hunks\":{}}}",
+                "{}{{\"path_hex\":{},\"{old_key}\":{},\"{new_key}\":{},\"new_mode\":{},\"hunks\":{}}}",
                 if index == 0 { "" } else { "," },
                 quote(&hex(&path.path)),
                 optional_oid(path.old_blob),

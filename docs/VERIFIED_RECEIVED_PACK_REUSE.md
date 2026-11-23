@@ -1,10 +1,11 @@
-# Reuse verified received packs for full and incremental histories
+# Reuse verified retained packs for full and incremental histories
 
 The network receive, native directory import, file-backed bundle intake, and
 upload paths share a bounded, immutable compressed representation and retain
 disposable compressed custody for later service restarts (`frankengit-1tl9`).
-After pushes or eligible packed imports have
-validated and placed their objects, a matching clone's pack-materialization
+After pushes or eligible packed imports have validated and placed their
+objects, or a native writer's output has been independently revalidated, a
+matching clone's pack-materialization
 step can reuse one original pack, join complete entry runs from several
 packs, or select individual verified entries without re-reading expanded blob
 bodies, choosing new deltas, or recompressing them. This includes an initial
@@ -15,6 +16,12 @@ selection still run first; this is not a claim of an I/O-free whole fetch.
 The HTTP, SSH, and raw Git request children share the live cache through their
 service configuration. A newly created service configuration starts with an
 empty live cache and must revalidate persisted custody before using it.
+A complete live hit is checked and pinned after current visibility, exact
+selection, held-base proof, and work admission, before optional disk restoration.
+Materialization gives that pinned representation a fresh response cursor. An
+equivalent encoding persisted by another service cannot force canonical body
+reads when the current live cache already satisfies the request. Cold misses
+still restore eligible custody and rebuild the same request's held-base proof.
 
 ## Selection and integrity
 
@@ -241,6 +248,89 @@ once per source within each selection pass.
 Incompatible or unavailable entries use the existing native writer. Cancelled
 work remains cancelled.
 
+### Hybrid reuse after native changes
+
+A native merge or TreeFS publication can add objects absent from every retained
+sender representation. After complete reuse misses, the serving path partitions
+the already authorized, identity-sorted selection into a reusable subset and
+its exact complement. It does not change the selected authority head or walk a
+broader object graph.
+
+The reusable subset is closed under its delta dependencies, except for the same
+independently proven client-held bases allowed by the negotiated thin profile.
+An entry whose selected parent cannot be reused goes into the native subset
+with that parent. A redundant held proof for a selected but unavailable parent
+cannot join the two graphs. Selection uses the existing depth/fanout checks,
+deterministic representation preferences and full retained-source integrity
+checks; it does not claim to find an optimal partition.
+
+Only the complement is read from the canonical object fabric and encoded.
+It uses the existing native streaming writer with a self-contained frozen
+profile and no external base offers. The native and retained delta graphs are
+therefore disjoint. Their entries are joined under one new pack header and
+native checksum; the native run remains contiguous, preserving its internal
+OFS distances. A client without OFS capability keeps the native no-delta
+profile, while reused OFS entries are converted to REF entries as before.
+
+Retained entry count, output bytes and both native-body and inflated-entry
+totals are reserved from the original aggregate envelope before encoding the
+complement. The joined result rechecks those totals and the actual native
+compression receipts. A representation-only output or expansion limit during
+native generation may fall back to the ordinary full writer under the same
+request deadline and unchanged original limits. Cancellation, source identity
+failure and I/O failure do not trigger a fresh attempt.
+
+Joining uses bounded reads and private scratch custody. Both source headers,
+counts and native trailers are checked while copying; the retained subset's
+full-byte SHA-256 is checked too. The final pack is promoted only after both
+source runs and the new trailer finish. Failure drops its temporary custody;
+it never publishes a partial response. The final receipt retains separate
+reused and written evidence rather than claiming a single native encoding
+profile.
+
+This avoids recompressing cached history when only a few native objects are
+new. It does not remove cold custody revalidation, make object storage
+authoritative through a cache, or establish a measured whole-clone speedup.
+Zero received-pack cache capacity still selects the ordinary writer.
+
+### Capture from native output
+
+Successful native emission can now supply a reusable representation even when
+no incoming pack contains those objects. This covers ordinary served packs,
+native exports, and the newly encoded complement of a hybrid response. The
+current response keeps its original `Written` or `Hybrid` receipt and bytes.
+Only later reuse reports a retained representation.
+
+Capture reserves raw bytes and conservative object metadata before copying the
+completed private spool. The copy does not advance the response cursor. A
+second bounded parser verifies framing, inflation and the native trailer;
+native reconstruction then rederives every identity, type and length. Every
+result must also match an independently EOF-authenticated canonical object's
+strong payload commitment. A writer receipt or unverified envelope length
+cannot substitute for these checks, including for SHA-1 repositories.
+
+Membership is exactly the native run's selected identities. A hybrid supplies
+only its missing-object complement, not the larger joined selection. External
+REF bases are considered only when they were proven client-held candidates for
+that native thin run. The resulting custody uses the existing dependency checks,
+bounded cache reservation, persistence format and later visibility checks.
+Neither filtered output nor an earlier private branch can widen a later fetch.
+
+This optional pass has finite memory and work limits. Raw bytes must fit the
+existing 64 MiB per-representation ceiling and shared cache budget. Both the
+inflated entry-program total and reconstructed native-body total must fit the
+minimum of the exact upload allowance, cache capacity and configured receive
+expansion limit. Canonical objects must also fit the configured receive object
+limit. A separate two-second monotonic allowance is checked throughout capture,
+and reconstruction work is bounded by those byte ceilings and the original
+work limit. Exhausting either optional allowance discards the candidate while
+returning the completed native response. Larger streamed outputs still succeed
+without capture. Allocation, cache I/O, or optional verification failure also
+leaves the successful response intact; the original request's cancellation
+remains terminal. Capture adds one bounded verification scan on the first
+writer miss, and cold restart still requires canonical revalidation. It is not
+a measured whole-repository clone speedup or removal of the cache size limits.
+
 ## Operator control and custody
 
 `fg serve`, `fg serve-http`, and `fg serve-ssh` accept:
@@ -250,9 +340,9 @@ work remains cancelled.
 ```
 
 The default is **128 MiB**, including conservative metadata charges. Zero
-disables received-pack capture and reuse. At most 64 representations are
-retained, and each original input allocation must fit **64 MiB**. Both its
-length and allocation capacity count; a pack outside the retention bound is
+disables retained-pack capture and reuse. At most 64 representations are
+retained, and each original input or generated allocation must fit **64 MiB**.
+Both its length and allocation capacity count; a pack outside the retention bound is
 still received normally under the independent receive envelope.
 
 This setting is separate from `--pack-cache-mib`, which controls deterministic
@@ -388,7 +478,7 @@ writer; request cancellation still stops the request.
   counts, expanded bytes, output bytes, and maximum delta depth. A composition
   uses the distinct `received-pack-concat-v1` profile with newly computed
   checksums and aggregate counts. `source_pack_count()` identifies the number
-  of complete verified sender runs in either profile.
+  of complete verified retained runs in either profile.
 - Responses that require client-held bases use `received-pack-thin-v1` or
   `received-pack-concat-thin-v1`. `external_base_count()` records the number of
   distinct external bases actually used. A thin-capable request that produces
@@ -400,7 +490,19 @@ writer; request cancellation still stops the request.
   `source_pack_count()` counts the distinct retained source allocations used,
   even when only part of each source is emitted.
 
-The singleton received profile preserves the sender's bytes and ordering; the
+- `Hybrid(HybridPackReceipt)` records `received-pack-hybrid-v1` or
+  `received-pack-hybrid-thin-v1`, the combined checksum, full-byte SHA-256,
+  object count, expanded native bytes and output bytes. `reused()` and
+  `written()` expose the separate source receipts. The outer
+  `PackMaterializationReceipt::writer()` and `received()` accessors remain
+  exclusive; use `hybrid()` for this representation. The written component
+  is always self-contained. External bases, if any, belong to the retained
+  component and still require the current held proof.
+
+The stable `received-pack-*` profile identifiers describe verified retained
+representations, including received, imported and locally generated sources;
+they do not attest network provenance. The singleton profile preserves the
+source's bytes and ordering; the
 composed profile preserves the constituent entry runs and replaces their outer
 framing. Selective profiles preserve compressed data while explicitly recording
 their changed entry framing and selection. None claims equivalence to the native
@@ -409,6 +511,32 @@ authorized native object set. Local exports continue to use their explicit
 deterministic writer profile.
 
 ## Regression coverage and execution status
+
+At source revision
+[`71c994b`](https://github.com/Dicklesworthstone/frankengit/commit/71c994b9abfb74addd8056636890519dbbca6efe),
+an isolated production-source harness passed **99 received-pack and pack-spool
+component tests**, including all **eight new hybrid tests**, with no failures.
+The original modules and checked-in tests were linked into their normal module
+layout without replacement implementations. The pinned nightly toolchain and
+workspace optimization settings were used, and all 42 selected registry
+dependencies matched the repository lockfile's versions and checksums.
+
+These executed cases cover both hash domains, exact complements, retained
+dependencies, typed held proofs, combined envelopes, corruption and cancellation.
+The new OFS case uses the real native planner/writer, preserves an entire shifted
+entry run byte-for-byte across the 64 KiB copy boundary, and independently checks
+the emitted identities and bodies.
+
+The four native-selection integration regressions remain authored, unexecuted
+coverage. They make historical object files unavailable after selection, require
+materialization to read only new objects, and re-admit the complete output into
+an empty node. A later production CLI check, which would also type-check the
+OneNode integration, was interrupted and reaped with exit 130 after progress
+stalled under host memory pressure; it produced no source compiler diagnostic.
+No complete node/CLI check, native transport campaign or performance result is
+claimed by the component run.
+
+
 
 Parser and wire regressions cover shared ownership without copying, original
 metadata binding, retention limits, SHA-1/SHA-256, corrupted input, cancellation,

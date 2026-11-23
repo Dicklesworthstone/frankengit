@@ -14,6 +14,7 @@ pub(super) const OPEN: &str = "frankengit_pull_open";
 pub(super) const UPDATE: &str = "frankengit_pull_update";
 pub(super) const CLOSE: &str = "frankengit_pull_close";
 pub(super) const REOPEN: &str = "frankengit_pull_reopen";
+pub(super) const RETARGET: &str = "frankengit_pull_retarget";
 const FIELDS: &[&str] = &[
     "number",
     "expected_version",
@@ -29,7 +30,7 @@ const FIELDS: &[&str] = &[
 ];
 
 pub(super) fn is_tool(name: &str) -> bool {
-    matches!(name, OPEN | UPDATE | CLOSE | REOPEN)
+    matches!(name, OPEN | UPDATE | CLOSE | REOPEN | RETARGET)
 }
 pub(super) fn tools() -> Vec<Tool> {
     [
@@ -37,6 +38,7 @@ pub(super) fn tools() -> Vec<Tool> {
         (UPDATE, "Replace complete PR metadata at an exact positive version and explicit branch tips. Cannot retarget branches or reopen a closed/merged PR. No latest-tip lookup."),
         (CLOSE, "Close a PR using its exact positive version and unchanged full recorded metadata. Remains possible after branch deletion. Retry the identical command and durable key."),
         (REOPEN, "Reopen a closed, unmerged PR at its exact positive version with complete metadata and current source/target tips on the same branches. Does not restore branches, move refs, approve or merge code. Retry the identical command and durable key."),
+        (RETARGET, "Retarget an open native PR to a different target branch at its exact positive version. Preserve the source branch and supply complete metadata and current source/new-target tips. Retains PR identity and conversation; previous reviews are stale. No ref movement or merge permission. Retry the identical command and durable key."),
     ].into_iter().map(|(name, description)| Tool { name, description, schema: schema() }).collect()
 }
 fn schema() -> Value {
@@ -153,6 +155,7 @@ pub(super) fn parse(
         UPDATE => PullRequestAction::Update,
         CLOSE => PullRequestAction::Close,
         REOPEN => PullRequestAction::Reopen,
+        RETARGET => PullRequestAction::Retarget,
         _ => return Err(ToolError::invalid("tool_not_granted")),
     };
     Ok(PullRequestCommand {
@@ -209,6 +212,7 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
             PullRequestAction::Update => "update",
             PullRequestAction::Close => "close",
             PullRequestAction::Reopen => "reopen",
+            PullRequestAction::Retarget => "retarget",
         }),
     );
     result.insert("complete".into(), Value::Bool(true));

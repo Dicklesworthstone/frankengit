@@ -6,6 +6,7 @@ use fgit_forge::aggregate::{AggregateVersion, ExpectedVersion, PullRequestNumber
 use fgit_forge::event::pull_request::{
     MAX_BODY_BYTES, PullRequestAction, PullRequestCommand, PullRequestData,
 };
+use fgit_forge::event::pull_request_labels::{MAX_LABELS, validate_labels};
 use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, GitHashAlgorithm, PrincipalId, RefName, RepositoryAuthorityHeadId,
@@ -38,6 +39,7 @@ pub(super) struct Mutation {
 pub(super) struct ReadOptions {
     pub selection: Selection,
     pub expected_head: Option<RepositoryAuthorityHeadId>,
+    pub labels: Vec<String>,
 }
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Selection {
@@ -63,14 +65,14 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
     if arguments.len() < 4 {
         return Err(super::USAGE.to_owned());
     }
-    if arguments.len() > 48
+    let action = arguments[0].as_str();
+    if arguments.len() > (if action == "list" { 96 } else { 48 })
         || arguments.iter().any(|arg| arg.len() > MAX_BODY_BYTES)
         || arguments.iter().map(String::len).sum::<usize>() > 128 * 1024
     {
         return Err("PR arguments exceed the bounded local profile".to_owned());
     }
-    let action = arguments[0].as_str();
-    let mutation = matches!(action, "open" | "update" | "close" | "reopen");
+    let mutation = matches!(action, "open" | "update" | "close" | "reopen" | "retarget");
     if !mutation && !matches!(action, "list" | "show") {
         return Err(super::USAGE.to_owned());
     }
@@ -86,6 +88,7 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
         Some(PullRequestNumber::try_new(decimal(text)?).ok_or("PR number must be positive")?)
     };
     let mut flags = BTreeMap::new();
+    let mut labels = Vec::new();
     let mut trusted = false;
     let mut cursor = if action == "list" { 4 } else { 5 };
     while cursor < arguments.len() {
@@ -125,7 +128,7 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
                 )
             } else {
                 flag == "--expected-head"
-                    || (action == "list" && matches!(flag, "--after" | "--limit"))
+                    || (action == "list" && matches!(flag, "--after" | "--limit" | "--label"))
             };
         if !allowed {
             return Err(format!("unknown or inapplicable PR option {supplied:?}"));
@@ -134,6 +137,13 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
             .get(cursor)
             .ok_or_else(|| format!("missing value for {supplied}"))?;
         cursor += 1;
+        if flag == "--label" {
+            if labels.len() == MAX_LABELS {
+                return Err("too many PR label filters".into());
+            }
+            labels.push(value.clone());
+            continue;
+        }
         if flags.insert(flag, value.as_str()).is_some() {
             return Err(format!("duplicate {flag}"));
         }
@@ -141,6 +151,8 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
     if !trusted {
         return Err("--trusted-local is required: an authorized local operator owns access to this repository".to_owned());
     }
+    labels.sort();
+    validate_labels(&labels).map_err(|_| "invalid or duplicate PR label filters")?;
     let requested_format = flags
         .get("--object-format")
         .map(|value| match *value {
@@ -165,7 +177,7 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
         let version = decimal(required(&flags, "--expected-version")?)?;
         if (action == "open") != (version == 0) {
             return Err(
-                "open requires version 0; update, close and reopen require a positive exact version"
+                "open requires version 0; update, close, reopen and retarget require a positive exact version"
                     .to_owned(),
             );
         }
@@ -191,6 +203,7 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
                 "open" => PullRequestAction::Open,
                 "update" => PullRequestAction::Update,
                 "reopen" => PullRequestAction::Reopen,
+                "retarget" => PullRequestAction::Retarget,
                 _ => PullRequestAction::Close,
             },
             data: PullRequestData {
@@ -247,6 +260,7 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
             Operation::Read(ReadOptions {
                 selection,
                 expected_head,
+                labels,
             }),
             requested_format.unwrap_or(GitHashAlgorithm::Sha1),
         )
@@ -266,7 +280,11 @@ fn required<'a>(flags: &BTreeMap<&str, &'a str>, flag: &str) -> Result<&'a str, 
         .copied()
         .ok_or_else(|| format!("{flag} is required"))
 }
-fn reference(flags: &BTreeMap<&str, &str>, plain: &str, encoded: &str) -> Result<RefName, String> {
+pub(super) fn reference(
+    flags: &BTreeMap<&str, &str>,
+    plain: &str,
+    encoded: &str,
+) -> Result<RefName, String> {
     let bytes = match (flags.get(plain), flags.get(encoded)) {
         (Some(value), None) if value.len() <= 4096 => value.as_bytes().to_vec(),
         (None, Some(value)) => unhex(value, 4096)?,

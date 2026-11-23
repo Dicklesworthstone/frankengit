@@ -205,8 +205,9 @@ pub(super) fn mutation(
     tx: TxId,
     terminal: TerminalOutcome,
 ) -> String {
+    let rebase_review = matches!(command, Command::RebaseReview(_));
     let (family, action, version, submitted, binding, reviewers, method_field) = match command {
-        Command::Review(command) => (
+        Command::Review(command) | Command::RebaseReview(command) => (
             "candidate_review_publication",
             decision(command.review.decision),
             match command.review.expected_version {
@@ -216,7 +217,11 @@ pub(super) fn mutation(
             &command.review.subject,
             command.candidate,
             "null".to_owned(),
-            String::new(),
+            if rebase_review {
+                ",\"method\":\"rebase\"".to_owned()
+            } else {
+                String::new()
+            },
         ),
         Command::Merge {
             subject,
@@ -243,6 +248,7 @@ pub(super) fn mutation(
                 quote(match method {
                     NativeMergeMethod::MergeCommit => "merge-commit",
                     NativeMergeMethod::Squash => "squash",
+                    NativeMergeMethod::Rebase => "rebase",
                     NativeMergeMethod::FastForwardOnly => "fast-forward-only/v1",
                 })
             ),

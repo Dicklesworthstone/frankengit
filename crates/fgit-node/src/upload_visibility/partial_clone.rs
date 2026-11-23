@@ -4,8 +4,9 @@ use super::{
     BTreeMap, BTreeSet, GitOid, NodePackMaterializationRefusal, ObjectType, PackError, PackLimits,
     PackRequest, PackWriteError, RefusalCode, disclosure_refusal,
 };
-use fgit_wire::ObjectFilter;
+use fgit_wire::{AdvertisedRef, ObjectFilter};
 mod sparse;
+mod sparse_names;
 
 pub(super) type PatternLoader<'a> =
     dyn FnMut(GitOid, usize) -> Result<(ObjectType, Vec<u8>), NodePackMaterializationRefusal> + 'a;
@@ -21,7 +22,7 @@ pub fn unserved_filter_name(filter: &ObjectFilter) -> Option<&'static str> {
     let mut pending = vec![filter];
     while let Some(filter) = pending.pop() {
         match filter {
-            ObjectFilter::SparseObjectName(_) => {
+            ObjectFilter::SparseObjectName(name) if !sparse_names::supported(name) => {
                 return Some("sparse:oid");
             }
             ObjectFilter::SparsePath(_) => return Some("sparse:path"),
@@ -30,7 +31,9 @@ pub fn unserved_filter_name(filter: &ObjectFilter) -> Option<&'static str> {
             ObjectFilter::BlobNone
             | ObjectFilter::BlobLimit(_)
             | ObjectFilter::TreeDepth(_)
-            | ObjectFilter::SparseObject(_) => {}
+            | ObjectFilter::ObjectType(_)
+            | ObjectFilter::SparseObject(_)
+            | ObjectFilter::SparseObjectName(_) => {}
         }
     }
     None
@@ -73,11 +76,17 @@ impl<F: FnMut() -> bool> Work<'_, F> {
 struct Predicate {
     blob_limit: Option<u64>,
     tree_depth: Option<u32>,
+    // An absent predicate permits every kind. Conflicting object:type terms
+    // intersect to zero; explicit wants still bypass the completed predicate.
+    object_types: Option<u8>,
     sparse: BTreeSet<GitOid>,
 }
 impl Predicate {
     fn compile(
         filter: Option<&ObjectFilter>,
+        objects: &BTreeMap<GitOid, FilterObject>,
+        facts: &BTreeMap<GitOid, super::WalkFacts>,
+        refs: &[AdvertisedRef],
         work: &mut Work<'_, impl FnMut() -> bool>,
     ) -> Result<Self, NodePackMaterializationRefusal> {
         let mut result = Self::default();
@@ -97,6 +106,10 @@ impl Predicate {
                     result.tree_depth =
                         Some(result.tree_depth.map_or(*depth, |old| old.min(*depth)));
                 }
+                ObjectFilter::ObjectType(kind) => {
+                    let mask = object_type_mask(*kind);
+                    result.object_types = Some(result.object_types.map_or(mask, |old| old & mask));
+                }
                 ObjectFilter::Combine(parts) => {
                     if parts.is_empty() || pending.len().saturating_add(parts.len()) > 65_520 {
                         return Err(disclosure_refusal(RefusalCode::ResourceBudgetExceeded));
@@ -115,7 +128,17 @@ impl Predicate {
                     )?;
                     result.sparse.insert(*id);
                 }
-                ObjectFilter::SparseObjectName(_) | ObjectFilter::SparsePath(_) => {
+                ObjectFilter::SparseObjectName(name) => {
+                    let id = sparse_names::resolve(name, objects, facts, refs, work)?;
+                    work.count(
+                        result
+                            .sparse
+                            .len()
+                            .saturating_add(usize::from(!result.sparse.contains(&id))),
+                    )?;
+                    result.sparse.insert(id);
+                }
+                ObjectFilter::SparsePath(_) => {
                     return Err(NodePackMaterializationRefusal::UnsupportedFetch(
                         "sparse filters",
                     ));
@@ -129,6 +152,12 @@ impl Predicate {
         object: &FilterObject,
         depth: Option<u32>,
     ) -> Result<bool, NodePackMaterializationRefusal> {
+        if self
+            .object_types
+            .is_some_and(|allowed| allowed & object_type_mask(object.kind) == 0)
+        {
+            return Ok(false);
+        }
         if object.kind == ObjectType::Blob
             && self
                 .blob_limit
@@ -144,6 +173,15 @@ impl Predicate {
                 .ok_or_else(|| disclosure_refusal(RefusalCode::EvidenceInvalid));
         }
         Ok(true)
+    }
+}
+
+const fn object_type_mask(kind: ObjectType) -> u8 {
+    match kind {
+        ObjectType::Commit => 1,
+        ObjectType::Tree => 2,
+        ObjectType::Blob => 4,
+        ObjectType::Tag => 8,
     }
 }
 
@@ -169,6 +207,7 @@ pub(super) fn apply_selection(
     apply_selection_with_sparse(
         objects,
         &BTreeMap::new(),
+        &[],
         ids,
         request,
         limits,
@@ -187,6 +226,7 @@ pub(super) fn apply_selection(
 pub(super) fn apply_selection_with_sparse(
     objects: &BTreeMap<GitOid, FilterObject>,
     facts: &BTreeMap<GitOid, super::WalkFacts>,
+    refs: &[AdvertisedRef],
     ids: &mut Vec<GitOid>,
     request: &PackRequest,
     limits: &PackLimits,
@@ -209,7 +249,7 @@ pub(super) fn apply_selection_with_sparse(
             "shallow history",
         ));
     }
-    let predicate = Predicate::compile(request.filter.as_ref(), &mut work)?;
+    let predicate = Predicate::compile(request.filter.as_ref(), objects, facts, refs, &mut work)?;
     work.count(ids.len())?;
     work.count(request.wants.len())?;
     let mut selected = BTreeSet::new();
@@ -231,7 +271,9 @@ pub(super) fn apply_selection_with_sparse(
         explicit.insert(id);
     }
     // Git propagates user-given status through an explicitly requested tag
-    // chain. Its terminal blob/tree bypasses filters, but descendants do not.
+    // chain. Intermediate tags and the terminal object bypass filters, but
+    // descendants of that terminal object do not. Object-type filters can
+    // exclude tags and commits too, unlike the older blob/tree predicates.
     // A directly held tag cuts this restoration just like a held target; no
     // physical lookup or additional disclosure permission is involved.
     for &id in &request.wants {
@@ -243,15 +285,15 @@ pub(super) fn apply_selection_with_sparse(
                 break;
             }
             let item = object(objects, target)?;
+            if target != id {
+                work.count(
+                    explicit
+                        .len()
+                        .saturating_add(usize::from(!explicit.contains(&target))),
+                )?;
+                explicit.insert(target);
+            }
             if item.kind != ObjectType::Tag {
-                if target != id && matches!(item.kind, ObjectType::Blob | ObjectType::Tree) {
-                    work.count(
-                        explicit
-                            .len()
-                            .saturating_add(usize::from(!explicit.contains(&target))),
-                    )?;
-                    explicit.insert(target);
-                }
                 break;
             }
             if !seen.insert(target) {

@@ -28,6 +28,7 @@ const USAGE: &str =
   --expected-source-tip <oid> --expected-target-tip <oid>
   --merge-base <oid> --candidate-commit <oid>
   --bundle <stable-local-file> --bundle-sha256 <independently-retained-64-lowercase-hex>
+  [--method rebase]
   [--source-ref-hex <hex> instead of --source-ref] [--ref-hex]
   [--minimum-pin <bytes>:<tail-sha256>] [--object-format sha1|sha256]
   [--timeout-ms <1..60000>]
@@ -36,6 +37,10 @@ Publish one completed job from the original trusted-local workflow journal for
 the exact native PR candidate. The bundle must be a bounded regular artifact
 whose independently retained SHA-256 matches; admission validates the actual
 merge, squash or fast-forward shape and every original PR/ref/policy coordinate.
+Explicit --method rebase selects complete original and rewritten linear-series
+validation, including every intermediate commit and target-only prerequisites.
+The existing check identity binds subject, candidate, base, bundle and execution
+evidence; this validation selection is not a distinct canonical check method.
 This does not run scripts, stage candidate objects, move refs, approve reviews,
 acknowledge custody, or authorize a merge. Configured candidate-check protection
 independently selects the publisher, workflow graph and job.
@@ -59,6 +64,7 @@ struct Options {
     candidate: CandidateBinding,
     bundle: PathBuf,
     bundle_sha256: [u8; 32],
+    rebase: bool,
 }
 
 pub(super) fn run(arguments: &[String], output: &mut impl Write) -> Result<u8, String> {
@@ -82,7 +88,7 @@ pub(super) fn run(arguments: &[String], output: &mut impl Write) -> Result<u8, S
 
 fn parse(arguments: &[String]) -> Result<Options, String> {
     if arguments.len() < 5
-        || arguments.len() > 72
+        || arguments.len() > 74
         || arguments.first().map(String::as_str) != Some("publish-candidate")
         || arguments
             .iter()
@@ -119,6 +125,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                 | "--candidate-commit"
                 | "--bundle"
                 | "--bundle-sha256"
+                | "--method"
         ) {
             if selected.insert(flag, value.as_str()).is_some() {
                 return Err(format!("duplicate {flag}"));
@@ -177,6 +184,16 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     candidate
         .validate(&subject)
         .map_err(|_| "invalid exact PR candidate coordinates")?;
+    let rebase = match selected.get("--method").copied() {
+        None => false,
+        Some("rebase") => true,
+        Some(_) => return Err("the optional candidate-check --method must be rebase".into()),
+    };
+    if rebase
+        && (candidate.merge_base == subject.source_tip || candidate.commit == subject.target_tip)
+    {
+        return Err("rebase requires nonempty original and rewritten series".into());
+    }
     let bundle = get("--bundle")?;
     if bundle.is_empty() {
         return Err("--bundle requires a stable local file path".into());
@@ -190,6 +207,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         candidate,
         bundle: bundle.into(),
         bundle_sha256,
+        rebase,
     })
 }
 
@@ -302,14 +320,26 @@ fn execute(options: Options, output: &mut impl Write) -> Result<u8, String> {
             return Err("pre-admission read timeout".to_owned());
         }
         entered_admission = true;
-        node.runtime()
-            .block_on(node.admit_trusted_candidate_workflow_check_in(
-                &request,
-                &session,
-                &observation.record,
-                &bundle,
-                Default::default(),
-            ))
+        let result = if options.rebase {
+            node.runtime()
+                .block_on(node.admit_trusted_rebase_candidate_workflow_check_in(
+                    &request,
+                    &session,
+                    &observation.record,
+                    &bundle,
+                    Default::default(),
+                ))
+        } else {
+            node.runtime()
+                .block_on(node.admit_trusted_candidate_workflow_check_in(
+                    &request,
+                    &session,
+                    &observation.record,
+                    &bundle,
+                    Default::default(),
+                ))
+        };
+        result
             .map(|(tx, terminal)| (tx, terminal, false))
             .map_err(|error| error.to_string())
     })();
@@ -380,7 +410,7 @@ fn receipt(
 ) -> String {
     let record = &observation.record;
     let subject = &record.subject;
-    let extension = format!(
+    let mut extension = format!(
         concat!(
             ",\"subject_kind\":\"unpublished_pr_candidate\",\"objects_staged\":false,\"outcome_recovered\":{},",
             "\"bundle_sha256\":{},\"candidate\":{{\"merge_base\":{},\"commit\":{}}},",
@@ -399,6 +429,11 @@ fn receipt(
         quote(&subject.source_tip.to_string()),
         quote(&subject.target_tip.to_string())
     );
+    if options.rebase {
+        // The selector is not part of canonical check identity. Recovery may
+        // return an original refusal from another validation entry point.
+        extension.push_str(",\"requested_validation_profile\":\"rebase-series-v1\"");
+    }
     publish::record_receipt(
         &options.publication,
         incarnation,

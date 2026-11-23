@@ -18,10 +18,14 @@ pub enum PullRequestAction {
     /// Explicitly resume a closed, unmerged native PR at its exact version.
     /// Ordinary updates cannot reopen it, and a merged PR is terminal.
     Reopen,
+    /// Explicitly move an open native PR to another target branch. The source
+    /// branch stays fixed, and the complete current tips are sealed as submitted.
+    Retarget,
 }
 
-/// Desired PR content. Updates cannot change branch identities. Tip changes
-/// explicitly refresh the compared source/base. Text is untrusted UTF-8 data.
+/// Desired PR content. Only explicit Retarget may change the target branch;
+/// the source branch never changes. Tip changes explicitly refresh the compared
+/// source/base. Text is untrusted UTF-8 data.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PullRequestData {
     pub source_ref: RefName,
@@ -78,6 +82,7 @@ impl NativePullRequestEvent {
             PullRequestAction::Update => 2,
             PullRequestAction::Close => 3,
             PullRequestAction::Reopen => 4,
+            PullRequestAction::Retarget => 5,
         });
         out.write_bytes("actor", self.actor.as_bytes())?;
         out.write_bytes("source_ref", self.data.source_ref.as_bytes())?;
@@ -95,6 +100,7 @@ impl NativePullRequestEvent {
             2 => PullRequestAction::Update,
             3 => PullRequestAction::Close,
             4 => PullRequestAction::Reopen,
+            5 => PullRequestAction::Retarget,
             observed => {
                 return Err(CodecRefusal::VariantUnknown {
                     field: "pull_request.action",
@@ -187,8 +193,10 @@ impl PullRequestCommand {
 /// cannot retarget, implicitly reopen a closed stream, or erase data during
 /// closure. Only Reopen can resume a closed native metadata stream. It may
 /// explicitly refresh the submitted metadata and tips on the SAME branches;
-/// admission must independently verify those live tips. Merged/legacy streams
-/// never reopen, and the original opening event remains the opener authority.
+/// admission must independently verify those live tips. Retarget is permitted
+/// only on an open native stream, preserves its source branch, and requires a
+/// different target branch. Merged/legacy streams never resume, and the original
+/// opening event remains the opener authority.
 pub fn validate_transition(
     previous: Option<&ForgeEvent>,
     next: &ForgeEvent,
@@ -226,7 +234,8 @@ pub fn validate_transition(
         return Err(RefusalCode::ProtectedRefTransitionDenied);
     }
     if old.data.source_ref != change.data.source_ref
-        || old.data.target_ref != change.data.target_ref
+        || (old.data.target_ref != change.data.target_ref)
+            != (change.action == PullRequestAction::Retarget)
     {
         return Err(RefusalCode::ProtectedRefTransitionDenied);
     }
@@ -396,3 +405,6 @@ mod tests {
 
 #[cfg(test)]
 mod reopen_tests;
+
+#[cfg(test)]
+mod retarget_tests;

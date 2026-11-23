@@ -18,7 +18,8 @@ The original body is an unchanged suffix, including its line endings.
 
 **Source identities and history remain attribution only.** All new native events belong to the
 principal authenticated by the destination token. Source authors are not enrolled
-as native accounts; assignees do not become native assignments, source timestamps
+as native accounts; assignees become native assignments only through the explicit
+mapping profile below. Source timestamps
 do not become audit timestamps, and a source lock grants no access or permission.
 The destination's existing issue-write grant authorizes a separate ordinary lock
 command after the imported discussion and final close. Locked open issues remain
@@ -35,6 +36,10 @@ dialects and reject malformed lock values or unknown versions. Never rewrite a
 saved capture or plan to upgrade it after native requests have been prepared.
 The source capture digest already binds the dialect in every import manifest;
 there is no additional destination publication format or permission bypass.
+
+The optional `frankengit-github-issue-capture-v3` profile additionally preserves
+assignments through an explicit, independently reviewed principal mapping.
+Source acquisition continues to produce v2; it never guesses this mapping.
 
 This is an issue/comment snapshot migration, **not a full GitHub repository
 import**. Pull requests are explicitly refused. Git commits, reviews, reactions,
@@ -63,6 +68,73 @@ node scripts/import_github_issues.mjs capture \
 node scripts/import_github_issues.mjs inspect \
   --capture migration/capture.json --offset 1000
 ```
+
+### Preserve assignments with an explicit map
+
+Retain the SHA-256 returned by capture and choose the destination principal for
+every distinct source assignee. The mapping uses canonical decimal **strings**
+for GitHub numeric user IDs, including IDs wider than JavaScript's safe-integer
+range. Logins are attribution and cannot select a destination. Destination IDs
+are exactly 32 lowercase hexadecimal characters. This profile does not enroll
+accounts, check that principals exist, authenticate them or grant permissions;
+ordinary destination admission still authorizes the importing principal.
+
+Write an owner-private mapping file in this closed shape, replacing the example
+capture digest and IDs with independently reviewed values. Pretty JSON is
+accepted; duplicate keys, extra fields and malformed UTF-8 refuse.
+
+```json
+{
+  "schema": "frankengit-github-assignee-map-v1",
+  "capture_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "mappings": [
+    {"source_user_id": "9007199254740993", "destination_principal_id": "11111111111111111111111111111111"},
+    {"source_user_id": "18446744073709551615", "destination_principal_id": "22222222222222222222222222222222"}
+  ]
+}
+```
+
+There must be exactly one row per encountered source assignee across the capture.
+Missing or unselected users, repeated source IDs and repeated destination IDs
+refuse. This is a one-to-one mapping profile; it does not merge accounts.
+An empty mapping is valid only when every source issue is unassigned. Each issue
+must fit the native limit of 16 assignees; the existing attribution-only v1/v2
+profiles retain their original larger source allowance. Mapping input is bounded
+to 256 KiB and 1,600 rows, and the resulting capture still must fit 1 MiB.
+
+```sh
+node scripts/import_github_issues.mjs map-assignees \
+  --capture migration/capture.json --map migration/assignees.json \
+  --out migration/mapped-capture.json
+
+node scripts/import_github_issues.mjs inspect \
+  --capture migration/mapped-capture.json --offset 1000
+```
+
+This operation is offline and creates a new private file. Its output SHA-256 pins
+the v3 capture; the original v2 file is unchanged. Every v3 reader reconstructs
+the exact original canonical v2 capture and verifies its hash against the map,
+so a source edit or different capture population requires a new mapping review.
+The source IDs and native IDs remain distinct namespaces.
+
+Pass the new capture to the existing `prepare` command, or use its path and new
+digest in a reviewed multi-batch migration source list. Preparation seals the
+whole command sequence before destination access. Each assigned issue opens at
+version zero, then receives one ordinary `assign` against version one. Comments
+follow with consecutive expected versions; close and lock remain last. Unassigned
+issues receive no assignment command. Native command, form, body, complete-plan
+and migration-wide step budgets include these additional mutations.
+
+The existing sender and restart recovery retain every original request body,
+version and key. Never change a prepared request or reuse its approval for a
+different map. Existing v1/v2 captures, compiled commands and saved keys stay
+byte-stable; `map-assignees` accepts only a v2 source and cannot relabel v1 history
+or replace a map already retained in a v3 capture.
+
+The focused `bash scripts/verify_github_issue_capture.sh` gate includes compiler,
+real CLI/private-file, frozen v1/v2 custody, and mapped migration/restart tests.
+The migration tests use an HTTP schema peer with the production clients and
+custody code; they do not establish native Rust authority or live GitHub results.
 
 Issue numbers are explicit: there is no implicit whole-repository crawl.
 The capture includes two complete observations of the selected repository

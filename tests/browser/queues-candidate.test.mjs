@@ -78,6 +78,27 @@ test('preparation requires the exact recorded first queue entry and preserves ex
   }
 });
 
+test('explicit built-in attributes and exact renames bind queue preparation through inspection', async () => {
+  for (const algorithm of ['sha1', 'sha256']) for (const profile of ['exact-renames-v1', 'builtin-attributes-v1']) {
+    const f = queueFixture(algorithm, true);
+    f.metadata.profile = profile; f.commitMetadata.profile = profile;
+    const h = harness(f); await h.connect();
+    const prepared = await h.prepare();
+    assert.equal(prepared.metadata.profile, profile); assert.equal(h.client.candidateReady, true);
+    assert.equal(h.client.pending, null);
+    const call = h.calls.find(value => value.path.endsWith('/prepare'));
+    assert.equal(new URLSearchParams(call.body).get('profile'), profile);
+    assert.equal(h.calls.filter(value => value.path.endsWith('/inspect')).length, 1);
+    assert.ok(h.calls.every(value => value.headers['Idempotency-Key'] === undefined));
+    const staged = await h.stage(); assert.equal(staged.body, f.commandForm);
+    assert.equal(h.calls.some(value => value.path.endsWith('/land-candidate')), false);
+    for (const substituted of ['path-merge-v1', 'exact-renames-v1', 'builtin-attributes-v1'].filter(value => value !== profile)) {
+      await assert.rejects(queuePreparationReply(response(f, { ...f.metadata, profile: substituted }), request(f), f.scope, webcrypto), /profile/);
+    }
+    h.client.disconnect();
+  }
+});
+
 test('conflicted and already-up-to-date native responses stop without inspection, staging or hidden fallback', async () => {
   for (const state of ['conflicted', 'already_up_to_date']) {
     const f = queueFixture(), metadata = { ...f.metadata, state, candidate: null, bundle: null, landing: null,

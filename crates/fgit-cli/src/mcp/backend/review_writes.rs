@@ -35,7 +35,7 @@ pub(super) const CANDIDATE_FIELDS: &[&str] = &[
 pub(super) fn tools() -> Vec<Tool> {
     vec![Tool {
         name: NAME,
-        description: "Approve, request changes, or withdraw your launch-bound principal's exact candidate review. Requires its independent review-write grant, exact PR and reviewer versions, tips, policy epoch and candidate. Approval/change requests verify an inline native bundle; withdrawal uses the exact prior subject without a bundle. Does not move refs or merge code.",
+        description: "Approve, request changes, or withdraw your launch-bound principal's exact candidate review. Requires its independent review-write grant, exact PR and reviewer versions, tips, policy epoch and candidate. Approval/change requests verify an inline native bundle; method=rebase verifies the whole linear PR series including intermediate changes. Withdrawal uses the exact prior subject without a bundle. Does not move refs or merge code.",
         schema: schema(),
     }]
 }
@@ -112,10 +112,15 @@ pub(super) fn bundle(args: &Object) -> Result<Vec<u8>, ToolError> {
 fn parse(
     args: &Object,
     format: GitHashAlgorithm,
-) -> Result<(CandidateReviewCommand, Option<Vec<u8>>), ToolError> {
+) -> Result<(CandidateReviewCommand, Option<Vec<u8>>, bool), ToolError> {
     let mut allowed = CANDIDATE_FIELDS.to_vec();
-    allowed.extend(["review_version", "decision", "reason"]);
+    allowed.extend(["review_version", "decision", "reason", "method"]);
     require_fields(args, &allowed)?;
+    let rebase = match super::string(args, "method")? {
+        None => false,
+        Some("rebase") => true,
+        Some(_) => return Err(ToolError::invalid("invalid_review_method")),
+    };
     common::key(args)?;
     let (subject, candidate) = subject(args, format)?;
     let version = common::number(args, "review_version")?;
@@ -157,6 +162,7 @@ fn parse(
             },
         },
         bundle,
+        rebase,
     ))
 }
 
@@ -198,7 +204,7 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
     if !backend.options.writes.reviews {
         return Err(ToolError::invalid("tool_not_granted"));
     }
-    let (command, bundle) = parse(args, backend.options.format)?;
+    let (command, bundle, rebase) = parse(args, backend.options.format)?;
     let session = common::session(backend, common::key(args)?)?;
     let principal = session
         .authenticated_session()
@@ -211,13 +217,31 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
     let (tx, terminal) = backend
         .node
         .runtime()
-        .block_on(backend.node.admit_candidate_review_durable_in(
-            &context,
-            &session,
-            &command,
-            bundle.as_deref(),
-            Default::default(),
-        ))
+        .block_on(async {
+            if rebase {
+                backend
+                    .node
+                    .admit_rebase_candidate_review_durable_in(
+                        &context,
+                        &session,
+                        &command,
+                        bundle.as_deref(),
+                        Default::default(),
+                    )
+                    .await
+            } else {
+                backend
+                    .node
+                    .admit_candidate_review_durable_in(
+                        &context,
+                        &session,
+                        &command,
+                        bundle.as_deref(),
+                        Default::default(),
+                    )
+                    .await
+            }
+        })
         .map_err(|_| ToolError::uncertain("mutation_outcome_unknown"))?;
     // This is a verified historical decision, not a claim that today's policy
     // is satisfied. In particular, do not read latest reviews after committing.
@@ -226,6 +250,9 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
     result.extend(subject_fields(&command.review.subject, command.candidate));
     result.insert("type".into(), text("candidate_review_publication"));
     result.insert("profile".into(), text(CANDIDATE_REVIEW_PROFILE));
+    if rebase {
+        result.insert("method".into(), text("rebase"));
+    }
     result.insert(
         "decision".into(),
         text(decision_name(command.review.decision)),
@@ -316,6 +343,10 @@ pub(super) fn candidate_schema(properties: Object, required: &[&str]) -> Value {
 }
 fn schema() -> Value {
     let mut properties = properties();
+    properties.insert("method".into(), object([
+        ("const", text("rebase")),
+        ("description", text("Required for a whole-series PR rebase review. Omit for existing merge-commit or squash candidates. Selects validation only; candidate review identity remains unchanged.")),
+    ]));
     properties.insert("review_version".into(), decimal_schema());
     properties.insert(
         "decision".into(),
@@ -410,7 +441,8 @@ mod tests {
     fn review_requires_all_coordinates_and_never_accepts_an_injected_principal() {
         for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
             let good = args(format);
-            let (command, bytes) = parse(&good, format).unwrap();
+            let (command, bytes, rebase) = parse(&good, format).unwrap();
+            assert!(!rebase);
             assert_eq!(bytes.unwrap(), vec![0xab, 0xcd]);
             assert_eq!(command.review.expected_version, ExpectedVersion::NewStream);
             for field in good.keys() {
@@ -455,11 +487,35 @@ mod tests {
         input.remove("bundle_hex_chunks");
         assert!(parse(&input, format).is_err());
         input.insert("review_version".into(), text("1"));
-        let (command, bytes) = parse(&input, format).unwrap();
+        let (command, bytes, _) = parse(&input, format).unwrap();
         assert!(bytes.is_none());
         assert_eq!(command.review.decision, ReviewDecision::Withdraw);
         input.insert("decision".into(), text("request-changes"));
         assert!(parse(&input, format).is_err());
+    }
+    #[test]
+    fn rebase_review_requires_its_explicit_validator_without_changing_candidate_identity() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let original = args(format);
+            let (ordinary, bytes, ordinary_rebase) = parse(&original, format).unwrap();
+            assert!(!ordinary_rebase);
+            let mut input = original;
+            input.insert("method".into(), text("rebase"));
+            let (series, series_bytes, rebase) = parse(&input, format).unwrap();
+            assert!(rebase);
+            assert_eq!(series, ordinary);
+            assert_eq!(series_bytes, bytes);
+            for method in [
+                text("squash"),
+                text("Rebase"),
+                text(""),
+                Value::Null,
+                json::number(1),
+            ] {
+                input.insert("method".into(), method);
+                assert!(parse(&input, format).is_err());
+            }
+        }
     }
     #[test]
     fn integer_hash_and_text_bounds_fail_before_admission() {
@@ -513,7 +569,7 @@ mod tests {
             .encode(json::MAX_INPUT)
             .unwrap();
         let decoded = json::parse(encoded.as_bytes()).unwrap();
-        let (_, bundle) = parse(decoded.object().unwrap(), format).unwrap();
+        let (_, bundle, _) = parse(decoded.object().unwrap(), format).unwrap();
         assert_eq!(bundle.unwrap(), vec![0xab; MAX_BUNDLE_BYTES]);
         for value in [
             Value::Null,

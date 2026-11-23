@@ -23,14 +23,20 @@ use crate::workflow_command::artifacts as workflow_artifacts;
 
 use crate::service_stop as stop_file;
 
+mod repositories;
+
 #[cfg(target_os = "linux")]
 mod workflow;
+
+#[cfg(all(test, unix))]
+mod token_file_tests;
 
 const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository-id> <loopback-address>
   --trusted-local (--token-file <path> --principal <id> | --credentials-file <path>)
   [--allow-receive] [--allow-issues] [--allow-discussions] [--allow-outcomes] [--allow-pulls] [--allow-source]
-  [--allow-protection] [--allow-queues] [--allow-queue-landings]
+  [--allow-protection] [--enable-default-branch-admin] [--allow-queues] [--allow-queue-landings]
   [--lfs-root <private-directory>] [--artifact-root <absolute-private-directory>]
+  [--require-lfs-payloads <absolute-private-directory>]
   [--expected-incarnation <id>] [--max-sessions <1..1000000>] [--max-in-flight <1..16>]
   [--idle-timeout-secs <1..86400>] [--session-timeout-secs <1..3600>]
   [--continuous --stop-file <path>]
@@ -64,7 +70,7 @@ const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository
    [--workflow-merge-principal <id>
     --workflow-merge-author <name-and-email> --workflow-merge-committer <name-and-email>
     --workflow-merge-timestamp <positive-unix-seconds> --workflow-merge-message <text>
-    [--workflow-merge-profile path|exact-renames]
+    [--workflow-merge-profile path|exact-renames|builtin-attributes-v1]
     [--workflow-merge-method merge-commit|squash]]]
 
 Continuous mode has no lifetime request cap or idle retirement. It requires an
@@ -169,6 +175,12 @@ appropriate scopes. No switch enables another service. --allow-source exposes
 read-only source queries to read-scoped tokens; it grants no mutation permission.
 --allow-discussions enables the independent discussions-read/discussions-write
 scopes for native repository discussions, including their browser workspace.
+--enable-default-branch-admin independently enables canonical default-branch
+changes for default-branch-write tokens. It requires --credentials-file and an
+already installed canonical administrator policy; it cannot bootstrap ownership.
+Reads and the browser selector additionally require --allow-source and read scope.
+Ordinary receive, protection-write and narrowed ref-write grants do not authorize
+this operation. See docs/HTTP_DEFAULT_BRANCH_API.md for exact expectations/retry.
 
 --token-file keeps the static Git-only profile and contains 64 lowercase hex
 characters, optionally followed by one newline. --credentials-file is reloaded
@@ -182,7 +194,7 @@ At most 64 selectors / 4096 decoded bytes per row restrict every Git and native
 source/merge ref write, including deletes and both ends of renames. They do not
 filter reads or grant a service. See docs/HTTP_REF_WRITE_SCOPES.md.
 Choose scopes once in this order:
-  read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write,reviews-read,reviews-write,merges-write,protection-read,protection-write,lfs-read,lfs-write,artifact-read,queues-read,queues-write,queues-land,notifications-read,notifications-write,discussions-read,discussions-write
+  read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write,reviews-read,reviews-write,merges-write,protection-read,protection-write,lfs-read,lfs-write,artifact-read,queues-read,queues-write,queues-land,notifications-read,notifications-write,discussions-read,discussions-write,default-branch-write
 No scope implies another. The header must match the exact repository incarnation.
 At most 256 entries and 64 KiB are accepted; a header alone revokes all tokens.
 Duplicate hashes or malformed rows refuse the entire table. Files must be private
@@ -190,16 +202,20 @@ regular files on Unix (0600 or stricter), not symlinks. Atomically replace the
 table to rotate/revoke credentials without restarting. Already authenticated
 in-flight requests retain their bounded grant.
 
-On Linux, --lfs-root enables the Git LFS basic transfer API in an existing
+On Unix, --lfs-root enables Git LFS basic and resumable Tus transfers in an existing
 private (0700) artifact-fabric directory. It requires --credentials-file and
 independent lfs-read/lfs-write grants; neither grants Git reads or pushes.
 Stock Git LFS uses <repository-url>/info/lfs with Basic token-as-password or
 Bearer credentials. Payloads are SHA-256 verified before immutable publication
-and before download; interrupted uploads can be retried under the same identity.
-The bounded profile accepts objects up to 64 MiB, at most 100 objects per batch,
-and at most 64 MiB total declared payload bytes per batch. Payloads are retained
-permanently: pointer-aware collection, partial-upload resume and LFS locking are
-outside this profile. Git pointer files are never rewritten by the service.
+and before download; interrupted Tus uploads resume from verified checkpoints.
+The bounded profile accepts objects up to 512 MiB, at most 100 objects per batch,
+and at most 512 MiB total declared payload bytes per batch. Payloads are retained
+permanently; pointer-aware collection and LFS locking remain outside this profile.
+--require-lfs-payloads <absolute-private-directory> independently requires complete
+payload custody for supported pointers in proposed Git history before receive
+publication. Use the same root as --lfs-root when this listener also accepts LFS
+uploads. It grants no credential scope or receive access. Git pointer files are
+never rewritten. See docs/RECEIVE_LFS_PAYLOAD_POLICY.md for bounds and refusals.
 See docs/GIT_LFS_BASIC_TRANSFER.md for provisioning and custody/backup limits.
 
 On Linux, --artifact-root enables read-only workflow artifact metadata/downloads
@@ -422,6 +438,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                 | "--allow-pulls"
                 | "--allow-source"
                 | "--allow-protection"
+                | "--enable-default-branch-admin"
                 | "--allow-queues"
                 | "--allow-queue-landings"
                 | "--print-credentials-header"
@@ -440,6 +457,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                     | "--principal"
                     | "--credentials-file"
                     | "--lfs-root"
+                    | "--require-lfs-payloads"
                     | "--artifact-root"
                     | "--expected-incarnation"
                     | "--stop-file"
@@ -599,6 +617,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     let allow_pulls = flags.contains_key("--allow-pulls");
     let allow_source = flags.contains_key("--allow-source");
     let allow_protection = flags.contains_key("--allow-protection");
+    let default_branch_admin = flags.contains_key("--enable-default-branch-admin");
     let allow_queues = flags.contains_key("--allow-queues");
     let allow_queue_landings = flags.contains_key("--allow-queue-landings");
     if flags.contains_key("--lfs-root") {
@@ -626,12 +645,13 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         || allow_pulls
         || allow_source
         || allow_protection
+        || default_branch_admin
         || allow_queues
         || allow_queue_landings)
         && !matches!(&credentials, CredentialInput::Reloadable(_))
     {
         return Err(
-            "issue/discussion/PR/source/protection/queue/outcome endpoints require explicit scopes in --credentials-file"
+            "issue/discussion/PR/source/protection/default-branch/queue/outcome endpoints require explicit scopes in --credentials-file"
                 .into(),
         );
     }
@@ -768,6 +788,9 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     if allow_protection {
         config = config.with_http_protection_admin();
     }
+    if default_branch_admin {
+        config = config.with_http_default_branch_admin();
+    }
     if allow_queues {
         config = config.with_http_queue_management();
     }
@@ -777,6 +800,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     if let Some(root) = flags.get("--lfs-root") {
         config = config.with_http_lfs_root(PathBuf::from(*root));
     }
+    config = crate::guarded_git_server::apply_receive_lfs_flag(config, &flags)?;
     if let Some(root) = flags.get("--artifact-root") {
         config = config.with_workflow_artifact_root(PathBuf::from(*root));
     }
@@ -831,12 +855,36 @@ fn token_digest(bytes: &[u8]) -> Result<[u8; 32], String> {
 }
 
 fn read_token(path: &Path) -> Result<[u8; 32], String> {
-    let metadata =
+    let before =
         fs::symlink_metadata(path).map_err(|e| format!("cannot inspect token file: {e}"))?;
-    if !metadata.is_file() || metadata.len() > 66 {
+    if !before.is_file() || before.len() > 66 {
         return Err("token must be a bounded regular file, not a symlink or device".into());
     }
-    let mut file = File::open(path).map_err(|e| format!("cannot open token file: {e}"))?;
+    let mut file = open_token_file(path, &before)?;
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(67)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("cannot read token file: {e}"))?;
+    token_digest(&bytes)
+}
+
+fn open_token_file(path: &Path, before: &fs::Metadata) -> Result<File, String> {
+    // The path can change after symlink_metadata. Refuse a substituted symlink
+    // during open and do not wait for a writer if it has become a FIFO.
+    #[cfg(unix)]
+    let file = {
+        use rustix::fs::{Mode, OFlags};
+        let descriptor = rustix::fs::open(
+            path,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            Mode::empty(),
+        )
+        .map_err(|e| format!("cannot open token file: {e}"))?;
+        File::from(descriptor)
+    };
+    #[cfg(not(unix))]
+    let file = File::open(path).map_err(|e| format!("cannot open token file: {e}"))?;
     let opened = file
         .metadata()
         .map_err(|e| format!("cannot inspect opened token file: {e}"))?;
@@ -846,9 +894,9 @@ fn read_token(path: &Path) -> Result<[u8; 32], String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        if metadata.dev() != opened.dev()
-            || metadata.ino() != opened.ino()
-            || metadata.mode() & 0o077 != 0
+        if before.dev() != opened.dev()
+            || before.ino() != opened.ino()
+            || before.mode() & 0o077 != 0
             || opened.mode() & 0o077 != 0
         {
             return Err(
@@ -856,18 +904,21 @@ fn read_token(path: &Path) -> Result<[u8; 32], String> {
             );
         }
     }
-    let mut bytes = Vec::new();
-    (&mut file)
-        .take(67)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("cannot read token file: {e}"))?;
-    token_digest(&bytes)
+    #[cfg(not(unix))]
+    let _ = before;
+    Ok(file)
 }
 
 pub fn run(arguments: &[String]) -> Result<u8, String> {
     if arguments == ["--help"] {
-        println!("{USAGE}");
+        println!("{USAGE}\n{}", repositories::USAGE);
         return Ok(0);
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == "--repositories-file")
+    {
+        return repositories::run(arguments);
     }
     let options = parse(arguments)?;
     let stop = options
@@ -881,6 +932,7 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
         _ => None,
     };
     let lfs_enabled = options.config.http_lfs_root().is_some();
+    let lfs_payloads_required = options.config.receive_lfs_root().is_some();
     let artifacts_enabled = options.config.workflow_artifact_root().is_some();
     #[cfg(target_os = "linux")]
     let workflow_enabled = options.workflow_service.is_some();
@@ -915,6 +967,8 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
         }
         node.validate_smart_http_lfs_storage()
             .map_err(|e| e.to_string())?;
+        node.validate_receive_lfs_storage()
+            .map_err(|code| format!("cannot open required LFS custody: {code:?}"))?;
         #[cfg(unix)]
         if artifacts_enabled {
             node.validate_workflow_artifact_storage()
@@ -939,7 +993,7 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
         let control = stop.as_ref().map(stop_file::StopControl::new);
         let report_ready = || -> io::Result<()> {
             let mut output = io::stdout().lock();
-            writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"discussions_enabled\":{},\"outcomes_enabled\":{},\"pulls_enabled\":{},\"source_enabled\":{},\"protection_enabled\":{},\"queues_enabled\":{},\"queue_landings_enabled\":{},\"lfs_enabled\":{},\"artifacts_enabled\":{},\"workflow_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{},\"lifetime\":{}}}",
+            writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"discussions_enabled\":{},\"outcomes_enabled\":{},\"pulls_enabled\":{},\"source_enabled\":{},\"protection_enabled\":{},\"queues_enabled\":{},\"queue_landings_enabled\":{},\"lfs_enabled\":{},\"lfs_payloads_required\":{lfs_payloads_required},\"artifacts_enabled\":{},\"workflow_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{},\"lifetime\":{}}}",
             quote(&url), options.allow_receive, options.allow_issues, options.allow_discussions, options.allow_outcomes, options.allow_pulls,
             options.allow_source, options.allow_protection, options.allow_queues, options.allow_queue_landings, lfs_enabled, artifacts_enabled, workflow_enabled, quote(&node.repository_incarnation_id().to_string()), quote(mode), quote(if stop.is_some() { "continuous" } else { "bounded" }))
             .and_then(|()| output.flush())
@@ -1138,6 +1192,40 @@ mod tests {
         .collect()
     }
     #[test]
+    fn required_lfs_custody_neither_enables_transfers_nor_grants_receive() {
+        #[cfg(unix)]
+        {
+            let mut args = arguments();
+            args.extend([
+                "--require-lfs-payloads".into(),
+                "/operator/lfs-custody".into(),
+            ]);
+            let selected = parse(&args).unwrap();
+            assert!(!selected.allow_receive);
+            assert!(selected.config.http_lfs_root().is_none());
+            assert_eq!(
+                selected.config.receive_lfs_root(),
+                Some(Path::new("/operator/lfs-custody"))
+            );
+        }
+        for extra in [
+            vec!["--require-lfs-payloads"],
+            vec!["--require-lfs-payloads", ""],
+            vec!["--require-lfs-payloads", "relative-custody"],
+            vec![
+                "--require-lfs-payloads",
+                "/one",
+                "--require-lfs-payloads",
+                "/two",
+            ],
+        ] {
+            let mut args = arguments();
+            args.extend(extra.iter().map(|value| (*value).to_owned()));
+            assert!(parse(&args).is_err(), "{extra:?}");
+        }
+    }
+
+    #[test]
     fn safe_defaults_require_credentials_and_do_not_enable_receive() {
         let options = parse(&arguments()).unwrap();
         assert!(!options.allow_receive);
@@ -1157,6 +1245,7 @@ mod tests {
         assert!(!options.config.http_protection_admin_enabled());
         assert!(!options.config.http_discussions_enabled());
         assert!(options.config.http_lfs_root().is_none());
+        assert!(options.config.receive_lfs_root().is_none());
         assert!(options.config.workflow_artifact_root().is_none());
         assert_eq!(options.limits.max_sessions(), 1024);
         assert_eq!(options.limits.max_in_flight(), 4);
@@ -1852,6 +1941,28 @@ mod tests {
         args.push("--allow-source".into());
         assert!(parse(&args).is_err());
     }
+    #[test]
+    fn default_branch_admin_requires_scoped_credentials_and_is_independently_enabled() {
+        let mut static_args = arguments();
+        static_args.push("--enable-default-branch-admin".into());
+        assert!(parse(&static_args).is_err());
+        let mut args = arguments()[..5].to_vec();
+        args.extend(["--credentials-file".into(), "grants".into()]);
+        assert!(
+            !parse(&args)
+                .unwrap()
+                .config
+                .http_default_branch_admin_enabled()
+        );
+        args.push("--enable-default-branch-admin".into());
+        let options = parse(&args).unwrap();
+        assert!(options.config.http_default_branch_admin_enabled());
+        assert!(!options.allow_receive && !options.allow_source && !options.allow_protection);
+        assert!(!options.config.http_protection_admin_enabled());
+        args.push("--enable-default-branch-admin".into());
+        assert!(parse(&args).is_err());
+    }
+
     #[test]
     fn protection_requires_scoped_credentials_and_never_enables_other_services() {
         let mut static_args = arguments();

@@ -84,6 +84,15 @@ publication, PR-specific diffs, verified-blob streaming, general bundle
 export/import, queues and workflow artifacts remain unavailable. See the
 [candidate guide](MCP_SOURCE_CANDIDATES.md) for the bounded artifact handoff.
 
+With `pulls-feedback-read`, the existing `--allow-pulls` ceiling exposes bounded
+PR reviews and canonical check summaries. The separate `pulls-check-evidence-read`
+scope under that same ceiling enables `frankengit_pull_check_evidence` for one
+exact canonical check at a pinned head and evidence digest. Sponsored evidence
+reads need no artifact flag or root and grant no generic artifact inspection or
+namespace access. Trusted-local evidence reads retain both `--allow-pulls` and
+`--allow-artifacts`. See [exact check evidence](MCP_CHECK_EVIDENCE.md) for its
+bounded byte pages, current source/target visibility and original request limits.
+
 Agent mode requires the exact incarnation and rejects `--trusted-local` and
 `--principal`. Every call verifies the current canonical grant and retains its
 agent, human or service sponsor, original deadline and response byte reservation.
@@ -177,6 +186,18 @@ and one request lane; insufficient capacity refuses before worker startup.
 and uses `after_version` instead of `after`. Show includes the issue state and
 its exact action/comment history. Unknown fields, including principal, storage,
 tenant, repository, mutation actions, and retry keys, are rejected.
+
+`frankengit_issue_search` uses the same issue-read grant to filter native issue
+snapshots by literal title/body `query`, `state`, `opened_by`, `assignee`, exact
+`labels`, and `milestone`. `assignee` accepts a principal ID or `"none"` for an
+empty assignment set; it is metadata, never an access grant. The tool returns
+at most 20 matches (default 5) and examines at most `max_scan` candidates
+(1..1000, default 1000). `scanned`, `count`, `stop_reason`, and `complete` make
+empty partial results explicit. Continue by passing `next_after` as `after`
+and the original `snapshot_token` as `expected_head`, with identical filters. Current sponsored
+`ISSUES_READ` authorization is checked even when reading a retained snapshot.
+See [native issue search](ISSUE_SEARCH.md#mcp-adapter) for the full grammar and
+examples.
 
 Every result names the tenant, repository, incarnation, object format, and exact
 `snapshot_token`. All 64-bit identifiers/counters/cursors use decimal strings,

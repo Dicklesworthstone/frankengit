@@ -11,6 +11,7 @@ use super::{
     request::{Prepare, oid, prepare_field, unhex},
 };
 use fgit_crypto::{GitObjectKind, git_object_id};
+use fgit_forge::preparation::PreparationLimits;
 use fgit_forge::preparation::rebase::resolutions::{
     RebaseCommitResolution, RebaseResolvedStep, validate_rebase_resolutions,
 };
@@ -36,7 +37,7 @@ pub(super) fn parse(
 }
 fn command(
     form: &[u8],
-    mut files: BTreeMap<&str, &[u8]>,
+    files: BTreeMap<&str, &[u8]>,
     format: GitHashAlgorithm,
     live: &mut impl FnMut() -> bool,
 ) -> Result<(Prepare, Vec<RebaseCommitResolution>), ApiError> {
@@ -62,10 +63,25 @@ fn command(
     if command.expected_head.is_none() {
         return Err(ApiError::bad("rebase_resolution_requires_snapshot"));
     }
+    let recipes =
+        decode_rebase_resolution_recipes(descriptors, files, format, command.limits, live)?;
+    Ok((command, recipes))
+}
+
+/// Decode the same closed original-commit recipes for source and PR rebases.
+/// The adapter must validate its own exact subject and required snapshot first.
+pub(in crate::smart_http::server) fn decode_rebase_resolution_recipes(
+    descriptors: Vec<String>,
+    mut files: BTreeMap<&str, &[u8]>,
+    format: GitHashAlgorithm,
+    limits: PreparationLimits,
+    live: &mut impl FnMut() -> bool,
+) -> Result<Vec<RebaseCommitResolution>, ApiError> {
+    checkpoint(live)?;
     if descriptors.is_empty() {
         return Err(ApiError::bad("rebase_resolution_choices_required"));
     }
-    if descriptors.len() > command.limits.max_conflicts {
+    if descriptors.len() > MAX_CHOICES || descriptors.len() > limits.max_conflicts {
         return Err(ApiError::too_large());
     }
     let mut bindings: BTreeMap<GitOid, Vec<ConflictResolution>> = BTreeMap::new();
@@ -83,14 +99,14 @@ fn command(
             parts
                 .next()
                 .ok_or_else(|| ApiError::bad("invalid_rebase_resolution"))?,
-            command.limits.max_path_bytes,
+            limits.max_path_bytes,
         )?;
         let action = parts
             .next()
             .ok_or_else(|| ApiError::bad("invalid_rebase_resolution"))?;
         retained = retained
             .checked_add(path.len())
-            .filter(|n| *n <= command.limits.max_output_bytes)
+            .filter(|n| *n <= limits.max_output_bytes)
             .ok_or_else(ApiError::too_large)?;
         let choice = match action {
             "base" => ResolutionChoice::Base,
@@ -114,9 +130,9 @@ fn command(
                     .ok_or_else(|| ApiError::bad("missing_or_reused_resolution_file"))?;
                 retained = retained
                     .checked_add(content.len())
-                    .filter(|n| *n <= command.limits.max_output_bytes)
+                    .filter(|n| *n <= limits.max_output_bytes)
                     .ok_or_else(ApiError::too_large)?;
-                if content.len() > command.limits.max_text_bytes {
+                if content.len() > limits.max_text_bytes {
                     return Err(ApiError::too_large());
                 }
                 let mut bytes = Vec::new();
@@ -145,10 +161,10 @@ fn command(
             RebaseCommitResolution { original, paths }
         })
         .collect();
-    validate_rebase_resolutions(format, command.limits, &recipes)
+    validate_rebase_resolutions(format, limits, &recipes)
         .map_err(|error| super::rebase_error(&error))?;
     checkpoint(live)?;
-    Ok((command, recipes))
+    Ok(recipes)
 }
 fn file_name(name: &str) -> bool {
     let Some(number) = name.strip_prefix("file_") else {
@@ -164,6 +180,7 @@ fn file_name(name: &str) -> bool {
 /// A stopped run may leave future recipes unused. A clean run must consume
 /// every recipe. Results are checked against the exact requested side or file
 /// identity, not just a count or an asserted native success flag.
+#[cfg(test)]
 fn validate(
     command: &Prepare,
     outcome: &RebasePreparation,
@@ -171,13 +188,26 @@ fn validate(
     receipts: &[RebaseResolvedStep],
     live: &mut impl FnMut() -> bool,
 ) -> Result<(), ApiError> {
-    checkpoint(live)?;
-    validate_rebase_resolutions(
+    validate_receipts(
         command.inputs.source_tip.algorithm(),
         command.limits,
+        outcome,
         recipes,
+        receipts,
+        live,
     )
-    .map_err(|_| ApiError::unavailable())?;
+}
+
+fn validate_receipts(
+    format: GitHashAlgorithm,
+    limits: PreparationLimits,
+    outcome: &RebasePreparation,
+    recipes: &[RebaseCommitResolution],
+    receipts: &[RebaseResolvedStep],
+    live: &mut impl FnMut() -> bool,
+) -> Result<(), ApiError> {
+    checkpoint(live)?;
+    validate_rebase_resolutions(format, limits, recipes).map_err(|_| ApiError::unavailable())?;
     if recipes.is_empty() || receipts.len() > recipes.len() {
         return Err(ApiError::unavailable());
     }
@@ -218,7 +248,6 @@ fn validate(
         .collect();
     let mut observed = BTreeSet::new();
     let mut previous = None;
-    let format = command.inputs.source_tip.algorithm();
     for receipt in receipts {
         checkpoint(live)?;
         let position = *positions
@@ -279,7 +308,28 @@ pub(super) fn append_receipts(
     receipts: &[RebaseResolvedStep],
     live: &mut impl FnMut() -> bool,
 ) -> Result<(), ApiError> {
-    validate(command, outcome, recipes, receipts, live)?;
+    append_rebase_resolution_receipts(
+        out,
+        command.inputs.source_tip.algorithm(),
+        command.limits,
+        outcome,
+        recipes,
+        receipts,
+        live,
+    )
+}
+
+/// Validate and render exact consumed recipes, including stops at later steps.
+pub(in crate::smart_http::server) fn append_rebase_resolution_receipts(
+    out: &mut String,
+    format: GitHashAlgorithm,
+    limits: PreparationLimits,
+    outcome: &RebasePreparation,
+    recipes: &[RebaseCommitResolution],
+    receipts: &[RebaseResolvedStep],
+    live: &mut impl FnMut() -> bool,
+) -> Result<(), ApiError> {
+    validate_receipts(format, limits, outcome, recipes, receipts, live)?;
     append(
         out,
         &format!(
@@ -308,7 +358,12 @@ pub(super) fn append_receipts(
                     ",{\"conflict\":"
                 },
             )?;
-            output::append_conflict(out, &path.conflict, command)?;
+            output::append_conflict_with_limits(
+                out,
+                &path.conflict,
+                format,
+                limits.max_path_bytes,
+            )?;
             let choice = match path.choice {
                 ResolutionKind::Base => "base",
                 ResolutionKind::Ours => "ours",
@@ -321,7 +376,7 @@ pub(super) fn append_receipts(
                 &format!(
                     ",\"choice\":{},\"result\":{}}}",
                     quote(choice),
-                    output::entry(path.result.as_ref(), command.inputs.source_tip.algorithm())?
+                    output::entry(path.result.as_ref(), format)?
                 ),
             )?;
         }

@@ -24,12 +24,9 @@ impl HeadChangeEvidence {
         basis: &PublicationBasis,
         tx_id: TxId,
         request_digest: Digest,
+        authentication: AdmissionAuthentication,
     ) -> Result<Self, RefusalCode> {
-        let principal = PrincipalSnapshotRecord::from_context(
-            context,
-            basis,
-            Some(AdmissionAuthentication::OperatorAssertion),
-        );
+        let principal = PrincipalSnapshotRecord::from_context(context, basis, Some(authentication));
         principal.verify_context(context, basis)?;
         let empty = fgit_reference::effect::NetEffects::default();
         Ok(Self {

@@ -478,10 +478,17 @@ pub(super) fn search(
         Some(fgit_forge::event::issue::MilestoneFilter::Unassigned) => quote("none"),
         Some(fgit_forge::event::issue::MilestoneFilter::Number(number)) => number.get().to_string(),
     };
+    let assignee = match predicate.assignee {
+        None => "null".to_owned(),
+        Some(fgit_forge::event::issue::AssigneeFilter::Unassigned) => quote("none"),
+        Some(fgit_forge::event::issue::AssigneeFilter::Principal(principal)) => {
+            quote(&principal.to_string())
+        }
+    };
     let mut out = format!(
         concat!(
             "{{\"type\":\"issue_search_page\",{},\"query\":{{\"state\":{},\"opened_by\":{},",
-            "\"labels\":{},\"text\":{},\"case_sensitive\":{},\"text_scope\":\"title_or_body\",\"milestone\":{}}},",
+            "\"labels\":{},\"text\":{},\"case_sensitive\":{},\"text_scope\":\"title_or_body\",\"milestone\":{},\"assignee\":{}}},",
             "\"after\":{},\"limit\":{},\"max_scan\":{},\"scanned\":{},\"count\":{},",
             "\"complete\":{},\"stop_reason\":{},\"has_more_candidates\":{},\"next_after\":{},",
             "\"refs_changed\":false,\"transaction_created\":false,\"issues\":["
@@ -493,6 +500,7 @@ pub(super) fn search(
         text,
         predicate.case_sensitive,
         milestone,
+        assignee,
         read.after,
         read.limit,
         max_scan,

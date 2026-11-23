@@ -4,8 +4,8 @@ mod input;
 mod inspection;
 #[cfg(test)]
 mod integration_tests;
-mod output;
-mod resolutions;
+pub(super) mod output;
+pub(super) mod resolutions;
 #[cfg(test)]
 mod tests;
 

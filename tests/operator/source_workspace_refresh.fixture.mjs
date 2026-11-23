@@ -32,6 +32,8 @@ export function ownSelectedSourceInput(bytes, expected) {
   return { bytes: Buffer.from(bytes), expected: selected };
 }
 export async function mergeSelectedSourcePackages() { throw new Error('Unexpected union service call'); }
+// Deletion tests import the real native membership verifier in their own suite.
+export async function verifyPathAbsence() { throw new Error('Unexpected absence service call'); }
 export async function readSourcePackage(bytes, expected, crypto, check) {
   check(); await hooks.verify?.(bytes, expected); check();
   const pkg = parse(bytes, SOURCE_PACKAGE_BYTES);

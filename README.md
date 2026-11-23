@@ -67,6 +67,15 @@ outcome after later branch or policy changes. See the
 [default-branch guide](docs/NATIVE_DEFAULT_BRANCH.md) for the trusted-local CLI,
 raw-byte names, recovery and supported authenticated layouts.
 
+Remote administrators can inspect and select the same canonical default at
+`/ui/default-branch/` or `/api/v1/default-branch`. Writes require the explicit
+`--enable-default-branch-admin` flag, a `default-branch-write` credential and an
+administrator in an already installed canonical policy. The browser selects
+branches from the same authenticated snapshot and retains the original command
+for retry or outcome recovery. See the
+[HTTP default-branch API](docs/HTTP_DEFAULT_BRANCH_API.md) for enablement,
+byte-preserving requests and terminal receipts.
+
 `import` verifies a bounded local object source composed of loose objects and
 checksum-bound idx-v2/pack-v2 pairs, then publishes its source refs through the
 sealed admission/RCR/head-CAS path. Sources include bare repositories, ordinary
@@ -112,7 +121,11 @@ omit unrelated objects, and convert offset deltas to identity references while
 preserving their compressed data. This supports narrower branches and filtered
 or have-reduced selections when their selected or proven held bases suffice.
 The combined graph and aggregate limits are rechecked, and receipts distinguish
-whole-run, selective, self-contained and thin responses. Reuse begins only after immutable
+whole-run, selective, self-contained and thin responses. If native merges or
+workspace changes add uncached objects, a hybrid pack can retain the reusable
+closed subset and encode only its exact complement. Both parts share the same
+selection and aggregate limits, and the joined pack receives a new checksum and
+separate construction evidence. Reuse begins only after immutable
 object publication, honors client capabilities and current limits, and carries
 its own representation receipt. Native idx/pack directory imports can retain
 eligible source packs through the same contract, including several packs per
@@ -185,6 +198,17 @@ clone, fetch and push:
   can restrict each token to exact refs or slash-terminated namespaces across
   Git pushes and native code publication routes. It has a `--continuous` mode
   that drains on a stop file, SIGTERM or SIGINT.
+  Its [multi-repository mode](docs/MULTI_REPOSITORY_HTTP.md) uses a private
+  `--repositories-file` to serve up to 64 exact `/tenant/repository` routes on
+  one loopback listener, with independent live credentials and pinned
+  incarnations. Optional services require both their catalog selection and
+  listener flag, in addition to the requesting token's scope.
+  Open the listener's `/ui/` home or query `GET /api/v1/repositories` to
+  discover the routes readable by your bearer credential. Each repository's
+  current credential file is checked independently; receive-only grants reveal
+  no repository, and a failed credential-source check refuses the complete
+  listing. The home links to enabled source browsers and keeps credentials in
+  memory only.
 - `fg serve-ssh` uses ed25519 deploy keys and per-session key exchange. Its
   private `--deploy-keys-file` is reloaded before each Git command, so key
   revocation, rotation and scope changes take effect without restarting the
@@ -198,6 +222,11 @@ clone, fetch and push:
   session budget (`--session-timeout-secs`, default 300 s, plus the configured
   allowance for admitted Git bytes), so a client still compressing a large
   pack is not subject to the pre-command 60 s idle cutoff.
+  Its [multi-repository mode](docs/MULTI_REPOSITORY_SSH.md) uses a private
+  `--repositories-file` to serve up to 64 exact `tenant/repository` routes on
+  one listener, with separate live key grants, incarnation checks, writer
+  gates and cache domains. Each row selects read-only or read-write service
+  and optional LFS payload enforcement.
 - `fg serve` and `fg serve-ssh` support `--continuous --stop-file <path>`, with
   SIGTERM/SIGINT requesting the same drain. The owned listener closes before
   accepted sessions settle; [service lifetime controls](docs/GIT_SERVICE_LIFETIME.md)
@@ -237,6 +266,49 @@ compatibility matrix. The non-empty clone campaign is pinned by
 `first_push.sh`, including the disabled-by-default refusal twin, initial and
 incremental pushes, retry behavior, and clone-back identity.
 
+### Native workflow shells and monorepo defaults
+
+Trusted-local workflows accept explicit `shell: bash` and `shell: sh`, plus
+workflow and job `defaults.run` for the shell and working directory. Each step
+inherits those fields independently and can override either; a matrix job can
+select its default directory from a whole-value matrix input. Bash runs with
+pipeline failure detection, while workflows with no shell selection preserve
+the original native shell behavior. The selected interpreter and directory bind
+the execution graph and remain recoverable through saved check evidence. See
+[shell selection](docs/NATIVE_WORKFLOW_SHELLS.md) and
+[run defaults](docs/NATIVE_WORKFLOW_STEP_CONTEXT.md#workflow-and-job-run-defaults)
+for examples, precedence and supported limits.
+
+[Native workflow matrices](docs/NATIVE_WORKFLOW_MATRICES.md) accept literal
+`fail-fast: true` or `false`, defaulting to `true`. In the serial native scheduler,
+a failed variant completes its cleanup before later unstarted variants of that
+matrix are skipped; explicit `false` continues them. Independent jobs continue,
+and cancellation or lost containment retains its existing global stop behavior.
+
+### Optional native workflow steps
+
+Trusted-local workflows can mark an individual command with literal
+`continue-on-error: true`. A complete ordinary nonzero exit then permits later
+success steps, dependent jobs and matrix siblings to run. The saved observation
+still records the failed command, original exit code and logs, plus the explicit
+policy and tolerance decision. Browser evidence labels the failure as tolerated.
+Cancellation, timeouts, output limits, incomplete capture, containment loss and
+cleanup failures remain unsuccessful. Existing workflows retain their graph and
+report formats; the new policy selects versioned graph and execution evidence.
+See [optional workflow steps](docs/NATIVE_WORKFLOW_CONTINUE_ON_ERROR.md) for
+conditions, exact recovery, checks and the unsupported job-level policy.
+
+### Find native pull requests
+
+`fg pr search`, authenticated `GET /api/v1/pulls/search`, and the
+`frankengit_pull_search` MCP tool search native PRs by literal title/body text,
+open/closed/merged state, opener and exact source or target branch. The PR browser
+provides the same filters. Search scans one retained snapshot under current ref
+visibility, with independent result and scan limits; an empty partial page keeps
+its continuation rather than claiming there are no matches. See
+[pull-request search](docs/PULL_REQUEST_SEARCH.md) for commands, permissions and
+pagination.
+
 ### Automatic native PR checks
 
 On Linux, `fg serve-http --workflow-pull-requests` discovers visible open
@@ -267,6 +339,25 @@ are unchanged. Durable custody supports revalidation after restart. See
 [verified bundle representation reuse](docs/NATIVE_GIT_BUNDLE_REUSE.md) for
 commands, output limits, incremental bases and the remaining cold-validation
 cost.
+
+### Complete source directory downloads
+
+The source browser's **Download directory** action exports the whole selected
+directory through `POST /api/v1/source/archive`, including entries beyond the
+visible listing page. HTTP and `fg tree --output` share the same pure-Rust,
+snapshot-pinned ustar collector. Downloads preserve binary and raw-name bytes,
+executable modes, safe symlinks and opaque gitlink directories. Output is bounded
+before assembly, and the browser offers a download only after receiving the
+complete response with matching source identities. See
+[source tree archives](docs/SOURCE_TREE_ARCHIVES.md) for API fields, limits,
+refusal behavior and the current validation boundary.
+
+CLI directory exports also accept `--output source.zip --archive-format zip`.
+The `zip-store-source-v1` profile uses the same pinned traversal and safe-Rust
+byte encoder as TreeFS, with exact UTF-8 names, executable modes and safe relative
+symlink data. Its complete-output budget includes the central directory. Tar
+remains the default; filenames do not select the encoding, and existing files
+are never replaced.
 
 ### Native milestone planning
 
@@ -374,6 +465,16 @@ Email and push delivery remain separate work.
 
 ### Sponsored agent source and metadata credentials
 
+Sponsored agents can start their own scoped task branches with the independent
+`source-branch-create` grant through HTTP or MCP. Creation requires an absent
+destination within the credential's ref ceiling and an explicit current visible
+branch tip. Normal protection and current credential checks still apply at
+publication, and exact retries recover the original outcome. Combined with
+independently granted candidate preparation, source publication and PR metadata,
+this removes the operator's per-task branch-creation step. See
+[sponsored task branches](docs/SPONSORED_AGENT_CREDENTIALS.md#create-an-independently-scoped-task-branch)
+for issuance and the supported workflow.
+
 `fg agent-credential generate-token|issue|revoke|show` manages immutable,
 repository-incarnation-bound credentials with an explicit agent and human or
 service sponsor. Native HTTP requests authenticate the current canonical grant
@@ -382,10 +483,20 @@ and run under finite operation scopes, byte envelopes and expiry. An independent
 and authority-bound context with the actual agent and sponsor retained. The
 separate `source-history-read` grant enables bounded log, blame, historical
 tree/blob reads and comparisons of visible references through HTTP and MCP.
+An independent `source-verified-read` grant exposes complete ref-anchored blob
+proofs for independent verification against the caller's pinned authority head.
+The separate `pulls-diff-read` grant enables HTTP and MCP comparison of the exact
+source and target tips recorded by a PR at its required version. Both source
+and PR service ceilings must be enabled; later branch writes do not replace the
+recorded comparison. Existing source, history, PR metadata, and publication
+grants gain neither proof disclosure nor PR-diff access.
 The independent `source-candidates` scope enables HTTP exact-patch preparation
 and bundle inspection, including the shipped source authoring operators. The
-[MCP candidate tool](docs/MCP_SOURCE_CANDIDATES.md) exposes regular-file patch
-preparation and single-parent inspection under that same independent scope.
+[MCP candidate tool](docs/MCP_SOURCE_CANDIDATES.md) exposes regular-file,
+binary-refactoring, and explicit `exact-symlink-v1` patch preparation, plus
+single-parent inspection under that same independent scope. HTTP preparation
+accepts the same explicit symlink profile. Symlink targets remain inert Git
+blob bytes and are never followed on the host.
 Candidate objects stay unstaged and publication remains separately authorized.
 Existing metadata and current-source credentials gain no history permission;
 history APIs can include current-tip content but do not grant search, indexes
@@ -642,6 +753,39 @@ precedence over cached history. Cold reads use the original native parser and
 retain eligible metadata for later queries; cache eviction or restart restores
 that same path. This shares parsing work with merge preparation without
 persisting an ancestry index or making cached entries publication authority.
+
+[Native PR rebase-and-merge](docs/NATIVE_PULL_REQUEST_REBASE.md) adds a separate
+trusted-local prepare → whole-series inspect → exact-candidate review → atomic
+merge workflow. It replays a bounded linear source suffix onto the target,
+preserves original authors/messages, and leaves the source branch unchanged.
+The target ref, PR merge event and delivery obligation publish together. Every
+intermediate commit remains inspectable, and path-specific review rules cover
+temporary changes even when later commits restore the final tree. Conflicts
+stop for explicit original-commit/path resolution; stale subjects, multi-parent
+steps and entirely dropped series refuse without an automatic alternate merge
+method.
+
+The same rebase workflow is available through the authenticated HTTP PR API and
+the browser's **Rebase and merge** selection. Remote reviewers inspect every
+rewritten commit and its changes, including edits removed by later commits.
+Candidate receipts can be shared and reinspected; review and merge remain
+explicit commands with the original retry key retained across lost responses.
+The browser, HTTP, CLI and MCP clients can resolve successive conflicts while
+retaining every earlier recipe and the original authority snapshot. Choices
+include the original parent, accumulated rebased parent, original commit,
+deletion, or exact replacement file bytes. The entire resolved series must pass
+inspection before the browser enables review or merge.
+The [rebase guide](docs/NATIVE_PULL_REQUEST_REBASE.md) describes the endpoints,
+required scopes and bounded browser profile.
+
+[Required checks for rebase candidates](docs/TRUSTED_REBASE_WORKFLOW.md) now
+connect that workflow to the trusted-local runner. `fg workflow
+run-rebase-candidate` executes the exact prepared series after verifying every
+intermediate commit and object closure; `fg workflow publish-candidate --method
+rebase` publishes a retained completed job for the exact PR subject and bundle.
+Protected rebase merges can require those checks without staging the candidate
+or creating a CI ref. Execution retains separate canonical-target and candidate
+provenance, and original terminal decisions remain recoverable after restart.
 
 Non-atomic receives now publish independent ref decisions in bounded groups:
 at most 64 decisions and 1 MiB of canonical decision-batch bytes share one

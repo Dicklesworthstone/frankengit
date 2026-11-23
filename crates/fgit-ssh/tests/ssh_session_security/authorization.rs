@@ -79,7 +79,10 @@ fn grants(principal: u8, scopes: &[DeployKeyScope]) -> Vec<DeployKeyBinding> {
     ]
 }
 
-fn ready(source: &Arc<MutableAuthorizer>, seed: u64) -> (SshServerSession, Client) {
+fn ready<A: SshCommandAuthorizer + 'static>(
+    source: &Arc<A>,
+    seed: u64,
+) -> (SshServerSession, Client) {
     let authorizer: Arc<dyn SshCommandAuthorizer> = source.clone();
     let (mut session, mut client, key) = key_exchange_with_authorizer(
         Arc::new(DetEntropy::new(seed)),
@@ -352,6 +355,16 @@ fn repository_selection_reaches_the_source_without_borrowing_another_grant() {
             RepositoryId::from_bytes([0x11; 16]),
             false,
         ),
+        (
+            "/ABABABABABABABABABABABABABABABAB.git",
+            RepositoryId::from_bytes([0xab; 16]),
+            false,
+        ),
+        (
+            "abababababababababababababababab",
+            RepositoryId::from_bytes([0xab; 16]),
+            false,
+        ),
     ] {
         let source = MutableAuthorizer::new(grants(0xa1, &[DeployKeyScope::Read]));
         let (mut session, mut client) = ready(&source, 52);
@@ -374,6 +387,205 @@ fn repository_selection_reaches_the_source_without_borrowing_another_grant() {
             }]
         );
     }
+}
+
+/// A transport's exact catalog is deliberately different from the legacy
+/// single-repository path aliases. The encrypted session must forward it the
+/// parsed command without first choosing a repository by suffix or digest.
+struct ExactRouteAuthorizer {
+    routes: Mutex<std::collections::BTreeMap<String, (u8, SshGitService)>>,
+    queries: Mutex<Vec<([u8; 32], fgit_ssh::SshGitCommand)>>,
+}
+
+impl ExactRouteAuthorizer {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            routes: Mutex::new(std::collections::BTreeMap::from([
+                ("alpha/repo.git".into(), (0xa1, SshGitService::UploadPack)),
+                ("beta/repo.git".into(), (0xb2, SshGitService::ReceivePack)),
+            ])),
+            queries: Mutex::new(Vec::new()),
+        })
+    }
+}
+
+impl SshCommandAuthorizer for ExactRouteAuthorizer {
+    fn authorize_command(
+        &self,
+        _: &[u8; 32],
+        _: RepositoryId,
+        _: SshGitService,
+    ) -> Result<PrincipalId, AuthRefusal> {
+        panic!("an exact-route authorizer must not use the legacy repository-ID callback")
+    }
+
+    fn authorize_repository_command(
+        &self,
+        key: &[u8; 32],
+        command: &fgit_ssh::SshGitCommand,
+    ) -> Result<fgit_ssh::SshCommandGrant, AuthRefusal> {
+        self.queries.lock().unwrap().push((*key, command.clone()));
+        let denied =
+            || AuthRefusal::DeployKey(fgit_identity::deploy_key::DeployKeyRefusal::NoBindingForKey);
+        if key != &peer_key().verifying_key().to_bytes() {
+            return Err(denied());
+        }
+        let routes = self.routes.lock().unwrap();
+        let (principal, service) = routes.get(command.repository_path()).ok_or_else(denied)?;
+        if *service != command.service() {
+            return Err(denied());
+        }
+        let ceiling = if *service == SshGitService::ReceivePack {
+            fgit_types::ref_write_scope::RefWriteScope::parse(
+                "prefix:726566732f68656164732f6167656e742f",
+            )
+            .unwrap()
+        } else {
+            None
+        };
+        Ok(fgit_ssh::SshCommandGrant::new(
+            PrincipalId::from_bytes([*principal; 16]),
+            ceiling,
+        ))
+    }
+}
+
+#[test]
+fn exact_routes_keep_tenant_path_service_and_ref_ceiling_through_encrypted_exec() {
+    for (path, principal, service) in [
+        ("alpha/repo.git", 0xa1, SshGitService::UploadPack),
+        ("/beta/repo.git", 0xb2, SshGitService::ReceivePack),
+    ] {
+        let source = ExactRouteAuthorizer::new();
+        let (mut session, mut client) = ready(&source, 801);
+        assert!(source.queries.lock().unwrap().is_empty());
+        let packets = exec(&mut session, &mut client, &format!("{service} '{path}'"));
+        allowed(&session, &packets, principal, service);
+        let normalized = path.strip_prefix('/').unwrap_or(path);
+        assert_eq!(
+            session.active_command().unwrap().repository_path(),
+            normalized
+        );
+        assert_eq!(
+            *source.queries.lock().unwrap(),
+            [(
+                peer_key().verifying_key().to_bytes(),
+                fgit_ssh::SshGitCommand::parse(&format!("{service} '{normalized}'")).unwrap(),
+            )],
+        );
+        let grant = session.authenticated_grant().unwrap();
+        if service == SshGitService::ReceivePack {
+            let ceiling = grant.ref_write_scope().unwrap();
+            assert!(ceiling.permits(b"refs/heads/agent/topic"));
+            assert!(!ceiling.permits(b"refs/heads/main"));
+            assert_eq!(
+                grant.principal_without_scope(service),
+                Err(AuthRefusal::RefWriteScopeRequired),
+            );
+        } else {
+            assert!(grant.ref_write_scope().is_none());
+        }
+    }
+}
+
+#[test]
+fn exact_routes_never_fall_back_to_suffix_hex_case_or_other_tenant_aliases() {
+    let mut refusal = None;
+    for path in [
+        "repo.git",
+        "alpha/repo",
+        "Alpha/repo.git",
+        "gamma/repo.git",
+        // The route exists, but grants the other service. Its reply must not
+        // reveal whether the route exists or belongs to another principal.
+        "beta/repo.git",
+        "11111111111111111111111111111111.git",
+    ] {
+        let source = ExactRouteAuthorizer::new();
+        let (mut session, mut client) = ready(&source, 802);
+        let packets = exec(
+            &mut session,
+            &mut client,
+            &format!("git-upload-pack '{path}'"),
+        );
+        let diagnostic = refused(&session, &packets);
+        assert_eq!(session.authenticated_grant(), None);
+        if let Some(expected) = &refusal {
+            assert_eq!(&diagnostic, expected);
+        } else {
+            refusal = Some(diagnostic);
+        }
+        let queries = source.queries.lock().unwrap();
+        assert_eq!(queries.len(), 1);
+        assert_eq!(queries[0].1.repository_path(), path);
+    }
+
+    let source = ExactRouteAuthorizer::new();
+    let (mut session, mut client) = ready(&source, 803);
+    let packets = exec(
+        &mut session,
+        &mut client,
+        "git-upload-pack 'alpha/repo.git'",
+    );
+    allowed(&session, &packets, 0xa1, SshGitService::UploadPack);
+}
+
+#[test]
+fn exact_route_revocation_is_checked_at_exec_and_active_commands_remain_bound() {
+    let source = ExactRouteAuthorizer::new();
+    let (mut existing, mut existing_client) = ready(&source, 804);
+    let packets = exec(
+        &mut existing,
+        &mut existing_client,
+        "git-receive-pack 'beta/repo.git'",
+    );
+    allowed(&existing, &packets, 0xb2, SshGitService::ReceivePack);
+    let existing_grant = existing.authenticated_grant().unwrap().clone();
+
+    let (mut next, mut next_client) = ready(&source, 805);
+    assert_eq!(source.queries.lock().unwrap().len(), 1);
+    source.routes.lock().unwrap().remove("beta/repo.git");
+    let packets = exec(
+        &mut next,
+        &mut next_client,
+        "git-receive-pack 'beta/repo.git'",
+    );
+    refused(&next, &packets);
+    assert_eq!(source.queries.lock().unwrap().len(), 2);
+    assert_eq!(existing.authenticated_grant(), Some(&existing_grant));
+
+    let packets = exec(
+        &mut existing,
+        &mut existing_client,
+        "git-upload-pack 'alpha/repo.git'",
+    );
+    assert_eq!(packets[0][0], msg::CHANNEL_FAILURE);
+    assert_eq!(source.queries.lock().unwrap().len(), 2);
+    assert_eq!(existing.authenticated_grant(), Some(&existing_grant));
+}
+
+#[test]
+fn invalid_route_commands_are_refused_before_the_exact_catalog_is_consulted() {
+    for command in [
+        "git-upload-pack 'alpha/../repo.git'",
+        "git-upload-pack 'alpha/repo.git' trailing",
+        "sh 'alpha/repo.git'",
+    ] {
+        let source = ExactRouteAuthorizer::new();
+        let (mut session, mut client) = ready(&source, 806);
+        let packets = exec(&mut session, &mut client, command);
+        refused(&session, &packets);
+        assert!(source.queries.lock().unwrap().is_empty());
+    }
+    let source = ExactRouteAuthorizer::new();
+    let (mut session, mut client) = ready(&source, 807);
+    let packets = exec(
+        &mut session,
+        &mut client,
+        "git-upload-pack 'alpha/repo.git'",
+    );
+    allowed(&session, &packets, 0xa1, SshGitService::UploadPack);
+    assert_eq!(source.queries.lock().unwrap().len(), 1);
 }
 
 #[test]

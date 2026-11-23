@@ -3,6 +3,11 @@
 //! Public native listener, real TCP, and a generated payload above the buffered
 //! ceiling. The client retains only bounded chunks and the small HTTP headers.
 
+#[path = "lfs_streaming_http/receive_policy.rs"]
+mod receive_policy;
+#[path = "lfs_streaming_http/tus.rs"]
+mod tus;
+
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};

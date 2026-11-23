@@ -1,5 +1,5 @@
 //! Static matrix lowering into the existing native job DAG, not a new scheduler.
-use super::{Job, Node, Span, WorkflowRefusal, graph};
+use super::{Job, Node, Span, WorkflowRefusal, defaults::RunDefaults, graph};
 use std::collections::{BTreeMap, BTreeSet};
 mod context;
 mod selection;
@@ -15,6 +15,7 @@ pub const MAX_EXPANDED_BYTES: usize = 8 * 1024 * 1024;
 pub struct MatrixBinding {
     source_job: String,
     values: Variables,
+    fail_fast: bool,
 }
 impl MatrixBinding {
     #[must_use]
@@ -25,12 +26,19 @@ impl MatrixBinding {
     pub const fn values(&self) -> &BTreeMap<String, String> {
         &self.values
     }
+    /// Whether a failed variant suppresses later unstarted variants in this
+    /// source-job group. This never turns the failed variant into a pass.
+    #[must_use]
+    pub const fn fail_fast(&self) -> bool {
+        self.fail_fast
+    }
 }
 
 pub(super) fn lower_jobs(
     entries: &[(String, Node, Span)],
     span: Span,
     workflow_environment: &super::context::Environment,
+    workflow_defaults: RunDefaults<'_>,
 ) -> Result<Vec<Job>, WorkflowRefusal> {
     let mut bytes = super::context::allocation_bytes(workflow_environment);
     // Keep the original canonical representation for context-free inputs.
@@ -51,7 +59,14 @@ pub(super) fn lower_jobs(
         return entries
             .iter()
             .map(|(id, node, span)| {
-                graph::lower_job(id, node, *span, workflow_environment, &mut bytes)
+                graph::lower_job(
+                    id,
+                    node,
+                    *span,
+                    workflow_environment,
+                    workflow_defaults,
+                    &mut bytes,
+                )
             })
             .collect();
     }
@@ -79,7 +94,7 @@ pub(super) fn lower_jobs(
                 *key_span,
             ));
         }
-        let count = rows.as_ref().map_or(1, Vec::len);
+        let count = rows.as_ref().map_or(1, |selection| selection.rows.len());
         job_count += count;
         limit(
             "expanded workflow jobs",
@@ -99,8 +114,8 @@ pub(super) fn lower_jobs(
             *key_span,
         )?;
         let cost = node_cost(node).saturating_add(id.len()).saturating_add(128);
-        if let Some(rows) = &rows {
-            for row in rows {
+        if let Some(selection) = &rows {
+            for row in &selection.rows {
                 let replacement = row.values().map(String::len).max().unwrap_or(0);
                 let growth = expression_count(node).saturating_mul(replacement);
                 let binding = row
@@ -139,8 +154,8 @@ pub(super) fn lower_jobs(
     }
     let mut jobs = Vec::with_capacity(job_count);
     for ((id, node, key_span), rows) in entries.iter().zip(plans) {
-        if let Some(rows) = rows {
-            for (index, values) in rows.into_iter().enumerate() {
+        if let Some(selection) = rows {
+            for (index, values) in selection.rows.into_iter().enumerate() {
                 let mut selected = node.clone();
                 if let Node::Mapping { entries, .. } = &mut selected {
                     entries.retain(|(key, _, _)| key != "strategy");
@@ -151,11 +166,13 @@ pub(super) fn lower_jobs(
                     &selected,
                     *key_span,
                     workflow_environment,
+                    workflow_defaults,
                     &mut bytes,
                 )?;
                 job.matrix = Some(MatrixBinding {
                     source_job: id.clone(),
                     values,
+                    fail_fast: selection.fail_fast,
                 });
                 jobs.push(job);
             }
@@ -165,6 +182,7 @@ pub(super) fn lower_jobs(
                 node,
                 *key_span,
                 workflow_environment,
+                workflow_defaults,
                 &mut bytes,
             )?);
         }

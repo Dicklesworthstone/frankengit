@@ -98,6 +98,36 @@ and current protection contracts. Lost publication replies retain their existing
 original-key recovery semantics; an old inspection never authorizes refreshing
 tips or replacing a retry key.
 
+## Inspect a PR rebase series
+
+Use `operation: "inspect_pull_rebase"` and `method: "rebase"` with the same
+exact subject, `merge_base` (the selected original upstream), `candidate_commit`,
+and complete bundle chunks. `prepare_pull_rebase` returns this exact handoff.
+Both source and PR read grants remain mandatory; the sponsored-agent credential
+profile does not acquire these operations.
+
+The adapter calls `OneNode::inspect_pull_request_rebase_bundle_in`, which checks
+the open PR, the original source suffix, target-only bundle prerequisites,
+native object identities and every rewritten intermediate tree. The response
+contains `net_change` from the original source tip to the final candidate and
+ordered `commits`, each with its exact native body, parent, tree and full
+parent-to-child `diff`. A change introduced and removed inside the series stays
+visible. `completion_scope` is `entire_rebase_series_and_net_tree`.
+
+All comparisons share the existing finite change/text/hunk/output limits;
+the counters do not reset for each commit. The series permits at most 256
+commits and 128 KiB of aggregate returned commit bodies. Rebase responses have
+a 1 MiB ceiling. Path filtering, merge-base comparison, truncated output and
+empty series refuse. No inspection receipt asserts replay equivalence,
+authorship, approval or publication authority.
+
+Both returned review and publication arguments preserve `method: "rebase"`.
+The review tool uses the dedicated series validator and the merger seals the
+method into the native transaction. Current checks, path protection (including
+paths changed only by an intermediate commit), reviewer quorums and exact
+branch leases still govern landing. The source branch is never rewritten by
+PR merge publication.
+
 ## Evidence and limits
 
 Authored tests cover strict parsing/schema/transport boundaries, real persisted

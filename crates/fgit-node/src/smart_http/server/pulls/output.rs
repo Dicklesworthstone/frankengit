@@ -18,6 +18,7 @@ pub(super) const fn action(value: PullRequestAction) -> &'static str {
         PullRequestAction::Update => "update",
         PullRequestAction::Close => "close",
         PullRequestAction::Reopen => "reopen",
+        PullRequestAction::Retarget => "retarget",
     }
 }
 fn data(value: &PullRequestData, rendered: Option<Rendering>) -> Result<String, ApiError> {
@@ -93,7 +94,7 @@ fn view(value: &PullRequestView, rendered: Option<Rendering>) -> Result<String, 
     Ok(format!(
         concat!(
             "{{\"number\":{},\"version\":{},\"state\":{},\"data\":{},",
-            "\"opened_by\":{},\"last_metadata_actor\":{},\"merge_only\":{},\"merge\":{}}}"
+            "\"opened_by\":{},\"last_metadata_actor\":{},\"merge_only\":{},\"merge\":{},{}}}"
         ),
         value.number.get(),
         value.event.version.get(),
@@ -111,10 +112,11 @@ fn view(value: &PullRequestView, rendered: Option<Rendering>) -> Result<String, 
             .last_metadata_actor
             .map_or_else(|| "null".to_owned(), |id| quote(&id.to_string())),
         value.data.is_none(),
-        merge
+        merge,
+        super::labels::fields(value)?,
     ))
 }
-fn header(
+pub(super) fn header(
     node: &OneNode,
     head: RepositoryAuthorityHeadId,
     expected: Option<RepositoryAuthorityHeadId>,
@@ -156,7 +158,7 @@ fn append(out: &mut String, part: &str, maximum: usize) -> Result<(), ApiError> 
     out.push_str(part);
     Ok(())
 }
-fn validate_page(page: Page, result: &PullRequestPage) -> Result<(), ApiError> {
+pub(super) fn validate_page(page: Page, result: &PullRequestPage) -> Result<(), ApiError> {
     let rows = &result.pull_requests;
     if rows.len() > usize::from(page.limit)
         || rows.iter().any(|row| row.number.get() <= page.after)
@@ -174,21 +176,36 @@ fn validate_page(page: Page, result: &PullRequestPage) -> Result<(), ApiError> {
 pub(super) fn list(
     node: &OneNode,
     page: Page,
+    labels: &[String],
     result: &PullRequestPage,
     maximum: usize,
 ) -> Result<String, ApiError> {
     validate_page(page, result)?;
+    fgit_forge::event::pull_request_labels::validate_labels(labels)
+        .map_err(|_| ApiError::unavailable())?;
+    if result.pull_requests.iter().any(|row| {
+        labels
+            .iter()
+            .any(|label| row.labels.binary_search(label).is_err())
+    }) {
+        return Err(ApiError::unavailable());
+    }
     let mut out = String::new();
     append(
         &mut out,
         &format!(
-            "{{\"type\":\"pull_request_page\",{},\"after\":{},\"limit\":{},\"next_after\":{},\"pull_requests\":[",
+            "{{\"type\":\"pull_request_page\",{},\"after\":{},\"limit\":{},\"next_after\":{},\"labels\":[{}],\"pull_requests\":[",
             header(node, result.source_head, page.expected_head)?,
             page.after,
             page.limit,
             result
                 .next_after
-                .map_or_else(|| "null".to_owned(), |number| number.to_string())
+                .map_or_else(|| "null".to_owned(), |number| number.to_string()),
+            labels
+                .iter()
+                .map(|label| quote(label))
+                .collect::<Vec<_>>()
+                .join(","),
         ),
         maximum,
     )?;
@@ -197,6 +214,71 @@ pub(super) fn list(
             append(&mut out, ",", maximum)?;
         }
         append(&mut out, &view(row, page.render)?, maximum)?;
+    }
+    append(&mut out, "]}", maximum)?;
+    Ok(out)
+}
+
+pub(super) fn search(
+    node: &OneNode,
+    search: &super::search::Search,
+    result: &crate::PullRequestSearchPage,
+    maximum: usize,
+) -> Result<String, ApiError> {
+    let request = search.request;
+    let query = search.query.query();
+    let ref_hex = |reference: &fgit_types::RefName| {
+        quote(
+            &reference
+                .as_bytes()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>(),
+        )
+    };
+    let mut out = String::new();
+    append(
+        &mut out,
+        &format!(
+            concat!(
+                "{{\"type\":\"pull_request_search\",{},\"after\":{},\"limit\":{},\"max_scan\":{},",
+                "\"scanned\":{},\"count\":{},\"complete\":{},\"stop_reason\":{},\"next_after\":{},",
+                "\"filters\":{{\"state\":{},\"opened_by\":{},\"source_ref_hex\":{},\"target_ref_hex\":{},\"query\":{},\"case_sensitive\":{}}},",
+                "\"pull_requests\":["
+            ),
+            header(node, result.source_head, request.expected_head)?,
+            request.after,
+            request.limit,
+            request.max_scan,
+            result.scanned,
+            result.pull_requests.len(),
+            result.is_complete(),
+            quote(result.stop.as_str()),
+            result
+                .next_after
+                .map_or_else(|| "null".into(), |n| n.to_string()),
+            quote(query.state.map_or("all", |state| state.as_str())),
+            query
+                .opened_by
+                .map_or_else(|| "null".into(), |id| quote(&id.to_string())),
+            query
+                .source_ref
+                .as_ref()
+                .map_or_else(|| "null".into(), ref_hex),
+            query
+                .target_ref
+                .as_ref()
+                .map_or_else(|| "null".into(), ref_hex),
+            query.text.as_deref().map_or_else(|| "null".into(), quote),
+            query.case_sensitive,
+        ),
+        maximum,
+    )?;
+    for (index, row) in result.pull_requests.iter().enumerate() {
+        if index != 0 {
+            append(&mut out, ",", maximum)?;
+        }
+        append(&mut out, &view(row, search.render)?, maximum)?;
     }
     append(&mut out, "]}", maximum)?;
     Ok(out)
@@ -328,6 +410,9 @@ mod tests {
             data: Some(command.data),
             opened_by: Some(actor),
             last_metadata_actor: Some(actor),
+            labels: Vec::new(),
+            labels_version: None,
+            labels_actor: None,
         };
         let encoded = view(&row, None).unwrap();
         assert!(encoded.contains("\"state\":\"open\""));
@@ -388,6 +473,9 @@ mod tests {
             data: Some(command.data),
             opened_by: Some(actor),
             last_metadata_actor: Some(actor),
+            labels: Vec::new(),
+            labels_version: None,
+            labels_actor: None,
         }
     }
 

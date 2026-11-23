@@ -41,7 +41,7 @@ struct Choice {
 
 // A native pack header needs at most ten bytes; a SHA-256 REF base needs32.
 // Compressed data remains borrowed from the accounted sender allocation.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct Piece {
     source: usize,
     local: usize,
@@ -170,8 +170,9 @@ fn resolve(
     keys: &[PackOrderKey],
     held: &[(GitOid, ObjectType)],
     limits: &PackLimits,
+    complete: bool,
     live: &mut impl Deadline,
-) -> Result<Option<Vec<Choice>>, PackError> {
+) -> Result<Option<Vec<Option<Choice>>>, PackError> {
     let mut variants = Vec::new();
     for (source, entry) in entries.iter().enumerate() {
         check(live)?;
@@ -205,9 +206,10 @@ fn resolve(
             }
         }
     }
-    // Retained eligible membership must cover every selected-object row before
-    // per-key scratch is allocated. Final selection still checks exact coverage.
-    if variants.len() < keys.len() {
+    // Complete reuse requires enough retained membership to cover every key.
+    // Partial callers project keys to matching retained membership first, so
+    // their scratch never grows with an unrelated cold selection.
+    if variants.is_empty() || (complete && variants.len() < keys.len()) {
         return Ok(None);
     }
     let Some(mut heads) = filled(keys.len(), usize::MAX) else {
@@ -330,22 +332,11 @@ fn resolve(
             dependent = candidate.next;
         }
     }
-    if count != keys.len() {
+    if count == 0 || (complete && count != keys.len()) {
         return Ok(None);
-    }
-    let mut result = Vec::new();
-    if result.try_reserve_exact(keys.len()).is_err() {
-        return Ok(None);
-    }
-    for choice in chosen {
-        check(live)?;
-        let Some(choice) = choice else {
-            return Ok(None);
-        };
-        result.push(choice);
     }
     check(live)?;
-    Ok(Some(result))
+    Ok(Some(chosen))
 }
 
 pub(super) fn select(
@@ -378,9 +369,175 @@ pub(super) fn select(
                 .map(Arc::clone),
         );
     }
-    let Some(mut choices) = resolve(&snapshot, keys, held, limits, live)? else {
+    let Some(resolved) = resolve(&snapshot, keys, held, limits, true, live)? else {
         return Ok(None);
     };
+    let mut choices = Vec::new();
+    if choices.try_reserve_exact(keys.len()).is_err() {
+        return Ok(None);
+    }
+    for choice in resolved {
+        check(live)?;
+        let Some(choice) = choice else {
+            return Ok(None);
+        };
+        choices.push(choice);
+    }
+    materialize(&snapshot, keys, choices, limits, held, live)
+}
+
+/// A closed subset of an exact selection. Missing objects have no retained
+/// representation in this response and must pass the ordinary native writer.
+pub(super) struct PartialSelection {
+    pub(super) received: ReceivedPackPayload,
+    pub(super) missing: Vec<PackOrderKey>,
+    pub(super) total_entry_bytes: usize,
+}
+
+pub(super) fn partial(
+    cache: &ReceivedPackCache,
+    keys: &[PackOrderKey],
+    limits: &PackLimits,
+    held: &[(GitOid, ObjectType)],
+    live: &mut impl Deadline,
+) -> Result<Option<PartialSelection>, PackError> {
+    if !valid_request(keys, held, limits, live)? {
+        return Ok(None);
+    }
+    let format = keys[0].id.algorithm();
+    let mut snapshot = Vec::new();
+    if snapshot.try_reserve_exact(MAX_ENTRIES).is_err() {
+        return Ok(None);
+    }
+    {
+        let Ok(state) = cache.state.lock() else {
+            return Ok(None);
+        };
+        if state.entries.len() > MAX_ENTRIES {
+            return Ok(None);
+        }
+        snapshot.extend(
+            state
+                .entries
+                .iter()
+                .filter(|entry| source_shape(entry, format))
+                .map(Arc::clone),
+        );
+    }
+    // Bound resolver scratch by retained membership, not by an arbitrarily
+    // larger cold selection. Include each matching source identity once.
+    let mut candidates = Vec::new();
+    for entry in &snapshot {
+        check(live)?;
+        if candidates
+            .try_reserve_exact(keys.len().min(entry.objects.len()))
+            .is_err()
+        {
+            return Ok(None);
+        }
+        // A small uncached fetch must not rescan every historical object.
+        // Probe whichever membership side is smaller, as complete reuse does.
+        if keys.len() < entry.objects.len() {
+            for key in keys {
+                check(live)?;
+                if let Ok(local) = entry
+                    .objects
+                    .binary_search_by_key(&key.id, |object| object.id)
+                    && entry.objects[local].kind == key.object_type
+                {
+                    candidates.push(*key);
+                }
+            }
+        } else {
+            for object in &entry.objects {
+                check(live)?;
+                if let Ok(index) = keys.binary_search_by_key(&object.id, |key| key.id)
+                    && keys[index].object_type == object.kind
+                {
+                    candidates.push(keys[index]);
+                }
+            }
+        }
+    }
+    candidates.sort_unstable_by_key(|key| key.id);
+    candidates.dedup_by_key(|key| key.id);
+    check(live)?;
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    // A selected but uncached parent must NOT become a held root after this
+    // projection: its native representation is emitted separately, and is not
+    // part of the retained graph. Dropping that redundant proof keeps the two
+    // graphs disjoint and their combined depth/fanout accounting exact.
+    let mut external = Vec::new();
+    if external.try_reserve_exact(held.len()).is_err() {
+        return Ok(None);
+    }
+    for &(id, kind) in held {
+        check(live)?;
+        if keys.binary_search_by_key(&id, |key| key.id).is_err() {
+            external.push((id, kind));
+        }
+    }
+    let Some(resolved) = resolve(&snapshot, &candidates, &external, limits, false, live)? else {
+        return Ok(None);
+    };
+    let mut selected = Vec::new();
+    let mut choices = Vec::new();
+    if selected.try_reserve_exact(candidates.len()).is_err()
+        || choices.try_reserve_exact(candidates.len()).is_err()
+    {
+        return Ok(None);
+    }
+    let mut total_entry_bytes = 0usize;
+    for (key, choice) in candidates.into_iter().zip(resolved) {
+        check(live)?;
+        if let Some(choice) = choice {
+            let Some(total) = total_entry_bytes
+                .checked_add(snapshot[choice.source].wire[choice.local].declared_size)
+            else {
+                return Ok(None);
+            };
+            total_entry_bytes = total;
+            selected.push(key);
+            choices.push(choice);
+        }
+    }
+    if selected.is_empty() || selected.len() == keys.len() {
+        return Ok(None);
+    }
+    let mut missing = Vec::new();
+    if missing.try_reserve_exact(keys.len() - selected.len()).is_err() {
+        return Ok(None);
+    }
+    let mut reused = 0usize;
+    for key in keys {
+        check(live)?;
+        if selected.get(reused).is_some_and(|selected| selected.id == key.id) {
+            reused += 1;
+        } else {
+            missing.push(*key);
+        }
+    }
+    let Some(received) = materialize(&snapshot, &selected, choices, limits, &external, live)? else {
+        return Ok(None);
+    };
+    Ok(Some(PartialSelection {
+        received,
+        missing,
+        total_entry_bytes,
+    }))
+}
+
+fn materialize(
+    snapshot: &[Arc<Entry>],
+    keys: &[PackOrderKey],
+    mut choices: Vec<Choice>,
+    limits: &PackLimits,
+    held: &[(GitOid, ObjectType)],
+    live: &mut impl Deadline,
+) -> Result<Option<ReceivedPackPayload>, PackError> {
+    let format = keys[0].id.algorithm();
     let edges = choices
         .iter()
         .enumerate()

@@ -1,5 +1,7 @@
 //! The real embedded authority owns every mutation, refusal and recovered key.
+mod labels;
 mod reopen;
+mod retarget;
 use super::super::super::{
     WriteGrants,
     protocol::{ReadTools, Server},
@@ -349,13 +351,14 @@ fn pull_write_grants_do_not_imply_reads_issues_or_recovery_and_descriptors_are_m
     let mut options = fixture.options.clone();
     options.outcomes = false;
     let mut backend = NodeTools::open(options).unwrap();
-    // The pull write tools plus the comment write and append tools (x2mv.4.39).
-    assert_eq!(backend.tools().len(), 6);
+    // PR lifecycle, comment, append and independent label replacement tools.
+    assert_eq!(backend.tools().len(), 8);
     for tool in backend.tools() {
         assert!(
             is_tool(tool.name)
                 || tool.name == super::super::pull_comments::WRITE
                 || tool.name == super::super::pull_comments::APPEND
+                || tool.name == super::super::pull_labels::WRITE
         );
         assert!(backend.is_mutation(tool.name));
     }

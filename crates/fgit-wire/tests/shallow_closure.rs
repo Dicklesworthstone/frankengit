@@ -454,6 +454,7 @@ const fn omission_reason_code(reason: OmissionReason) -> u8 {
     match reason {
         OmissionReason::BlobFilter => 1,
         OmissionReason::TreeDepth => 2,
+        OmissionReason::ObjectTypeFilter => 3,
     }
 }
 

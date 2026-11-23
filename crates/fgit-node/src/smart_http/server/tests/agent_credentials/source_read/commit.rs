@@ -164,6 +164,10 @@ fn current_commit_http_execution_preserves_exact_output_limit_and_original_agent
         ))
         .unwrap();
     let session = request.authenticated_session();
+    let admission_deadline = crate::GitDaemonSessionDeadline::new(
+        node.git_daemon_session_timeout,
+        crate::GitDaemonSessionWorkScaling::FLAT,
+    );
     let execute = |session: &LoopbackReceiveSession, maximum| {
         source::execute(
             &node,
@@ -175,6 +179,7 @@ fn current_commit_http_execution_preserves_exact_output_limit_and_original_agent
             &mut body.as_slice(),
             HttpLimits::default(),
             maximum,
+            &admission_deadline,
         )
     };
     let success = execute(&session, MAXIMUM as u64).unwrap();

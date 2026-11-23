@@ -5,6 +5,8 @@
 mod checks;
 mod conversation;
 mod fast_forward;
+mod labels;
+mod search;
 pub use checks::{
     PullRequestCheckEvidence, PullRequestChecksPage, PullRequestChecksReadRefusal,
     WorkflowCheckSummary,
@@ -12,7 +14,10 @@ pub use checks::{
 pub use conversation::{
     PullRequestCommentView, PullRequestCommentsPage, PullRequestCommentsReadRefusal,
 };
+pub use search::{PullRequestSearchPage, PullRequestSearchRefusal};
 mod preparation;
+mod rebase;
+pub use rebase::PreparedPullRequestRebaseBundle;
 #[path = "reviews.rs"]
 mod reviews;
 
@@ -135,6 +140,27 @@ impl OneNode {
         limit: u16,
         expected_head: Option<RepositoryAuthorityHeadId>,
     ) -> Result<PullRequestPage, PullRequestReadRefusal> {
+        self.read_pull_requests_filtered_in(request, visibility, after, limit, expected_head, &[])
+            .await
+    }
+
+    /// Read the native AND-label predicate before applying pagination. The
+    /// label state and PR metadata come from one authenticated retained basis;
+    /// current disclosure policy continues to govern both branch identities.
+    pub async fn read_pull_requests_filtered_in(
+        &self,
+        request: &NodeRequestContext,
+        visibility: &RefVisibility,
+        after: u64,
+        limit: u16,
+        expected_head: Option<RepositoryAuthorityHeadId>,
+        labels: &[String],
+    ) -> Result<PullRequestPage, PullRequestReadRefusal> {
+        fgit_forge::event::pull_request_labels::validate_labels(labels).map_err(|_| {
+            PullRequestReadRefusal::Admission(Box::new(AdmissionError::AsyncProjectionUnavailable(
+                RefusalCode::EvidenceInvalid,
+            )))
+        })?;
         if limit == 0 || limit > 100 {
             return Err(PullRequestReadRefusal::InvalidLimit);
         }
@@ -163,12 +189,13 @@ impl OneNode {
                     && !current.hidden_refs.hides(reference.as_bytes())
             })
         };
-        pull_request::read_page_at(
+        pull_request::read_page_filtered_at(
             &self.authority,
             request.authority(),
             &selected,
             after,
             limit,
+            labels,
             &visible,
             &|| !super::workspace_request_live(request),
         )

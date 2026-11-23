@@ -105,6 +105,41 @@ fn milestone_search_is_an_explicit_conjunctive_snapshot_filter() {
 }
 
 #[test]
+fn assignee_search_distinguishes_exact_membership_no_assignment_and_no_restriction() {
+    let principal = PrincipalId::from_bytes([5; 16]);
+    let options = parse(&args(&[
+        "--assignee",
+        &principal.to_string(),
+        "--state",
+        "open",
+    ]))
+    .unwrap();
+    assert_eq!(
+        options.query.query().assignee,
+        Some(AssigneeFilter::Principal(principal))
+    );
+    assert_eq!(options.query.query().state, Some(IssueState::Open));
+    assert_eq!(
+        parse(&args(&["--assignee", "none"]))
+            .unwrap()
+            .query
+            .query()
+            .assignee,
+        Some(AssigneeFilter::Unassigned)
+    );
+    assert_eq!(parse(&args(&[])).unwrap().query.query().assignee, None);
+    for fields in [
+        vec!["--assignee", "all"],
+        vec!["--assignee", ""],
+        vec!["--assignee", "not-a-principal"],
+        vec!["--assignee", "none", "--assignee", "none"],
+        vec!["--assignee"],
+    ] {
+        assert!(parse(&args(&fields)).is_err(), "{fields:?}");
+    }
+}
+
+#[test]
 fn rejects_inapplicable_duplicate_and_unbounded_inputs_before_node_open() {
     for flags in [
         vec!["--state", "unknown"],
@@ -149,6 +184,8 @@ fn continuation_and_partial_empty_receipt_are_explicit() {
         &token,
         "--query",
         "<script>\"",
+        "--assignee",
+        "none",
         "--max-scan",
         "2",
     ]))
@@ -172,6 +209,7 @@ fn continuation_and_partial_empty_receipt_are_explicit() {
     assert!(report.contains("\"stop_reason\":\"scan_limit\""));
     assert!(report.contains("\"next_after\":9"));
     assert!(report.contains("\"count\":0"));
+    assert!(report.contains("\"assignee\":\"none\""));
     assert!(report.contains(&format!(
         "\"text\":{}",
         crate::publication_support::quote("<script>\"")

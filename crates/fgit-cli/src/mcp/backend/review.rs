@@ -36,7 +36,7 @@ pub(super) fn tools(source: bool, pulls: bool) -> Vec<Tool> {
     }
     if permitted(source, pulls, PULL_DIFF) {
         tools.push(Tool { name: PULL_DIFF,
-            description: "Review the exact code tips recorded by a PR at its required version. Requires source AND PR read grants. Moving branches never refresh the compared PR tips. No approval or publication.",
+            description: "Review the exact code tips recorded by a PR at its required version. Requires source AND PR launch ceilings; sponsored credentials also require pulls-diff-read. Moving branches never refresh the recorded tips. No approval or publication.",
             schema: input_schema(true) });
     }
     tools
@@ -54,6 +54,15 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
     // Defense in depth for direct handler callers, before even parsing input.
     if !permitted(backend.options.source, backend.options.pulls, name) {
         return Err(ToolError::invalid("tool_not_granted"));
+    }
+    let sponsored_operation = if name == PULL_DIFF {
+        fgit_identity::agent::PULLS_DIFF_READ
+    } else {
+        fgit_identity::agent::SOURCE_HISTORY_READ
+    };
+    let sponsored = backend.options.agent_token_file.is_some() || backend.agent.is_some();
+    if sponsored {
+        super::agent::check_operation(backend, sponsored_operation)?;
     }
     let query = parse(args, name == PULL_DIFF, backend.options.format)?;
     let request = backend.command_context();
@@ -81,6 +90,12 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
     result
         .encode(MAX_RESULT_BYTES)
         .map_err(|_| ToolError::failed("review_response_limit"))?;
+    if !request.is_live() {
+        return Err(ToolError::failed("source_review_cancelled"));
+    }
+    if sponsored {
+        super::agent::check_operation(backend, sponsored_operation)?;
+    }
     Ok(result)
 }
 

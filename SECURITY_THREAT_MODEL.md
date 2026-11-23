@@ -32,6 +32,11 @@ Security cannot depend on one parser, local repository, cloud provider, model, g
 - Native Git object identity and format are preserved exactly.
 - SHA-1 and SHA-256 are separate typed domains.
 - Pack/delta/DEFLATE/wire parsing is bounded and rejects ambiguity, overflow, recursion, expansion, and malformed structure.
+- Hybrid served packs may reuse only a dependency-closed subset of the exact
+  authorized selection, with independently proven held bases where negotiated.
+  Newly encoded entries cannot depend on retained entries or vice versa.
+  Both source frames/checksums and combined count, output and expansion limits
+  must verify before the joined private spool becomes consumable.
 - Internal objects, segments, manifests, evidence, generations, and capsules verify canonical identity/length/structure.
 - Repair reproduces exact committed bytes or fails closed.
 
@@ -63,6 +68,15 @@ Security cannot depend on one parser, local repository, cloud provider, model, g
   author bypasses this gate. Edits and close/reopen preserve the independent lock.
   Immutable terminal recovery still returns an earlier comment's original
   committed or refused result; later lock changes cannot reinterpret that result.
+- Native PR labels use a separate exact-version aggregate and the existing
+  repository PR-write grant. Every CAS rechecks current canonical credentials,
+  native PR existence, both branch visibility rules and the labels predecessor.
+  Label changes cannot move refs, refresh PR tips, alter the opener or invalidate
+  code reviews. Full replacement, actor, PR and predecessor are sealed together;
+  a concurrent labels winner makes a stale command refuse, while an exact
+  terminal retry retains its original outcome. Missing or corrupt selected
+  label evidence cannot become an empty label set. Label-filtered reads enforce
+  current visibility, one pinned authority head and finite work before pagination.
 
 ### 1.4 Confidentiality and privacy
 
@@ -425,6 +439,8 @@ object envelopes (`VERIFY_SPEC.md` §12).
 - service or agent uses sponsor/admin ambient token;
 - weak auth used for high-impact override;
 - replayed signed request;
+- SSH route substitution across tenants, path aliases selecting a different
+  repository, or a recreated storage root inheriting an old route's grants;
 - capability serialized into logs/context/cache;
 - cross-site request forgery: a page in the operator's browser sends a
   state-changing request that rides an ambient, browser-cached credential.
@@ -437,6 +453,17 @@ object envelopes (`VERIFY_SPEC.md` §12).
 - brokered secrets/effects; no ambient sponsor token/cloud metadata;
 - idempotency/nonces according to protocol;
 - redaction and secret-taint tests;
+- explicit multi-repository SSH catalogs bind exact parsed paths to one
+  authenticated tenant/repository/incarnation and live deploy-key source.
+  Authorization and dispatch share the immutable route entry; no repository
+  node is leased before the route's command grant. Duplicate identities and
+  overlapping canonical roots refuse startup, while cold opens recheck the
+  expected incarnation. Unknown routes, denied services and source failures
+  share one refusal. Global, route and credential write ceilings all apply.
+  This operator-controlled profile does not provide canonical account/key
+  administration, constant-time route secrecy, or protection from replacement
+  of all authority inputs by a privileged operator
+  ([deployment contract](docs/MULTI_REPOSITORY_SSH.md));
 - stock HTTP attempt aliases preserve ordinary routing and authentication
   error ordering: malformed aliases are not rejected based on the configured
   repository prefix, and recognized aliases authenticate before retry-header
@@ -522,6 +549,17 @@ incarnation and object format; missing active requests cannot fall back to local
 operator attribution. Canonical revocation is checked on every call, and nested
 retrieval and response disclosure retain the original finite deadline.
 Caller fields and repository text cannot replace these identities or add operations.
+Sponsored task-branch creation requires the independent `SOURCE_BRANCH_CREATE`
+grant, its finite target-ref ceiling and the transport's source-write deployment
+ceiling. Neither `SOURCE_PUBLISH` nor read/candidate/metadata scopes imply it.
+The native sealed request requires an absent destination and an exact verified
+current visible branch tip. Every publication basis rechecks that membership,
+destination visibility, canonical credential and branch protection. A hidden-only,
+retained or guessed object cannot become disclosed by creating a branch.
+Creation changes no source files and grants no update, delete, rename, initial
+history or arbitrary Git receive authority. Original-request deadlines survive
+authority I/O; historical terminal recovery preserves the original identity
+witness without treating a later branch state as the earlier outcome.
 Sponsored milestone planning similarly uses independent `MILESTONES_READ` and
 `MILESTONES_WRITE` operations. Existing issue/source credential masks acquire no
 milestone access; milestone scopes expose metadata and aggregate issue counts,

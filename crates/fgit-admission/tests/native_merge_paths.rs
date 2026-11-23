@@ -9,10 +9,11 @@ use fgit_admission::ProjectionFailure;
 use fgit_admission::merge::native::objects::MergeObjectLimits;
 use fgit_admission::merge::native::protection::path_reviews::{
     MAX_MERGE_CHANGED_PATH_BYTES, MAX_MERGE_CHANGED_PATHS, MAX_MERGE_PATH_BYTES,
-    MAX_MERGE_PATH_DEPTH, verify_merge_paths,
+    MAX_MERGE_PATH_DEPTH, verify_merge_paths, verify_rebase_paths, verify_source_paths,
 };
 use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_forge::event::NativeMerge;
+use fgit_forge::event::agent_credential::SourcePublicationScope;
 use fgit_pack::{CanonicalObjectSource, CanonicalPackObject, PackWriteError};
 use fgit_types::{GitHashAlgorithm, GitOid, RefName, RefusalCode};
 
@@ -85,6 +86,28 @@ fn paths(objects: &Objects, merge: &NativeMerge) -> Vec<Vec<u8>> {
     witness.changed_paths().to_vec()
 }
 
+fn source_paths(objects: &Objects, merge: &NativeMerge) -> Vec<Vec<u8>> {
+    let witness = verify_source_paths(
+        objects,
+        merge.target_tip_before,
+        merge.merge_commit,
+        MergeObjectLimits::default(),
+        &mut || true,
+    )
+    .unwrap();
+    assert_eq!(witness.before(), merge.target_tip_before);
+    assert_eq!(witness.after(), merge.merge_commit);
+    witness.changed_paths().to_vec()
+}
+
+fn source_scope(prefix: &[u8]) -> SourcePublicationScope {
+    let reference: String = b"refs/heads/main"
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    SourcePublicationScope::new(&format!("exact:{reference}"), vec![prefix.to_vec()]).unwrap()
+}
+
 #[test]
 fn complete_actual_delta_includes_structural_replacements_and_raw_leaf_identity_changes() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
@@ -154,6 +177,29 @@ fn complete_actual_delta_includes_structural_replacements_and_raw_leaf_identity_
         .collect();
         expected.sort_unstable();
         assert_eq!(paths(&objects, &merge), expected);
+        // Source scope elides only pure nonempty directory containers.
+        // Replacements, empty entries, executable modes, gitlinks, symlinks,
+        // raw names and both rename endpoints remain independent path facts.
+        let expected_source: Vec<_> = [
+            b"added/secret".as_slice(),
+            b"deleted/deep/secret",
+            b"dir_to_file",
+            b"dir_to_file/deep/secret",
+            b"empty",
+            b"file_to_dir",
+            b"file_to_dir/secret",
+            b"gitlink",
+            b"mode",
+            b"nested/secret",
+            b"new-name",
+            b"old-name",
+            b"raw\xff",
+            b"symlink",
+        ]
+        .into_iter()
+        .map(<[u8]>::to_vec)
+        .collect();
+        assert_eq!(source_paths(&objects, &merge), expected_source);
         assert!(!objects.reads.borrow().contains(&stable));
         assert!(!objects.reads.borrow().contains(&old));
         assert!(!objects.reads.borrow().contains(&new));
@@ -432,4 +478,118 @@ fn changed_path_count_depth_length_and_total_bytes_have_complete_boundaries() {
         verify_merge_paths(&objects, &merge, Default::default(), &mut || true).unwrap_err(),
         ProjectionFailure::Unavailable(RefusalCode::ResourceBudgetExceeded)
     );
+}
+
+
+#[test]
+fn narrow_source_scope_can_create_first_and_remove_last_nested_file() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut objects = Objects::default();
+        let empty = objects.tree(format, &[]);
+        let component = objects.tree(format, &[(b"100644", b"lib.rs", blob(format, b"new"))]);
+        let new = objects.tree(format, &[(b"40000", b"component", component)]);
+        let src = objects.tree(format, &[(b"40000", b"new", new)]);
+        let nested = objects.tree(format, &[(b"40000", b"src", src)]);
+        let scope = source_scope(b"src/new/component");
+        let exact_file = source_scope(b"src/new/component/lib.rs");
+        assert!(!scope.permits_path(b"src"));
+        assert!(!scope.permits_path(b"src/new"));
+        for (before, after) in [(empty, nested), (nested, empty)] {
+            let merge = objects.merge(before, after);
+            let changed = source_paths(&objects, &merge);
+            assert_eq!(changed, [b"src/new/component/lib.rs".to_vec()]);
+            assert!(changed.iter().all(|path| scope.permits_path(path)));
+            assert!(changed.iter().all(|path| exact_file.permits_path(path)));
+
+            // The source-specific rule must not weaken merge/rebase reviewers.
+            let structural = [
+                b"src".to_vec(),
+                b"src/new".to_vec(),
+                b"src/new/component".to_vec(),
+                b"src/new/component/lib.rs".to_vec(),
+            ];
+            assert_eq!(paths(&objects, &merge), structural);
+            let rebase = verify_rebase_paths(
+                &objects,
+                &merge,
+                MergeObjectLimits::default(),
+                &mut || true,
+            )
+            .unwrap();
+            assert_eq!(rebase.changed_paths(), structural.as_slice());
+        }
+    }
+}
+
+#[test]
+fn narrow_source_scope_cannot_replace_an_ungranted_file_with_a_directory_or_back() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut objects = Objects::default();
+        let content = blob(format, b"content");
+        let leaf = objects.tree(format, &[(b"100644", b"file", content)]);
+        let nested = objects.tree(format, &[(b"40000", b"component", leaf)]);
+        let directory = objects.tree(format, &[(b"40000", b"src", nested)]);
+        let scope = source_scope(b"src/component");
+        for mode in [b"100644".as_slice(), b"120000", b"160000"] {
+            let scalar = objects.tree(format, &[(mode, b"src", content)]);
+            for (before, after) in [(scalar, directory), (directory, scalar)] {
+                let merge = objects.merge(before, after);
+                let changed = source_paths(&objects, &merge);
+                assert_eq!(
+                    changed,
+                    [b"src".to_vec(), b"src/component/file".to_vec()]
+                );
+                assert!(!changed.iter().all(|path| scope.permits_path(path)));
+            }
+        }
+    }
+}
+
+#[test]
+fn narrow_source_scope_retains_unrelated_empty_trees_and_sibling_changes() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut objects = Objects::default();
+        let empty = objects.tree(format, &[]);
+        let component = objects.tree(format, &[(b"100644", b"lib.rs", blob(format, b"new"))]);
+        let scope = source_scope(b"src/new/component");
+        // An explicitly added/removed empty directory is not justified merely
+        // because its path is an ancestor of some possible granted child.
+        let empty_new = objects.tree(format, &[(b"40000", b"new", empty)]);
+        let empty_ancestor = objects.tree(format, &[(b"40000", b"src", empty_new)]);
+        for (before, after) in [(empty, empty_ancestor), (empty_ancestor, empty)] {
+            let merge = objects.merge(before, after);
+            let changed = source_paths(&objects, &merge);
+            assert_eq!(changed, [b"src/new".to_vec()]);
+            assert!(!changed.iter().all(|path| scope.permits_path(path)));
+        }
+
+        for mode in [b"40000".as_slice(), b"100644"] {
+            let outside = if mode == b"40000" {
+                empty
+            } else {
+                blob(format, b"unauthorized")
+            };
+            let new = objects.tree(
+                format,
+                &[
+                    (b"40000", b"component", component),
+                    (mode, b"outside", outside),
+                ],
+            );
+            let src = objects.tree(format, &[(b"40000", b"new", new)]);
+            let mixed = objects.tree(format, &[(b"40000", b"src", src)]);
+            for (before, after) in [(empty, mixed), (mixed, empty)] {
+                let merge = objects.merge(before, after);
+                let changed = source_paths(&objects, &merge);
+                assert_eq!(
+                    changed,
+                    [
+                        b"src/new/component/lib.rs".to_vec(),
+                        b"src/new/outside".to_vec(),
+                    ]
+                );
+                assert!(!changed.iter().all(|path| scope.permits_path(path)));
+            }
+        }
+    }
 }

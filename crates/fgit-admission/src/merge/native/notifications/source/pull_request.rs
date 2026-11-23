@@ -13,7 +13,8 @@ use fgit_chronicle::PublicationBasis;
 use fgit_codec::{CanonicalForgePositionState, DecodeLimits, ForgePositionStateEntry};
 use fgit_forge::event::notification::apply_event;
 use fgit_forge::event::pull_request::{PullRequestAction, validate_transition};
-use fgit_forge::{AggregateId, AggregateVersion, ForgeEventPayload, PullRequestNumber};
+use fgit_forge::event::review::{ReviewDecision, validate_review_transition};
+use fgit_forge::{AggregateId, AggregateVersion, ForgeEvent, ForgeEventPayload, PullRequestNumber};
 use fgit_types::{Digest, PrincipalId, PrincipalSnapshotId, RefusalCode, RepositoryId};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -32,6 +33,7 @@ struct StreamTail {
 fn relevant(aggregate: AggregateId, principal: PrincipalId) -> bool {
     match aggregate {
         AggregateId::PullRequest(_)
+        | AggregateId::PullRequestLabels(_)
         | AggregateId::PullRequestConversation(_)
         | AggregateId::PullRequestReview { .. } => true,
         AggregateId::PullRequestNotificationPreference {
@@ -61,6 +63,8 @@ fn frontiers(
         let aggregate = if let Some(raw) = label.as_str().strip_prefix("pull-request/") {
             subjects += 1;
             AggregateId::PullRequest(number(raw)?)
+        } else if let Some(raw) = label.as_str().strip_prefix("pull-request-labels/") {
+            AggregateId::PullRequestLabels(number(raw)?)
         } else if let Some(raw) = label.as_str().strip_prefix("conversation/") {
             AggregateId::PullRequestConversation(number(raw)?)
         } else if let Some(raw) = label.as_str().strip_prefix("review/") {
@@ -133,6 +137,9 @@ where
     let mut scanned_bytes = history.scanned_bytes;
     let mut tails = BTreeMap::<AggregateId, StreamTail>::new();
     let mut threads = BTreeMap::<PullRequestNumber, NotificationThread>::new();
+    // Move, rather than clone, consumed review events into their per-reviewer
+    // frontier. They remain within the selected history's retained-byte bound.
+    let mut reviews = BTreeMap::<AggregateId, ForgeEvent>::new();
     // Legacy digest-only and standalone merge receipts have no native opener
     // or title. Keep them outside this explicit native notification profile.
     let mut legacy = BTreeSet::new();
@@ -163,7 +170,7 @@ where
                 validate_transition(previous_event.as_ref(), &item.event)
                     .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
                 let version = next_activity(prior)?;
-                let subject = PullRequestNotificationSnapshot {
+                let mut subject = PullRequestNotificationSnapshot {
                     number: *number,
                     activity_version: version,
                     lifecycle_version: item.event.version,
@@ -176,6 +183,7 @@ where
                     },
                     last_action: change.action,
                     last_metadata_actor: change.actor,
+                    disclosure_refs: BTreeSet::new(),
                 };
                 let preference = previous.and_then(|thread| thread.preference.clone());
                 let participated = previous.is_some_and(|thread| thread.participated)
@@ -188,6 +196,18 @@ where
                 if previous.is_none() && threads.len() >= MAX_THREADS {
                     return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
                 }
+                // Preserve every historical target without repeatedly cloning
+                // the growing set on a long retarget history.
+                if let Some(previous) = threads.get_mut(number) {
+                    subject.disclosure_refs =
+                        std::mem::take(&mut pull_mut(previous)?.disclosure_refs);
+                }
+                subject
+                    .disclosure_refs
+                    .insert(change.data.source_ref.clone());
+                subject
+                    .disclosure_refs
+                    .insert(change.data.target_ref.clone());
                 threads.insert(
                     *number,
                     NotificationThread {
@@ -236,6 +256,17 @@ where
                 legacy.insert(*number);
             }
             (
+                AggregateId::PullRequestLabels(number),
+                ForgeEventPayload::PullRequestLabelsChangedNative(change),
+            ) => {
+                // Label metadata participates in activity ordering, without
+                // changing the content/review subject or inventing an opener.
+                let thread = threads
+                    .get_mut(number)
+                    .ok_or_else(|| unavailable(RefusalCode::EvidenceMissing))?;
+                activity(thread, change.actor, principal, false)?;
+            }
+            (
                 AggregateId::PullRequestConversation(number),
                 ForgeEventPayload::PullRequestCommentedNative(comment),
             ) => {
@@ -247,9 +278,9 @@ where
                 };
                 if let Some(anchor) = &comment.anchor {
                     let subject = pull(thread)?;
-                    // Retained anchors carry disclosure coordinates of their
-                    // own. Native PR branch identities are immutable, so an
-                    // anchor naming either different ref cannot join this inbox.
+                    // A new anchor must match the PR at its chronological
+                    // publication position. Historical refs remain in the
+                    // thread's disclosure set after later retargets.
                     if anchor.source_ref != subject.data.source_ref
                         || anchor.target_ref != subject.data.target_ref
                     {
@@ -271,14 +302,20 @@ where
                     }
                     return Err(unavailable(RefusalCode::EvidenceMissing));
                 };
+                validate_review_transition(reviews.get(&item.event.aggregate), &item.event)
+                    .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
                 let subject = pull(thread)?;
                 if review.subject.source_ref != subject.data.source_ref
-                    || review.subject.target_ref != subject.data.target_ref
+                    || (review.decision != ReviewDecision::Withdraw
+                        && review.subject.target_ref != subject.data.target_ref)
                     || review.subject.pull_request_version > subject.lifecycle_version
                 {
                     return Err(unavailable(RefusalCode::EvidenceInvalid));
                 }
                 activity(thread, review.reviewer, principal, true)?;
+                // Withdrawal was checked against its exact prior reviewer
+                // event above, so it may retain a target preceding a retarget.
+                reviews.insert(item.event.aggregate, item.event);
             }
             (
                 AggregateId::PullRequestNotificationPreference {

@@ -14,10 +14,12 @@ pub(super) fn succeeded(report: &WorkflowReport) -> bool {
             match job.outcome {
                 JobOutcome::Succeeded => job.steps.iter().all(|step| {
                     let result = &step.observation;
-                    result.outcome == StepOutcome::Succeeded
+                    let completed = result.outcome == StepOutcome::Succeeded
                         && result.exit_code == Some(0)
                         && result.output_complete
-                        && !result.retain_workspace
+                        && !result.retain_workspace;
+                    step.outcome_tolerated == step.can_tolerate_failure()
+                        && (completed || step.outcome_tolerated)
                 }),
                 JobOutcome::Skipped => job.steps.is_empty(),
                 JobOutcome::Failed
@@ -54,6 +56,9 @@ mod tests {
                             index: 0,
                             name: None,
                             script: Commitment::of_bytes(b"true"),
+                            shell: None,
+                            continue_on_error: false,
+                            outcome_tolerated: false,
                             observation: StepObservation {
                                 outcome: if *outcome == JobOutcome::Succeeded {
                                     StepOutcome::Succeeded
@@ -159,5 +164,41 @@ mod tests {
         failure.jobs[0].failure = Some(WorkerFailure::new("failed cleanup", false));
         assert!(!succeeded(&failure));
         assert!(succeeded(&original));
+    }
+
+    #[test]
+    fn only_complete_ordinary_failures_with_explicit_policy_can_complete_successfully() {
+        let mut original = report(&[JobOutcome::Succeeded, JobOutcome::Skipped]);
+        let step = &mut original.jobs[0].steps[0];
+        step.continue_on_error = true;
+        step.outcome_tolerated = true;
+        step.observation.outcome = StepOutcome::Failed;
+        step.observation.exit_code = Some(7);
+        assert!(succeeded(&original));
+        assert_eq!(
+            original.jobs[0].steps[0].observation.outcome,
+            StepOutcome::Failed
+        );
+        for change in 0..11 {
+            let mut changed = original.clone();
+            let step = &mut changed.jobs[0].steps[0];
+            match change {
+                0 => step.continue_on_error = false,
+                1 => step.outcome_tolerated = false,
+                2 => step.observation.exit_code = Some(0),
+                3 => step.observation.exit_code = None,
+                4 => step.observation.output_complete = false,
+                5 => step.observation.retain_workspace = true,
+                6 => step.observation.outcome = StepOutcome::Succeeded,
+                7 => step.observation.outcome = StepOutcome::Cancelled,
+                8 => step.observation.outcome = StepOutcome::TimedOut,
+                9 => step.observation.outcome = StepOutcome::OutputLimit,
+                _ => step.observation.outcome = StepOutcome::ContainmentFailure,
+            }
+            assert!(!succeeded(&changed), "accepted forged tolerance {change}");
+        }
+        let mut failed_close = original.clone();
+        failed_close.jobs[0].failure = Some(WorkerFailure::new("failed cleanup", false));
+        assert!(!succeeded(&failed_close));
     }
 }

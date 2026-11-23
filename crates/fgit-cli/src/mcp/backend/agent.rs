@@ -10,8 +10,9 @@ use super::{NodeTools, Object, Options, ToolError, Value, mutations, object, tex
 use fgit_authority::IdempotencyKey;
 use fgit_identity::agent::{
     DISCUSSIONS_READ, DISCUSSIONS_WRITE, ISSUES_READ, ISSUES_WRITE, MILESTONES_READ,
-    MILESTONES_WRITE, OUTCOMES_READ, PULLS_READ, PULLS_WRITE, SOURCE_CANDIDATES,
-    SOURCE_HISTORY_READ, SOURCE_READ,
+    MILESTONES_WRITE, OUTCOMES_READ, PULLS_CHECK_EVIDENCE_READ, PULLS_DIFF_READ,
+    PULLS_FEEDBACK_READ, PULLS_READ, PULLS_WRITE, SOURCE_BRANCH_CREATE, SOURCE_CANDIDATES,
+    SOURCE_HISTORY_READ, SOURCE_PUBLISH, SOURCE_READ, SOURCE_VERIFIED_READ,
 };
 use fgit_node::agent_credentials::AgentRequest;
 use fgit_node::{LoopbackReceiveSession, NodeReceiveTransportRefusal};
@@ -49,12 +50,16 @@ impl Profile {
 }
 
 /// One exhaustive list owns both discovery and dispatch. Do not derive this
-/// from broad operator groups: those also grant notifications,
-/// checks, reviews and events not covered by these grants. Candidate operations
-/// have an additional closed argument gate before authentication and dispatch.
-pub(super) fn operation(options: &Options, name: &str) -> Option<u16> {
+/// from broad operator groups: those also grant notifications, artifact custody,
+/// review mutations and events not covered by these grants. Candidate and source
+/// publication operations have closed argument gates before authentication.
+pub(super) fn operation(options: &Options, name: &str) -> Option<u32> {
     match name {
-        "frankengit_issue_list" | "frankengit_issue_show" if options.issues => Some(ISSUES_READ),
+        "frankengit_issue_list" | "frankengit_issue_show" | "frankengit_issue_search"
+            if options.issues =>
+        {
+            Some(ISSUES_READ)
+        }
         "frankengit_milestone_list" | "frankengit_milestone_show" if options.issues => {
             Some(MILESTONES_READ)
         }
@@ -84,7 +89,11 @@ pub(super) fn operation(options: &Options, name: &str) -> Option<u16> {
         {
             Some(ISSUES_WRITE)
         }
-        "frankengit_pull_list" | "frankengit_pull_show" | "frankengit_pull_comments"
+        "frankengit_pull_list"
+        | "frankengit_pull_show"
+        | "frankengit_pull_search"
+        | "frankengit_pull_comments"
+        | "frankengit_pull_labels"
             if options.pulls =>
         {
             Some(PULLS_READ)
@@ -93,8 +102,10 @@ pub(super) fn operation(options: &Options, name: &str) -> Option<u16> {
         | "frankengit_pull_update"
         | "frankengit_pull_close"
         | "frankengit_pull_reopen"
+        | "frankengit_pull_retarget"
         | "frankengit_pull_comment"
         | "frankengit_pull_append_comment"
+        | "frankengit_pull_set_labels"
             if options.writes.pulls =>
         {
             Some(PULLS_WRITE)
@@ -130,6 +141,14 @@ pub(super) fn operation(options: &Options, name: &str) -> Option<u16> {
         }
         "frankengit_agent_context" if options.agent_context => Some(SOURCE_READ),
         super::candidate::NAME if options.source => Some(SOURCE_CANDIDATES),
+        super::source_writes::PUBLISH if options.writes.source => Some(SOURCE_PUBLISH),
+        super::source_writes::CREATE if options.writes.source => Some(SOURCE_BRANCH_CREATE),
+        super::verified_blob::NAME if options.source => Some(SOURCE_VERIFIED_READ),
+        super::review::PULL_DIFF if options.source && options.pulls => Some(PULLS_DIFF_READ),
+        super::pull_reviews::NAME | super::checks::NAME if options.pulls => {
+            Some(PULLS_FEEDBACK_READ)
+        }
+        super::check_evidence::NAME if options.pulls => Some(PULLS_CHECK_EVIDENCE_READ),
         "frankengit_source_log"
         | "frankengit_source_blame"
         | "frankengit_source_historical_tree"
@@ -143,8 +162,15 @@ pub(super) fn operation(options: &Options, name: &str) -> Option<u16> {
     }
 }
 
-pub(super) fn is_write(operation: u16) -> bool {
-    operation & (ISSUES_WRITE | PULLS_WRITE | DISCUSSIONS_WRITE | MILESTONES_WRITE) != 0
+pub(super) fn is_write(operation: u32) -> bool {
+    operation
+        & (ISSUES_WRITE
+            | PULLS_WRITE
+            | DISCUSSIONS_WRITE
+            | MILESTONES_WRITE
+            | SOURCE_PUBLISH
+            | SOURCE_BRANCH_CREATE)
+        != 0
 }
 
 fn request_commitment(name: &str, args: &Object) -> Result<[u8; 32], ToolError> {
@@ -189,6 +215,9 @@ pub(super) fn call(backend: &mut NodeTools, name: &str, args: &Object) -> Result
         operation(&backend.options, name).ok_or(ToolError::invalid("tool_not_granted"))?;
     if operation == SOURCE_CANDIDATES {
         super::candidate::agent_operation(args)?;
+    }
+    if matches!(operation, SOURCE_PUBLISH | SOURCE_BRANCH_CREATE) {
+        super::source_writes::agent_operation(name, args)?;
     }
     let key = if is_write(operation) || operation == OUTCOMES_READ {
         mutations::key(args)?
@@ -259,6 +288,19 @@ pub(super) fn response_checkpoint(
     Ok(())
 }
 
+/// Defense in depth for a native handler reached outside normal dispatch.
+/// Completed response custody and a different operation cannot supply active
+/// read authority, even when the host enabled a broad source tool group.
+pub(super) fn check_operation(backend: &NodeTools, operation: u32) -> Result<(), ToolError> {
+    backend
+        .agent
+        .as_ref()
+        .and_then(|profile| profile.request.as_ref())
+        .ok_or(ToolError::failed("agent_request_required"))?
+        .check_operation(&backend.node, operation)
+        .map_err(auth_error)
+}
+
 pub(super) fn session(
     backend: &NodeTools,
     key: IdempotencyKey,
@@ -305,6 +347,35 @@ pub(super) fn source_candidate_request(
         .and_then(|profile| profile.request.as_ref())
         .ok_or(ToolError::failed("agent_request_required"))?
         .source_candidates(&backend.node)
+        .map_err(auth_error)
+}
+
+/// Publication consumes only the original independently authenticated source
+/// grant. A read/candidate reservation or public attribution cannot replace it.
+pub(super) fn source_publication_request(
+    backend: &NodeTools,
+) -> Result<fgit_node::agent_credentials::SourcePublicationRequest<'_>, ToolError> {
+    backend
+        .agent
+        .as_ref()
+        .and_then(|profile| profile.request.as_ref())
+        .ok_or(ToolError::failed("agent_request_required"))?
+        .source_publication(&backend.node)
+        .map_err(auth_error)
+}
+
+/// Branch creation has its own canonical operation. Neither the source-write
+/// launch ceiling nor an active source-publication request can substitute for
+/// the original authenticated creation request.
+pub(super) fn source_branch_creation_request(
+    backend: &NodeTools,
+) -> Result<fgit_node::agent_credentials::SourceBranchCreationRequest<'_>, ToolError> {
+    backend
+        .agent
+        .as_ref()
+        .and_then(|profile| profile.request.as_ref())
+        .ok_or(ToolError::failed("agent_request_required"))?
+        .source_branch_creation(&backend.node)
         .map_err(auth_error)
 }
 

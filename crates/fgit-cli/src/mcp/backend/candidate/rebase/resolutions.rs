@@ -29,7 +29,7 @@ fn encoded_length(value: &Value, maximum: usize) -> Result<usize, ToolError> {
     }
     Ok(value.len() / 2)
 }
-pub(super) fn parse(
+pub(in super::super) fn parse(
     args: &Object,
     format: GitHashAlgorithm,
 ) -> Result<Vec<RebaseCommitResolution>, ToolError> {
@@ -108,7 +108,7 @@ pub(super) fn parse(
     result.sort_by_key(|row| row.original);
     Ok(result)
 }
-pub(super) fn schema() -> Value {
+pub(in super::super) fn schema() -> Value {
     object([
         ("type", text("array")),
         ("minItems", json::number(1)),

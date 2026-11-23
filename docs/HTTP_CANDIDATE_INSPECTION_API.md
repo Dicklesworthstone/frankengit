@@ -143,6 +143,41 @@ reviewer and its own original retry key. Merge still evaluates current reviews,
 branch tips, policy and mandatory protection at its publication CAS. An old
 inspection cannot authorize a changed candidate or bypass a withdrawn vote.
 
+## Inspect a complete rebase series
+
+`POST {REPO_URL}/api/v1/pulls/{number}/inspect-rebase` uses the same exact
+subject/candidate form fields, binary multipart upload, independent read grants
+and no-idempotency-key contract. Here `merge_base` is the explicitly selected
+original upstream. It calls `inspect_pull_request_rebase_bundle_in`; ordinary
+single-candidate inspection is not substituted for complete series inspection.
+
+The report has `type: "pull_request_rebase_inspection"`,
+`profile: "verified-linear-series-v1"`, `method: "rebase"`,
+`scope: "all_paths_all_commits"` and `complete: true`. Alongside the same
+repository, subject, candidate, snapshot and bundle commitments it contains:
+
+- `source_comparison`: the direct original source-tip to final-candidate diff.
+- `commits`: every rewritten commit, oldest first, with `commit`, `parent`,
+  `tree`, complete native `commit_hex`, and its parent-to-child `comparison`.
+- `prerequisites`: the target tip alone. The first rewritten parent is that
+  target, and the final inspected commit is the exact submitted candidate.
+
+Every comparison uses the existing exact-byte `entries` and hunk schema above,
+including binary/object-only distinctions and three context lines. A protected
+path introduced and removed in different commits remains visible in those
+intermediate comparisons. Path filtering and merge-base comparison mode are
+rejected. Native commit identities, the complete parent chain, current subject,
+original ancestry and target-only bundle prerequisites are validated before
+success; the response does not claim arbitrary historical replay equivalence.
+
+One aggregate budget covers all comparisons and up to 256 rewritten commits,
+with at most 16 MiB of native commit bodies and the existing per-body bound.
+For this route the complete expanded JSON additionally has an 8 MiB ceiling,
+further narrowed by server settings. Exceeding it returns an error before any
+successful response, never a truncated inspection. All read-only and
+nonpublication flags retain their meanings. A separate `method=rebase` vote
+revalidates the entire series; inspection never grants a vote or merge.
+
 ## Refusals and bounded work
 
 Absent or undisclosed PRs/refs return 404; stale PR versions, tips, policies or

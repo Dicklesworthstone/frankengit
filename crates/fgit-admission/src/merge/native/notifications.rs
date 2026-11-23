@@ -149,12 +149,12 @@ fn validate_current_thread_disclosure(
     snapshot: &AdmissionSnapshot,
     event: &ForgeEvent,
 ) -> Result<(), RefusalCode> {
-    if let Some((source, target)) = thread.and_then(|thread| thread.subject.pull_request_refs()) {
-        if snapshot.hidden_refs.hides(source.as_bytes())
-            || snapshot.hidden_refs.hides(target.as_bytes())
-        {
-            return Err(RefusalCode::HiddenRefUnauthorized);
-        }
+    if thread.is_some_and(|thread| {
+        !thread
+            .subject
+            .permits_disclosure(|reference| !snapshot.hidden_refs.hides(reference.as_bytes()))
+    }) {
+        return Err(RefusalCode::HiddenRefUnauthorized);
     }
     validate_current_thread(thread, event)
 }

@@ -82,7 +82,7 @@ fn squash_candidates_keep_their_method_through_inspection_review_publication_and
         inappropriate.insert("method".into(), text("squash"));
         assert_eq!(
             f.call(reviews::NAME, &inappropriate).unwrap_err().code,
-            "unknown_argument"
+            "invalid_review_method"
         );
         let approved_response = f.protocol_call(reviews::NAME, approval.clone());
         let approved = content(&approved_response);

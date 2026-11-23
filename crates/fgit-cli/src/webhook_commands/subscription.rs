@@ -34,6 +34,7 @@ pub(super) fn require_subscription(
             | ForgeEventPayload::PullRequestChangedNative(_) => "pull_request",
             ForgeEventPayload::PullRequestReviewedNative(_) => "pull_request_review",
             ForgeEventPayload::PullRequestCommentedNative(_) => "pull_request_commented",
+            ForgeEventPayload::PullRequestLabelsChangedNative(_) => "pull_request_labels",
             ForgeEventPayload::IssueChangedNative(_) => "issue",
             ForgeEventPayload::DiscussionChangedNative(_) => "discussion",
             ForgeEventPayload::MilestoneChangedNative(_) => "milestone",
@@ -62,6 +63,40 @@ mod tests {
     };
     use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber};
     use fgit_types::{GitHashAlgorithm, GitOid, PrincipalId, RefName};
+
+    #[test]
+    fn labels_require_their_own_family_or_exact_kind_without_relabeling_content() {
+        let event = fgit_forge::event::pull_request_labels::PullRequestLabelsCommand {
+            number: PullRequestNumber::FIRST,
+            expected_version: ExpectedVersion::NewStream,
+            labels: vec!["triage".into()],
+        }
+        .proposed_event(PrincipalId::from_bytes([7; 16]))
+        .unwrap();
+        for name in ["pull_request_labels", "kind:27"] {
+            assert!(
+                require_subscription(
+                    &WebhookEventFilter::Selected(vec![name.into()]),
+                    std::slice::from_ref(&event)
+                )
+                .is_ok()
+            );
+        }
+        for name in [
+            "pull_request",
+            "pull_request_commented",
+            "kind:6",
+            "kind:12",
+        ] {
+            assert!(
+                require_subscription(
+                    &WebhookEventFilter::Selected(vec![name.into()]),
+                    std::slice::from_ref(&event)
+                )
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn agent_credentials_are_private_for_wildcard_exact_kind_and_mixed_batches() {

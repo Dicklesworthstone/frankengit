@@ -24,7 +24,7 @@ const MAX_BUNDLE_BYTES: usize = CHUNK_BYTES * MAX_CHUNKS;
 pub(super) fn tool() -> Tool {
     Tool {
         name: NAME,
-        description: "Prepare an exact patch into a bounded native Git bundle; prepare_patch optionally selects exact-symlink-v1 for inert Git symlink bytes, while omission retains regular-file behavior. prepare_initial creates zero-parent history at an absent branch, prepare_pull_merge constructs a PR candidate, prepare_queue_merge constructs the exact canonical queue-head candidate, inspect_pull_merge reviews an upload, and resolve_pull_merge resolves every exact conflict then inspects the result. prepare_replay applies one historical cherry-pick or revert and resolve_replay resolves every conflict at the original snapshot, using explicit path-v1 profile. prepare_rebase and resolve_rebase reconstruct the complete linear-v1 source suffix onto a distinct visible branch with original-commit-bound resolutions and explicit empty policy; inspect_rebase independently reviews the uploaded whole series and net change. Replay and rebase require source read and remain outside the sponsored-agent profile. PR operations additionally require PR read; queue preparation also requires queue read. Or inspect an uploaded single-parent candidate (inspect) or zero-parent initial bundle (inspect_initial). Read-only: no object import, checkout, shell, approval or publication. Publication requires its independent source-, rebase-, merge-, or queue-landing tool and an original retry key.",
+        description: "Prepare an exact patch into a bounded native Git bundle; prepare_patch optionally selects exact-tree-binary-v1 for edited binary renames exact-symlink-v1 for inert Git symlink bytes, or exact-gitlink-v1 for opaque submodule commit pointers, while omission retains regular-file behavior. prepare_initial creates zero-parent history at an absent branch, prepare_pull_merge constructs a PR candidate, prepare_queue_merge constructs the exact canonical queue-head candidate, inspect_pull_merge reviews an upload, and resolve_pull_merge resolves every exact conflict then inspects the result. prepare_pull_rebase replays an exact open PR suffix onto its target with explicit path-v1 and empty policy; resolve_pull_rebase reconstructs it at the original snapshot with original-commit-bound conflict choices; inspect_pull_rebase reviews every rewritten commit before independent method=rebase review and atomic PR merge. prepare_replay applies one historical cherry-pick or revert and resolve_replay resolves every conflict at the original snapshot, using explicit path-v1 profile. prepare_rebase and resolve_rebase reconstruct the complete linear-v1 source suffix onto a distinct visible branch with original-commit-bound resolutions and explicit empty policy; inspect_rebase independently reviews the uploaded whole series and net change. Replay and rebase require source read and remain outside the sponsored-agent profile. PR operations additionally require PR read; queue preparation also requires queue read. Or inspect an uploaded single-parent candidate (inspect) or zero-parent initial bundle (inspect_initial). Read-only: no object import, checkout, shell, approval or publication. Publication requires its independent source-, rebase-, merge-, or queue-landing tool and an original retry key.",
         schema: object([
             ("type", text("object")),
             (
@@ -38,6 +38,9 @@ pub(super) fn tool() -> Tool {
                     pull::inspection_schema(),
                     pull::resolution_schema(),
                     pull::queue_schema(),
+                    pull::rebase_schema(pull::REBASE_PREPARE),
+                    pull::rebase_schema(pull::REBASE_RESOLVE),
+                    pull::rebase_schema(pull::REBASE_INSPECT),
                     replay::schema(false),
                     replay::schema(true),
                     rebase::schema(rebase::PREPARE),
@@ -54,7 +57,7 @@ pub(super) fn tool() -> Tool {
 pub(super) fn agent_tool() -> Tool {
     Tool {
         name: NAME,
-        description: "Prepare a regular-file exact patch against a visible current branch (prepare_patch, exact-tree-v1) or inspect an uploaded single-parent candidate (inspect). Requires the independent canonical source-candidates scope and the source launch ceiling. Work retains the original agent request, deadline and bounded transport reservation. Read-only: no object import, checkout, shell, approval or publication. Returned publication arguments are unsigned handoff data; this agent profile has no source-publication tool.",
+        description: "Prepare a regular-file exact patch against a visible current branch (prepare_patch, exact-tree-v1), explicitly select exact-tree-binary-v1 for edited binary renames exact-symlink-v1 for inert Git symlink bytes, or exact-gitlink-v1 for opaque submodule commit pointers, or inspect an uploaded single-parent candidate (inspect). Requires the independent canonical source-candidates scope and the source launch ceiling. Work retains the original agent request, deadline and bounded transport reservation. Link targets are never followed. Read-only: no object import, checkout, shell, approval or publication. Returned publication arguments are unsigned handoff data; publication separately requires the canonical source-publish grant, its ref/path scope and the source-write launch ceiling.",
         schema: object([
             ("type", text("object")),
             (
@@ -71,7 +74,10 @@ pub(super) fn agent_tool() -> Tool {
 pub(super) fn agent_operation(args: &Object) -> Result<(), ToolError> {
     match required(args, "operation")? {
         "prepare_patch" => match string(args, "profile")? {
-            None | Some("exact-tree-v1") => Ok(()),
+            None
+            | Some(
+                "exact-tree-v1" | "exact-tree-binary-v1" | "exact-symlink-v1" | "exact-gitlink-v1",
+            ) => Ok(()),
             Some(_) => Err(ToolError::invalid("unsupported_patch_profile")),
         },
         "inspect" => Ok(()),
@@ -106,9 +112,13 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
         "inspect_initial" => inspect_initial::call(backend, args)?,
         replay::PREPARE | replay::RESOLVE => replay::call(backend, args)?,
         rebase::PREPARE | rebase::RESOLVE | rebase::INSPECT => rebase::call(backend, args)?,
-        pull::PREPARE | pull::INSPECT | pull::RESOLVE | pull::QUEUE_PREPARE => {
-            pull::call(backend, args)?
-        }
+        pull::PREPARE
+        | pull::INSPECT
+        | pull::RESOLVE
+        | pull::QUEUE_PREPARE
+        | pull::REBASE_PREPARE
+        | pull::REBASE_RESOLVE
+        | pull::REBASE_INSPECT => pull::call(backend, args)?,
         _ => return Err(ToolError::invalid("unsupported_candidate_operation")),
     };
     result
@@ -272,6 +282,8 @@ fn binding(backend: &NodeTools) -> Object {
     fields
 }
 
+#[cfg(test)]
+pub(super) mod binary_test_support;
 #[cfg(test)]
 mod integration_tests;
 #[cfg(test)]

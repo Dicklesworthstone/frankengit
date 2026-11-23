@@ -34,36 +34,58 @@ pub(super) fn execute(
     reader: &mut impl Read,
     limits: HttpLimits,
     maximum_response: u64,
+    admission_deadline: &GitDaemonSessionDeadline,
 ) -> Result<Reply, ApiError> {
     let authenticated = session
         .authenticated_session()
         .ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?;
-    let candidate_request = match authenticated.authentication() {
+    let (candidate_request, publication_request) = match authenticated.authentication() {
         fgit_admission::evidence::AdmissionAuthentication::AgentCredential(authentication) => {
-            if request.is_mutation() {
-                return Err(ApiError::new(Status::Forbidden, "forbidden"));
-            }
             let agent = agent_request
                 .filter(|agent| {
                     agent.authentication == authentication
+                        && authentication.agent() == authenticated.principal_id()
                         && Some(agent.deadline()) == authenticated.agent_deadline
                 })
-                .ok_or_else(|| ApiError::new(Status::Forbidden, "candidate_grant_required"))?;
-            Some(
-                agent
-                    .source_candidates(node)
-                    .map_err(|_| ApiError::new(Status::Forbidden, "candidate_grant_unavailable"))?,
-            )
+                .ok_or_else(|| ApiError::new(Status::Forbidden, "source_grant_required"))?;
+            if request.is_mutation() {
+                let publication = agent.source_publication(node).map_err(|_| {
+                    ApiError::new(Status::Forbidden, "publication_grant_unavailable")
+                })?;
+                if publication.key() != authenticated.client_idempotency_key() {
+                    return Err(ApiError::new(Status::Forbidden, "publication_key_mismatch"));
+                }
+                (None, Some(publication))
+            } else {
+                (
+                    Some(agent.source_candidates(node).map_err(|_| {
+                        ApiError::new(Status::Forbidden, "candidate_grant_unavailable")
+                    })?),
+                    None,
+                )
+            }
         }
-        _ => None,
+        _ => (None, None),
     };
     // Finish HTTP framing before parsing provisional MIME parts or entering an
-    // engine. Socket ingress has its own deadline; this is the server-work phase.
+    // engine. Sponsored work retains the original ingress deadline and live
+    // reservation; parsing never refreshes its authority or byte envelope.
     let bytes = read_source_upload(reader, framing, limits, request.kind())?;
-    let deadline = GitDaemonSessionDeadline::new(
-        node.git_daemon_session_timeout,
-        GitDaemonSessionWorkScaling::FLAT,
-    );
+    if let Some(publication) = &publication_request {
+        // Include the complete MIME command and framing, not just bundle bytes.
+        // No publisher has been entered, so refusal cannot conceal a commit.
+        publication
+            .check_input(bytes.len())
+            .map_err(publication_input_error)?;
+    }
+    let deadline = if candidate_request.is_some() || publication_request.is_some() {
+        admission_deadline.clone()
+    } else {
+        GitDaemonSessionDeadline::new(
+            node.git_daemon_session_timeout,
+            GitDaemonSessionWorkScaling::FLAT,
+        )
+    };
     let context = node.authenticated_session_request_context(&deadline, session);
     let mut live = || {
         !deadline.expired()
@@ -71,6 +93,9 @@ pub(super) fn execute(
             && candidate_request
                 .as_ref()
                 .is_none_or(|request| request.check().is_ok())
+            && publication_request
+                .as_ref()
+                .is_none_or(|request| request.check_context(node, &context).is_ok())
     };
     let (form, payload) = source_upload(&bytes, request.boundary, request.kind(), &mut live)?;
     let command = request.command(form, node.object_format)?;
@@ -87,6 +112,30 @@ pub(super) fn execute(
             // legacy grammar, including its edited-binary-rename refusal.
             let preparation = async {
                 if let Some(candidate_request) = candidate_request.as_ref() {
+                    if matches!(profile, Some(PatchProfile::Gitlinks)) {
+                        return node
+                            .prepare_agent_source_gitlink_patch_with_context_in(
+                                &context,
+                                candidate_request,
+                                &reference,
+                                base,
+                                payload,
+                                &metadata,
+                            )
+                            .await;
+                    }
+                    if matches!(profile, Some(PatchProfile::Symlinks)) {
+                        return node
+                            .prepare_agent_source_symlink_patch_with_context_in(
+                                &context,
+                                candidate_request,
+                                &reference,
+                                base,
+                                payload,
+                                &metadata,
+                            )
+                            .await;
+                    }
                     return node
                         .prepare_agent_source_patch_with_context_in(
                             &context,
@@ -100,6 +149,30 @@ pub(super) fn execute(
                         .await;
                 }
                 match profile {
+                    Some(PatchProfile::Gitlinks) => {
+                        node.prepare_trusted_gitlink_patch_in(
+                            &context,
+                            &reference,
+                            base,
+                            *authenticated.principal_id().as_bytes(),
+                            payload,
+                            &metadata,
+                            PatchLimits::default(),
+                        )
+                        .await
+                    }
+                    Some(PatchProfile::Symlinks) => {
+                        node.prepare_trusted_symlink_patch_in(
+                            &context,
+                            &reference,
+                            base,
+                            *authenticated.principal_id().as_bytes(),
+                            payload,
+                            &metadata,
+                            PatchLimits::default(),
+                        )
+                        .await
+                    }
                     Some(PatchProfile::BinaryTree) => {
                         node.prepare_trusted_binary_refactor_in(
                             &context,
@@ -210,9 +283,19 @@ pub(super) fn execute(
             // admission. In particular, identical terminal retries must recover
             // after the branch moves. The native publisher owns quarantine,
             // single-parent validation, policy, seal and exact-predecessor CAS.
-            let result = drive_request_while(
-                node,
-                &context,
+            let publication = async {
+                if let Some(publication_request) = publication_request.as_ref() {
+                    return node
+                        .apply_agent_workspace_bundle_in(
+                            &context,
+                            publication_request,
+                            &reference,
+                            base,
+                            candidate,
+                            payload,
+                        )
+                        .await;
+                }
                 node.apply_workspace_bundle_with_authentication_in(
                     &context,
                     authenticated.principal_id(),
@@ -222,15 +305,20 @@ pub(super) fn execute(
                     candidate,
                     payload,
                     authenticated.authentication(),
-                ),
-                &mut live,
-            )
-            .map_err(|error| match error {
-                NodeWorkspaceRefusal::WorkspacePublication(error) => admission_error(*error),
-                // After entry, infrastructure and cancellation never prove
-                // non-commit; the independent key lookup is the recovery path.
-                _ => ApiError::unknown(),
-            })?;
+                )
+                .await
+            };
+            let result =
+                drive_request_while(node, &context, publication, &mut live).map_err(|error| {
+                    match error {
+                        NodeWorkspaceRefusal::WorkspacePublication(error) => {
+                            admission_error(*error)
+                        }
+                        // After entry, infrastructure and cancellation never prove
+                        // non-commit; the original key remains the recovery path.
+                        _ => ApiError::unknown(),
+                    }
+                })?;
             output::publication(
                 node,
                 authenticated.principal_id(),
@@ -244,6 +332,21 @@ pub(super) fn execute(
         }
         _ => Err(ApiError::bad("source_operation_mismatch")),
     }
+}
+
+fn publication_input_error(error: NodeWorkspaceRefusal) -> ApiError {
+    if let NodeWorkspaceRefusal::WorkspacePublication(error) = error
+        && let crate::NodeReceiveTransportRefusal::Admission(error) = *error
+        && matches!(
+            *error,
+            fgit_admission::AdmissionError::AsyncProjectionUnavailable(
+                fgit_types::RefusalCode::ResourceBudgetExceeded
+            )
+        )
+    {
+        return ApiError::too_large();
+    }
+    ApiError::new(Status::Forbidden, "publication_grant_unavailable")
 }
 
 fn preparation_error(error: NodeWorkspaceRefusal) -> ApiError {

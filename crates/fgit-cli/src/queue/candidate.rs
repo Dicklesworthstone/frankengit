@@ -117,6 +117,7 @@ pub(super) fn finish(
         quote(match preparation.profile {
             MergeProfile::PathMergeV1 => "path-v1",
             MergeProfile::ExactRenamesV1 => "exact-renames-v1",
+            MergeProfile::BuiltinAttributesV1 => "builtin-attributes-v1",
         }),
         quote(outcome),
         bundle.is_some(),
