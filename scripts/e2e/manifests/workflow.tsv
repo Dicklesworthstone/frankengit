@@ -15,6 +15,7 @@
 #   proof_class        what a pass establishes, in claim-lattice terms
 #   expected_terminal  the terminal status a pass must carry
 #
+suites-workflow-stock_push_landing	frankengit-root-doctrine-x2mv.4.12	g2	scripts/e2e/suites/workflow/stock_push_landing.sh	linux	required	mechanism	pass
 suites-workflow-workflow_crash_cancel	frankengit-fg095c-workflow-evidence-6opd	g2	scripts/e2e/suites/workflow/workflow_crash_cancel.sh	any	required	mechanism	pass
 suites-workflow-workflow_execution	frankengit-fg095c-workflow-evidence-6opd	g2	scripts/e2e/suites/workflow/workflow_execution.sh	any	required	mechanism	pass
 suites-workflow-workflow_lowering	frankengit-fg095c-workflow-evidence-6opd	g2	scripts/e2e/suites/workflow/workflow_lowering.sh	any	required	mechanism	pass
