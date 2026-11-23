@@ -364,7 +364,7 @@ impl<A: GitHashAlgorithm> SparseWorkspacePlan<A> {
 pub struct SparseWorkspace<A: GitHashAlgorithm> {
     plan: SparseWorkspacePlan<A>,
     parent: File,
-    root: File,
+    root: WorkspaceRoot,
     name: TreePath,
     obligation: ReservedObligation<SparseDirectoryLease>,
     copied_bytes: u64,
@@ -463,10 +463,11 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
                 });
             }
         };
+        let mut root = WorkspaceRoot::new(root);
         let mut visible = false;
         let mut shared_host_bytes = 0_u64;
         let result = (|| {
-            lock(&root)?;
+            root.lock()?;
             write_new(
                 &root,
                 MARKER,
@@ -614,14 +615,15 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
         capability: &TreeCapability,
         now: u64,
     ) -> Result<Self, HostRefusal> {
-        let opened: Result<File, HostRefusal> = (|| {
+        let opened: Result<WorkspaceRoot, HostRefusal> = (|| {
             validate_slot(&name)?;
             validate_parent(&parent)?;
             plan.authorize(capability, now)?;
             validate_reservation(&plan, &obligation)?;
             let root = open(&parent, name.as_bytes(), OFlags::RDONLY | OFlags::DIRECTORY)
                 .map_err(|_| HostRefusal::IncompleteWorkspace)?;
-            lock(&root)?;
+            let mut root = WorkspaceRoot::new(root);
+            root.lock()?;
             check_marker(&root, &plan.marker)?;
             job_inputs::verify_retained(&root, &plan.job_inputs)?;
             Ok(root)
@@ -666,7 +668,8 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
                 staging.as_bytes(),
                 OFlags::RDONLY | OFlags::DIRECTORY,
             )?;
-            lock(&root)?;
+            let mut root = WorkspaceRoot::new(root);
+            root.lock()?;
             check_marker(&root, &plan.marker)?;
             reap(&parent, &root, staging.as_bytes(), plan.limits.max_entries)
         })();
@@ -961,41 +964,70 @@ fn host_mode(mode: FileMode) -> Mode {
 fn sync(file: &File) -> Result<(), HostRefusal> {
     file.sync_all().map_err(|e| io_error("sync workspace", e))
 }
-/// Takes the exclusive workspace lease lock, waiting at most `LOCK_GRACE`.
-///
-/// `flock(2)` locks belong to the open file description, and a child forked by
-/// a multithreaded process shares every description until `execve` closes its
-/// `CLOEXEC` copies. Ensuring `FD_CLOEXEC` prevents leaked lock descriptors across
-/// `execve`, and retrying for a bounded grace window absorbs the brief
-/// `fork`-to-`exec` window while returning `HostRefusal::LeaseBusy` on genuine
-/// contention.
-fn lock(file: &File) -> Result<(), HostRefusal> {
-    const LOCK_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
-    const LOCK_STEP: std::time::Duration = std::time::Duration::from_millis(2);
-    let flags =
-        rustix::io::fcntl_getfd(file).map_err(|e| io_error("inspect workspace lease fd", e))?;
-    if !flags.contains(rustix::io::FdFlags::CLOEXEC) {
-        rustix::io::fcntl_setfd(file, flags | rustix::io::FdFlags::CLOEXEC)
-            .map_err(|e| io_error("set workspace lease cloexec", e))?;
+/// Own the directory descriptor and the advisory lock for precisely the lifetime
+/// of this workspace operation. A fork or dup shares its open file description.
+#[derive(Debug)]
+struct WorkspaceRoot {
+    file: File,
+    owner: Option<u32>,
+}
+
+impl WorkspaceRoot {
+    fn new(file: File) -> Self {
+        Self { file, owner: None }
     }
-    let started = std::time::Instant::now();
-    loop {
-        match fs::flock(file, fs::FlockOperation::NonBlockingLockExclusive) {
-            Ok(()) => return Ok(()),
-            Err(error) => {
-                let io_err = std::io::Error::from(error);
-                if io_err.kind() == std::io::ErrorKind::WouldBlock {
-                    if started.elapsed() < LOCK_GRACE {
-                        std::thread::sleep(LOCK_STEP);
-                        continue;
-                    }
-                    return Err(HostRefusal::LeaseBusy);
+
+    fn lock(&mut self) -> Result<(), HostRefusal> {
+        const LOCK_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
+        const LOCK_STEP: std::time::Duration = std::time::Duration::from_millis(2);
+        let flags = rustix::io::fcntl_getfd(&self.file)
+            .map_err(|e| io_error("inspect workspace lease fd", e))?;
+        if !flags.contains(rustix::io::FdFlags::CLOEXEC) {
+            rustix::io::fcntl_setfd(&self.file, flags | rustix::io::FdFlags::CLOEXEC)
+                .map_err(|e| io_error("set workspace lease cloexec", e))?;
+        }
+        let started = std::time::Instant::now();
+        loop {
+            match fs::flock(&self.file, fs::FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => {
+                    self.owner = Some(std::process::id());
+                    return Ok(());
                 }
-                return Err(io_error("exclusive workspace lease", io_err));
+                Err(error) => {
+                    let io_err = std::io::Error::from(error);
+                    if io_err.kind() == std::io::ErrorKind::WouldBlock {
+                        if started.elapsed() < LOCK_GRACE {
+                            std::thread::sleep(LOCK_STEP);
+                            continue;
+                        }
+                        return Err(HostRefusal::LeaseBusy);
+                    }
+                    return Err(io_error("exclusive workspace lease", io_err));
+                }
             }
         }
     }
 }
+
+impl std::ops::Deref for WorkspaceRoot {
+    type Target = File;
+    fn deref(&self) -> &File {
+        &self.file
+    }
+}
+
+impl Drop for WorkspaceRoot {
+    fn drop(&mut self) {
+        // Closing one fd cannot release the lock while a sibling fork still
+        // has a pre-exec copy. Only the acquiring process may unlock it.
+        if self.owner == Some(std::process::id()) {
+            while fs::flock(&self.file, fs::FlockOperation::Unlock) == Err(rustix::io::Errno::INTR)
+            {
+            }
+        }
+    }
+}
+
 fn open(root: &File, path: &[u8], flags: OFlags) -> Result<File, HostRefusal> {
     fs::openat2(
         root,
@@ -1186,4 +1218,66 @@ fn reap_children(root: &File, remaining: &mut usize, depth: usize) -> Result<(),
             .map_err(|e| io_error("reap workspace entry", e))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod lease_tests {
+    use super::*;
+
+    #[test]
+    fn duplicated_description_cannot_extend_a_released_workspace_lease() {
+        use std::os::fd::AsFd;
+        use std::process::{Command, Stdio};
+
+        const OWNER_PID: &str = "FGIT_TEST_SPARSE_LEASE_ACQUIRING_PID";
+        const DROPPED: &str = "child dropped the duplicate lease";
+        if let Some(pid) = std::env::var_os(OWNER_PID) {
+            let owner = pid.to_str().unwrap().parse().unwrap();
+            assert_ne!(owner, std::process::id());
+            // The child received the same open file description on stdin. Its
+            // guard carries the original PID, just as it would across a fork.
+            drop(WorkspaceRoot {
+                file: File::from(std::io::stdin().as_fd().try_clone_to_owned().unwrap()),
+                owner: Some(owner),
+            });
+            println!("{DROPPED}");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "fg-workspace-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let open_root = || WorkspaceRoot::new(File::open(&dir).unwrap());
+        let mut owner = open_root();
+        owner.lock().unwrap();
+        // A duplicate holds the same kernel open file description as an fd
+        // inherited across fork. Keep it alive even beyond the contention grace.
+        let alias = owner.file.try_clone().unwrap();
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "sparse_workspace::lease_tests::duplicated_description_cannot_extend_a_released_workspace_lease",
+                "--nocapture",
+            ])
+            .env(OWNER_PID, std::process::id().to_string())
+            .stdin(Stdio::from(alias.try_clone().unwrap()))
+            .output()
+            .unwrap();
+        assert!(child.status.success(), "{child:?}");
+        assert!(String::from_utf8(child.stdout).unwrap().contains(DROPPED));
+        let mut next = open_root();
+        assert_eq!(next.lock(), Err(HostRefusal::LeaseBusy));
+        drop(owner);
+        next.lock().unwrap();
+        drop(alias);
+        assert_eq!(open_root().lock(), Err(HostRefusal::LeaseBusy));
+        drop(next);
+        open_root().lock().unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+    }
 }
