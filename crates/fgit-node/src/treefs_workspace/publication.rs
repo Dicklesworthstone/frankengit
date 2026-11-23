@@ -364,12 +364,13 @@ impl OneNode {
             .await?;
         // Candidate-specific validation reads this request's private custody.
         // A rejected shape or stale ref never needs permanent object placement.
+        let quarantine_object_limit = parse_limits.max_object_bytes;
         {
             let exhaustion = Cell::new(None);
             let source = VerifiedFabricPackSource {
                 fabric: &self.fabric,
                 object_format: self.object_format,
-                maximum_object_bytes: parse_limits.max_object_bytes.min(MAX_CANDIDATE_BYTES),
+                maximum_object_bytes: quarantine_object_limit.min(MAX_CANDIDATE_BYTES),
                 database_context: request.authority(),
                 database_exhaustion: &exhaustion,
                 session_is_live: None,
@@ -401,8 +402,7 @@ impl OneNode {
                 use fgit_admission::merge::native::protection::path_reviews::verify_source_paths;
                 let exhaustion = Cell::new(None);
                 let limits = MergeObjectLimits {
-                    max_object_bytes: parse_limits
-                        .max_object_bytes
+                    max_object_bytes: quarantine_object_limit
                         .min(MergeObjectLimits::default().max_object_bytes),
                     ..MergeObjectLimits::default()
                 };
