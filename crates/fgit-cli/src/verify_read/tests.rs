@@ -371,6 +371,64 @@ fn fetch_credentials_are_bound_to_one_explicit_numeric_loopback_url() {
 }
 
 #[test]
+fn proof_token_files_admit_both_closed_bearer_profiles_without_changing_their_bytes() {
+    let scratch = Scratch::new();
+    let path = scratch.0.join("token");
+    let ordinary = "ab".repeat(32);
+    let sponsored = format!("fgagent_{ordinary}");
+    for expected in [&ordinary, &sponsored] {
+        for ending in ["", "\n", "\r\n"] {
+            std::fs::write(&path, format!("{expected}{ending}")).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            assert_eq!(
+                token(&path, Instant::now() + Duration::from_secs(2)).unwrap(),
+                *expected
+            );
+        }
+    }
+    for invalid in [
+        String::new(),
+        "fgagent_".to_owned(),
+        format!("FGAGENT_{ordinary}"),
+        format!("fgagent_{}", "AB".repeat(32)),
+        format!("fgagent_{}", "a".repeat(63)),
+        format!("{sponsored}a"),
+        format!("{sponsored} "),
+        format!("{sponsored}\n\n"),
+        format!("{sponsored}\r"),
+        format!("{ordinary}\n\n"),
+        format!("{ordinary}\r\nInjected: yes"),
+    ] {
+        std::fs::write(&path, invalid).unwrap();
+        let error = token(&path, Instant::now() + Duration::from_secs(2)).unwrap_err();
+        assert_eq!(error.kind, "credential_file");
+        assert!(!error_json(&error).contains(&ordinary));
+    }
+    std::fs::write(&path, &sponsored).unwrap();
+    assert_eq!(token(&path, Instant::now()).unwrap_err().kind, "deadline_exceeded");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            token(&path, Instant::now() + Duration::from_secs(2)).unwrap_err().kind,
+            "credential_file"
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = scratch.0.join("token-link");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert_eq!(
+            token(&link, Instant::now() + Duration::from_secs(2)).unwrap_err().kind,
+            "credential_file"
+        );
+    }
+}
+
+#[test]
 fn valid_native_paths_over_the_http_target_bound_refuse_before_connecting() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -429,9 +487,15 @@ fn invalid_or_expired_proof_never_writes_partial_output() {
 
 #[test]
 fn actual_http_client_preserves_query_and_credentials_and_rejects_truncation() {
-    for complete in [true, false] {
+    for (bearer, complete) in [
+        ("a".repeat(64), true),
+        ("a".repeat(64), false),
+        (format!("fgagent_{}", "b".repeat(64)), true),
+        (format!("fgagent_{}", "b".repeat(64)), false),
+    ] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
+        let expected_bearer = bearer.clone();
         let worker = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             stream
@@ -446,7 +510,7 @@ fn actual_http_client_preserves_query_and_credentials_and_rejects_truncation() {
             }
             let text = String::from_utf8(request).unwrap();
             assert!(text.starts_with("GET /repo.git/api/v1/source/verified-blob?ref_hex=726566732f68656164732f6d61696e&path_hex=7372632f6c69622e7273&expected_head=alg:1:"));
-            assert!(text.contains(&format!("Authorization: Bearer {}\r\n", "a".repeat(64))));
+            assert!(text.contains(&format!("Authorization: Bearer {expected_bearer}\r\n")));
             assert!(!text.contains("Idempotency-Key:"));
             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/vnd.frankengit.verified-blob\r\nContent-Length: 3\r\nConnection: close\r\n\r\n").unwrap();
             stream
@@ -463,7 +527,7 @@ fn actual_http_client_preserves_query_and_credentials_and_rejects_truncation() {
         };
         let result = http::fetch(
             url,
-            &"a".repeat(64),
+            &bearer,
             &options,
             Instant::now() + Duration::from_secs(2),
         );

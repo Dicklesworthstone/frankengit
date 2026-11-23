@@ -171,11 +171,13 @@ publication authority; the existing stage/apply/recover steps remain separate.
 ## Native authority-head verification at capture
 
 The same capture command accepts an explicit `--native-fg /absolute/path/to/fg`.
-This optional mode requires an ordinary repository-read credential because it
-uses the separate `verified-blob` authority-proof route. Combining `--native-fg`
-(or the module's `nativeFg` option) with a sponsored token refuses with
-`native_source_proof_agent_scope_unsupported` before source requests or native
-execution. Use ordinary package capture for sponsored source reads; there is no
+This optional mode accepts an ordinary repository-read credential or a canonical
+sponsored credential with both `source-read` and `source-verified-read`. Source
+acquisition and the separate `verified-blob` authority-proof route each check
+their own grant at the server. A sponsored `source-read` grant alone cannot
+disclose proofs; denial of the later proof request prevents package publication.
+The exact selected bearer is passed to the native client through a private token
+file, never a command argument. There is no credential substitution, retry or
 silent downgrade of a requested authority-proof mode.
 
 Use an owner-controlled executable without symlink aliases or group/other write

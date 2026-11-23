@@ -108,13 +108,11 @@ for (const status of [401, 403]) {
   }
 }
 
-test('optional native authority proofs refuse sponsored credentials before context parsing, helper inspection or network access', async t => {
+test('sponsored native authority proofs retain independent-head preflight before helper inspection or network access', async t => {
   const p = await packagePeer(t, packageFixture(), undefined, { token: AGENT });
-  for (const context of [p.context, Buffer.from('not JSON')]) {
-    await assert.rejects(captureSourcePackage(context, p.contextHash, p.selected, p.expected, AGENT,
-      { nativeFg: { executable: '/does-not-exist/frankengit', sha256: '0'.repeat(64) } }),
-    { code: 'native_source_proof_agent_scope_unsupported' });
-  }
+  await assert.rejects(captureSourcePackage(p.context, p.contextHash,
+    { ...p.selected, expected_head: null }, p.expected, AGENT,
+    { nativeFg: '/does-not-exist/frankengit' }), /independently retained head/);
   assert.equal(p.requests.length, 0);
 });
 
@@ -124,6 +122,8 @@ test('all acquisition clients reject malformed sponsored credentials before any 
   for (const bad of [AGENT + '\n', AGENT + ' ', 'FGAGENT_' + 'a'.repeat(64), 'fgagent_' + 'A'.repeat(64),
     'fgagent_' + 'a'.repeat(63), 'fgagent_' + 'a'.repeat(65)]) {
     await assert.rejects(captureSourcePackage(p.context, p.contextHash, p.selected, p.expected, bad));
+    await assert.rejects(captureSourcePackage(p.context, p.contextHash, p.selected, p.expected, bad,
+      { nativeFg: '/does-not-exist/frankengit' }), /invalid source-read credential/);
     await assert.rejects(captureContextProof(context, sha256(context), f.selection, bad));
     await assert.rejects(captureSource(f.selection, bad));
   }

@@ -7,6 +7,7 @@ import { chmod, mkdtemp, realpath, readdir, rmdir, unlink, writeFile } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { executable, parseJson, readPrivate } from './workflow_watch_io.mjs';
+import { isCredentialToken } from './credential_token.mjs';
 import { runNativeProcess } from '../lib/native-process-owner.mjs';
 
 // Test seam: keep filesystem calls on a mutable object so fault-injection tests
@@ -52,7 +53,9 @@ export async function prepareNativePackageRead(fg, plan, maximumRequests, check)
 }
 export async function verifyNativePackageRead(native, plan, value, verified, token, deadline, signal, check) {
   check();
-  if (typeof token !== 'string' || !/^[0-9a-f]{64}$/.test(token)) fail('native_source_proof_invalid_token');
+  // Token spelling does not imply proof permission. The native request retains
+  // this exact bearer and the server checks source-verified-read independently.
+  if (!isCredentialToken(token)) fail('native_source_proof_invalid_token');
   const created = await mkdtemp(join(tmpdir(), 'fg-package-native-'));
   let scratch, identity;
   try { scratch = await realpath(created); await chmod(scratch, 0o700); identity = await nativeFs.lstat(scratch); }

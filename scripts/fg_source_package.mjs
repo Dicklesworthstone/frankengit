@@ -26,6 +26,8 @@ With --native-fg, independently retain expected_head in the selection. Every
 selected file additionally passes Rust verify-read at that head before package
 publication. Native mode requires numeric-loopback HTTP and a trusted native
 executable; refusal never falls back. Each proof consumes one blob-request slot.
+Sponsored credentials require both source-read and source-verified-read; the
+server checks these independent grants for each source and proof request.
 The portable package does not retain authority proofs; native_read in the capture
 receipt describes verification at capture only.
 Inspect is offline, accepts no token, and rechecks the original saved excerpts.

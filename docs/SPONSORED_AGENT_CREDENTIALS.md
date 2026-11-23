@@ -304,9 +304,13 @@ source-only agent acquire [portable source packages](SELECTED_SOURCE_PACKAGE_OPE
 [context byte proofs](SPARSE_SOURCE_PROOFS.md), and
 [verified source archives](VERIFIED_SOURCE_ARCHIVE.md) using pinned commit/tree/blob
 reads. It accepts only the current ref and optional head/commit comparisons;
-it cannot select a historical or arbitrary object. The package command's optional
-`--native-fg` authority-proof mode rejects sponsored tokens before acquisition
-because `verified-blob` remains outside this grant. No new MCP tool is introduced.
+it cannot select a historical or arbitrary object. The native `fg verify-read --token-file` client also accepts canonical sponsored
+bearers with the independent `source-verified-read` grant. The package command's
+optional `--native-fg` mode requires both `source-read` for acquisition and
+`source-verified-read` for its native authority-proof requests. Each request
+checks the current credential; a missing proof scope or revocation prevents
+package publication without changing credentials or falling back. No new MCP
+tool is introduced.
 
 A source grant covers the repository's visible current source. Path selectors
 and query limits narrow an individual request; they are not a stored sparse-path
