@@ -107,8 +107,16 @@ const JOIN: &str = "sleep 2 & echo $! > worker.pid; wait";
 fn cancellation_stops_the_owned_child_and_grandchild_not_only_the_shell() {
     let work = Work::new();
     let script = "sh -c 'sleep 2 & echo $! > grandchild.pid; wait' & echo $! > worker.pid; wait";
+    // Each shell publishes its own PID record. Either can run first, and
+    // redirection creates the file before the shell has written its contents.
+    let live_record = |name: &str| {
+        fs::read_to_string(work.0.join(name))
+            .ok()
+            .and_then(|record| record.strip_suffix('\n')?.parse::<u32>().ok())
+            .is_some_and(running)
+    };
     let result = work.run(script, Duration::from_secs(5), 4096, &|| {
-        !work.0.join("grandchild.pid").exists()
+        !(live_record("worker.pid") && live_record("grandchild.pid"))
     });
     assert_eq!(result.outcome, StepOutcome::Cancelled);
     assert!(result.retain_workspace);
