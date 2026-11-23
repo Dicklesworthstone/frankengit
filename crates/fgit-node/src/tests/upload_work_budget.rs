@@ -12,6 +12,51 @@ fn session_deadline() -> GitDaemonSessionDeadline {
 }
 
 #[test]
+fn upload_disclosure_inherits_only_the_remaining_database_wall_clock() {
+    let scratch = ScratchDirectory::new();
+    let (node, _) = OneNode::init(test_config(scratch.path().to_path_buf())).unwrap();
+    let mut deadline = GitDaemonSessionDeadline::new(
+        GitDaemonSessionTimeout::try_new(Duration::from_secs(120)).unwrap(),
+        GitDaemonSessionWorkScaling::FLAT,
+    );
+    deadline.started -= Duration::from_secs(45);
+    let remaining = |request: &NodeRequestContext| {
+        request
+            .authority()
+            .attached_native_cx()
+            .unwrap()
+            .budget()
+            .remaining(node.runtime.now())
+    };
+    let class = remaining(&node.request_context());
+    let request = node.session_request_context(&deadline);
+    let budget = remaining(&request);
+    assert!(
+        budget
+            .deadline
+            .is_some_and(|wall| wall > Duration::from_secs(60) && wall <= Duration::from_secs(75)),
+        "{budget:?}"
+    );
+    assert_eq!(budget.polls, class.polls);
+    assert_eq!(budget.cost, class.cost);
+    assert!(
+        node.runtime()
+            .block_on(node.read_authority_head_in(&request))
+            .is_ok()
+    );
+
+    deadline.started -= Duration::from_secs(80);
+    let expired = node.session_request_context(&deadline);
+    assert!(expired.authority().is_cancel_requested());
+    assert!(
+        node.runtime()
+            .block_on(node.read_authority_head_in(&expired))
+            .is_err()
+    );
+    node.shutdown().unwrap();
+}
+
+#[test]
 fn selected_upload_allowance_is_shared_bounded_and_never_added_twice() {
     let deadline = session_deadline();
     let twin = deadline.clone();

@@ -9600,7 +9600,7 @@ impl OneNode {
         &self,
         deadline: &GitDaemonSessionDeadline,
     ) -> NodeRequestContext {
-        self.session_request_context_with_timeout(deadline.budget())
+        self.session_request_context_with_timeout(deadline.remaining().unwrap_or_default())
     }
 
     /// Carry a verified request's authority ceiling into awaited database work.
@@ -11357,7 +11357,7 @@ impl OneNode {
             return Err(NodeGitDaemonServeRefusal::RepositoryPathMismatch);
         }
 
-        let request = self.request_context();
+        let request = self.session_request_context(&deadline);
         deadline
             .check("materialize authenticated admission")
             .map_err(NodeGitDaemonServeRefusal::from)?;

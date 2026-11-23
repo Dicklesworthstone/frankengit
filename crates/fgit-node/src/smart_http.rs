@@ -477,11 +477,11 @@ impl OneNode {
         if request.operation != Operation::Discover(Service::UploadPack) {
             return Err(NodeSmartHttpRefusal::UnsupportedOperation);
         }
-        let node_request = self.request_context();
         let deadline = GitDaemonSessionDeadline::new(
             self.git_daemon_session_timeout,
             self.git_daemon_session_work_scaling,
         );
+        let node_request = self.session_request_context(&deadline);
         let is_live = || !deadline.expired();
         let materialized = self
             .runtime
@@ -606,7 +606,7 @@ impl OneNode {
         deadline
             .check("materialize smart HTTP admission")
             .map_err(NodeGitDaemonServeRefusal::from)?;
-        let node_request = self.request_context();
+        let node_request = self.session_request_context(&deadline);
         let admission_deadline_expired = AtomicBool::new(false);
         let admission_is_live = || {
             if deadline.expired() {
@@ -700,7 +700,7 @@ impl OneNode {
             self.git_daemon_session_timeout,
             self.git_daemon_session_work_scaling,
         );
-        let node_request = self.request_context();
+        let node_request = self.session_request_context(&deadline);
 
         // Construct the whole selected pack before writing HTTP success. The
         // current pack writer has its own explicit memory envelope; this HTTP
