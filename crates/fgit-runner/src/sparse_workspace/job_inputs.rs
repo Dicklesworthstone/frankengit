@@ -395,6 +395,73 @@ mod tests {
     }
 
     #[test]
+    fn released_workspace_with_a_live_description_checks_the_actual_plan() {
+        let (plan, cap) = plan(b"source");
+        let (wrong, wrong_cap) = super::tests::plan(b"second");
+        let root = std::env::temp_dir().join(format!(
+            "fg-workspace-released-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        let slot = TreePath::parse_default(b"job").unwrap();
+        let ledger = |id| {
+            ObligationLedger::root(
+                RegionId::new(id),
+                LeakDisposition::RecordAndContinue,
+                plan.budget(),
+            )
+        };
+        let prior = ledger(1);
+        let workspace = SparseWorkspace::materialize(
+            plan.clone(),
+            File::open(&root).unwrap(),
+            slot.clone(),
+            prior
+                .reserve(plan.reservation(), prior.grant(plan.budget()).unwrap())
+                .unwrap(),
+            &cap,
+            0,
+            &|_| false,
+        )
+        .unwrap();
+        let alias = workspace.root.try_clone().unwrap();
+        drop(workspace);
+        assert!(matches!(
+            prior.close(),
+            RegionCloseOutcome::ContainmentFailure(_)
+        ));
+
+        let recovery = ledger(2);
+        let reopen = |plan: &SparseWorkspacePlan<Sha1>, capability: &TreeCapability| {
+            SparseWorkspace::reopen(
+                plan.clone(),
+                File::open(&root).unwrap(),
+                slot.clone(),
+                recovery
+                    .reserve(plan.reservation(), recovery.grant(plan.budget()).unwrap())
+                    .unwrap(),
+                capability,
+                0,
+            )
+        };
+        assert_eq!(
+            reopen(&wrong, &wrong_cap).unwrap_err(),
+            HostRefusal::IdentityMismatch
+        );
+        let recovered = reopen(&plan, &cap).unwrap();
+        drop(alias);
+        assert_eq!(reopen(&plan, &cap).unwrap_err(), HostRefusal::LeaseBusy);
+        let _settled = recovered.close().unwrap();
+        assert!(matches!(recovery.close(), RegionCloseOutcome::Quiescent(_)));
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
     fn reopen_verifies_retained_inputs_before_returning_a_workspace() {
         for mutation in 0..9 {
             let (plan, cap) = plan(b"source");
