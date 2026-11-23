@@ -48,7 +48,7 @@ PRF_REPO=$(cd "$PRF_DIR/../../../.." && pwd)
 fge_init fg041-proof-lane
 fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg041c-proof-refinement-wuy
-fge_context scope 'proofs/fg041/check.sh proofs/fg041/OrderedResidue.lean proofs/fg041/FalseVariant.lean'
+fge_context scope 'ordered-residue model, registered reference vectors and two DPOR head-publication schedules'
 
 PRF_TOOLCHAIN=leanprover/lean4:v4.32.0
 PRF_CHECK="$PRF_REPO/proofs/fg041/check.sh"
@@ -362,4 +362,4 @@ else
 fi
 
 fge_phase teardown
-fge_note "this lane proves the Lean MODEL only; proofs/fg041/README.md's non-claims stand -- no implementation-refinement claim is made or implied here"
+fge_note 'The kernel lane covers the contained Lean model and bounded reference-model histories. Native storage and release qualification have separate gates.'
