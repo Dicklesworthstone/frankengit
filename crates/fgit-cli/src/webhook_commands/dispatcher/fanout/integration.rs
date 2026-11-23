@@ -510,6 +510,9 @@ fn continuous_global_budget_rotates_before_retrying_the_first_route() {
         &first.url,
         &second.url,
         Duration::from_secs(120),
+        // The 503 must be eligible for retry at the second sweep. Otherwise
+        // even a dispatcher that always starts at route 7 appears fair.
+        &|| Ok(fixture.clock.fetch_add(10, Ordering::Relaxed)),
     );
     assert_eq!(first.finish().len(), 1);
     assert_eq!(second.finish().len(), 1);
@@ -520,6 +523,7 @@ fn assert_continuous_global_budget_progress(
     first_url: &str,
     second_url: &str,
     bound: Duration,
+    clock: &impl Fn() -> Result<u64, String>,
 ) {
     fixture.register(7, first_url);
     fixture.register(8, second_url);
@@ -544,7 +548,7 @@ fn assert_continuous_global_budget_progress(
         route.continuous = true;
     }
     let mut output = Vec::new();
-    let delivered = execute(options, &stopped, &|| Ok(10_000), &mut output).unwrap();
+    let delivered = execute(options, &stopped, clock, &mut output).unwrap();
     assert!(
         started.elapsed() <= bound,
         "the continuous dispatcher made no delivery progress within {bound:?}"
@@ -569,8 +573,8 @@ fn unanswered_receivers_fail_the_fairness_harness_within_its_deadline() {
     let fixture = Fixture::new(GitHashAlgorithm::Sha1);
     // Capture each real POST, then close without an HTTP response. Neither
     // route can produce the accepted observation required by the pass case.
-    let first = Receiver::new(vec![None]);
-    let second = Receiver::new(vec![None]);
+    let first = Receiver::new(vec![None, Some(204)]);
+    let second = Receiver::new(vec![None, Some(204)]);
     let first_url = first.url.as_str();
     let second_url = second.url.as_str();
     let started = Instant::now();
@@ -580,6 +584,9 @@ fn unanswered_receivers_fail_the_fairness_harness_within_its_deadline() {
             first_url,
             second_url,
             Duration::from_secs(5),
+            // Reproduce the original constant-clock harness. If the second
+            // POST too has an unknown outcome, neither route becomes due.
+            &|| Ok(10_000),
         );
     })
     .expect_err("unanswered deliveries must fail the unchanged progress assertions");
@@ -596,10 +603,25 @@ fn unanswered_receivers_fail_the_fairness_harness_within_its_deadline() {
         started.elapsed() < Duration::from_secs(120),
         "the planted no-progress run exceeded the original harness bound"
     );
-    // Joining both receivers proves the planted case reached real transport;
-    // setup failure or cancellation before either POST cannot pass this test.
+    // At the same instant the real dispatcher still has two pending sends,
+    // and cannot reach either of the old progress-only stop predicates.
+    let (code, waiting) = fixture.run(2);
+    assert_eq!(code, 3, "{waiting}");
+    assert!(waiting.contains("\"attempts\":0"), "{waiting}");
+    assert!(waiting.contains("\"unknown\":2"), "{waiting}");
+    // The next run advances by 10 ms, past both 1 ms retry delays. It uses
+    // the original journals and both receivers now acknowledge ordinal two.
+    let (code, resumed) = fixture.run(2);
+    assert_eq!(code, 0, "{resumed}");
+    assert!(resumed.contains("\"accepted\":2"), "{resumed}");
     for captured in [first.finish(), second.finish()] {
-        assert_eq!(captured.len(), 1);
+        assert_eq!(captured.len(), 2);
         assert_eq!(captured[0].headers["x-frankengit-attempt"], "1");
+        assert_eq!(captured[1].headers["x-frankengit-attempt"], "2");
+        assert_eq!(
+            captured[0].headers["x-frankengit-delivery"],
+            captured[1].headers["x-frankengit-delivery"]
+        );
+        assert_eq!(captured[0].body, captured[1].body);
     }
 }
