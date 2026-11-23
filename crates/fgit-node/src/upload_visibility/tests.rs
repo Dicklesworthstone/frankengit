@@ -15,6 +15,8 @@ struct MemorySource {
     objects: BTreeMap<GitOid, (ObjectType, Vec<u8>)>,
     reads: RefCell<Vec<GitOid>>,
     header_reads: RefCell<Vec<GitOid>>,
+    prioritize_bodies: bool,
+    bodies_after_header: Cell<usize>,
     polls: Cell<usize>,
     stop_at: Cell<usize>,
 }
@@ -25,6 +27,8 @@ impl MemorySource {
             objects: BTreeMap::new(),
             reads: RefCell::new(Vec::new()),
             header_reads: RefCell::new(Vec::new()),
+            prioritize_bodies: false,
+            bodies_after_header: Cell::new(0),
             polls: Cell::new(0),
             stop_at: Cell::new(usize::MAX),
         }
@@ -45,6 +49,9 @@ impl MemorySource {
     }
 }
 impl VisibilitySource for MemorySource {
+    fn prioritize_verified_bodies(&self) -> bool {
+        self.prioritize_bodies
+    }
     fn format(&self) -> GitHashAlgorithm {
         self.format
     }
@@ -64,6 +71,10 @@ impl VisibilitySource for MemorySource {
         }
     }
     fn load(&self, id: GitOid) -> Result<(ObjectType, Vec<u8>), NodePackMaterializationRefusal> {
+        if !self.header_reads.borrow().is_empty() {
+            self.bodies_after_header
+                .set(self.bodies_after_header.get() + 1);
+        }
         self.reads.borrow_mut().push(id);
         self.objects
             .get(&id)
@@ -110,6 +121,45 @@ fn expect_code<T>(result: Result<T, NodePackMaterializationRefusal>, code: Refus
     assert!(
         matches!(result, Err(NodePackMaterializationRefusal::DisclosureGraph(observed)) if observed == code)
     );
+}
+
+#[test]
+fn served_discovery_verifies_structure_first_and_still_requires_every_typed_header() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut source = MemorySource::new(format);
+        let mut tip = None;
+        let mut leaves = Vec::new();
+        for n in 0..32_u8 {
+            let blob = source.put(ObjectType::Blob, vec![n]);
+            let tree = source.tree(&[(b"100644", b"file", blob)]);
+            tip = Some(source.commit(tree, tip.as_slice()));
+            leaves.push(blob);
+        }
+        let root = tip.unwrap();
+        let admitted = source.admitted();
+        let limits = PackLimits::default();
+        let reference = project_visible_graph(&source, &admitted, [root], &limits).unwrap();
+        assert!(source.bodies_after_header.get() > 0);
+
+        source.prioritize_bodies = true;
+        source.bodies_after_header.set(0);
+        source.header_reads.borrow_mut().clear();
+        source.reads.borrow_mut().clear();
+        let served = project_visible_graph(&source, &admitted, [root], &limits).unwrap();
+        assert_eq!(served, reference);
+        assert_eq!(source.bodies_after_header.get(), 0);
+        leaves.sort();
+        assert_eq!(*source.header_reads.borrow(), leaves);
+        assert_eq!(source.reads.borrow().len(), 64);
+
+        // The final leaf is still indispensable: neither its typed tree
+        // edge nor all preceding verified bodies can replace its header.
+        source.objects.remove(leaves.last().unwrap());
+        let error = project_visible_graph(&source, &admitted, [root], &limits).unwrap_err();
+        source.prioritize_bodies = false;
+        let old = project_visible_graph(&source, &admitted, [root], &limits).unwrap_err();
+        assert_eq!(error.to_string(), old.to_string());
+    }
 }
 
 #[test]
