@@ -143,7 +143,13 @@ fn project(
         .await
         .unwrap();
         selection
-            .materialize_in(store, request.authority(), node.repository_id(), &|| false)
+            .materialize_in(
+                store,
+                request.authority(),
+                node.repository_id(),
+                selected.root_layout(),
+                &|| false,
+            )
             .await
             .unwrap()
             .0

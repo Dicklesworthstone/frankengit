@@ -68,6 +68,7 @@ fn stage(
         cx,
         selected.basis(),
         current,
+        Some(selected.selected_closure().closure()),
         selected.root_layout(),
         &request,
         &fold,

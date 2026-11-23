@@ -35,6 +35,8 @@ connection, retry, shutdown and verification obligations are in
 
 ## Current one-node integration boundary
 
+On November 22 the native CLI failed to compile at `6194cf96` and `72db4b11`. At repair revision `5019dfd9`, both the CLI and node passed their all-target Cargo checks on the pinned nightly. Same-revision runtime qualification is still open. The [dated reality check and bridge plan](docs/REALITY_CHECK_AND_BRIDGE_PLAN.md) identifies the tests needed for team use, sponsored writes, recovery and release.
+
 The checked-in `fgit-cli` library contains a narrow, configuration-free one-node
 surface for exercising the same authority, admission, and object-selection
 abstractions the finished system will use. It does not consult a configuration

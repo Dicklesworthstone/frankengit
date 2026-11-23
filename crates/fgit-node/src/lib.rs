@@ -207,7 +207,7 @@ mod loose_import;
 mod merge_delivery;
 mod node_lanes;
 mod pack_spool;
-mod smart_http;
+pub mod smart_http;
 /// HTTP `search-initial`/`context-initial` for an in-process host (see the fn).
 pub use smart_http::{source_agent_context_json, source_index_json, source_retrieval_json};
 mod termination;
@@ -2892,9 +2892,9 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
             request,
             fold,
             closure,
-            inherited_closure,
             current,
             root_layout,
+            inherited_closure,
             evidence,
             reusable,
         )
@@ -9003,7 +9003,7 @@ impl OneNode {
                     &node.authority,
                     &initialization_cx,
                     repository_id,
-                    config.root_layout,
+                    root_layout,
                     PermittedObjectClosure::default(),
                 ),
         ) {
@@ -10901,7 +10901,9 @@ impl OneNode {
             && (prepared.request.options.ofs_delta()
                 || pack.payload.receipt().ofs_delta_count() == 0)
         {
-            pack.payload.fresh_reader(live)?
+            pack.payload
+                .fresh_reader(live)
+                .map_err(PackWriteError::from)?
         } else {
             None
         };

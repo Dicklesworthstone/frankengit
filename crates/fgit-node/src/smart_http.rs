@@ -8,7 +8,7 @@
 mod command_limit;
 mod ingress;
 mod receive_session;
-mod server;
+pub mod server;
 pub use server::{source_agent_context_json, source_index_json, source_retrieval_json};
 mod upload_refusal;
 mod verdict;

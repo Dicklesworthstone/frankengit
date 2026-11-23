@@ -92,6 +92,7 @@ fn visible() -> collaboration::Visibility {
     collaboration::Visibility {
         reviews: BTreeSet::from([PullRequestNumber::FIRST]),
         conversations: BTreeSet::from([PullRequestNumber::FIRST]),
+        labels: BTreeSet::new(),
     }
 }
 

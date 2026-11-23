@@ -535,6 +535,19 @@ fn a_server_produced_v2_object_envelope_verifies_across_multi_commit_and_refusal
         Ok(VerifiedMembership::ObjectAbsence)
     );
     let mut floor = HeadChainFloor::anchored_to(genesis_decoded.head()).expect("genesis anchors");
+    let mut observe_successor = || {
+        let head = node
+            .runtime()
+            .block_on(node.authenticate_authority_head())
+            .expect("authentic successor head")
+            .body()
+            .expect("head body decodes");
+        assert_eq!(
+            floor.accept(&head).expect("authenticated predecessor matches"),
+            FreshnessVerdict::Advances { to: head.generation }
+        );
+        head
+    };
 
     // 2. Commit 1 imports blob_a on refs/heads/first; Commit 2 imports blob_b on refs/heads/second.
     let (commit_a, blob_a) = import_single_blob_branch(
@@ -545,6 +558,7 @@ fn a_server_produced_v2_object_envelope_verifies_across_multi_commit_and_refusal
         b"admitted in first commit\n",
         b"c7tb-import-first",
     );
+    assert_eq!(observe_successor().generation.get(), 2);
     let (_, blob_b) = import_single_blob_branch(
         &node,
         &scratch.0.join("git-second"),
@@ -553,6 +567,8 @@ fn a_server_produced_v2_object_envelope_verifies_across_multi_commit_and_refusal
         b"admitted in second commit\n",
         b"c7tb-import-second",
     );
+    let committed_head = observe_successor();
+    assert_eq!(committed_head.generation.get(), 3);
 
     // 3. Publish a genuine refusal-only head generation (stale CAS on refs/heads/first)
     // so head.generation advances without changing head.latest_committed_rcr_id.
@@ -560,7 +576,7 @@ fn a_server_produced_v2_object_envelope_verifies_across_multi_commit_and_refusal
         PrincipalId::from_bytes([0x44; 16]),
         IdempotencyKey::new(b"c7tb-stale-refusal".to_vec()).expect("idempotency key"),
     );
-    let (_, refusal_terminal) = node
+    let refusal = node
         .runtime()
         .block_on(node.admit_branch_updates_durable_in(
             &node.request_context(),
@@ -574,21 +590,23 @@ fn a_server_produced_v2_object_envelope_verifies_across_multi_commit_and_refusal
             Default::default(),
         ))
         .expect("refusal batch publishes");
+    let [command] = refusal.commands.as_slice() else {
+        panic!("single-command admission returned {:?}", refusal.commands);
+    };
     assert!(
-        matches!(refusal_terminal.outcome, DecisionOutcome::Refused { .. }),
-        "expected a canonical refusal decision: {refusal_terminal:?}"
+        matches!(command.terminal.outcome, DecisionOutcome::Refused { .. }),
+        "expected a canonical refusal decision: {command:?}"
     );
 
-    let current_head = node
-        .runtime()
-        .block_on(node.authenticate_authority_head())
-        .expect("authentic current head")
-        .body()
-        .expect("head body decodes");
+    let current_head = observe_successor();
     assert_eq!(current_head.generation.get(), 4);
     assert_eq!(
-        floor.accept(&current_head).expect("floor advances"),
-        FreshnessVerdict::Advances
+        current_head.latest_committed_rcr_id,
+        committed_head.latest_committed_rcr_id
+    );
+    assert_eq!(
+        current_head.latest_repository_sequence,
+        committed_head.latest_repository_sequence
     );
     let pin = PinnedAuthorityHead::new(current_head);
 
@@ -653,7 +671,7 @@ fn a_server_produced_v2_object_envelope_verifies_across_multi_commit_and_refusal
     );
     assert_eq!(
         verify_envelope_v2(&pin, &forged_commit_witness),
-        Err(VerifiedReadRefusal::ObjectWitnessCommitMismatch),
+        Err(VerifiedReadRefusal::ObjectWitnessHeadMismatch),
         "substituting a forged RCR object_closure_root must fail RCR identity verification"
     );
 
@@ -668,7 +686,7 @@ fn a_server_produced_v2_object_envelope_verifies_across_multi_commit_and_refusal
     );
     assert_eq!(
         verify_envelope_v2(&pin, &forged_genesis_witness),
-        Err(VerifiedReadRefusal::ObjectWitnessGenesisHeadNotEmpty),
+        Err(VerifiedReadRefusal::ObjectWitnessHeadMismatch),
         "claiming GenesisEmpty at a post-commit head must be refused by name"
     );
 

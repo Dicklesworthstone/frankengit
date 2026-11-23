@@ -5,7 +5,8 @@
 use super::*;
 use crate::evidence::AgentAuthentication;
 use fgit_reference::effect::{FoldOutcome, RefEffect};
-use fgit_reference::intent::{ExpectedRefState, Intent, RefIntent, TransactionRequest};
+use fgit_reference::intent::{Intent, RefIntent, TransactionRequest};
+use fgit_reference::refs::ExpectedRefState;
 use fgit_txn::TransactionFoldReport;
 
 /// Check a source publication's current scoped credential, immutable native
