@@ -6,18 +6,19 @@
 //! rewrite the canonical per-decision closure or the trusted local exporter.
 use super::{
     AcceptanceProfile, AdmissionUploadPackRepository, AdvertisedRef, AnyGitOid, Arc, BTreeMap,
-    BTreeSet, BudgetClass, CacheBinding, CacheScope, Cell, GitDaemonSessionDeadline,
-    GitHashAlgorithm, GitOid, HeadGeneration, MaterializedAdmission, NodeAdmissionViewRefusal,
-    NodeGitDaemonServeRefusal, NodePackMaterializationRefusal, NodeRequestContext, ObjectType,
-    OneNode, OpaqueHandle, PackError, PackLimits, PackOrderKey, PackRequest, PackWriteError,
-    ParseLimits, ParsedObject, PermittedClosureTraversalSource, PermittedObjectClosure,
-    PublicationBasis, RefusalCode, RwLock, UploadPackRepository, VerifiedFabricPackSource,
-    WireError, WireLimits, entry_limit_error, parse_object_body, selected_pack_ids_and_held,
+    BTreeSet, BudgetClass, CacheBinding, CacheScope, CeiledFabricSource, Cell, FabricReadCeiling,
+    GitDaemonSessionDeadline, GitHashAlgorithm, GitOid, HeadGeneration, MaterializedAdmission,
+    NodeAdmissionViewRefusal, NodeGitDaemonServeRefusal, NodePackMaterializationRefusal,
+    NodeRequestContext, ObjectType, OneNode, OpaqueHandle, PackError, PackLimits, PackOrderKey,
+    PackRequest, PackWriteError, ParseLimits, ParsedObject, PermittedClosureTraversalSource,
+    PermittedObjectClosure, PublicationBasis, RefusalCode, RwLock, UploadPackRepository,
+    VerifiedFabricPackSource, WireError, WireLimits, entry_limit_error, parse_object_body,
+    selected_pack_ids_and_held,
 };
 #[cfg(test)]
 use super::{
     AdmissionContext, AdmissionLimits, AdmissionSnapshot, AtomicBool, AtomicU64, Capabilities,
-    CeiledFabricSource, Duration, FsqliteCx, GitDaemonSessionOutcome, GitDaemonSessionTimeout,
+    Duration, FsqliteCx, GitDaemonSessionOutcome, GitDaemonSessionTimeout,
     GitDaemonSessionWorkScaling, GitObjectKind, IdempotencyKey, LoopbackReceiveSession, NodeConfig,
     NodeSmartHttpRefusal, Ordering, PackPlanner, PackWriteProfile, PackWriter, Packet, PathBuf,
     PrincipalId, ReceiveContext, ReceiveLimits, RefName, RefVisibility, RepositoryId,
@@ -461,6 +462,11 @@ impl OneNode {
             database_exhaustion: &exhaustion,
             session_is_live: Some(&live),
         };
+        let ceiling = FabricReadCeiling::for_upload(self, request.authority(), deadline);
+        let source = CeiledFabricSource {
+            inner: &source,
+            ceiling: ceiling.as_ref(),
+        };
         let roots = repository
             .advertised_refs()
             .iter()
@@ -600,6 +606,33 @@ impl VisibilitySource for VerifiedFabricPackSource<'_> {
         // will never read; every selected body still passes `read_object`.
         self.read_object_header_within(&id, usize::MAX)
             .map_err(NodePackMaterializationRefusal::from)
+    }
+}
+
+impl VisibilitySource for CeiledFabricSource<'_, '_> {
+    fn format(&self) -> GitHashAlgorithm {
+        self.inner.format()
+    }
+
+    fn parse_limits(&self) -> ParseLimits {
+        self.inner.parse_limits()
+    }
+
+    fn checkpoint(&self) -> Result<(), NodePackMaterializationRefusal> {
+        self.inner.checkpoint()
+    }
+
+    fn load(&self, id: GitOid) -> Result<(ObjectType, Vec<u8>), NodePackMaterializationRefusal> {
+        self.inner
+            .read_object_within(&id, self.ceiling)
+            .map_err(NodePackMaterializationRefusal::from)
+    }
+
+    fn load_header(
+        &self,
+        id: GitOid,
+    ) -> Result<(ObjectType, usize), NodePackMaterializationRefusal> {
+        self.inner.load_header(id)
     }
 }
 

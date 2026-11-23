@@ -6,12 +6,17 @@ use super::{
     PackError, ParsedDeltaBase, ProductionQuarantineValidator, QuarantinedPack, RefusalCode,
     ResolutionBudget, StoreRefusal, checkpoint, copy_bytes, crypto_object_kind, map_pack_error,
 };
-use crate::fabric_object_kind;
 use crate::received_pack::{
     PendingReceivedPack, StreamedCaptureReservation, VerifiedReceivedObject,
 };
+use crate::{CeiledFabricSource, fabric_object_kind};
 use fgit_crypto::git_payload_commitment;
 use fgit_types::CANONICAL_CODEC_VERSION;
+
+pub(crate) enum Restoration<'a> {
+    Received(Option<&'a CeiledFabricSource<'a, 'a>>),
+    Captured(StreamedCaptureReservation),
+}
 
 impl ProductionQuarantineValidator<'_> {
     /// Restore optional custody after bounded parsing of a persisted pack.
@@ -28,6 +33,7 @@ impl ProductionQuarantineValidator<'_> {
     /// its ordinary writer fallback remains available. Cancellation remains a
     /// stop condition for the whole request. A successful result has completed
     /// the fabric collision check and may be committed directly.
+    #[cfg(test)]
     pub(crate) fn restore_received_pack(
         &self,
         pack: &QuarantinedPack,
@@ -42,7 +48,7 @@ impl ProductionQuarantineValidator<'_> {
             authorized,
             resolution_budget,
             deadline,
-            None,
+            Restoration::Received(None),
         )
     }
 
@@ -64,18 +70,18 @@ impl ProductionQuarantineValidator<'_> {
             authorized,
             resolution_budget,
             deadline,
-            Some(reservation),
+            Restoration::Captured(reservation),
         )
     }
 
-    fn restore_received_pack_bounded(
+    pub(crate) fn restore_received_pack_bounded(
         &self,
         pack: &QuarantinedPack,
         hints: &[VerifiedReceivedObject],
         authorized: &BTreeSet<GitOid>,
         resolution_budget: &mut ResolutionBudget,
         deadline: &mut impl Deadline,
-        reservation: Option<StreamedCaptureReservation>,
+        restoration: Restoration<'_>,
     ) -> Result<Option<PendingReceivedPack>, RefusalCode> {
         checkpoint(deadline)?;
         let result = self.restore_received_pack_checked(
@@ -84,7 +90,7 @@ impl ProductionQuarantineValidator<'_> {
             authorized,
             resolution_budget,
             deadline,
-            reservation,
+            restoration,
         );
         // An expiry discovered after failed I/O still outranks cache damage.
         checkpoint(deadline)?;
@@ -104,8 +110,12 @@ impl ProductionQuarantineValidator<'_> {
         authorized: &BTreeSet<GitOid>,
         resolution_budget: &mut ResolutionBudget,
         deadline: &mut impl Deadline,
-        reservation: Option<StreamedCaptureReservation>,
+        restoration: Restoration<'_>,
     ) -> Result<Option<PendingReceivedPack>, RefusalCode> {
+        let reads = match &restoration {
+            Restoration::Received(reads) => *reads,
+            Restoration::Captured(_) => None,
+        };
         if hints.is_empty()
             || hints.len() != pack.entries().len()
             || hints.len() > self.pack_limits.max_entries as usize
@@ -146,7 +156,7 @@ impl ProductionQuarantineValidator<'_> {
         }
 
         let bases =
-            self.restored_pack_bases(pack, hints, authorized, resolution_budget, deadline)?;
+            self.restored_pack_bases(pack, hints, authorized, resolution_budget, deadline, reads)?;
         let (verified, ids_at_offset, mut spool) = self.verified_pack_objects_with_budget(
             pack,
             &bases,
@@ -196,12 +206,24 @@ impl ProductionQuarantineValidator<'_> {
             );
             drop(bytes);
             checkpoint(deadline)?;
+            if let Some(reads) = reads {
+                reads.check_read()?;
+            }
             let canonical = self.node.fabric.verify_object_integrity_bounded(
                 id,
                 hint.bytes as u64,
                 &mut || deadline.checkpoint(),
             );
             checkpoint(deadline)?;
+            if let Some(reads) = reads {
+                if let Ok(verified) = &canonical {
+                    reads.verified_read(
+                        usize::try_from(verified.payload_length())
+                            .map_err(|_| RefusalCode::ResourceBudgetExceeded)?,
+                    );
+                }
+                reads.check_read()?;
+            }
             let canonical = canonical.map_err(|error| match error {
                 StoreRefusal::RuntimeCheckpointRejected => RefusalCode::CancellationInProgress,
                 _ => RefusalCode::EvidenceInvalid,
@@ -218,8 +240,8 @@ impl ProductionQuarantineValidator<'_> {
         // verified immutable native objects. This rebuilds spans, dependencies,
         // receipts and binding digests from the checked pack, never from disk.
         let cache = self.node.received_pack_cache();
-        match reservation {
-            Some(reservation) => cache.prepare_streamed_verified(
+        match restoration {
+            Restoration::Captured(reservation) => cache.prepare_streamed_verified(
                 pack,
                 hints.iter().copied(),
                 &ids_at_offset,
@@ -227,7 +249,7 @@ impl ProductionQuarantineValidator<'_> {
                 deadline,
                 reservation,
             ),
-            None => cache.prepare_verified(
+            Restoration::Received(_) => cache.prepare_verified(
                 pack,
                 hints.iter().copied(),
                 &ids_at_offset,
@@ -245,6 +267,7 @@ impl ProductionQuarantineValidator<'_> {
         authorized: &BTreeSet<GitOid>,
         resolution_budget: &mut ResolutionBudget,
         deadline: &mut impl Deadline,
+        reads: Option<&crate::CeiledFabricSource<'_, '_>>,
     ) -> Result<ExternalBases, RefusalCode> {
         let mut bases = BTreeMap::new();
         let mut read_bytes = 0_usize;
@@ -275,8 +298,14 @@ impl ProductionQuarantineValidator<'_> {
             // The header is only a read-budget hint. Its length is charged
             // before a separately bounded, fully verified body read; changing
             // the file cannot widen that read or authenticate its contents.
+            if let Some(reads) = reads {
+                reads.check_read()?;
+            }
             let header = self.node.fabric.read_header_bounded(base, maximum as u64);
             checkpoint(deadline)?;
+            if let Some(reads) = reads {
+                reads.check_read()?;
+            }
             let header = header.map_err(|_| RefusalCode::EvidenceInvalid)?;
             let length = usize::try_from(header.payload_length)
                 .map_err(|_| RefusalCode::ResourceBudgetExceeded)?;
@@ -288,6 +317,12 @@ impl ProductionQuarantineValidator<'_> {
                 .fabric
                 .read_whole_bounded(base, header.payload_length);
             checkpoint(deadline)?;
+            if let Some(reads) = reads {
+                if let Ok(verified) = &read {
+                    reads.verified_read(verified.object.payload().len());
+                }
+                reads.check_read()?;
+            }
             let object = read.map_err(|_| RefusalCode::EvidenceInvalid)?.object;
             let kind = match object.envelope().object_kind() {
                 fgit_object_fabric::ObjectKind::Commit => ObjectType::Commit,

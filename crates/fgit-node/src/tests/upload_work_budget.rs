@@ -12,46 +12,66 @@ fn session_deadline() -> GitDaemonSessionDeadline {
 }
 
 #[test]
-fn upload_disclosure_inherits_only_the_remaining_database_wall_clock() {
+fn upload_fabric_time_is_greeting_anchored_and_bounded_by_both_clocks() {
     let scratch = ScratchDirectory::new();
     let (node, _) = OneNode::init(test_config(scratch.path().to_path_buf())).unwrap();
+    let database = BudgetPolicy::finite_defaults().limits_for(BudgetClass::Database);
+    let base = database.timeout.unwrap();
     let mut deadline = GitDaemonSessionDeadline::new(
-        GitDaemonSessionTimeout::try_new(Duration::from_secs(120)).unwrap(),
-        GitDaemonSessionWorkScaling::FLAT,
+        GitDaemonSessionTimeout::try_new(base + Duration::from_secs(60)).unwrap(),
+        GitDaemonSessionWorkScaling::DEFAULT,
     );
-    deadline.started -= Duration::from_secs(45);
-    let remaining = |request: &NodeRequestContext| {
-        request
-            .authority()
-            .attached_native_cx()
-            .unwrap()
-            .budget()
-            .remaining(node.runtime.now())
-    };
-    let class = remaining(&node.request_context());
+    // Reading a slow greeting consumed all but two seconds of the Database
+    // allowance before the first context is minted. Transport ingress and
+    // selected bytes never count as delivered canonical reads.
+    deadline.started -= base - Duration::from_secs(2);
+    deadline.note_admitted(1_000_000);
+    assert!(deadline.note_selected_upload_work(20_000_000));
     let request = node.upload_request_context(&deadline);
-    let budget = remaining(&request);
+    let native = request.authority().attached_native_cx().unwrap();
+    let left = native.budget().remaining(node.runtime.now());
     assert!(
-        budget
-            .deadline
-            .is_some_and(|wall| wall > Duration::from_secs(60) && wall <= Duration::from_secs(75)),
-        "{budget:?}"
+        left.deadline
+            .is_some_and(|t| !t.is_zero() && t <= Duration::from_secs(2)),
+        "{left:?}"
     );
-    assert_eq!(budget.polls, class.polls);
-    assert_eq!(budget.cost, class.cost);
+    assert_eq!(native.budget().poll_quota, database.poll_quota);
+    assert_eq!(native.budget().cost_quota, database.cost_quota);
+    assert_eq!(native.budget().priority, database.priority);
     assert!(
         node.runtime()
             .block_on(node.read_authority_head_in(&request))
             .is_ok()
     );
 
-    deadline.started -= Duration::from_secs(80);
-    let expired = node.upload_request_context(&deadline);
-    assert!(expired.authority().is_cancel_requested());
+    deadline.started -= Duration::from_secs(3);
+    let idle = node.upload_request_context(&deadline);
+    assert!(!deadline.expired());
+    assert!(matches!(
+        checkpoint_pack_context(idle.authority()),
+        PackContextCheckpoint::Stopped {
+            budget_exhaustion: Some(Exhaustion::Deadline)
+        }
+    ));
+    let mut short = GitDaemonSessionDeadline::new(
+        GitDaemonSessionTimeout::try_new(Duration::from_secs(2)).unwrap(),
+        GitDaemonSessionWorkScaling::FLAT,
+    );
+    let short_request = node.upload_request_context(&short);
+    let wall = short_request
+        .authority()
+        .attached_native_cx()
+        .unwrap()
+        .budget()
+        .remaining(node.runtime.now())
+        .deadline
+        .unwrap();
+    assert!(!wall.is_zero() && wall <= Duration::from_secs(2));
+    short.started -= Duration::from_secs(3);
     assert!(
-        node.runtime()
-            .block_on(node.read_authority_head_in(&expired))
-            .is_err()
+        node.upload_request_context(&short)
+            .authority()
+            .is_cancel_requested()
     );
     node.shutdown().unwrap();
 }

@@ -14,7 +14,8 @@ use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_node::{
     GitDaemonReceiveProcessingTimeout, GitDaemonReceiveProcessingTimeoutRefusal,
     GitDaemonServeError, GitDaemonSessionOutcome, GitDaemonSessionTimeout,
-    GitDaemonSessionTimeoutRefusal, GitDaemonTransportRefusal, serve_git_daemon_tcp_once,
+    GitDaemonSessionTimeoutRefusal, GitDaemonSessionWorkScaling, GitDaemonTransportRefusal,
+    serve_git_daemon_tcp_once,
 };
 use fgit_node::{NodeConfig, NodeGitDaemonServeRefusal, NodePackMaterializationRefusal, OneNode};
 use fgit_runtime::{BudgetClass, BudgetPolicy, ClassLimits, Exhaustion};
@@ -289,6 +290,7 @@ enum Negotiation {
 fn run_one_node_session(
     database_timeout: Option<Duration>,
     session_duration: Duration,
+    scaling: GitDaemonSessionWorkScaling,
     negotiation: Negotiation,
 ) -> (
     Result<GitDaemonSessionOutcome, NodeGitDaemonServeRefusal>,
@@ -306,7 +308,8 @@ fn run_one_node_session(
         TenantId::from_bytes([0x51; 16]),
         RepositoryId::from_bytes([0x52; 16]),
     )
-    .with_git_daemon_session_timeout(session_timeout);
+    .with_git_daemon_session_timeout(session_timeout)
+    .with_git_daemon_session_work_scaling(scaling);
     if let Some(timeout) = database_timeout {
         config = config.with_runtime_budgets(one_node_budget_policy(timeout));
     }
@@ -595,6 +598,7 @@ fn one_node_reports_database_budget_expiry_while_the_session_is_live() {
     let (served, response, total_elapsed) = run_one_node_session(
         Some(DATABASE_CLASS_TIMEOUT),
         ONE_NODE_SESSION_TIMEOUT,
+        GitDaemonSessionWorkScaling::DEFAULT,
         Negotiation::FinishAfter(EXPIRED_CLASS_WAIT),
     );
 
@@ -633,6 +637,7 @@ fn one_node_under_the_same_class_budget_emits_the_selected_pack() {
     let (served, response, _) = run_one_node_session(
         Some(DATABASE_CLASS_TIMEOUT),
         ONE_NODE_SESSION_TIMEOUT,
+        GitDaemonSessionWorkScaling::DEFAULT,
         Negotiation::FinishAfter(Duration::ZERO),
     );
 
@@ -644,8 +649,12 @@ fn one_node_under_the_same_class_budget_emits_the_selected_pack() {
 fn explicit_database_policy_cannot_extend_a_shorter_transport_deadline() {
     let database = Duration::from_secs(60);
     let session = Duration::from_secs(2);
-    let (served, response, elapsed) =
-        run_one_node_session(Some(database), session, Negotiation::WithholdDone);
+    let (served, response, elapsed) = run_one_node_session(
+        Some(database),
+        session,
+        GitDaemonSessionWorkScaling::FLAT,
+        Negotiation::WithholdDone,
+    );
 
     assert!(elapsed >= session && elapsed < database, "{elapsed:?}");
     assert!(
@@ -671,6 +680,7 @@ fn implicit_database_profile_serves_a_pack_beyond_the_generic_class_timeout() {
     let (served, response, _) = run_one_node_session(
         None,
         delay + Duration::from_secs(15),
+        GitDaemonSessionWorkScaling::DEFAULT,
         Negotiation::FinishAfter(delay),
     );
     assert!(
@@ -678,6 +688,41 @@ fn implicit_database_profile_serves_a_pack_beyond_the_generic_class_timeout() {
         "{served:?}"
     );
     assert!(response.starts_with(b"0008NAK\nPACK"));
+}
+
+#[test]
+fn only_verified_disclosure_work_can_extend_the_database_clock_for_a_real_pack() {
+    let database = Duration::from_secs(3);
+    let delay = Duration::from_secs(4);
+    let session = Duration::from_secs(20);
+    // The commit and tree bodies are read and verified before the client sees
+    // refs. The declared size of the header-only hello blob earns no time.
+    let scaling =
+        GitDaemonSessionWorkScaling::try_new(Duration::from_millis(100), Duration::from_secs(10))
+            .unwrap();
+    let (served, response, _) = run_one_node_session(
+        Some(database),
+        session,
+        scaling,
+        Negotiation::FinishAfter(delay),
+    );
+    assert!(
+        matches!(served, Ok(GitDaemonSessionOutcome::Pack(_))),
+        "{served:?}"
+    );
+    assert!(response.starts_with(b"0008NAK\nPACK"));
+    let (flat, _, _) = run_one_node_session(
+        Some(database),
+        session,
+        GitDaemonSessionWorkScaling::FLAT,
+        Negotiation::FinishAfter(delay),
+    );
+    assert!(
+        matches!(flat, Err(NodeGitDaemonServeRefusal::Pack(ref e)) if matches!(**e,
+            NodePackMaterializationRefusal::BudgetClassExhausted { class: BudgetClass::Database, dimension: Exhaustion::Deadline, .. }
+        )),
+        "{flat:?}"
+    );
 }
 
 #[test]
