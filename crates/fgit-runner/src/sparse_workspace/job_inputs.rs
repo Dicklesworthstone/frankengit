@@ -436,25 +436,35 @@ mod tests {
         ));
 
         let recovery = ledger(2);
-        let reopen = |plan: &SparseWorkspacePlan<Sha1>, capability: &TreeCapability| {
+        let reopen = |ledger: &ObligationLedger,
+                      plan: &SparseWorkspacePlan<Sha1>,
+                      capability: &TreeCapability| {
             SparseWorkspace::reopen(
                 plan.clone(),
                 File::open(&root).unwrap(),
                 slot.clone(),
-                recovery
-                    .reserve(plan.reservation(), recovery.grant(plan.budget()).unwrap())
+                ledger
+                    .reserve(plan.reservation(), ledger.grant(plan.budget()).unwrap())
                     .unwrap(),
                 capability,
                 0,
             )
         };
         assert_eq!(
-            reopen(&wrong, &wrong_cap).unwrap_err(),
+            reopen(&recovery, &wrong, &wrong_cap).unwrap_err(),
             HostRefusal::IdentityMismatch
         );
-        let recovered = reopen(&plan, &cap).unwrap();
+        let recovered = reopen(&recovery, &plan, &cap).unwrap();
         drop(alias);
-        assert_eq!(reopen(&plan, &cap).unwrap_err(), HostRefusal::LeaseBusy);
+        let contender = ledger(3);
+        assert_eq!(
+            reopen(&contender, &plan, &cap).unwrap_err(),
+            HostRefusal::LeaseBusy
+        );
+        assert!(matches!(
+            contender.close(),
+            RegionCloseOutcome::Quiescent(_)
+        ));
         let _settled = recovered.close().unwrap();
         assert!(matches!(recovery.close(), RegionCloseOutcome::Quiescent(_)));
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
