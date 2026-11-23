@@ -457,9 +457,13 @@ impl OneNode {
             Ok(())
         }
         .await;
-        if let Err(error) = work {
-            result.request_stopped = !request.checkpoint_is_live();
-            result.error = Some(format!("{error}; retain original queue refresh custody"));
+        match work {
+            Err(TrustedWorkflowFailure::WatchRecoveryStopped) => result.request_stopped = true,
+            Err(error) => {
+                result.request_stopped = !request.checkpoint_is_live();
+                result.error = Some(format!("{error}; retain original queue refresh custody"));
+            }
+            Ok(()) => {}
         }
         result
     }

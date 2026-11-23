@@ -8,7 +8,7 @@ impl From<WatchPrestartRefusal> for TrustedWorkflowFailure {
         match error {
             WatchPrestartRefusal::Invalid(detail) => invalid(detail),
             WatchPrestartRefusal::Io(error) => io(error),
-            WatchPrestartRefusal::Stopped => invalid("prestart intent verification stopped"),
+            WatchPrestartRefusal::Stopped => Self::WatchRecoveryStopped,
         }
     }
 }

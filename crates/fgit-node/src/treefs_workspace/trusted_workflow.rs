@@ -55,6 +55,9 @@ mod input_tests;
 
 #[derive(Debug)]
 pub enum TrustedWorkflowFailure {
+    /// A cooperative checkpoint stopped inspection of retained watch custody.
+    /// The caller still owns any previously observed execution or publication.
+    WatchRecoveryStopped,
     InvalidInput(&'static str),
     Source(NodeWorkspaceRefusal),
     Candidate(Box<super::candidate_inspection::BundleInspectionRefusal>),

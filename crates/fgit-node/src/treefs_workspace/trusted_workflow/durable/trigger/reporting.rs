@@ -256,8 +256,10 @@ impl OneNode {
             }
             Ok(())
         }.await;
-        if let Err(error) = work {
-            result.error = Some(error.to_string());
+        match work {
+            Err(TrustedWorkflowFailure::WatchRecoveryStopped) => result.request_stopped = true,
+            Err(error) => result.error = Some(error.to_string()),
+            Ok(()) => {}
         }
         result
     }

@@ -235,7 +235,7 @@ impl OneNode {
                 .filter(|key| lower_hash(key))
                 .ok_or_else(|| invalid("unknown watch custody entry"))?;
             check_directory(&entry.path())?;
-            if !reporting::recover_settlement(
+            let settlement = reporting::recover_settlement(
                 self,
                 merge_config.map_or(reference, |config| config.reference()),
                 directory,
@@ -243,9 +243,16 @@ impl OneNode {
                 &scope,
                 key,
                 &|| request.checkpoint_is_live(),
-            )? {
+            );
+            if matches!(
+                settlement,
+                Err(TrustedWorkflowFailure::WatchRecoveryStopped)
+            ) {
+                return Ok(stopped_poll());
+            }
+            if !settlement? {
                 if let Some(config) = merge_config {
-                    if let Some(original) = prestart::read(
+                    let original = prestart::read(
                         self,
                         reference,
                         directory,
@@ -255,11 +262,20 @@ impl OneNode {
                         config,
                         Some((read_prefixes, limits, artifacts)),
                         &|| workspace_request_live(request),
-                    )
-                    .map_err(|error| TrustedWorkflowFailure::Journal {
-                        directory: entry.path(),
-                        detail: format!("{error}; original prestart custody retained"),
-                    })? {
+                    );
+                    let original = match original {
+                        Ok(original) => original,
+                        Err(TrustedWorkflowFailure::WatchRecoveryStopped) => {
+                            return Ok(stopped_poll());
+                        }
+                        Err(error) => {
+                            return Err(TrustedWorkflowFailure::Journal {
+                                directory: entry.path(),
+                                detail: format!("{error}; original prestart custody retained"),
+                            });
+                        }
+                    };
+                    if let Some(original) = original {
                         if pending.replace((entry.path(), original)).is_some() {
                             return Err(invalid(
                                 "multiple unresolved prestart events in one watch scope",

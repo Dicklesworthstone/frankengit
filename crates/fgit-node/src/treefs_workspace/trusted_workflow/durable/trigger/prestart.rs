@@ -326,6 +326,6 @@ fn checkpoint(live: &dyn Fn() -> bool) -> Result<(), TrustedWorkflowFailure> {
     if live() {
         Ok(())
     } else {
-        Err(invalid("prestart recovery cancelled"))
+        Err(TrustedWorkflowFailure::WatchRecoveryStopped)
     }
 }

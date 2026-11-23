@@ -208,7 +208,7 @@ fn checkpoint(live: &dyn Fn() -> bool) -> Result<(), TrustedWorkflowFailure> {
     if live() {
         Ok(())
     } else {
-        Err(invalid("watch settlement recovery cancelled"))
+        Err(TrustedWorkflowFailure::WatchRecoveryStopped)
     }
 }
 

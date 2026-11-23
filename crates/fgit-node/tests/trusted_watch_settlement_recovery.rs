@@ -577,6 +577,63 @@ enum Damage {
 }
 
 #[test]
+fn exhausted_inspection_stops_before_reservation_and_preserves_the_original_handoff() {
+    use fgit_runtime::{BudgetClass, BudgetPolicy, ClassLimits};
+
+    const POLLS: u32 = 8192;
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut f = fixture(format, Mode::Ref);
+        let retained = complete(&f, Mode::Ref);
+        let marker = retained.event.join("settled");
+        let original = fs::read(&marker).unwrap();
+        fs::remove_file(&marker).unwrap();
+        let budgets = BudgetPolicy::finite_defaults()
+            .with_class_limits(
+                BudgetClass::Database,
+                ClassLimits::finite(Duration::from_secs(60), POLLS, 100_000_000),
+            )
+            .unwrap();
+        f.config = f.config.clone().with_runtime_budgets(budgets);
+        f.reopen();
+        let before = generation(f.node());
+        let limited = || {
+            let request = f.node().command_request_context(None);
+            // Admit the pass and enter verification of the existing event.
+            // Both callers reach the missing marker with this finite remainder.
+            for _ in 0..POLLS - 4 {
+                assert!(request.checkpoint_is_live());
+            }
+            request
+        };
+        let (poll, dispatch) = poll_with_request(&f, Mode::Ref, &limited()).unwrap();
+        assert!(poll.contains("stopped_before_reservation"), "{poll}");
+        assert!(dispatch.is_none());
+        let result = f
+            .node()
+            .runtime()
+            .block_on(f.node().publish_trusted_ref_workflow_checks_in(
+                &limited(),
+                &source_ref(),
+                b"ci",
+                &f.parent(),
+                OWNER,
+                |_| panic!("a stopped custody scan attempted publication"),
+            ));
+        assert!(result.request_stopped, "{result:?}");
+        assert!(result.error.is_none(), "{result:?}");
+        assert_eq!((result.committed, result.pending_execution), (0, 0));
+        assert!(!marker.exists());
+        assert_eq!(generation(f.node()), before);
+        let (admitted, _, lines, error) = publish(&f, Mode::Ref);
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(admitted, 1);
+        assert_eq!(lines[0], retained.manifest);
+        assert_eq!(fs::read(marker).unwrap(), original);
+        assert_eq!(fs::read(f.root.join("executed")).unwrap(), b"x");
+    }
+}
+
+#[test]
 fn cancelled_recovery_keeps_completion_handoff_for_a_later_live_owner() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let f = fixture(format, Mode::Queue);

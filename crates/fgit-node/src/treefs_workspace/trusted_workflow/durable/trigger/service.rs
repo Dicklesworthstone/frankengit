@@ -1301,6 +1301,12 @@ impl Custody {
         };
         self.pending_execution = 0;
         let live = || !control.is_stopped() && request.checkpoint_is_live();
+        let recovery = |error| match error {
+            super::TrustedWorkflowFailure::WatchRecoveryStopped if control.is_stopped() => {
+                WorkflowWatchError::StoppedBeforeReadiness
+            }
+            error => custody(error),
+        };
         for entry in reporting::event_entries(&events).map_err(custody)? {
             if control.is_stopped() {
                 return Err(WorkflowWatchError::StoppedBeforeReadiness);
@@ -1324,13 +1330,8 @@ impl Custody {
                 key,
                 &live,
             )
-            .map_err(|error| {
-                if control.is_stopped() {
-                    WorkflowWatchError::StoppedBeforeReadiness
-                } else {
-                    custody(error)
-                }
-            })? {
+            .map_err(recovery)?
+            {
                 if let Some(merge) = &config.merge_candidate
                     && super::prestart::pending(
                         node,
@@ -1343,13 +1344,7 @@ impl Custody {
                         Some((&config.inputs, config.limits, config.artifacts.as_ref())),
                         &live,
                     )
-                    .map_err(|error| {
-                        if control.is_stopped() {
-                            WorkflowWatchError::StoppedBeforeReadiness
-                        } else {
-                            custody(error)
-                        }
-                    })?
+                    .map_err(recovery)?
                 {
                     self.pending_execution =
                         self.pending_execution.checked_add(1).ok_or_else(|| {
