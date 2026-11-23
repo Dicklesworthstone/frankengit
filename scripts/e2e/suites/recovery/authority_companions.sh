@@ -26,7 +26,13 @@ for format in sha1 sha256; do
     mkdir "$root"
     id="AUTH-COMPANIONS-$format"
     export_args=(--trusted-local --all-heads)
-    expect_exit "$id-init" 0 "$FG_BIN" init "$root/source" 11111111111111111111111111111111 22222222222222222222222222222222 "$format"
+    tenant=11111111111111111111111111111111
+    repository=22222222222222222222222222222222
+    actor=33333333333333333333333333333333
+    expect_exit "$id-init" 0 "$FG_BIN" init "$root/source" "$tenant" "$repository" "$format"
+    expect_exit "$id-open-issue" 0 "$FG_BIN" issue open "$root/source" "$tenant" "$repository" 1 \
+        --trusted-local --object-format "$format" --principal "$actor" --idempotency-key initial-issue \
+        --expected-version 0 --title 'Companion restore' --body 'Preserve this issue through retry.'
     expect_exit "$id-export" 0 "$FG_BIN" authority-backup export "$root/source/authority.fsqlite" "$root/archive" "${export_args[@]}"
     restore=("$FG_BIN" authority-backup restore "$root/archive" "$root/dest" "${export_args[@]}" --expected-sha256 "$(fge_digest_file "$root/archive")" --destination-instance 99)
     expect_exit "$id-restore" 0 "${restore[@]}"
@@ -55,6 +61,16 @@ for format in sha1 sha256; do
     expect_exit "$id-cleanup" 0 test ! -e "$quarantine"
     expect_exit "$id-after" 0 "$FG_BIN" authority-backup export "$root/dest/authority.fsqlite" "$root/after" "${export_args[@]}"
     expect_exit "$id-identical-restored-image" 0 cmp "$root/before" "$root/after"
+    expect_exit "$id-reopened-issue" 0 "$FG_BIN" issue show "$root/dest" "$tenant" "$repository" 1 \
+        --trusted-local --object-format "$format"
+    expect_exit "$id-issue-state" 0 python3 -I -c '
+import json, sys
+record = json.loads(sys.argv[1])
+issue = record["issue"]
+assert record["node_closed"] is True and record["object_format"] == sys.argv[2]
+assert (issue["number"], issue["version"], issue["state"], issue["opened_by"]) == (1, 1, "open", sys.argv[3])
+assert (issue["title"], issue["body"]) == ("Companion restore", "Preserve this issue through retry.")
+' "$FGE_LAST_STDOUT" "$format" "$actor"
 
     # A surviving hard-link alias and a complete, controlled set of closed
     # staging files exercise cleanup after publication. Only the reopened
