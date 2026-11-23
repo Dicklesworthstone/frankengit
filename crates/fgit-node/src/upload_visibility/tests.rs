@@ -51,7 +51,10 @@ impl VisibilitySource for MemorySource {
     fn advise_pending(&self, pending: &mut BTreeMap<GitOid, bool>) {
         if let Some(advice) = &self.advice {
             let mut issued = Vec::new();
-            advise_pending_pages(pending, |id| issued.push(id));
+            advise_pending_pages(pending, |id| {
+                issued.push(id);
+                true
+            });
             advice.borrow_mut().push(issued);
         }
     }
@@ -155,6 +158,15 @@ fn first_page_advice_preserves_reads_refusals_and_scope_in_native_oid_order() {
         assert_eq!(unique.len(), advised.len());
         assert!(!unique.contains(&hidden));
         assert!(unique.is_subset(reference.closure.objects()));
+
+        let mut pending: BTreeMap<_, _> = headers.iter().map(|id| (*id, false)).collect();
+        let mut attempts = 0;
+        advise_pending_pages(&mut pending, |_| {
+            attempts += 1;
+            attempts == 1
+        });
+        assert_eq!(attempts, 2);
+        assert_eq!(pending.values().filter(|advised| **advised).count(), 1);
 
         // Two independently missing keys still report the first actual
         // ordered read. Advice neither diagnoses nor hides the later defect.

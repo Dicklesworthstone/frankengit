@@ -572,11 +572,16 @@ const fn disclosure_refusal(code: RefusalCode) -> NodePackMaterializationRefusal
 // entry carries one bit until its ordinary native-ID-ordered removal.
 const DISCLOSURE_ADVICE_STRIDE: usize = 8;
 #[cfg(any(target_os = "linux", test))]
-fn advise_pending_pages(pending: &mut BTreeMap<GitOid, bool>, mut advise: impl FnMut(GitOid)) {
+fn advise_pending_pages(
+    pending: &mut BTreeMap<GitOid, bool>,
+    mut advise: impl FnMut(GitOid) -> bool,
+) {
     for (&id, advised) in pending.iter_mut().take(16) {
         if !*advised {
+            if !advise(id) {
+                break;
+            }
             *advised = true;
-            advise(id);
         }
     }
 }
@@ -632,13 +637,18 @@ impl VisibilitySource for VerifiedFabricPackSource<'_> {
 impl VisibilitySource for CeiledFabricSource<'_, '_> {
     #[cfg(target_os = "linux")]
     fn advise_pending(&self, pending: &mut BTreeMap<GitOid, bool>) {
-        if self.ceiling.is_some() {
+        if let Some(ceiling) = self.ceiling {
             advise_pending_pages(pending, |id| {
-                if !self.inner.database_context.is_cancel_requested()
-                    && self.inner.session_is_live.is_none_or(|live| live())
+                // Advice never earns time. Stop issuing opens at the armed
+                // Database deadline without spending another metered poll.
+                if std::time::Instant::now() >= ceiling.armed.get()
+                    || self.inner.database_context.is_cancel_requested()
+                    || self.inner.session_is_live.is_some_and(|live| !live())
                 {
-                    self.inner.fabric.advise_first_page(id);
+                    return false;
                 }
+                self.inner.fabric.advise_first_page(id);
+                true
             });
         }
     }
