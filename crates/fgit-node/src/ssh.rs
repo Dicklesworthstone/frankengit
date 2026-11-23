@@ -884,7 +884,7 @@ impl OneNode {
         let service =
             ssh_git_service(true, git_protocol).map_err(NodeGitDaemonServeRefusal::from)?;
         let limits = WireLimits::default();
-        let request = self.session_request_context(deadline);
+        let request = self.upload_request_context(deadline);
         deadline
             .check("materialize authenticated admission")
             .map_err(NodeGitDaemonServeRefusal::from)?;

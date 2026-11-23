@@ -29,7 +29,7 @@ fn upload_disclosure_inherits_only_the_remaining_database_wall_clock() {
             .remaining(node.runtime.now())
     };
     let class = remaining(&node.request_context());
-    let request = node.session_request_context(&deadline);
+    let request = node.upload_request_context(&deadline);
     let budget = remaining(&request);
     assert!(
         budget
@@ -46,7 +46,7 @@ fn upload_disclosure_inherits_only_the_remaining_database_wall_clock() {
     );
 
     deadline.started -= Duration::from_secs(80);
-    let expired = node.session_request_context(&deadline);
+    let expired = node.upload_request_context(&deadline);
     assert!(expired.authority().is_cancel_requested());
     assert!(
         node.runtime()

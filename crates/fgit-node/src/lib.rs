@@ -9600,6 +9600,12 @@ impl OneNode {
         &self,
         deadline: &GitDaemonSessionDeadline,
     ) -> NodeRequestContext {
+        self.session_request_context_with_timeout(deadline.budget())
+    }
+
+    /// Upload admission, disclosure and pack reads share the remaining
+    /// transport time, including time already spent reading the greeting.
+    fn upload_request_context(&self, deadline: &GitDaemonSessionDeadline) -> NodeRequestContext {
         self.session_request_context_with_timeout(deadline.remaining().unwrap_or_default())
     }
 
@@ -11357,7 +11363,11 @@ impl OneNode {
             return Err(NodeGitDaemonServeRefusal::RepositoryPathMismatch);
         }
 
-        let request = self.session_request_context(&deadline);
+        let request = if greeting.service() == GitDaemonService::ReceivePack {
+            self.request_context()
+        } else {
+            self.upload_request_context(&deadline)
+        };
         deadline
             .check("materialize authenticated admission")
             .map_err(NodeGitDaemonServeRefusal::from)?;
