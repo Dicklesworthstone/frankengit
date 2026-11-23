@@ -32,6 +32,7 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct NativeMergeBasis {
     pub refs: CanonicalRefState,
+    pub selected_closure: PermittedObjectClosure,
     pub root_layout: RootLayoutVersion,
     pub forge: CanonicalForgePositionState,
     pub outbox: CanonicalOutboxState,
@@ -809,6 +810,18 @@ pub(in crate::merge) fn prepare_coupled_events(
         },
         compaction_generation_link: None,
     };
+    let (committed_closure, committed_closure_root) = if resolved
+        .root_layout
+        .commits_authority_object_closure_merkle()
+    {
+        let mut united = resolved.selected_closure.objects().clone();
+        united.extend(closure.objects.iter().copied());
+        let cumulative = PermittedObjectClosure::new(united);
+        let root = crate::object_closure_root(resolved.root_layout, &cumulative)?;
+        (cumulative, root)
+    } else {
+        (objects, closure.object_closure_root)
+    };
     let record = RepositoryCommitRecord {
         repository_id: context.repository_id,
         repository_sequence: fgit_types::RepositorySequence::FIRST,
@@ -820,7 +833,7 @@ pub(in crate::merge) fn prepare_coupled_events(
             &effects.refs,
         ))?,
         resulting_ref_root: roots.ref_root,
-        object_closure_root: closure.object_closure_root,
+        object_closure_root: committed_closure_root,
         forge_event_batch_root: event_root,
         resulting_forge_position_root: roots.forge_position_root,
         policy_epoch: basis.body().policy_epoch,
@@ -832,7 +845,7 @@ pub(in crate::merge) fn prepare_coupled_events(
     Ok(PreparedNativeMerge {
         refs,
         root_layout: resolved.root_layout,
-        closure: objects,
+        closure: committed_closure,
         event,
         forge: transition.forge_positions().clone(),
         outbox: transition.outbox().clone(),

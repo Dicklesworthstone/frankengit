@@ -104,6 +104,20 @@ export interface RepositoryIncarnationConfigurationV21 {
   policy_root?: Digest;
 }
 
+/** Version-2.2 repository configuration carrying incarnation identity, optional policy root, and optional capability-revocation root. */
+export interface RepositoryIncarnationConfigurationV22 {
+  /** Authenticated root layout needed to interpret the head roots. */
+  root_layout: number;
+  /** Permanent native Git object identity algorithm. */
+  object_format: number;
+  /** Minted incarnation preventing a delete/recreate location alias. */
+  repository_incarnation_id: string;
+  /** Policy root bound to this incarnation, absent when none is published. */
+  policy_root?: Digest;
+  /** Capability-revocation generation root bound to this incarnation, absent when none is published. */
+  capability_revocation_root?: Digest;
+}
+
 /** The terminal outcome of one decision: committed, or refused with a reason. */
 export type DecisionOutcome =
   | DecisionOutcomeCommitted
@@ -131,7 +145,8 @@ export interface DecisionOutcomeRefused {
 export type VerifiedReadConfiguration =
   | VerifiedReadConfigurationRepositoryV1
   | VerifiedReadConfigurationRepositoryIncarnationV2
-  | VerifiedReadConfigurationRepositoryIncarnationV2_1;
+  | VerifiedReadConfigurationRepositoryIncarnationV2_1
+  | VerifiedReadConfigurationRepositoryIncarnationV2_2;
 
 /** RepositoryConfigurationBody schema v1.2. */
 export interface VerifiedReadConfigurationRepositoryV1 {
@@ -155,6 +170,14 @@ export interface VerifiedReadConfigurationRepositoryIncarnationV2_1 {
   discriminant: 3;
   /** Exact V2.1 configuration payload, without a nested canonical frame. */
   body: RepositoryIncarnationConfigurationV21;
+}
+
+/** RepositoryIncarnationConfigurationBodyV2_2 schema v2.2, carrying policy and capability-revocation roots. */
+export interface VerifiedReadConfigurationRepositoryIncarnationV2_2 {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 4;
+  /** Exact V2.2 configuration payload, without a nested canonical frame. */
+  body: RepositoryIncarnationConfigurationV22;
 }
 
 /** An absence proof selected by the requested name's ordered position. */
@@ -280,6 +303,143 @@ export interface ObjectClosureNonMembershipProofAfterLast {
   discriminant: 3;
   /** The authenticated last neighbour. */
   last: ObjectClosureNeighbour;
+}
+
+/** Authority-bound witness deriving object_closure_root strictly from the client-pinned authority head. */
+export type ObjectClosureWitness =
+  | ObjectClosureWitnessGenesisEmpty
+  | ObjectClosureWitnessSelectedCommitRecord;
+
+/** Genesis empty closure when latest_committed_rcr_id and latest_repository_sequence are absent. */
+export interface ObjectClosureWitnessGenesisEmpty {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 0;
+}
+
+/** The committed RepositoryCommitRecord whose identity equals pinned.latest_committed_rcr_id. */
+export interface ObjectClosureWitnessSelectedCommitRecord {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 1;
+  /** Exact RepositoryCommitRecord payload carrying object_closure_root. */
+  record: RcrV1;
+}
+
+/** One V2 proof answer including authority-bound object membership and absence variants. */
+export type VerifiedReadAnswerV2 =
+  | VerifiedReadAnswerV2RefMembership
+  | VerifiedReadAnswerV2OutcomeMembership
+  | VerifiedReadAnswerV2AuthorizedRefAbsence
+  | VerifiedReadAnswerV2ObjectMembership
+  | VerifiedReadAnswerV2AuthorizedObjectAbsence;
+
+/** One named ref and a path proving its membership in the pinned ref root. */
+export interface VerifiedReadAnswerV2RefMembership {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 1;
+  /** Validated claimed ref-name bytes. */
+  name: string;
+  /** Claimed native object identity. */
+  oid: GitOid;
+  /** Membership path for the named ref leaf. */
+  proof: VerifiedReadMerkleProofPayload;
+}
+
+/** One terminal decision and a path proving its outcome-index membership. */
+export interface VerifiedReadAnswerV2OutcomeMembership {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 2;
+  /** Canonical terminal decision selected by the transaction identity. */
+  decision: RepositoryDecision;
+  /** Membership path for the canonical outcome leaf. */
+  proof: VerifiedReadMerkleProofPayload;
+}
+
+/** A disclosure-authorized requested name and ordered non-membership witness. */
+export interface VerifiedReadAnswerV2AuthorizedRefAbsence {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 3;
+  /** Validated requested ref-name bytes; authorization happened before lookup. */
+  name: string;
+  /** Ordered absence witness under the pinned ref root. */
+  proof: RefStateNonMembershipProof;
+}
+
+/** One object identity, its authority-bound commit witness, and its Merkle membership proof. */
+export interface VerifiedReadAnswerV2ObjectMembership {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 4;
+  /** Claimed native object identity. */
+  oid: GitOid;
+  /** Authority-bound witness selecting object_closure_root from the pinned head. */
+  witness: ObjectClosureWitness;
+  /** Membership path for the object leaf. */
+  proof: VerifiedReadMerkleProofPayload;
+}
+
+/** A disclosure-authorized absent object identity, its authority-bound commit witness, and its ordered Merkle non-membership proof. */
+export interface VerifiedReadAnswerV2AuthorizedObjectAbsence {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 5;
+  /** Requested absent object identity; authorization happened before lookup. */
+  oid: GitOid;
+  /** Authority-bound witness selecting object_closure_root from the pinned head. */
+  witness: ObjectClosureWitness;
+  /** Ordered absence witness under the authority-bound object closure root. */
+  proof: ObjectClosureNonMembershipProof;
+}
+
+/** Client-advertised verified-read response capability tier. */
+export type VerifiedReadCapability =
+  | VerifiedReadCapabilityUnproven
+  | VerifiedReadCapabilityEnvelopeV1
+  | VerifiedReadCapabilityEnvelopeV2;
+
+/** Client accepts unproven answers without Merkle witnesses. */
+export interface VerifiedReadCapabilityUnproven {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 0;
+}
+
+/** Client accepts V1 ref and outcome proof envelopes. */
+export interface VerifiedReadCapabilityEnvelopeV1 {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 1;
+}
+
+/** Client accepts V2 ref, outcome, and authority-bound object proof envelopes. */
+export interface VerifiedReadCapabilityEnvelopeV2 {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 2;
+}
+
+/** Tagged question target inside a verified-read query envelope. */
+export type VerifiedReadQueryTarget =
+  | VerifiedReadQueryTargetRef
+  | VerifiedReadQueryTargetOutcome
+  | VerifiedReadQueryTargetObject;
+
+/** Query membership or authorized absence of one ref name. */
+export interface VerifiedReadQueryTargetRef {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 1;
+  /** Validated requested ref-name bytes. */
+  name: string;
+}
+
+/** Query terminal outcome membership for one transaction identity. */
+export interface VerifiedReadQueryTargetOutcome {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 2;
+  /** Requested sealed transaction identity. */
+  tx_id: DerivedId;
+}
+
+/** Query membership or authorized absence of one native object identity. */
+export interface VerifiedReadQueryTargetObject {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 3;
+  /** Requested native object identity. */
+  oid: GitOid;
 }
 
 /**
@@ -490,6 +650,36 @@ export interface VerifiedReadEnvelopeV1 {
   configuration?: VerifiedReadConfiguration;
   /** The ref, outcome, or authorization-gated absence claim and its witness. */
   answer: VerifiedReadAnswer;
+}
+
+/**
+ * A version-two relayed answer whose ref, outcome, or authority-bound object proof verifies strictly against the client's pinned authority head.
+ *
+ * schema verified-read-envelope-v2 v2.0, domain frankengit/verified-read-envelope/v2
+ */
+export interface VerifiedReadEnvelopeV2V2 {
+  /** Verified-read envelope grammar version; V2 (2) is the only accepted value for this family. */
+  version: number;
+  /** Carried authority head, compared byte-for-byte to the client pin. */
+  head: AuthorityHeadV1;
+  /** Exact optional configuration body required to interpret the selected root layout. */
+  configuration?: VerifiedReadConfiguration;
+  /** The ref, outcome, or authority-bound object membership/absence claim and its witness. */
+  answer: VerifiedReadAnswerV2;
+}
+
+/**
+ * A canonical verified-read query carrying the client capability tier and ref, outcome, or object target.
+ *
+ * schema verified-read-query v1.0, domain frankengit/verified-read-query/v1
+ */
+export interface VerifiedReadQueryV1 {
+  /** Verified-read query grammar version; V1 (1) is the only accepted value. */
+  version: number;
+  /** Maximum verified-read response capability accepted by the querying client. */
+  capability: VerifiedReadCapability;
+  /** The ref, outcome, or object question being asked. */
+  target: VerifiedReadQueryTarget;
 }
 
 /**

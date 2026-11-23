@@ -1539,6 +1539,7 @@ fn immutable_staging_failure_never_publishes_a_partial_original_api_merge() {
             &NativeMergeBasis {
                 refs,
                 root_layout: before.root_layout(),
+                selected_closure: before.selected_closure().closure().clone(),
                 forge: delivery.forge,
                 outbox: delivery.outbox,
             },

@@ -35,12 +35,13 @@ use std::collections::BTreeMap;
 use fgit_authority::{TerminalOutcome, outcome_index_proof, outcome_index_root};
 use fgit_codec::RepositoryIncarnationConfigurationBody;
 use fgit_codec::{
-    CryptoBodyIdentity, RepositoryAuthorityHeadBody, RepositoryConfigurationBody, body_id,
+    CryptoBodyIdentity, RepositoryAuthorityHeadBody, RepositoryCommitRecord,
+    RepositoryConfigurationBody, body_id, harness::commit_record,
 };
 use fgit_crypto::{
     IdentityDomain, MerkleProof, ObjectClosureNeighbour, ObjectClosureNonMembershipProof,
     object_closure_membership_proof, object_closure_merkle_root,
-    object_closure_non_membership_proof, ref_state_membership_proof, ref_state_merkle_root,
+    object_closure_non_membership_proof, ref_state_membership_proof_v2, ref_state_merkle_root_v2,
 };
 use fgit_types::CANONICAL_CODEC_VERSION;
 use fgit_types::hash::{Digest, DigestBytes};
@@ -54,8 +55,9 @@ use fgit_types::refs::RefName;
 use fgit_types::vocabulary::DecisionOutcome;
 use fgit_verified_read::freshness::HeadChainFloor;
 use fgit_verified_read::{
-    PinnedAuthorityHead, VerifiedMembership, VerifiedReadAnswer, VerifiedReadConfiguration,
-    VerifiedReadEnvelope, VerifiedReadRefusal, verify_envelope,
+    ObjectClosureWitness, PinnedAuthorityHead, VerifiedMembership, VerifiedReadAnswer,
+    VerifiedReadAnswerV2, VerifiedReadConfiguration, VerifiedReadEnvelope, VerifiedReadEnvelopeV2,
+    VerifiedReadRefusal, verify_envelope, verify_envelope_v2,
 };
 
 /// What a tampering mirror altered.
@@ -99,11 +101,15 @@ enum TamperClass {
     ObjectAbsencePredecessorTampered,
     /// An object non-membership proof with tampered successor neighbour.
     ObjectAbsenceSuccessorTampered,
+    /// A forged commit-record witness substituted for the head-selected RCR.
+    ObjectCommitWitnessSubstituted,
+    /// A genesis-empty object witness claimed against a committed authority head.
+    ObjectGenesisWitnessOnCommittedHead,
 }
 
 impl TamperClass {
     /// Every class the corpus must exercise.
-    const ALL: [Self; 20] = [
+    const ALL: [Self; 22] = [
         Self::RefName,
         Self::RefIdentity,
         Self::ProofSibling,
@@ -124,6 +130,8 @@ impl TamperClass {
         Self::ObjectRootConfusion,
         Self::ObjectAbsencePredecessorTampered,
         Self::ObjectAbsenceSuccessorTampered,
+        Self::ObjectCommitWitnessSubstituted,
+        Self::ObjectGenesisWitnessOnCommittedHead,
     ];
 
     /// Ties `ALL` to the enum, which the array alone does not do.
@@ -148,7 +156,24 @@ impl TamperClass {
             | Self::ObjectProofLeafCount
             | Self::ObjectRootConfusion
             | Self::ObjectAbsencePredecessorTampered
-            | Self::ObjectAbsenceSuccessorTampered => (),
+            | Self::ObjectAbsenceSuccessorTampered
+            | Self::ObjectCommitWitnessSubstituted
+            | Self::ObjectGenesisWitnessOnCommittedHead => (),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum CorpusEnvelope {
+    V1(VerifiedReadEnvelope),
+    V2(VerifiedReadEnvelopeV2),
+}
+
+impl CorpusEnvelope {
+    const fn head(&self) -> &RepositoryAuthorityHeadBody {
+        match self {
+            Self::V1(envelope) => envelope.head(),
+            Self::V2(envelope) => envelope.head(),
         }
     }
 }
@@ -200,25 +225,16 @@ fn ref_state() -> Vec<(RefName, GitOid)> {
 /// it; production genesis (fgit-node) publishes this layout too.
 fn configuration() -> RepositoryConfigurationBody {
     RepositoryConfigurationBody {
-        root_layout: RootLayoutVersion::RefStateAndObjectClosureMerkleV1,
+        root_layout: RootLayoutVersion::AuthorityBoundObjectClosureMerkleV2,
         object_format: GitHashAlgorithm::Sha1,
         hidden_ref_rules: vec![b"refs/secret".to_vec()],
     }
 }
 
 /// A configuration with the hidden-ref policy STRIPPED, and otherwise identical.
-///
-/// This is the substitution worth testing now that the policy lives in the
-/// configuration body. The layout still admits proofs, so
-/// nothing about the answer looks wrong; the only change is that a mirror has
-/// removed the rules that withhold `refs/secret`. If the body were accepted
-/// without identifying to the head, a mirror could widen disclosure without
-/// touching a single proof.
-/// Identical to [`configuration`] except the hidden-ref policy is STRIPPED —
-/// the substitution under test — so it must carry the same layout.
 const fn other_configuration() -> RepositoryConfigurationBody {
     RepositoryConfigurationBody {
-        root_layout: RootLayoutVersion::RefStateAndObjectClosureMerkleV1,
+        root_layout: RootLayoutVersion::AuthorityBoundObjectClosureMerkleV2,
         object_format: GitHashAlgorithm::Sha1,
         hidden_ref_rules: Vec::new(),
     }
@@ -270,23 +286,39 @@ fn outcome_index() -> Vec<(TxId, TerminalOutcome)> {
     vec![(tx(0xA1), committed(1, 0x55))]
 }
 
+fn object_closure_oids() -> Vec<GitOid> {
+    vec![oid(0x10), oid(0x20), oid(0x30), oid(0x40)]
+}
+
+fn committed_rcr_for(
+    head: &RepositoryAuthorityHeadBody,
+    object_root: Digest,
+) -> RepositoryCommitRecord {
+    let mut rcr = commit_record();
+    rcr.repository_id = head.repository_id;
+    rcr.resulting_ref_root = head.ref_root;
+    rcr.object_closure_root = object_root;
+    rcr.policy_epoch = head.policy_epoch;
+    rcr
+}
+
 fn honest() -> Honest {
     let entries = ref_state();
-    let root = ref_state_merkle_root(&entries).expect("a ref root");
+    let root = ref_state_merkle_root_v2(&entries, None).expect("a v2 ref root");
     let configuration = configuration();
     let queried = name("refs/heads/main");
     let (found, proof) =
-        ref_state_membership_proof(&entries, &queried).expect("a membership proof");
+        ref_state_membership_proof_v2(&entries, None, &queried).expect("a membership proof");
     let mut base = head(2, None, root, configuration_root(&configuration));
-    // The pinned head carries the REAL outcome-index root as well as the ref
-    // root. Without this, an outcome case has to move the head to publish its
-    // root -- and a moved head is refused by the FRESHNESS floor before the
-    // proof is ever examined. Measured when this fixture was first written:
-    // all three outcome classes came back detected, every one of them by
-    // Freshness, so the outcome proof path was never reached and the family
-    // would have been coverage in name only.
     base.outcome_index_root =
         outcome_index_root(&outcome_index()).expect("a terminal outcome has a canonical root");
+    let obj_root = object_closure_merkle_root(&object_closure_oids()).expect("object closure root");
+    let rcr = committed_rcr_for(&base, obj_root);
+    let rcr_id =
+        RepositoryCommitId::from_internal_object_id(body_id(&CryptoBodyIdentity, &rcr).unwrap())
+            .unwrap();
+    base.latest_committed_rcr_id = Some(rcr_id);
+    base.latest_repository_sequence = Some(rcr.repository_sequence);
     Honest {
         head: base,
         configuration,
@@ -308,12 +340,16 @@ fn membership(name_value: RefName, oid_value: GitOid, proof: MerkleProof) -> Ver
 fn combined_client(
     floor: &HeadChainFloor,
     pinned: &PinnedAuthorityHead,
-    envelope: &VerifiedReadEnvelope,
+    envelope: &CorpusEnvelope,
 ) -> Detection {
     if floor.judge(envelope.head()).is_err() {
         return Detection::Freshness;
     }
-    match verify_envelope(pinned, envelope) {
+    let result = match envelope {
+        CorpusEnvelope::V1(envelope) => verify_envelope(pinned, envelope),
+        CorpusEnvelope::V2(envelope) => verify_envelope_v2(pinned, envelope),
+    };
+    match result {
         Err(refusal) => Detection::Envelope(refusal_name(&refusal)),
         Ok(_) => Detection::Accepted,
     }
@@ -326,10 +362,11 @@ fn refusal_name(refusal: &VerifiedReadRefusal) -> String {
         VerifiedReadRefusal::PinnedHeadMismatch => "PinnedHeadMismatch",
         VerifiedReadRefusal::ConfigurationIdentityUnavailable => "ConfigurationIdentityUnavailable",
         VerifiedReadRefusal::ConfigurationRootMismatch => "ConfigurationRootMismatch",
+        VerifiedReadRefusal::CommitRecordIdentityUnavailable => "CommitRecordIdentityUnavailable",
+        VerifiedReadRefusal::ObjectWitnessHeadMismatch => "ObjectWitnessHeadMismatch",
         VerifiedReadRefusal::WireDecode(_) => "WireDecode",
         VerifiedReadRefusal::RefLayout(_) => "RefLayout",
         VerifiedReadRefusal::ObjectLayout(_) => "ObjectLayout",
-        VerifiedReadRefusal::ObjectClosureRootUnavailable => "ObjectClosureRootUnavailable",
         VerifiedReadRefusal::ProofRejected => "ProofRejected",
         VerifiedReadRefusal::Outcome(_) => "Outcome",
         VerifiedReadRefusal::RefNotFoundOrUnauthorized => "RefNotFoundOrUnauthorized",
@@ -337,10 +374,6 @@ fn refusal_name(refusal: &VerifiedReadRefusal) -> String {
         VerifiedReadRefusal::ObjectNotFoundOrUnauthorized => "ObjectNotFoundOrUnauthorized",
         VerifiedReadRefusal::ObjectPresent => "ObjectPresent",
         VerifiedReadRefusal::ForgePositionProofUnavailable => "ForgePositionProofUnavailable",
-        // Exhaustive on purpose. A wildcard would map a newly added refusal to
-        // one bucket, and this corpus's whole claim is that detections are
-        // SPREAD across distinct checks -- a silent merge would weaken that
-        // measurement without failing anything.
     }
     .to_owned()
 }
@@ -356,20 +389,22 @@ impl fgit_verified_read::ObjectDisclosurePolicy for AllowAllObjectPolicy {
 /// The honest object-membership and non-membership answers these cases tamper with.
 struct HonestObject {
     head: RepositoryAuthorityHeadBody,
-    object_closure_root: Digest,
+    rcr: RepositoryCommitRecord,
     queried: GitOid,
     proof: MerkleProof,
     objects: Vec<GitOid>,
 }
 
 fn honest_object() -> HonestObject {
-    let oids = vec![oid(0x10), oid(0x20), oid(0x30), oid(0x40)];
+    let oids = object_closure_oids();
     let root = object_closure_merkle_root(&oids).expect("object closure root");
     let queried = oids[1];
     let proof = object_closure_membership_proof(&oids, &queried).expect("object membership proof");
+    let head = honest().head;
+    let rcr = committed_rcr_for(&head, root);
     HonestObject {
-        head: honest().head,
-        object_closure_root: root,
+        head,
+        rcr,
         queried,
         proof,
         objects: oids,
@@ -436,7 +471,7 @@ fn honest_outcome() -> HonestOutcome {
 /// body until this was added.
 const fn incarnation_configuration() -> RepositoryIncarnationConfigurationBody {
     RepositoryIncarnationConfigurationBody {
-        root_layout: RootLayoutVersion::RefStateMerkleV1,
+        root_layout: RootLayoutVersion::AuthorityBoundObjectClosureMerkleV2,
         object_format: GitHashAlgorithm::Sha1,
         repository_incarnation_id: RepositoryIncarnationId::from_bytes([0x7A; 16]),
     }
@@ -448,7 +483,7 @@ fn incarnation_configuration_root(body: &RepositoryIncarnationConfigurationBody)
 }
 
 /// Every tampered envelope, paired with the class it represents.
-fn corpus() -> Vec<(TamperClass, VerifiedReadEnvelope)> {
+fn corpus() -> Vec<(TamperClass, CorpusEnvelope)> {
     let base = honest();
     let good_proof = base.proof.clone();
     // Kept for the cross-root case at the end, which needs a genuine REF proof.
@@ -461,21 +496,21 @@ fn corpus() -> Vec<(TamperClass, VerifiedReadEnvelope)> {
     // A ref the state does not hold, presented with a real proof.
     cases.push((
         TamperClass::RefName,
-        VerifiedReadEnvelope::new(
+        CorpusEnvelope::V1(VerifiedReadEnvelope::new(
             good_head.clone(),
             Some(good_config.clone()),
             membership(name("refs/heads/injected"), base.oid, good_proof.clone()),
-        ),
+        )),
     ));
 
     // The right ref, the wrong object.
     cases.push((
         TamperClass::RefIdentity,
-        VerifiedReadEnvelope::new(
+        CorpusEnvelope::V1(VerifiedReadEnvelope::new(
             good_head.clone(),
             Some(good_config.clone()),
             membership(base.queried.clone(), oid(0xFF), good_proof.clone()),
-        ),
+        )),
     ));
 
     // A flipped byte in the first sibling.
@@ -487,7 +522,7 @@ fn corpus() -> Vec<(TamperClass, VerifiedReadEnvelope)> {
     }
     cases.push((
         TamperClass::ProofSibling,
-        VerifiedReadEnvelope::new(
+        CorpusEnvelope::V1(VerifiedReadEnvelope::new(
             good_head.clone(),
             Some(good_config.clone()),
             membership(
@@ -495,13 +530,13 @@ fn corpus() -> Vec<(TamperClass, VerifiedReadEnvelope)> {
                 base.oid,
                 MerkleProof::new(good_proof.index(), good_proof.leaf_count(), siblings),
             ),
-        ),
+        )),
     ));
 
     // The right leaf, claimed at the wrong position.
     cases.push((
         TamperClass::ProofIndex,
-        VerifiedReadEnvelope::new(
+        CorpusEnvelope::V1(VerifiedReadEnvelope::new(
             good_head.clone(),
             Some(good_config.clone()),
             membership(
@@ -513,13 +548,13 @@ fn corpus() -> Vec<(TamperClass, VerifiedReadEnvelope)> {
                     good_proof.siblings().to_vec(),
                 ),
             ),
-        ),
+        )),
     ));
 
     // A different tree shape, which changes how the fold pairs and promotes.
     cases.push((
         TamperClass::ProofLeafCount,
-        VerifiedReadEnvelope::new(
+        CorpusEnvelope::V1(VerifiedReadEnvelope::new(
             good_head.clone(),
             Some(good_config.clone()),
             membership(
@@ -531,79 +566,73 @@ fn corpus() -> Vec<(TamperClass, VerifiedReadEnvelope)> {
                     good_proof.siblings().to_vec(),
                 ),
             ),
-        ),
+        )),
     ));
 
     // A head whose ref_root is not the root the proof was built against.
     cases.push((
         TamperClass::HeadRefRoot,
-        VerifiedReadEnvelope::new(
+        CorpusEnvelope::V1(VerifiedReadEnvelope::new(
             head(2, None, digest(0xAB), configuration_root(&good_config)),
             Some(good_config.clone()),
             membership(base.queried.clone(), base.oid, good_proof.clone()),
-        ),
+        )),
     ));
 
     // A head whose configuration_root does not identify the carried body.
     cases.push((
         TamperClass::HeadConfigurationRoot,
-        VerifiedReadEnvelope::new(
+        CorpusEnvelope::V1(VerifiedReadEnvelope::new(
             head(2, None, good_head.ref_root, digest(0xCD)),
             Some(good_config.clone()),
             membership(base.queried.clone(), base.oid, good_proof.clone()),
-        ),
+        )),
     ));
 
     // A different configuration body under the honest head.
     cases.push((
         TamperClass::ConfigurationSubstituted,
-        VerifiedReadEnvelope::new(
+        CorpusEnvelope::V1(VerifiedReadEnvelope::new(
             good_head.clone(),
             Some(other_configuration()),
             membership(base.queried.clone(), base.oid, good_proof.clone()),
-        ),
+        )),
     ));
 
     // No configuration at all, which forces the legacy layout that admits no
     // ref-state membership proof.
     cases.push((
         TamperClass::ConfigurationRemoved,
-        VerifiedReadEnvelope::new(
+        CorpusEnvelope::V1(VerifiedReadEnvelope::new(
             good_head,
             None,
             membership(base.queried.clone(), base.oid, good_proof),
-        ),
+        )),
     ));
 
     // A genuine, fully valid answer about an OLDER head. Nothing here is
     // forged; this is the replay.
-    let old_root = ref_state_merkle_root(&[(name("refs/heads/main"), oid(0x11))]).expect("a root");
-    let old_head = head(1, None, old_root, configuration_root(&good_config));
     let old_entries = vec![(name("refs/heads/main"), oid(0x11))];
+    let old_root = ref_state_merkle_root_v2(&old_entries, None).expect("a v2 root");
+    let old_head = head(1, None, old_root, configuration_root(&good_config));
     let (old_oid, old_proof) =
-        ref_state_membership_proof(&old_entries, &name("refs/heads/main")).expect("a proof");
+        ref_state_membership_proof_v2(&old_entries, None, &name("refs/heads/main"))
+            .expect("a v2 proof");
     cases.push((
         TamperClass::StaleHeadReplay,
-        VerifiedReadEnvelope::new(
+        CorpusEnvelope::V1(VerifiedReadEnvelope::new(
             old_head,
             Some(good_config.clone()),
             membership(name("refs/heads/main"), old_oid, old_proof),
-        ),
+        )),
     ));
 
     // --- the outcome-membership family ---------------------------------
-    //
-    // Everything above rides the REF path, so until here the corpus shared one
-    // root, one layout and one answer variant. These pin the second verified
-    // answer type, which is checked against `outcome_index_root` rather than
-    // `ref_root`.
     let honest_outcome = honest_outcome();
 
-    // A transaction the index does not hold, carried by a real proof. The
-    // outcome analogue of RefName.
     cases.push((
         TamperClass::OutcomeTxId,
-        VerifiedReadEnvelope::new(
+        CorpusEnvelope::V1(VerifiedReadEnvelope::new(
             honest_outcome.head.clone(),
             None,
             VerifiedReadAnswer::OutcomeMembership {
@@ -611,14 +640,12 @@ fn corpus() -> Vec<(TamperClass, VerifiedReadEnvelope)> {
                 outcome: Box::new(honest_outcome.outcome),
                 proof: Box::new(honest_outcome.proof.clone()),
             },
-        ),
+        )),
     ));
 
-    // The right transaction, a different terminal outcome: the answer that
-    // matters most to a client, since it changes what it believes happened.
     cases.push((
         TamperClass::OutcomeSubstituted,
-        VerifiedReadEnvelope::new(
+        CorpusEnvelope::V1(VerifiedReadEnvelope::new(
             honest_outcome.head.clone(),
             None,
             VerifiedReadAnswer::OutcomeMembership {
@@ -626,57 +653,42 @@ fn corpus() -> Vec<(TamperClass, VerifiedReadEnvelope)> {
                 outcome: Box::new(committed(2, 0x66)),
                 proof: Box::new(honest_outcome.proof.clone()),
             },
-        ),
+        )),
     ));
 
-    // CROSS-ROOT CONFUSION, and the reason this family earns its place: a
-    // genuine REF proof presented as an OUTCOME answer.
-    //
-    // The head is UNTOUCHED, which is the whole design of this case. The
-    // obvious version -- swap the head's outcome-index root for its ref root --
-    // is a head change, so the freshness floor refuses it before the verifier
-    // runs; measured, it came back detected by Freshness and the proof path was
-    // never reached. Leaving the head alone makes freshness pass and forces the
-    // envelope verifier to be the thing that answers, which is the only way to
-    // learn whether it checks a proof against the root its ANSWER TYPE names
-    // rather than whichever root happens to verify.
-    //
-    // No proof-structure class above can see this: they all ride the ref path,
-    // so a verifier that checked every outcome answer against `ref_root` would
-    // satisfy the entire pre-existing corpus.
     assert_ne!(
         base.head.ref_root, base.head.outcome_index_root,
         "the two roots must genuinely differ, or routing to the wrong one is undetectable"
     );
     cases.push((
         TamperClass::OutcomeRootConfusion,
-        VerifiedReadEnvelope::new(
+        CorpusEnvelope::V1(VerifiedReadEnvelope::new(
             honest_outcome.head.clone(),
             None,
             VerifiedReadAnswer::OutcomeMembership {
                 tx_id: honest_outcome.tx_id,
                 outcome: Box::new(honest_outcome.outcome),
-                // A real ref-membership proof, valid under `ref_root`, offered
-                // where an outcome-index proof belongs.
                 proof: Box::new(ref_proof_for_cross_root),
             },
-        ),
+        )),
     ));
 
-    // --- the object-closure family -------------------------------------
+    // --- the authority-bound object-closure family (Envelope V2) -------
     let honest_object = honest_object();
+    let witness = ObjectClosureWitness::SelectedCommitRecord(Box::new(honest_object.rcr.clone()));
 
     // Wrong object identity.
     cases.push((
         TamperClass::ObjectIdentity,
-        VerifiedReadEnvelope::new(
+        CorpusEnvelope::V2(VerifiedReadEnvelopeV2::new(
             honest_object.head.clone(),
             Some(good_config.clone()),
-            VerifiedReadAnswer::ObjectMembership {
+            VerifiedReadAnswerV2::ObjectMembership {
                 oid: oid(0x99),
+                witness: witness.clone(),
                 proof: Box::new(honest_object.proof.clone()),
             },
-        ),
+        )),
     ));
 
     // A flipped byte in the first sibling of object proof.
@@ -688,58 +700,61 @@ fn corpus() -> Vec<(TamperClass, VerifiedReadEnvelope)> {
     }
     cases.push((
         TamperClass::ObjectProofSibling,
-        VerifiedReadEnvelope::new(
+        CorpusEnvelope::V2(VerifiedReadEnvelopeV2::new(
             honest_object.head.clone(),
             Some(good_config.clone()),
-            VerifiedReadAnswer::ObjectMembership {
+            VerifiedReadAnswerV2::ObjectMembership {
                 oid: honest_object.queried,
+                witness: witness.clone(),
                 proof: Box::new(MerkleProof::new(
                     honest_object.proof.index(),
                     honest_object.proof.leaf_count(),
                     obj_siblings,
                 )),
             },
-        ),
+        )),
     ));
 
     // Wrong index in object proof.
     cases.push((
         TamperClass::ObjectProofIndex,
-        VerifiedReadEnvelope::new(
+        CorpusEnvelope::V2(VerifiedReadEnvelopeV2::new(
             honest_object.head.clone(),
             Some(good_config.clone()),
-            VerifiedReadAnswer::ObjectMembership {
+            VerifiedReadAnswerV2::ObjectMembership {
                 oid: honest_object.queried,
+                witness: witness.clone(),
                 proof: Box::new(MerkleProof::new(
                     honest_object.proof.index().saturating_add(1),
                     honest_object.proof.leaf_count(),
                     honest_object.proof.siblings().to_vec(),
                 )),
             },
-        ),
+        )),
     ));
 
     // Wrong leaf count in object proof.
     cases.push((
         TamperClass::ObjectProofLeafCount,
-        VerifiedReadEnvelope::new(
+        CorpusEnvelope::V2(VerifiedReadEnvelopeV2::new(
             honest_object.head.clone(),
             Some(good_config.clone()),
-            VerifiedReadAnswer::ObjectMembership {
+            VerifiedReadAnswerV2::ObjectMembership {
                 oid: honest_object.queried,
+                witness: witness.clone(),
                 proof: Box::new(MerkleProof::new(
                     honest_object.proof.index(),
                     honest_object.proof.leaf_count().saturating_add(2),
                     honest_object.proof.siblings().to_vec(),
                 )),
             },
-        ),
+        )),
     ));
 
     // Object proof presented as a ref membership proof.
     cases.push((
         TamperClass::ObjectRootConfusion,
-        VerifiedReadEnvelope::new(
+        CorpusEnvelope::V1(VerifiedReadEnvelope::new(
             honest_object.head.clone(),
             Some(good_config.clone()),
             membership(
@@ -747,7 +762,7 @@ fn corpus() -> Vec<(TamperClass, VerifiedReadEnvelope)> {
                 honest_object.queried,
                 honest_object.proof.clone(),
             ),
-        ),
+        )),
     ));
 
     // Non-membership proof with tampered predecessor neighbour.
@@ -775,14 +790,15 @@ fn corpus() -> Vec<(TamperClass, VerifiedReadEnvelope)> {
         .expect("authorized absence");
     cases.push((
         TamperClass::ObjectAbsencePredecessorTampered,
-        VerifiedReadEnvelope::new(
+        CorpusEnvelope::V2(VerifiedReadEnvelopeV2::new(
             honest_object.head.clone(),
             Some(good_config.clone()),
-            VerifiedReadAnswer::AuthorizedObjectAbsence {
+            VerifiedReadAnswerV2::AuthorizedObjectAbsence {
                 absence: absence.clone(),
+                witness: witness.clone(),
                 proof: Box::new(tampered_pred),
             },
-        ),
+        )),
     ));
 
     // Non-membership proof with tampered successor neighbour.
@@ -801,14 +817,48 @@ fn corpus() -> Vec<(TamperClass, VerifiedReadEnvelope)> {
     };
     cases.push((
         TamperClass::ObjectAbsenceSuccessorTampered,
-        VerifiedReadEnvelope::new(
-            honest_object.head,
-            Some(good_config),
-            VerifiedReadAnswer::AuthorizedObjectAbsence {
+        CorpusEnvelope::V2(VerifiedReadEnvelopeV2::new(
+            honest_object.head.clone(),
+            Some(good_config.clone()),
+            VerifiedReadAnswerV2::AuthorizedObjectAbsence {
                 absence,
+                witness,
                 proof: Box::new(tampered_succ),
             },
-        ),
+        )),
+    ));
+
+    // Forged commit-record witness substituted by the mirror for a forged proof.
+    let mut forged_rcr = honest_object.rcr.clone();
+    forged_rcr.object_closure_root =
+        object_closure_merkle_root(&[oid(0x99)]).expect("forged object closure root");
+    let forged_proof =
+        object_closure_membership_proof(&[oid(0x99)], &oid(0x99)).expect("forged proof");
+    cases.push((
+        TamperClass::ObjectCommitWitnessSubstituted,
+        CorpusEnvelope::V2(VerifiedReadEnvelopeV2::new(
+            honest_object.head.clone(),
+            Some(good_config.clone()),
+            VerifiedReadAnswerV2::ObjectMembership {
+                oid: oid(0x99),
+                witness: ObjectClosureWitness::SelectedCommitRecord(Box::new(forged_rcr)),
+                proof: Box::new(forged_proof),
+            },
+        )),
+    ));
+
+    // Genesis-empty witness claimed against a committed authority head.
+    cases.push((
+        TamperClass::ObjectGenesisWitnessOnCommittedHead,
+        CorpusEnvelope::V2(VerifiedReadEnvelopeV2::new(
+            honest_object.head,
+            Some(good_config),
+            VerifiedReadAnswerV2::ObjectMembership {
+                oid: honest_object.queried,
+                witness: ObjectClosureWitness::GenesisEmpty,
+                proof: Box::new(honest_object.proof),
+            },
+        )),
     ));
 
     cases
@@ -818,20 +868,11 @@ fn corpus() -> Vec<(TamperClass, VerifiedReadEnvelope)> {
 fn client() -> (HeadChainFloor, PinnedAuthorityHead) {
     let base = honest();
     let floor = HeadChainFloor::anchored_to(&base.head).expect("anchors");
-    let obj = honest_object();
-    (
-        floor,
-        PinnedAuthorityHead::new_with_object_closure(base.head, obj.object_closure_root),
-    )
+    (floor, PinnedAuthorityHead::new(base.head))
 }
 
 #[test]
 fn an_unsupported_envelope_version_cannot_even_be_constructed() {
-    // Stronger than "it is rejected at verification": the checked constructor
-    // refuses it, and `new` hardcodes V1, so there is no public path that
-    // produces an envelope carrying an unknown version. A mirror cannot present
-    // one at all. That is why this class is absent from the corpus rather than
-    // scored in it -- scoring it would imply it had reached the verifier.
     let base = honest();
     let refused = VerifiedReadEnvelope::from_versioned_parts(
         99,
@@ -844,13 +885,40 @@ fn an_unsupported_envelope_version_cannot_even_be_constructed() {
         Err(VerifiedReadRefusal::UnsupportedEnvelopeVersion { observed: 99 })
     ));
 
-    // The permitted twin at the exact boundary: version 1 constructs.
     assert!(
         VerifiedReadEnvelope::from_versioned_parts(
             1,
-            base.head,
+            base.head.clone(),
             Some(base.configuration.clone()),
-            membership(base.queried, base.oid, base.proof),
+            membership(base.queried.clone(), base.oid, base.proof.clone()),
+        )
+        .is_ok()
+    );
+
+    let refused_v2 = VerifiedReadEnvelopeV2::from_versioned_parts(
+        1,
+        base.head.clone(),
+        Some(base.configuration.clone()),
+        VerifiedReadAnswerV2::RefMembership {
+            name: base.queried.clone(),
+            oid: base.oid,
+            proof: Box::new(base.proof.clone()),
+        },
+    );
+    assert!(matches!(
+        refused_v2,
+        Err(VerifiedReadRefusal::UnsupportedEnvelopeVersion { observed: 1 })
+    ));
+    assert!(
+        VerifiedReadEnvelopeV2::from_versioned_parts(
+            2,
+            base.head,
+            Some(base.configuration),
+            VerifiedReadAnswerV2::RefMembership {
+                name: base.queried,
+                oid: base.oid,
+                proof: Box::new(base.proof),
+            },
         )
         .is_ok()
     );
@@ -858,10 +926,6 @@ fn an_unsupported_envelope_version_cannot_even_be_constructed() {
 
 #[test]
 fn the_corpus_covers_every_declared_tamper_class_exactly_once() {
-    // The denominator guard. Asserted BEFORE the rate, because a rate over an
-    // unpinned set says nothing: drop a class from `corpus()` and detection stays
-    // at 100% while coverage quietly falls. This is the assertion that fails
-    // instead.
     let mut present: Vec<TamperClass> = corpus().into_iter().map(|(class, _)| class).collect();
     let built = present.len();
     present.sort_unstable();
@@ -872,8 +936,6 @@ fn the_corpus_covers_every_declared_tamper_class_exactly_once() {
         present.len(),
         "a class appears twice in the corpus, which would double-count it in the rate"
     );
-    // Compile-time half: every declared class is named in the wildcard-free
-    // match, so a variant cannot be added without the build stopping there.
     for class in TamperClass::ALL {
         class.is_declared();
     }
@@ -891,10 +953,6 @@ fn the_corpus_covers_every_declared_tamper_class_exactly_once() {
         "the corpus must build exactly one case per declared class"
     );
 
-    // Emitted so the e2e can assert the TAMPER-CLASS count rather than the
-    // test-function count. Counting functions cannot see a class being deleted
-    // from `corpus()` -- the review's point -- because ten classes live inside
-    // one function. This marker is the denominator made visible one layer up.
     println!("fg037b.tamper_classes={}", TamperClass::ALL.len());
 }
 
@@ -915,16 +973,13 @@ fn every_tampered_answer_in_the_corpus_is_rejected() {
 
 #[test]
 fn the_honest_answer_is_accepted_so_the_rate_is_not_a_client_that_refuses_everything() {
-    // Without this, a 100% detection rate is equally satisfied by a verifier
-    // that rejects its own valid input, which would be a broken client rather
-    // than a safe one.
     let base = honest();
     let (floor, pinned) = client();
-    let genuine = VerifiedReadEnvelope::new(
+    let genuine = CorpusEnvelope::V1(VerifiedReadEnvelope::new(
         base.head.clone(),
         Some(base.configuration.clone()),
         membership(base.queried, base.oid, base.proof),
-    );
+    ));
     assert_eq!(
         combined_client(&floor, &pinned, &genuine),
         Detection::Accepted,
@@ -935,10 +990,6 @@ fn the_honest_answer_is_accepted_so_the_rate_is_not_a_client_that_refuses_everyt
 
 #[test]
 fn detections_are_spread_across_distinct_checks_not_funnelled_through_one() {
-    // The guard that makes the rate mean something. If every case were caught
-    // by the same refusal, the rate would not move if the other checks were
-    // deleted, and it would be reporting one assertion wearing a corpus
-    // costume.
     let (floor, pinned) = client();
     let mut by_class: BTreeMap<TamperClass, Detection> = BTreeMap::new();
     for (class, envelope) in corpus() {
@@ -947,57 +998,45 @@ fn detections_are_spread_across_distinct_checks_not_funnelled_through_one() {
 
     let distinct: std::collections::BTreeSet<&Detection> = by_class.values().collect();
     assert!(
-        distinct.len() >= 4,
+        distinct.len() >= 5,
         "detections funnelled through too few checks: {by_class:?}"
     );
 
-    // And the class that only freshness can catch must be attributed to it.
     assert_eq!(
         by_class.get(&TamperClass::StaleHeadReplay),
         Some(&Detection::Freshness),
         "a replayed valid head must be caught by the floor"
     );
+    assert_eq!(
+        by_class.get(&TamperClass::ObjectCommitWitnessSubstituted),
+        Some(&Detection::Envelope("ObjectWitnessHeadMismatch".to_owned())),
+        "a forged commit-record witness must be caught by authority-head RCR binding"
+    );
 }
 
 #[test]
 fn envelope_verification_alone_accepts_the_replay_which_is_why_freshness_exists() {
-    // The dependency made explicit. verify_envelope is CORRECT to accept this:
-    // the proof really is valid against the head it names. Detection requires
-    // memory of what the client already saw, which lives in the floor. Delete
-    // freshness.rs and the corpus rate drops below 100%; this is the assertion
-    // that would fail.
     let (_, pinned) = client();
-    let replay = corpus()
+    let CorpusEnvelope::V1(replay) = corpus()
         .into_iter()
         .find(|(class, _)| *class == TamperClass::StaleHeadReplay)
         .map(|(_, envelope)| envelope)
-        .expect("the corpus contains a replay case");
+        .expect("the corpus contains a replay case")
+    else {
+        panic!("stale head replay case uses a V1 envelope");
+    };
 
-    // Pinning the OLD head is what a client tricked into re-pinning would do,
-    // and then the envelope verifies perfectly.
     let old_pin = PinnedAuthorityHead::new(replay.head().clone());
     assert!(
         verify_envelope(&old_pin, &replay).is_ok(),
         "the replayed answer must be internally valid, or it is not a replay"
     );
 
-    // Against the client's actual pin it fails for a different reason -- the
-    // head does not match -- which is not the same protection: a client that
-    // re-pins on what the mirror hands it has no mismatch to notice.
     assert!(verify_envelope(&pinned, &replay).is_err());
 }
 
 #[test]
 fn an_outcome_envelope_is_checked_against_the_outcome_index_root_not_whichever_root_verifies() {
-    // Stated on its own because it is the one property of the outcome family
-    // that no ref-path case can reach, and because "detected" is not the claim
-    // -- "detected by the verifier, on the right root" is.
-    //
-    // The head is IDENTICAL in both halves, deliberately. Move it and the
-    // freshness floor answers first: the obvious version of this case swapped
-    // the head's outcome-index root for its ref root, and came back detected by
-    // Freshness with the proof path never reached. Holding the head still is
-    // what forces the envelope verifier to be the thing that answers.
     let base = honest();
     let outcome = honest_outcome();
     let pinned = PinnedAuthorityHead::new(base.head.clone());
@@ -1007,7 +1046,6 @@ fn an_outcome_envelope_is_checked_against_the_outcome_index_root_not_whichever_r
         "the two roots must differ, or routing to the wrong one could not be observed"
     );
 
-    // PERMITTED: the genuine outcome answer under the pinned head.
     let genuine = VerifiedReadEnvelope::new(
         outcome.head.clone(),
         None,
@@ -1020,13 +1058,8 @@ fn an_outcome_envelope_is_checked_against_the_outcome_index_root_not_whichever_r
     assert_eq!(
         verify_envelope(&pinned, &genuine),
         Ok(VerifiedMembership::Outcome),
-        "the honest outcome answer must verify, or the refusal below proves only that \
-         the verifier rejects everything"
     );
 
-    // REFUSED: a real ref-membership proof, valid under `ref_root`, offered
-    // where an outcome-index proof belongs. A verifier that tried each root
-    // until one matched would accept this.
     let cross_root = VerifiedReadEnvelope::new(
         base.head.clone(),
         None,
@@ -1042,9 +1075,6 @@ fn an_outcome_envelope_is_checked_against_the_outcome_index_root_not_whichever_r
         "a ref proof presented as an outcome answer must be refused"
     );
 
-    // And the mirror, so this is a statement about ROUTING rather than about
-    // outcome answers being fussy: the genuine OUTCOME proof offered as a REF
-    // answer is refused too.
     let mirrored = VerifiedReadEnvelope::new(
         base.head.clone(),
         Some(base.configuration.clone()),
@@ -1059,18 +1089,6 @@ fn an_outcome_envelope_is_checked_against_the_outcome_index_root_not_whichever_r
 
 #[test]
 fn a_v1_configuration_cannot_stand_in_for_the_incarnation_body_the_head_selected() {
-    // The variant a real node actually serves, which the corpus above never
-    // reaches. `OneNode`'s genesis publishes a
-    // `RepositoryIncarnationConfigurationBody`, so a production envelope
-    // carries `RepositoryIncarnationV2`; every case in the corpus carries
-    // `RepositoryV1`, because `VerifiedReadEnvelope::new` wraps it that way.
-    //
-    // NOT IN THE CORPUS, deliberately. A head whose `configuration_root` names
-    // a different body is a different head, so the freshness floor answers
-    // first: measured, the corpus version came back detected by Freshness with
-    // the verifier never consulted, which made it an unlabelled duplicate of
-    // `HeadConfigurationRoot` rather than a new class. Giving it its own pinned
-    // head is what lets the configuration check be the thing that answers.
     let incarnation = incarnation_configuration();
     let pinned_head = head(
         2,
@@ -1081,23 +1099,13 @@ fn a_v1_configuration_cannot_stand_in_for_the_incarnation_body_the_head_selected
     let pinned = PinnedAuthorityHead::new(pinned_head.clone());
     let base = honest();
 
-    // THE SEPARATION THIS RESTS ON, asserted rather than assumed. The two
-    // configuration bodies share a DOMAIN ("frankengit/repository-configuration/v1")
-    // AND a SCHEMA_FAMILY ("repository-configuration"); only SCHEMA_MAJOR
-    // differs, 1 against 2. So nothing but the schema major reaching the digest
-    // keeps a v1 body from standing in for a v2 one, and every other
-    // configuration case in this file substitutes one v1 body for another,
-    // which cannot test that.
     let v1_identity = body_id(&CryptoBodyIdentity, &base.configuration).expect("v1 identifies");
     let v2_identity = body_id(&CryptoBodyIdentity, &incarnation).expect("v2 identifies");
     assert_ne!(
         (v1_identity.algorithm(), v1_identity.digest()),
         (v2_identity.algorithm(), v2_identity.digest()),
-        "the two configuration schemas share a domain and family, so if the major did not \
-         reach the digest a v1 body could impersonate the incarnation the head bound"
     );
 
-    // PERMITTED: the exact incarnation body the head selected.
     let genuine = VerifiedReadEnvelope::new_with_exact_configuration(
         pinned_head.clone(),
         Some(VerifiedReadConfiguration::RepositoryIncarnationV2(
@@ -1108,12 +1116,8 @@ fn a_v1_configuration_cannot_stand_in_for_the_incarnation_body_the_head_selected
     assert_eq!(
         verify_envelope(&pinned, &genuine),
         Ok(VerifiedMembership::Ref),
-        "the incarnation-bound answer must verify, or the refusal below proves only that \
-         this head rejects everything"
     );
 
-    // REFUSED: a v1 body in its place, carrying the same root layout so the
-    // substitution is otherwise invisible.
     let swapped = VerifiedReadEnvelope::new(
         pinned_head,
         Some(base.configuration.clone()),
@@ -1122,7 +1126,6 @@ fn a_v1_configuration_cannot_stand_in_for_the_incarnation_body_the_head_selected
     assert_eq!(
         verify_envelope(&pinned, &swapped),
         Err(VerifiedReadRefusal::ConfigurationRootMismatch),
-        "a v1 configuration must not satisfy a head that bound an incarnation"
     );
 }
 
@@ -1130,18 +1133,20 @@ fn a_v1_configuration_cannot_stand_in_for_the_incarnation_body_the_head_selected
 fn the_honest_object_answers_are_accepted() {
     let (floor, pinned) = client();
     let obj = honest_object();
-    let genuine_membership = VerifiedReadEnvelope::new(
+    let witness = ObjectClosureWitness::SelectedCommitRecord(Box::new(obj.rcr));
+    let genuine_membership = CorpusEnvelope::V2(VerifiedReadEnvelopeV2::new(
         obj.head.clone(),
         Some(honest().configuration),
-        VerifiedReadAnswer::ObjectMembership {
+        VerifiedReadAnswerV2::ObjectMembership {
             oid: obj.queried,
+            witness: witness.clone(),
             proof: Box::new(obj.proof),
         },
-    );
+    ));
     assert_eq!(
         combined_client(&floor, &pinned, &genuine_membership),
         Detection::Accepted,
-        "the client must accept honest object membership"
+        "the client must accept honest authority-bound object membership"
     );
 
     let absence_target = oid(0x25);
@@ -1152,53 +1157,84 @@ fn the_honest_object_answers_are_accepted() {
             false
         })
         .expect("authorized absence");
-    let genuine_absence = VerifiedReadEnvelope::new(
+    let genuine_absence = CorpusEnvelope::V2(VerifiedReadEnvelopeV2::new(
         obj.head,
         Some(honest().configuration),
-        VerifiedReadAnswer::AuthorizedObjectAbsence {
+        VerifiedReadAnswerV2::AuthorizedObjectAbsence {
             absence,
+            witness,
             proof: Box::new(absence_proof),
         },
-    );
+    ));
     assert_eq!(
         combined_client(&floor, &pinned, &genuine_absence),
         Detection::Accepted,
-        "the client must accept honest object absence"
+        "the client must accept honest authority-bound object absence"
     );
 }
 
 #[test]
-fn an_object_envelope_is_checked_against_the_object_closure_root() {
+fn an_object_envelope_is_checked_against_the_authority_bound_commit_witness() {
     let base = honest();
     let obj = honest_object();
-    let pinned =
-        PinnedAuthorityHead::new_with_object_closure(base.head.clone(), obj.object_closure_root);
+    let pinned = PinnedAuthorityHead::new(base.head.clone());
 
-    // Permitted: genuine object membership
-    let genuine = VerifiedReadEnvelope::new(
+    let genuine = VerifiedReadEnvelopeV2::new(
         base.head.clone(),
         Some(base.configuration.clone()),
-        VerifiedReadAnswer::ObjectMembership {
+        VerifiedReadAnswerV2::ObjectMembership {
             oid: obj.queried,
+            witness: ObjectClosureWitness::SelectedCommitRecord(Box::new(obj.rcr.clone())),
+            proof: Box::new(obj.proof.clone()),
+        },
+    );
+    assert_eq!(
+        verify_envelope_v2(&pinned, &genuine),
+        Ok(VerifiedMembership::Object),
+    );
+
+    // Refused: non-authority-bound layout (`RefStateAndObjectClosureMerkleV2`) cannot verify object proofs.
+    let legacy_config = RepositoryConfigurationBody {
+        root_layout: RootLayoutVersion::RefStateAndObjectClosureMerkleV2,
+        object_format: GitHashAlgorithm::Sha1,
+        hidden_ref_rules: Vec::new(),
+    };
+    let mut legacy_head = base.head.clone();
+    legacy_head.configuration_root = configuration_root(&legacy_config);
+    let mut legacy_rcr = obj.rcr.clone();
+    let legacy_rcr_id = RepositoryCommitId::from_internal_object_id(
+        body_id(&CryptoBodyIdentity, &legacy_rcr).unwrap(),
+    )
+    .unwrap();
+    legacy_head.latest_committed_rcr_id = Some(legacy_rcr_id);
+    let legacy_pin = PinnedAuthorityHead::new(legacy_head.clone());
+    let legacy_envelope = VerifiedReadEnvelopeV2::new(
+        legacy_head,
+        Some(legacy_config),
+        VerifiedReadAnswerV2::ObjectMembership {
+            oid: obj.queried,
+            witness: ObjectClosureWitness::SelectedCommitRecord(Box::new(legacy_rcr.clone())),
+            proof: Box::new(obj.proof.clone()),
+        },
+    );
+    assert!(matches!(
+        verify_envelope_v2(&legacy_pin, &legacy_envelope),
+        Err(VerifiedReadRefusal::ObjectLayout(_))
+    ));
+
+    // Refused: tampered object_closure_root inside carried commit record fails head RCR ID binding.
+    legacy_rcr.object_closure_root = digest(0xEE);
+    let tampered_witness = VerifiedReadEnvelopeV2::new(
+        base.head,
+        Some(base.configuration),
+        VerifiedReadAnswerV2::ObjectMembership {
+            oid: obj.queried,
+            witness: ObjectClosureWitness::SelectedCommitRecord(Box::new(legacy_rcr)),
             proof: Box::new(obj.proof),
         },
     );
     assert_eq!(
-        verify_envelope(&pinned, &genuine),
-        Ok(VerifiedMembership::Object),
-    );
-
-    // Refused: without object_closure_root on pin
-    let pin_without_obj = PinnedAuthorityHead::new(base.head.clone());
-    assert_eq!(
-        verify_envelope(&pin_without_obj, &genuine),
-        Err(VerifiedReadRefusal::ObjectClosureRootUnavailable),
-    );
-
-    // Refused: wrong object closure root on pin
-    let pin_wrong_root = PinnedAuthorityHead::new_with_object_closure(base.head, digest(0xEE));
-    assert_eq!(
-        verify_envelope(&pin_wrong_root, &genuine),
-        Err(VerifiedReadRefusal::ProofRejected),
+        verify_envelope_v2(&pinned, &tampered_witness),
+        Err(VerifiedReadRefusal::ObjectWitnessHeadMismatch),
     );
 }

@@ -701,6 +701,14 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for NodeNativeMergeProjecti
             .materialize_commit_async(authority, cx, basis, request, fold, closure)
     }
 
+    fn expected_commit_closure_root(
+        &self,
+        basis: &PublicationBasis,
+        closure: &ValidatedClosure,
+    ) -> Result<fgit_types::Digest, ProjectionFailure> {
+        self.inner.expected_commit_closure_root(basis, closure)
+    }
+
     fn materialize_refusal_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
@@ -874,6 +882,7 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
         Ok(NativeMergeBasis {
             refs: prepared.ref_state,
             root_layout: prepared.root_layout,
+            selected_closure: prepared.selected_closure,
             forge: delivery.forge,
             outbox: delivery.outbox,
         })

@@ -182,6 +182,7 @@ fn fold_fixture(
             (source_ref.clone(), *head_tip),
             (command.target_ref.clone(), *expected_target_tip),
         ])),
+        selected_closure: crate::PermittedObjectClosure::default(),
         root_layout: RootLayoutVersion::LegacyWholeBody,
         forge: CanonicalForgePositionState::try_new(
             context.repository_id,

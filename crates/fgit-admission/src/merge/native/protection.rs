@@ -1482,10 +1482,10 @@ where
     if policy_root == existing.policy_root {
         return Err(unavailable(RefusalCode::EvidenceInvalid));
     }
-    let empty_closure = PermittedObjectClosure::default();
-    let object_closure_root =
-        crate::permitted_object_closure_root(&empty_closure).map_err(unavailable)?;
-    let closure_frame = fgit_codec::encode_body(&empty_closure)
+    let (carried_closure, object_closure_root) =
+        storage::read_carried_object_closure(store, cx, &basis, existing.root_layout, &|| false)
+            .await?;
+    let closure_frame = fgit_codec::encode_body(&carried_closure)
         .map_err(|_| unavailable(RefusalCode::CanonicalFramingInvalid))?;
     match store
         .put_if_absent(

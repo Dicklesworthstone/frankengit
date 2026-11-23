@@ -11,6 +11,7 @@ fn layouts_pin_wire_codes_proof_families_and_head_commitment() {
             0,
             false,
             false,
+            false,
             true,
             false,
         ),
@@ -18,6 +19,7 @@ fn layouts_pin_wire_codes_proof_families_and_head_commitment() {
             RootLayoutVersion::RefStateMerkleV1,
             1,
             true,
+            false,
             false,
             false,
             false,
@@ -29,11 +31,13 @@ fn layouts_pin_wire_codes_proof_families_and_head_commitment() {
             true,
             false,
             false,
+            false,
         ),
         (
             RootLayoutVersion::RefStateMerkleV2,
             4,
             true,
+            false,
             false,
             true,
             true,
@@ -43,12 +47,22 @@ fn layouts_pin_wire_codes_proof_families_and_head_commitment() {
             5,
             true,
             true,
+            false,
+            true,
+            true,
+        ),
+        (
+            RootLayoutVersion::AuthorityBoundObjectClosureMerkleV2,
+            6,
+            true,
+            true,
+            true,
             true,
             true,
         ),
     ];
     assert_eq!(RootLayoutVersion::ALL.len(), expectations.len());
-    for (index, (layout, code, refs, objects, head, head_merkle)) in
+    for (index, (layout, code, refs, objects, authority_objects, head, head_merkle)) in
         expectations.into_iter().enumerate()
     {
         assert_eq!(RootLayoutVersion::ALL[index], layout);
@@ -56,6 +70,10 @@ fn layouts_pin_wire_codes_proof_families_and_head_commitment() {
         assert_eq!(RootLayoutVersion::from_code_point(code), Ok(layout));
         assert_eq!(layout.admits_ref_state_membership_proof(), refs);
         assert_eq!(layout.admits_object_closure_membership_proof(), objects);
+        assert_eq!(
+            layout.commits_authority_object_closure_merkle(),
+            authority_objects
+        );
         assert_eq!(layout.commits_head_target(), head);
         assert_eq!(layout.uses_head_aware_ref_merkle(), head_merkle);
     }
@@ -67,7 +85,7 @@ fn layouts_pin_wire_codes_proof_families_and_head_commitment() {
 
 #[test]
 fn reserved_forge_code_and_unknown_codes_are_not_claimed_by_head_layouts() {
-    for code in [3, 6, u16::MAX] {
+    for code in [3, 7, u16::MAX] {
         assert_eq!(
             RootLayoutVersion::from_code_point(code),
             Err(TypeRefusal::CodePointUnknown {

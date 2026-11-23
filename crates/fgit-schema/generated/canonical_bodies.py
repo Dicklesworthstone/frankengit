@@ -132,6 +132,22 @@ class RepositoryIncarnationConfigurationV21:
 
 
 @dataclass(frozen=True, slots=True)
+class RepositoryIncarnationConfigurationV22:
+    """Version-2.2 repository configuration carrying incarnation identity, optional policy root, and optional capability-revocation root."""
+
+    # Authenticated root layout needed to interpret the head roots.
+    root_layout: int
+    # Permanent native Git object identity algorithm.
+    object_format: int
+    # Minted incarnation preventing a delete/recreate location alias.
+    repository_incarnation_id: str
+    # Policy root bound to this incarnation, absent when none is published.
+    policy_root: Digest | None = None
+    # Capability-revocation generation root bound to this incarnation, absent when none is published.
+    capability_revocation_root: Digest | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class DecisionOutcomeCommitted:
     """The decision committed, naming the record it produced."""
 
@@ -187,8 +203,18 @@ class VerifiedReadConfigurationRepositoryIncarnationV2_1:
     body: RepositoryIncarnationConfigurationV21
 
 
+@dataclass(frozen=True, slots=True)
+class VerifiedReadConfigurationRepositoryIncarnationV2_2:
+    """RepositoryIncarnationConfigurationBodyV2_2 schema v2.2, carrying policy and capability-revocation roots."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 4
+    # Exact V2.2 configuration payload, without a nested canonical frame.
+    body: RepositoryIncarnationConfigurationV22
+
+
 # A version-tagged configuration body, inlined only when the answer needs one.
-VerifiedReadConfiguration = VerifiedReadConfigurationRepositoryV1 | VerifiedReadConfigurationRepositoryIncarnationV2 | VerifiedReadConfigurationRepositoryIncarnationV2_1
+VerifiedReadConfiguration = VerifiedReadConfigurationRepositoryV1 | VerifiedReadConfigurationRepositoryIncarnationV2 | VerifiedReadConfigurationRepositoryIncarnationV2_1 | VerifiedReadConfigurationRepositoryIncarnationV2_2
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,6 +355,160 @@ class ObjectClosureNonMembershipProofAfterLast:
 
 # An absence proof selected by the requested object identity's ordered position.
 ObjectClosureNonMembershipProof = ObjectClosureNonMembershipProofEmptyClosure | ObjectClosureNonMembershipProofBeforeFirst | ObjectClosureNonMembershipProofBetween | ObjectClosureNonMembershipProofAfterLast
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectClosureWitnessGenesisEmpty:
+    """Genesis empty closure when latest_committed_rcr_id and latest_repository_sequence are absent."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectClosureWitnessSelectedCommitRecord:
+    """The committed RepositoryCommitRecord whose identity equals pinned.latest_committed_rcr_id."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 1
+    # Exact RepositoryCommitRecord payload carrying object_closure_root.
+    record: RcrV1
+
+
+# Authority-bound witness deriving object_closure_root strictly from the client-pinned authority head.
+ObjectClosureWitness = ObjectClosureWitnessGenesisEmpty | ObjectClosureWitnessSelectedCommitRecord
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedReadAnswerV2RefMembership:
+    """One named ref and a path proving its membership in the pinned ref root."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 1
+    # Validated claimed ref-name bytes.
+    name: str
+    # Claimed native object identity.
+    oid: GitOid
+    # Membership path for the named ref leaf.
+    proof: VerifiedReadMerkleProofPayload
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedReadAnswerV2OutcomeMembership:
+    """One terminal decision and a path proving its outcome-index membership."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 2
+    # Canonical terminal decision selected by the transaction identity.
+    decision: RepositoryDecision
+    # Membership path for the canonical outcome leaf.
+    proof: VerifiedReadMerkleProofPayload
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedReadAnswerV2AuthorizedRefAbsence:
+    """A disclosure-authorized requested name and ordered non-membership witness."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 3
+    # Validated requested ref-name bytes; authorization happened before lookup.
+    name: str
+    # Ordered absence witness under the pinned ref root.
+    proof: RefStateNonMembershipProof
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedReadAnswerV2ObjectMembership:
+    """One object identity, its authority-bound commit witness, and its Merkle membership proof."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 4
+    # Claimed native object identity.
+    oid: GitOid
+    # Authority-bound witness selecting object_closure_root from the pinned head.
+    witness: ObjectClosureWitness
+    # Membership path for the object leaf.
+    proof: VerifiedReadMerkleProofPayload
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedReadAnswerV2AuthorizedObjectAbsence:
+    """A disclosure-authorized absent object identity, its authority-bound commit witness, and its ordered Merkle non-membership proof."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 5
+    # Requested absent object identity; authorization happened before lookup.
+    oid: GitOid
+    # Authority-bound witness selecting object_closure_root from the pinned head.
+    witness: ObjectClosureWitness
+    # Ordered absence witness under the authority-bound object closure root.
+    proof: ObjectClosureNonMembershipProof
+
+
+# One V2 proof answer including authority-bound object membership and absence variants.
+VerifiedReadAnswerV2 = VerifiedReadAnswerV2RefMembership | VerifiedReadAnswerV2OutcomeMembership | VerifiedReadAnswerV2AuthorizedRefAbsence | VerifiedReadAnswerV2ObjectMembership | VerifiedReadAnswerV2AuthorizedObjectAbsence
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedReadCapabilityUnproven:
+    """Client accepts unproven answers without Merkle witnesses."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 0
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedReadCapabilityEnvelopeV1:
+    """Client accepts V1 ref and outcome proof envelopes."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 1
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedReadCapabilityEnvelopeV2:
+    """Client accepts V2 ref, outcome, and authority-bound object proof envelopes."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 2
+
+
+# Client-advertised verified-read response capability tier.
+VerifiedReadCapability = VerifiedReadCapabilityUnproven | VerifiedReadCapabilityEnvelopeV1 | VerifiedReadCapabilityEnvelopeV2
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedReadQueryTargetRef:
+    """Query membership or authorized absence of one ref name."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 1
+    # Validated requested ref-name bytes.
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedReadQueryTargetOutcome:
+    """Query terminal outcome membership for one transaction identity."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 2
+    # Requested sealed transaction identity.
+    tx_id: DerivedId
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedReadQueryTargetObject:
+    """Query membership or authorized absence of one native object identity."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 3
+    # Requested native object identity.
+    oid: GitOid
+
+
+# Tagged question target inside a verified-read query envelope.
+VerifiedReadQueryTarget = VerifiedReadQueryTargetRef | VerifiedReadQueryTargetOutcome | VerifiedReadQueryTargetObject
 
 
 @dataclass(frozen=True, slots=True)
@@ -551,6 +731,38 @@ class VerifiedReadEnvelopeV1:
 
 
 @dataclass(frozen=True, slots=True)
+class VerifiedReadEnvelopeV2V2:
+    """A version-two relayed answer whose ref, outcome, or authority-bound object proof verifies strictly against the client's pinned authority head.
+
+    schema verified-read-envelope-v2 v2.0, domain frankengit/verified-read-envelope/v2
+    """
+
+    # Verified-read envelope grammar version; V2 (2) is the only accepted value for this family.
+    version: int
+    # Carried authority head, compared byte-for-byte to the client pin.
+    head: AuthorityHeadV1
+    # The ref, outcome, or authority-bound object membership/absence claim and its witness.
+    answer: VerifiedReadAnswerV2
+    # Exact optional configuration body required to interpret the selected root layout.
+    configuration: VerifiedReadConfiguration | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedReadQueryV1:
+    """A canonical verified-read query carrying the client capability tier and ref, outcome, or object target.
+
+    schema verified-read-query v1.0, domain frankengit/verified-read-query/v1
+    """
+
+    # Verified-read query grammar version; V1 (1) is the only accepted value.
+    version: int
+    # Maximum verified-read response capability accepted by the querying client.
+    capability: VerifiedReadCapability
+    # The ref, outcome, or object question being asked.
+    target: VerifiedReadQueryTarget
+
+
+@dataclass(frozen=True, slots=True)
 class RepositoryCreationAttemptV1:
     """One attempt to create a repository, keyed so a retry is recognisable as the same attempt.
 
@@ -647,6 +859,8 @@ WIRE_ORDER: dict[str, tuple[str, ...]] = {
     "VerifiedReadRefNonMembershipProofV1": ("proof",),
     "VerifiedReadObjectNonMembershipProofV1": ("proof",),
     "VerifiedReadEnvelopeV1": ("version", "head", "configuration", "answer",),
+    "VerifiedReadEnvelopeV2V2": ("version", "head", "configuration", "answer",),
+    "VerifiedReadQueryV1": ("version", "capability", "target",),
     "RepositoryCreationAttemptV1": ("tenant_id", "repository_id", "root_layout", "object_format", "idempotency_key_digest", "repository_incarnation_id",),
     "HiddenRefPolicyV1": ("rules",),
     "OutboxDeliveryReceiptV1": ("repository_id", "delivery_key", "destination", "payload_root", "predecessor_effect_state_root", "disposition", "evidence",),

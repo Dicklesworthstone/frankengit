@@ -146,6 +146,18 @@ pub enum RootLayoutVersion {
     /// admitted by `RefStateAndObjectClosureMerkleV1`. Its object-closure
     /// adoption and authority-binding obligations remain unchanged. Wire code 5.
     RefStateAndObjectClosureMerkleV2,
+    /// Everything [`Self::RefStateAndObjectClosureMerkleV2`] admits, **plus**
+    /// authority-bound cumulative Merkle commitment of `object_closure_root` in
+    /// every committed `RepositoryCommitRecord` (and empty-set commitment at
+    /// genesis when `latest_committed_rcr_id` is `None`).
+    ///
+    /// Wire code point **6** (code point 3 remains reserved for
+    /// `forge_position_root`). Earlier code points `2` and `5` keep their exact
+    /// historical per-decision whole-body `object_closure_root` meaning and are
+    /// never reinterpreted in place; only heads published under this layout bind
+    /// verified object-membership and ordered-absence proofs to the authority
+    /// head without an external side digest.
+    AuthorityBoundObjectClosureMerkleV2,
 }
 
 impl RootLayoutVersion {
@@ -156,6 +168,7 @@ impl RootLayoutVersion {
         Self::RefStateAndObjectClosureMerkleV1,
         Self::RefStateMerkleV2,
         Self::RefStateAndObjectClosureMerkleV2,
+        Self::AuthorityBoundObjectClosureMerkleV2,
     ];
 
     /// Compile-time completeness guard for [`RootLayoutVersion::ALL`].
@@ -179,7 +192,8 @@ impl RootLayoutVersion {
             | Self::RefStateMerkleV1
             | Self::RefStateAndObjectClosureMerkleV1
             | Self::RefStateMerkleV2
-            | Self::RefStateAndObjectClosureMerkleV2 => (),
+            | Self::RefStateAndObjectClosureMerkleV2
+            | Self::AuthorityBoundObjectClosureMerkleV2 => (),
         }
     }
 
@@ -192,6 +206,7 @@ impl RootLayoutVersion {
             Self::RefStateAndObjectClosureMerkleV1 => 2,
             Self::RefStateMerkleV2 => 4,
             Self::RefStateAndObjectClosureMerkleV2 => 5,
+            Self::AuthorityBoundObjectClosureMerkleV2 => 6,
         }
     }
 
@@ -225,13 +240,14 @@ impl RootLayoutVersion {
             Self::RefStateMerkleV1
             | Self::RefStateAndObjectClosureMerkleV1
             | Self::RefStateMerkleV2
-            | Self::RefStateAndObjectClosureMerkleV2 => true,
+            | Self::RefStateAndObjectClosureMerkleV2
+            | Self::AuthorityBoundObjectClosureMerkleV2 => true,
         }
     }
 
     /// Whether this layout admits a membership proof for the object closure.
     ///
-    /// Only the two `RefStateAndObjectClosureMerkle` layouts do.
+    /// Only the object-closure Merkle layouts (`2`, `5`, and `6`) do.
     /// [`Self::LegacyWholeBody`] does not because a whole-body digest cannot be
     /// walked with a sibling path — and [`Self::RefStateMerkleV1`] does not for
     /// exactly the same reason: it advances the *ref state* only, and its own
@@ -251,7 +267,30 @@ impl RootLayoutVersion {
     pub const fn admits_object_closure_membership_proof(self) -> bool {
         match self {
             Self::LegacyWholeBody | Self::RefStateMerkleV1 | Self::RefStateMerkleV2 => false,
-            Self::RefStateAndObjectClosureMerkleV1 | Self::RefStateAndObjectClosureMerkleV2 => true,
+            Self::RefStateAndObjectClosureMerkleV1
+            | Self::RefStateAndObjectClosureMerkleV2
+            | Self::AuthorityBoundObjectClosureMerkleV2 => true,
+        }
+    }
+
+    /// Whether every committed `RepositoryCommitRecord::object_closure_root`
+    /// under this layout is the domain-separated Merkle apex of the repository's
+    /// cumulative admitted object closure, binding object-membership and
+    /// ordered-absence proofs directly to `RepositoryAuthorityHead`.
+    ///
+    /// Layouts `2` and `5` admit the cryptographic proof family in `fgit-crypto`
+    /// while publishing whole-body per-decision closure roots in `RCR`s; they
+    /// return `false` here so authority-bound verifiers refuse them cleanly
+    /// without reinterpreting historical heads.
+    #[must_use]
+    pub const fn commits_authority_object_closure_merkle(self) -> bool {
+        match self {
+            Self::AuthorityBoundObjectClosureMerkleV2 => true,
+            Self::LegacyWholeBody
+            | Self::RefStateMerkleV1
+            | Self::RefStateAndObjectClosureMerkleV1
+            | Self::RefStateMerkleV2
+            | Self::RefStateAndObjectClosureMerkleV2 => false,
         }
     }
 
@@ -263,7 +302,8 @@ impl RootLayoutVersion {
         match self {
             Self::LegacyWholeBody
             | Self::RefStateMerkleV2
-            | Self::RefStateAndObjectClosureMerkleV2 => true,
+            | Self::RefStateAndObjectClosureMerkleV2
+            | Self::AuthorityBoundObjectClosureMerkleV2 => true,
             Self::RefStateMerkleV1 | Self::RefStateAndObjectClosureMerkleV1 => false,
         }
     }
@@ -273,7 +313,9 @@ impl RootLayoutVersion {
     #[must_use]
     pub const fn uses_head_aware_ref_merkle(self) -> bool {
         match self {
-            Self::RefStateMerkleV2 | Self::RefStateAndObjectClosureMerkleV2 => true,
+            Self::RefStateMerkleV2
+            | Self::RefStateAndObjectClosureMerkleV2
+            | Self::AuthorityBoundObjectClosureMerkleV2 => true,
             Self::LegacyWholeBody
             | Self::RefStateMerkleV1
             | Self::RefStateAndObjectClosureMerkleV1 => false,

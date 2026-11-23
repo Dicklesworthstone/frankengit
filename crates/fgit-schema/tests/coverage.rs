@@ -72,6 +72,8 @@ fn families_by_type() -> BTreeSet<String> {
     families
         .insert(fgit_verified_read::ObjectClosureNonMembershipProofBody::SCHEMA_FAMILY.to_string());
     families.insert(fgit_verified_read::VerifiedReadEnvelope::SCHEMA_FAMILY.to_string());
+    families.insert(fgit_verified_read::VerifiedReadEnvelopeV2::SCHEMA_FAMILY.to_string());
+    families.insert(fgit_verified_read::VerifiedReadQueryEnvelope::SCHEMA_FAMILY.to_string());
     families.insert(fgit_verified_read::blob::VerifiedBlobEnvelope::SCHEMA_FAMILY.to_string());
     families
 }

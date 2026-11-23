@@ -4,13 +4,14 @@
 use fgit_authority::{TerminalOutcome, outcome_index_proof, outcome_index_root};
 use fgit_codec::{
     CryptoBodyIdentity, DecodeLimits, RepositoryAuthorityHeadBody, RepositoryConfigurationBody,
-    body_id, canonical_body_bytes, decode_body, encode_body, split_frame,
+    body_id, canonical_body_bytes, decode_body, encode_body, harness::commit_record, split_frame,
 };
 use fgit_codec_verify::parse_frame;
 use fgit_crypto::{
-    IdentityDomain, MerkleProof, RefStateNonMembershipProof, object_closure_membership_proof,
-    object_closure_merkle_root, object_closure_non_membership_proof, ref_state_membership_proof,
-    ref_state_merkle_root, ref_state_non_membership_proof,
+    IdentityDomain, MerkleProof, ObjectClosureNeighbour, ObjectClosureNonMembershipProof,
+    RefStateNonMembershipProof, object_closure_membership_proof, object_closure_merkle_root,
+    object_closure_non_membership_proof, ref_state_membership_proof, ref_state_merkle_root,
+    ref_state_merkle_root_v2, ref_state_non_membership_proof,
 };
 use fgit_types::CANONICAL_CODEC_VERSION;
 use fgit_types::hash::{Digest, DigestBytes};
@@ -21,13 +22,18 @@ use fgit_types::numeric::{DecisionSequence, HeadGeneration, PolicyEpoch, Registr
 use fgit_types::refs::RefName;
 use fgit_types::vocabulary::DecisionOutcome;
 use fgit_verified_read::{
-    MerkleProofBody, ObjectClosureNonMembershipProofBody, ObjectDisclosurePolicy,
-    PinnedAuthorityHead, RefDisclosurePolicy, RefStateNonMembershipProofBody, VerifiedMembership,
-    VerifiedReadAnswer, VerifiedReadEnvelope, VerifiedReadRefusal, authorize_object_absence,
-    authorize_ref_absence, decode_merkle_proof, decode_object_closure_non_membership_proof,
-    decode_ref_state_non_membership_proof, decode_verified_read_envelope, encode_merkle_proof,
-    encode_object_closure_non_membership_proof, encode_ref_state_non_membership_proof,
-    encode_verified_read_envelope, verify_envelope,
+    MerkleProofBody, ObjectClosureNonMembershipProofBody, ObjectClosureWitness,
+    ObjectDisclosurePolicy, PinnedAuthorityHead, RefDisclosurePolicy,
+    RefStateNonMembershipProofBody, VerifiedMembership, VerifiedReadAnswer, VerifiedReadAnswerV2,
+    VerifiedReadCapability, VerifiedReadEnvelope, VerifiedReadEnvelopeV2,
+    VerifiedReadQueryEnvelope, VerifiedReadQueryTarget, VerifiedReadRefusal,
+    authorize_object_absence, authorize_ref_absence, decode_merkle_proof,
+    decode_object_closure_non_membership_proof, decode_ref_state_non_membership_proof,
+    decode_verified_read_envelope, decode_verified_read_envelope_v2, decode_verified_read_query,
+    encode_merkle_proof, encode_object_closure_non_membership_proof,
+    encode_ref_state_non_membership_proof, encode_verified_read_envelope,
+    encode_verified_read_envelope_v2, encode_verified_read_query, verify_envelope,
+    verify_envelope_v2,
 };
 
 struct AllowAll;
@@ -90,13 +96,12 @@ fn v1_configuration() -> (RepositoryConfigurationBody, Digest) {
     )
 }
 
-/// The cumulative layout: only `RefStateAndObjectClosureMerkleV1` admits
-/// object-closure proofs, so the object round-trip must pin a head that
-/// selected it. The ref fixture keeps `v1_configuration` so the ref-only
-/// layout stays covered on the wire too.
-fn combined_configuration() -> (RepositoryConfigurationBody, Digest) {
+/// Authority-bound object-closure layout: only
+/// `AuthorityBoundObjectClosureMerkleV2` admits authority-bound object proofs
+/// over the wire.
+fn authority_bound_configuration() -> (RepositoryConfigurationBody, Digest) {
     let configuration = RepositoryConfigurationBody {
-        root_layout: RootLayoutVersion::RefStateAndObjectClosureMerkleV1,
+        root_layout: RootLayoutVersion::AuthorityBoundObjectClosureMerkleV2,
         object_format: GitHashAlgorithm::Sha1,
         hidden_ref_rules: Vec::new(),
     };
@@ -238,6 +243,75 @@ fn committed_goldens_bind_the_envelope_and_both_proof_body_encodings() {
         )
         .expect("envelope golden re-encodes"),
         envelope_wire
+    );
+
+    let obj_absence =
+        ObjectClosureNonMembershipProofBody::new(ObjectClosureNonMembershipProof::Between {
+            predecessor: Box::new(ObjectClosureNeighbour::new(
+                oid(0x11),
+                MerkleProof::new(0, 1, Vec::new()),
+            )),
+            successor: Box::new(ObjectClosureNeighbour::new(
+                oid(0x22),
+                MerkleProof::new(0, 1, Vec::new()),
+            )),
+        });
+    let obj_absence_wire = golden_bytes(include_str!("goldens/object-non-membership-proof-v1.hex"));
+    assert_eq!(
+        encode_body(&obj_absence).expect("object absence golden encodes"),
+        obj_absence_wire
+    );
+    assert_eq!(
+        encode_body(
+            &decode_body::<ObjectClosureNonMembershipProofBody>(
+                &obj_absence_wire,
+                DecodeLimits::DEFAULT
+            )
+            .expect("object absence golden decodes"),
+        )
+        .expect("object absence golden re-encodes"),
+        obj_absence_wire
+    );
+
+    let query = VerifiedReadQueryEnvelope::new(
+        VerifiedReadCapability::EnvelopeV2,
+        VerifiedReadQueryTarget::Object(oid(0x31)),
+    );
+    let query_wire = golden_bytes(include_str!("goldens/verified-read-query-v1.hex"));
+    assert_eq!(
+        encode_verified_read_query(&query).expect("query golden encodes"),
+        query_wire
+    );
+    assert_eq!(
+        encode_verified_read_query(
+            &decode_verified_read_query(&query_wire, DecodeLimits::DEFAULT)
+                .expect("query golden decodes"),
+        )
+        .expect("query golden re-encodes"),
+        query_wire
+    );
+
+    let envelope_v2 = VerifiedReadEnvelopeV2::new(
+        golden_head(),
+        None,
+        VerifiedReadAnswerV2::ObjectMembership {
+            oid: oid(0x31),
+            witness: ObjectClosureWitness::GenesisEmpty,
+            proof: Box::new(MerkleProof::new(0, 1, Vec::new())),
+        },
+    );
+    let envelope_v2_wire = golden_bytes(include_str!("goldens/verified-read-envelope-v2.hex"));
+    assert_eq!(
+        encode_verified_read_envelope_v2(&envelope_v2).expect("v2 envelope golden encodes"),
+        envelope_v2_wire
+    );
+    assert_eq!(
+        encode_verified_read_envelope_v2(
+            &decode_verified_read_envelope_v2(&envelope_v2_wire, DecodeLimits::DEFAULT)
+                .expect("v2 envelope golden decodes"),
+        )
+        .expect("v2 envelope golden re-encodes"),
+        envelope_v2_wire
     );
 }
 
@@ -433,7 +507,7 @@ fn envelope_body_payload_is_the_identity_bearing_payload_not_the_transport_frame
 }
 
 #[test]
-fn object_proofs_and_envelopes_round_trip_and_verify() {
+fn object_proofs_and_v2_envelopes_round_trip_and_verify() {
     let objects = vec![oid(0x11), oid(0x22), oid(0x33)];
     let obj_root = object_closure_merkle_root(&objects).expect("object root");
     let (bound_oid, membership) = (
@@ -462,48 +536,170 @@ fn object_proofs_and_envelopes_round_trip_and_verify() {
         "the native object absence verifier receives exactly the decoded proof"
     );
 
-    // Object membership envelope
-    let (configuration, configuration_root) = combined_configuration();
+    // Authority-bound committed head with no out-of-band root on PinnedAuthorityHead
+    let (configuration, configuration_root) = authority_bound_configuration();
     let mut head = fgit_codec::harness::genesis_head();
     head.configuration_root = configuration_root;
-    let pinned = PinnedAuthorityHead::new_with_object_closure(head.clone(), obj_root);
+    head.ref_root = ref_state_merkle_root_v2(&[], None).expect("empty v2 ref root");
+    let mut rcr = commit_record();
+    rcr.repository_id = head.repository_id;
+    rcr.resulting_ref_root = head.ref_root;
+    rcr.object_closure_root = obj_root;
+    rcr.policy_epoch = head.policy_epoch;
+    let rcr_id =
+        RepositoryCommitId::from_internal_object_id(body_id(&CryptoBodyIdentity, &rcr).unwrap())
+            .unwrap();
+    head.latest_committed_rcr_id = Some(rcr_id);
+    head.latest_repository_sequence = Some(rcr.repository_sequence);
+    let pinned = PinnedAuthorityHead::new(head.clone());
 
-    let member_envelope = VerifiedReadEnvelope::new(
+    let member_envelope = VerifiedReadEnvelopeV2::new(
         head.clone(),
         Some(configuration.clone()),
-        VerifiedReadAnswer::ObjectMembership {
+        VerifiedReadAnswerV2::ObjectMembership {
             oid: bound_oid,
+            witness: ObjectClosureWitness::SelectedCommitRecord(Box::new(rcr.clone())),
             proof: Box::new(membership),
         },
     );
-    let member_wire = encode_verified_read_envelope(&member_envelope).expect("member encodes");
-    let member_decoded =
-        decode_verified_read_envelope(&member_wire, DecodeLimits::DEFAULT).expect("member decodes");
+    let member_wire = encode_verified_read_envelope_v2(&member_envelope).expect("member encodes");
+    let parsed = parse_frame(&member_wire).expect("independent v2 frame parse");
+    assert_eq!(parsed.domain, "frankengit/verified-read-envelope/v2");
+    assert_eq!(parsed.family, "verified-read-envelope-v2");
+    assert_eq!(parsed.schema_major, 2);
+    assert_eq!(parsed.schema_minor, 0);
+
+    let member_decoded = decode_verified_read_envelope_v2(&member_wire, DecodeLimits::DEFAULT)
+        .expect("member decodes");
     assert_eq!(
-        verify_envelope(&pinned, &member_decoded),
+        verify_envelope_v2(&pinned, &member_decoded),
         Ok(VerifiedMembership::Object),
     );
 
-    // Object absence envelope
+    // Object absence envelope V2
     let auth_absence = authorize_object_absence(&AllowAllObject, oid(0x15), |_| false)
         .expect("authorized absence");
-    let absence_envelope = VerifiedReadEnvelope::new(
+    let absence_envelope = VerifiedReadEnvelopeV2::new(
         head,
         Some(configuration),
-        VerifiedReadAnswer::AuthorizedObjectAbsence {
+        VerifiedReadAnswerV2::AuthorizedObjectAbsence {
             absence: auth_absence,
+            witness: ObjectClosureWitness::SelectedCommitRecord(Box::new(rcr)),
             proof: Box::new(absence),
         },
     );
     let absence_envelope_wire =
-        encode_verified_read_envelope(&absence_envelope).expect("absence encodes");
+        encode_verified_read_envelope_v2(&absence_envelope).expect("absence encodes");
     let absence_envelope_decoded =
-        decode_verified_read_envelope(&absence_envelope_wire, DecodeLimits::DEFAULT)
+        decode_verified_read_envelope_v2(&absence_envelope_wire, DecodeLimits::DEFAULT)
             .expect("absence decodes");
     assert_eq!(
-        verify_envelope(&pinned, &absence_envelope_decoded),
+        verify_envelope_v2(&pinned, &absence_envelope_decoded),
         Ok(VerifiedMembership::ObjectAbsence),
     );
+
+    // V1 wire grammar refuses answer tags 4 and 5; V2 wire grammar refuses version != 2;
+    // Query wire grammar round-trips all 3 targets and refuses version != 1.
+    let (_, v1_frame) = ref_fixture();
+    let v1_bytes = encode_verified_read_envelope(&v1_frame).expect("v1 encodes");
+    let (_, v1_payload) = split_frame(&v1_bytes, DecodeLimits::DEFAULT).expect("v1 splits");
+    let v1_payload_start = v1_bytes.len() - v1_payload.len();
+    // V1 answer tag sits right after version (2) + head (309) + Some(config_v1): find the answer tag byte
+    // using a configuration-free V1 envelope where answer tag is at payload_start + 2 + 309 + 1:
+    let no_cfg_v1 = VerifiedReadEnvelope::new(
+        golden_head(),
+        None,
+        VerifiedReadAnswer::RefMembership {
+            name: name(b"refs/heads/main"),
+            oid: oid(0x31),
+            proof: Box::new(MerkleProof::new(0, 1, Vec::new())),
+        },
+    );
+    let mut hostile_v1 = encode_verified_read_envelope(&no_cfg_v1).expect("no-cfg v1 encodes");
+    let (_, no_cfg_payload) = split_frame(&hostile_v1, DecodeLimits::DEFAULT).expect("splits");
+    let answer_tag_at = hostile_v1.len() - no_cfg_payload.len() + 2 + 309 + 1;
+    assert_eq!(hostile_v1[answer_tag_at], 1);
+    for forbidden_tag in [4_u8, 5_u8] {
+        hostile_v1[answer_tag_at] = forbidden_tag;
+        assert!(matches!(
+            decode_verified_read_envelope(&hostile_v1, DecodeLimits::DEFAULT),
+            Err(VerifiedReadRefusal::WireDecode(refusal))
+                if matches!(
+                    *refusal,
+                    fgit_codec::CodecRefusal::VariantUnknown {
+                        field: "VerifiedReadAnswer",
+                        observed,
+                        ..
+                    } if observed == u32::from(forbidden_tag)
+                )
+        ));
+    }
+    let _ = v1_payload_start;
+
+    let (_, v2_payload) = split_frame(&member_wire, DecodeLimits::DEFAULT).expect("v2 splits");
+    let v2_start = member_wire.len() - v2_payload.len();
+    let mut bad_v2_version = member_wire.clone();
+    bad_v2_version[v2_start..v2_start + 2].copy_from_slice(&1_u16.to_be_bytes());
+    assert_eq!(
+        decode_verified_read_envelope_v2(&bad_v2_version, DecodeLimits::DEFAULT),
+        Err(VerifiedReadRefusal::UnsupportedEnvelopeVersion { observed: 1 }),
+    );
+
+    for target in [
+        VerifiedReadQueryTarget::Ref(name(b"refs/heads/main")),
+        VerifiedReadQueryTarget::Outcome(tx(0xA1)),
+        VerifiedReadQueryTarget::Object(oid(0x22)),
+    ] {
+        let q = VerifiedReadQueryEnvelope::new(VerifiedReadCapability::EnvelopeV2, target);
+        let q_wire = encode_verified_read_query(&q).expect("query encodes");
+        assert_eq!(
+            decode_verified_read_query(&q_wire, DecodeLimits::DEFAULT).expect("query decodes"),
+            q
+        );
+    }
+    let q_wire = encode_verified_read_query(&VerifiedReadQueryEnvelope::new(
+        VerifiedReadCapability::EnvelopeV2,
+        VerifiedReadQueryTarget::Object(oid(0x22)),
+    ))
+    .expect("query encodes");
+    let (_, q_payload) = split_frame(&q_wire, DecodeLimits::DEFAULT).expect("query splits");
+    let q_start = q_wire.len() - q_payload.len();
+    let mut bad_q = q_wire.clone();
+    bad_q[q_start..q_start + 2].copy_from_slice(&2_u16.to_be_bytes());
+    assert_eq!(
+        decode_verified_read_query(&bad_q, DecodeLimits::DEFAULT),
+        Err(VerifiedReadRefusal::UnsupportedEnvelopeVersion { observed: 2 }),
+    );
+}
+
+#[test]
+fn hostile_object_absence_neighbour_index_is_refused_before_constructing_proof() {
+    let objects = vec![oid(0x11), oid(0x22), oid(0x33)];
+    let honest = object_closure_non_membership_proof(&objects, &oid(0x15)).expect("between proof");
+    let permitted = encode_object_closure_non_membership_proof(&honest).expect("encodes");
+    assert_eq!(
+        decode_object_closure_non_membership_proof(&permitted, DecodeLimits::DEFAULT)
+            .expect("permitted decodes"),
+        honest
+    );
+
+    // Payload layout of Between: variant byte (1) + oid (2 + 20 = 22) + predecessor index (8) + leaf_count (8)
+    let (_, payload) = split_frame(&permitted, DecodeLimits::DEFAULT).expect("splits");
+    let pred_index_at = permitted.len() - payload.len() + 1 + 22;
+    let mut hostile = permitted.clone();
+    hostile[pred_index_at..pred_index_at + 8].copy_from_slice(&u64::MAX.to_be_bytes());
+    assert!(matches!(
+        decode_object_closure_non_membership_proof(&hostile, DecodeLimits::DEFAULT),
+        Err(VerifiedReadRefusal::WireDecode(refusal))
+            if matches!(
+                *refusal,
+                fgit_codec::CodecRefusal::ValueUnrepresentable {
+                    field: "merkle_proof.index",
+                    observed: u64::MAX,
+                    ..
+                }
+            )
+    ));
 }
 
 /// A decoded leaf position outside the tree the proof itself declares is

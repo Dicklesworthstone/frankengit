@@ -54,7 +54,8 @@ pub fn validate_prepared(prepared: &PreparedNativeMerge) -> Result<(), Admission
         || record.resulting_ref_root != roots.ref_root
         || crate::ref_state_root(prepared.root_layout, &prepared.refs).map_err(unavailable)?
             != roots.ref_root
-        || crate::permitted_object_closure_root(&prepared.closure).map_err(unavailable)?
+        || crate::object_closure_root(prepared.root_layout, &prepared.closure)
+            .map_err(unavailable)?
             != record.object_closure_root
         || event_root != record.forge_event_batch_root
         || root(&prepared.forge)? != roots.forge_position_root
@@ -141,7 +142,15 @@ pub async fn stage_prepared<S: AsyncAuthorityStore + ?Sized>(
         &prepared.refs,
     )
     .await?;
-    stage(store, cx, repository, CLOSURE, &prepared.closure).await?;
+    stage_at(
+        store,
+        cx,
+        repository,
+        CLOSURE,
+        record.object_closure_root,
+        &prepared.closure,
+    )
+    .await?;
     match prepared.evidence.principal_snapshot() {
         crate::evidence::PrincipalSnapshotRecord::Legacy(body) => {
             stage(store, cx, repository, PRINCIPAL, body).await?;

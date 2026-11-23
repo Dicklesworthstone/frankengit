@@ -22,21 +22,29 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fgit_authority::{AuthorityVersionToken, HeadRead, HeadReadReceipt};
+use fgit_authority::{
+    AuthorityVersionToken, ExpectedOld, HeadRead, HeadReadReceipt, IdempotencyKey, ProposedNew,
+    RefCommand,
+};
 use fgit_codec::DecodeLimits;
-use fgit_crypto::MerkleRefusal;
-use fgit_node::{NodeConfig, OneNode, VerifiedReadQuery, VerifiedReadServingRefusal};
+use fgit_crypto::{GitObjectKind, MerkleRefusal, git_object_id};
+use fgit_node::{
+    LoopbackReceiveSession, NodeConfig, OneNode, VerifiedReadQuery, VerifiedReadServingRefusal,
+};
 use fgit_types::cell::{CellState, CellTransitionCause, ReadLabel};
 use fgit_types::hash::{Digest, DigestBytes};
 use fgit_types::layout::RootLayoutVersion;
+use fgit_types::native::{GitHashAlgorithm, GitOid};
 use fgit_types::numeric::HeadGeneration;
 use fgit_types::refs::RefName;
-use fgit_types::{RepositoryId, TenantId};
+use fgit_types::{DecisionOutcome, PrincipalId, RepositoryId, TenantId};
 use fgit_verified_read::freshness::{FreshnessRefusal, FreshnessVerdict, HeadChainFloor};
 use fgit_verified_read::{
-    PinnedAuthorityHead, ReadResponse, VerifiedMembership, VerifiedReadCapability,
-    VerifiedReadEnvelope, VerifiedReadRefusal, decode_verified_read_envelope,
-    encode_verified_read_envelope, verify_envelope,
+    ObjectClosureWitness, PinnedAuthorityHead, ReadResponse, VERIFIED_READ_ENVELOPE_V1,
+    VerifiedMembership, VerifiedReadAnswerV2, VerifiedReadCapability, VerifiedReadEnvelope,
+    VerifiedReadEnvelopeV2, VerifiedReadRefusal, decode_verified_read_envelope,
+    decode_verified_read_envelope_v2, encode_verified_read_envelope,
+    encode_verified_read_envelope_v2, verify_envelope, verify_envelope_v2,
 };
 use fgit_wire::visibility::RefVisibility;
 
@@ -404,4 +412,362 @@ fn a_relayed_envelope_crosses_the_wire_and_the_client_runs_both_checks_on_the_de
         }),
         "a rival head at the pinned generation must be refused as a fork after decoding"
     );
+}
+
+fn write_loose_object(
+    git_dir: &std::path::Path,
+    kind: GitObjectKind,
+    header_kind: &str,
+    body: &[u8],
+) -> GitOid {
+    let oid = git_object_id(GitHashAlgorithm::Sha1, kind, body);
+    let raw = [format!("{header_kind} {}\0", body.len()).as_bytes(), body].concat();
+    let mut encoded = vec![0x78, 0x01];
+    let length = u16::try_from(raw.len()).expect("fixture object fits one stored deflate block");
+    encoded.push(1);
+    encoded.extend(length.to_le_bytes());
+    encoded.extend((!length).to_le_bytes());
+    encoded.extend(&raw);
+    let (a, b) = raw.iter().fold((1_u32, 0_u32), |(a, b), byte| {
+        let next = (a + u32::from(*byte)) % 65_521;
+        (next, (b + next) % 65_521)
+    });
+    encoded.extend(((b << 16) | a).to_be_bytes());
+    let text = oid.to_string();
+    std::fs::create_dir_all(git_dir.join("objects").join(&text[..2])).expect("loose shard dir");
+    std::fs::write(
+        git_dir.join("objects").join(&text[..2]).join(&text[2..]),
+        encoded,
+    )
+    .expect("loose object writes");
+    oid
+}
+
+fn import_single_blob_branch(
+    node: &OneNode,
+    git_dir: &std::path::Path,
+    branch: &str,
+    file_name: &str,
+    blob_bytes: &[u8],
+    idempotency_tag: &[u8],
+) -> (GitOid, GitOid) {
+    std::fs::create_dir_all(git_dir.join("refs/heads")).expect("refs/heads");
+    std::fs::write(git_dir.join("HEAD"), format!("ref: {branch}\n")).expect("HEAD");
+    std::fs::write(
+        git_dir.join("config"),
+        "[core]\nrepositoryformatversion = 0\nbare = true\n",
+    )
+    .expect("config");
+    let blob = write_loose_object(git_dir, GitObjectKind::Blob, "blob", blob_bytes);
+    let tree_body = [format!("100644 {file_name}\0").as_bytes(), blob.as_bytes()].concat();
+    let tree = write_loose_object(git_dir, GitObjectKind::Tree, "tree", &tree_body);
+    let commit_body = format!(
+        "tree {tree}\nauthor Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\n\nimport {branch}\n"
+    );
+    let commit = write_loose_object(
+        git_dir,
+        GitObjectKind::Commit,
+        "commit",
+        commit_body.as_bytes(),
+    );
+    std::fs::write(git_dir.join(branch), format!("{commit}\n")).expect("branch ref");
+    let imported = node
+        .runtime()
+        .block_on(node.import_loose_git_directory_durable_in(
+            &node.request_context(),
+            git_dir,
+            PrincipalId::from_bytes([0x44; 16]),
+            idempotency_tag,
+        ))
+        .expect("loose import succeeds");
+    assert!(
+        imported
+            .commands
+            .iter()
+            .all(|cmd| matches!(cmd.terminal.outcome, DecisionOutcome::Committed { .. }))
+    );
+    (commit, blob)
+}
+
+#[test]
+fn a_server_produced_v2_object_envelope_verifies_across_multi_commit_and_refusal_heads_and_rejects_witness_tampering()
+ {
+    let scratch = ScratchDirectory::new();
+    let (mut node, _) = OneNode::init(
+        NodeConfig::new(
+            scratch.0.join("node"),
+            TenantId::from_bytes([0x61; 16]),
+            RepositoryId::from_bytes([0x62; 16]),
+        )
+        .with_root_layout(RootLayoutVersion::AuthorityBoundObjectClosureMerkleV2),
+    )
+    .expect("authority-bound object closure node initializes");
+    node.bring_into_service(HeadGeneration::FIRST)
+        .expect("node enters active service");
+
+    let absent_oid = git_object_id(
+        GitHashAlgorithm::Sha1,
+        GitObjectKind::Blob,
+        b"never-admitted-object",
+    );
+
+    // 1. Genesis empty object absence proof (witness = GenesisEmpty).
+    let genesis_served = node
+        .runtime()
+        .block_on(node.serve_current_verified_read_in(
+            &node.request_context(),
+            &RefVisibility::new(),
+            ReadLabel::current(),
+            VerifiedReadCapability::EnvelopeV2,
+            VerifiedReadQuery::Object(absent_oid),
+        ))
+        .expect("genesis V2 object absence serves");
+    let ReadResponse::VerifiedV2(genesis_envelope) = genesis_served.response() else {
+        panic!("expected V2 envelope at genesis");
+    };
+    let genesis_bytes =
+        encode_verified_read_envelope_v2(genesis_envelope).expect("genesis V2 encodes");
+    let genesis_decoded = decode_verified_read_envelope_v2(&genesis_bytes, DecodeLimits::DEFAULT)
+        .expect("genesis V2 decodes");
+    let genesis_pin = PinnedAuthorityHead::new(genesis_decoded.head().clone());
+    assert_eq!(
+        verify_envelope_v2(&genesis_pin, &genesis_decoded),
+        Ok(VerifiedMembership::ObjectAbsence)
+    );
+    let mut floor = HeadChainFloor::anchored_to(genesis_decoded.head()).expect("genesis anchors");
+
+    // 2. Commit 1 imports blob_a on refs/heads/first; Commit 2 imports blob_b on refs/heads/second.
+    let (commit_a, blob_a) = import_single_blob_branch(
+        &node,
+        &scratch.0.join("git-first"),
+        "refs/heads/first",
+        "a.txt",
+        b"admitted in first commit\n",
+        b"c7tb-import-first",
+    );
+    let (_, blob_b) = import_single_blob_branch(
+        &node,
+        &scratch.0.join("git-second"),
+        "refs/heads/second",
+        "b.txt",
+        b"admitted in second commit\n",
+        b"c7tb-import-second",
+    );
+
+    // 3. Publish a genuine refusal-only head generation (stale CAS on refs/heads/first)
+    // so head.generation advances without changing head.latest_committed_rcr_id.
+    let refusal_session = LoopbackReceiveSession::authenticated(
+        PrincipalId::from_bytes([0x44; 16]),
+        IdempotencyKey::new(b"c7tb-stale-refusal".to_vec()).expect("idempotency key"),
+    );
+    let (_, refusal_terminal) = node
+        .runtime()
+        .block_on(node.admit_branch_updates_durable_in(
+            &node.request_context(),
+            &refusal_session,
+            &[RefCommand {
+                name: RefName::try_new(b"refs/heads/first").expect("ref name"),
+                expected_old: ExpectedOld::Absent,
+                proposed_new: ProposedNew::Update(commit_a),
+                force: false,
+            }],
+            Default::default(),
+        ))
+        .expect("refusal batch publishes");
+    assert!(
+        matches!(refusal_terminal.outcome, DecisionOutcome::Refused { .. }),
+        "expected a canonical refusal decision: {refusal_terminal:?}"
+    );
+
+    let current_head = node
+        .runtime()
+        .block_on(node.authenticate_authority_head())
+        .expect("authentic current head")
+        .body()
+        .expect("head body decodes");
+    assert_eq!(current_head.generation.get(), 4);
+    assert_eq!(
+        floor.accept(&current_head).expect("floor advances"),
+        FreshnessVerdict::Advances
+    );
+    let pin = PinnedAuthorityHead::new(current_head);
+
+    // 4. Both blob_a (from commit 1) and blob_b (from commit 2) verify from the
+    // pinned post-refusal head alone via cumulative RCR #2 Merkle object_closure_root!
+    for (oid, expected_membership) in [
+        (blob_a, VerifiedMembership::Object),
+        (blob_b, VerifiedMembership::Object),
+        (absent_oid, VerifiedMembership::ObjectAbsence),
+    ] {
+        let served = node
+            .runtime()
+            .block_on(node.serve_current_verified_read_in(
+                &node.request_context(),
+                &RefVisibility::new(),
+                ReadLabel::current(),
+                VerifiedReadCapability::EnvelopeV2,
+                VerifiedReadQuery::Object(oid),
+            ))
+            .expect("post-refusal V2 object query serves");
+        let ReadResponse::VerifiedV2(envelope) = served.response() else {
+            panic!("expected V2 envelope");
+        };
+        let wire = encode_verified_read_envelope_v2(envelope).expect("encodes V2");
+        let decoded =
+            decode_verified_read_envelope_v2(&wire, DecodeLimits::DEFAULT).expect("decodes V2");
+        assert_eq!(verify_envelope_v2(&pin, &decoded), Ok(expected_membership));
+    }
+
+    // 5. Tamper the SelectedCommitRecord witness inside a real served V2 envelope.
+    let served_a = node
+        .runtime()
+        .block_on(node.serve_current_verified_read_in(
+            &node.request_context(),
+            &RefVisibility::new(),
+            ReadLabel::current(),
+            VerifiedReadCapability::EnvelopeV2,
+            VerifiedReadQuery::Object(blob_a),
+        ))
+        .expect("serves blob_a");
+    let ReadResponse::VerifiedV2(genuine_a) = served_a.response() else {
+        panic!("expected V2 envelope");
+    };
+    let VerifiedReadAnswerV2::ObjectMembership {
+        oid,
+        witness: ObjectClosureWitness::SelectedCommitRecord(record),
+        proof,
+    } = genuine_a.answer().clone()
+    else {
+        panic!("expected SelectedCommitRecord witness");
+    };
+    let mut forged_record = *record;
+    forged_record.object_closure_root = digest(0xEE);
+    let forged_commit_witness = VerifiedReadEnvelopeV2::new_with_exact_configuration(
+        genuine_a.head().clone(),
+        genuine_a.exact_configuration().cloned(),
+        VerifiedReadAnswerV2::ObjectMembership {
+            oid,
+            witness: ObjectClosureWitness::SelectedCommitRecord(Box::new(forged_record)),
+            proof: proof.clone(),
+        },
+    );
+    assert_eq!(
+        verify_envelope_v2(&pin, &forged_commit_witness),
+        Err(VerifiedReadRefusal::ObjectWitnessCommitMismatch),
+        "substituting a forged RCR object_closure_root must fail RCR identity verification"
+    );
+
+    let forged_genesis_witness = VerifiedReadEnvelopeV2::new_with_exact_configuration(
+        genuine_a.head().clone(),
+        genuine_a.exact_configuration().cloned(),
+        VerifiedReadAnswerV2::ObjectMembership {
+            oid,
+            witness: ObjectClosureWitness::GenesisEmpty,
+            proof,
+        },
+    );
+    assert_eq!(
+        verify_envelope_v2(&pin, &forged_genesis_witness),
+        Err(VerifiedReadRefusal::ObjectWitnessGenesisHeadNotEmpty),
+        "claiming GenesisEmpty at a post-commit head must be refused by name"
+    );
+
+    node.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn non_authority_bound_object_layouts_and_v1_capability_refuse_object_proof_serving() {
+    let probe_oid = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, b"probe");
+    for layout in [
+        RootLayoutVersion::LegacyWholeBody,
+        RootLayoutVersion::RefStateMerkleV2,
+        RootLayoutVersion::RefStateAndObjectClosureMerkleV2,
+    ] {
+        let scratch = ScratchDirectory::new();
+        let (mut node, _) = OneNode::init(
+            NodeConfig::new(
+                scratch.0.join("node"),
+                TenantId::from_bytes([0x71; 16]),
+                RepositoryId::from_bytes([0x72; 16]),
+            )
+            .with_root_layout(layout),
+        )
+        .expect("node initializes");
+        node.transition_cell_state(
+            CellState::VerifiedReadOnly,
+            CellTransitionCause::Operator,
+            HeadGeneration::FIRST,
+        )
+        .expect("enters VerifiedReadOnly");
+
+        let refusal = node
+            .runtime()
+            .block_on(node.serve_current_verified_read_in(
+                &node.request_context(),
+                &RefVisibility::new(),
+                ReadLabel::current(),
+                VerifiedReadCapability::EnvelopeV2,
+                VerifiedReadQuery::Object(probe_oid),
+            ))
+            .expect_err("non-authority-bound layout must refuse V2 object proof serving");
+        assert!(
+            matches!(
+                refusal,
+                VerifiedReadServingRefusal::ObjectLayoutUnavailable { layout: observed }
+                    if observed == layout
+            ),
+            "expected ObjectLayoutUnavailable({layout:?}), got {refusal:?}"
+        );
+        node.shutdown().expect("clean shutdown");
+    }
+
+    // Permitted twin on AuthorityBoundObjectClosureMerkleV2, paired with V1 capability refusal.
+    let scratch = ScratchDirectory::new();
+    let (mut node, _) = OneNode::init(
+        NodeConfig::new(
+            scratch.0.join("node"),
+            TenantId::from_bytes([0x73; 16]),
+            RepositoryId::from_bytes([0x74; 16]),
+        )
+        .with_root_layout(RootLayoutVersion::AuthorityBoundObjectClosureMerkleV2),
+    )
+    .expect("node initializes");
+    node.transition_cell_state(
+        CellState::VerifiedReadOnly,
+        CellTransitionCause::Operator,
+        HeadGeneration::FIRST,
+    )
+    .expect("enters VerifiedReadOnly");
+
+    let v1_refusal = node
+        .runtime()
+        .block_on(node.serve_current_verified_read_in(
+            &node.request_context(),
+            &RefVisibility::new(),
+            ReadLabel::current(),
+            VerifiedReadCapability::EnvelopeV1,
+            VerifiedReadQuery::Object(probe_oid),
+        ))
+        .expect_err("V1 capability cannot carry authority-bound object witness");
+    assert!(matches!(
+        v1_refusal,
+        VerifiedReadServingRefusal::VerifiedRead(ref refusal)
+            if refusal.as_ref()
+                == &VerifiedReadRefusal::UnsupportedEnvelopeVersion {
+                    observed: VERIFIED_READ_ENVELOPE_V1,
+                }
+    ));
+
+    let v2_ok = node
+        .runtime()
+        .block_on(node.serve_current_verified_read_in(
+            &node.request_context(),
+            &RefVisibility::new(),
+            ReadLabel::current(),
+            VerifiedReadCapability::EnvelopeV2,
+            VerifiedReadQuery::Object(probe_oid),
+        ))
+        .expect("AuthorityBoundObjectClosureMerkleV2 + EnvelopeV2 succeeds");
+    assert!(matches!(v2_ok.response(), ReadResponse::VerifiedV2(_)));
+    node.shutdown().expect("clean shutdown");
 }

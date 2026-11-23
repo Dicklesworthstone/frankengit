@@ -290,7 +290,7 @@ impl Display for CliRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => formatter.write_str(
-                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] [--root-layout legacy|ref-merkle-v2] [--initial-branch <name>] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256] [--root-layout legacy|ref-merkle-v2]; fg lfs --help; fg verify-read --help; fg queue --help; fg inbox --help; fg agent context --help; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <non-zero> --max-in-flight <non-zero>] [--receive-principal <principal-id-hex>] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>] [--received-pack-cache-mib <0..65536>]; fg at <storage-root> <tenant-id-hex> <repository-id-hex> <position> [refs|prs|checks <pr-number>|diff <other-position>] [--actor <principal-id-hex>] [--expected-incarnation <id>]",
+                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] [--root-layout legacy|ref-merkle-v2|authority-object-merkle-v2] [--initial-branch <name>] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256] [--root-layout legacy|ref-merkle-v2|authority-object-merkle-v2]; fg lfs --help; fg verify-read --help; fg queue --help; fg inbox --help; fg agent context --help; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <non-zero> --max-in-flight <non-zero>] [--receive-principal <principal-id-hex>] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>] [--received-pack-cache-mib <0..65536>]; fg at <storage-root> <tenant-id-hex> <repository-id-hex> <position> [refs|prs|checks <pr-number>|diff <other-position>] [--actor <principal-id-hex>] [--expected-incarnation <id>]",
             ),
             Self::UnsupportedObjectFormat(token) => write!(
                 formatter,
@@ -298,7 +298,7 @@ impl Display for CliRefusal {
             ),
             Self::UnsupportedRootLayout(token) => write!(
                 formatter,
-                "unsupported root layout `{token}`: expected `legacy` or `ref-merkle-v2`"
+                "unsupported root layout `{token}`: expected `legacy`, `ref-merkle-v2`, or `authority-object-merkle-v2`"
             ),
             Self::InvalidInitialBranch(name) => write!(
                 formatter,
@@ -845,6 +845,9 @@ fn extract_init_root_layout(
             layout = Some(match token.as_str() {
                 "legacy" => RootLayoutVersion::LegacyWholeBody,
                 "ref-merkle-v2" => RootLayoutVersion::RefStateMerkleV2,
+                "authority-object-merkle-v2" => {
+                    RootLayoutVersion::AuthorityBoundObjectClosureMerkleV2
+                }
                 _ => return Err(CliRefusal::UnsupportedRootLayout(token.clone())),
             });
             cursor += 2;
@@ -2469,7 +2472,16 @@ mod tests {
         explicit.extend(["--root-layout".to_owned(), "ref-merkle-v2".to_owned()]);
         assert_eq!(
             extract_init_root_layout(&explicit).unwrap(),
-            (base, RootLayoutVersion::RefStateMerkleV2)
+            (base.clone(), RootLayoutVersion::RefStateMerkleV2)
+        );
+        let mut authority_object = base.clone();
+        authority_object.extend([
+            "--root-layout".to_owned(),
+            "authority-object-merkle-v2".to_owned(),
+        ]);
+        assert_eq!(
+            extract_init_root_layout(&authority_object).unwrap(),
+            (base, RootLayoutVersion::AuthorityBoundObjectClosureMerkleV2)
         );
         explicit.extend(["--root-layout".to_owned(), "legacy".to_owned()]);
         assert!(extract_init_root_layout(&explicit).is_err());
@@ -2503,43 +2515,51 @@ mod tests {
 
     #[test]
     fn cli_initialization_persists_selected_ref_merkle_layout_for_reopening() {
-        for format in ["sha1", "sha256"] {
-            let scratch = ScratchDirectory::new();
-            let command = vec![
-                "init".to_owned(),
-                scratch.0.to_string_lossy().into_owned(),
-                "11111111111111111111111111111111".to_owned(),
-                "22222222222222222222222222222222".to_owned(),
-                "--creation-idempotency-key".to_owned(),
-                "proof-layout-initialization".to_owned(),
-                format.to_owned(),
-                "--root-layout".to_owned(),
-                "ref-merkle-v2".to_owned(),
-            ];
-            assert!(matches!(run(&command), Ok(CliOutcome::Initialized(_))));
-            assert!(matches!(
-                run(&command),
-                Ok(CliOutcome::Initialized(
-                    fgit_node::NodeInitialization::IdenticalRetry
+        for (layout_arg, expected_layout) in [
+            (
+                "ref-merkle-v2",
+                fgit_types::RootLayoutVersion::RefStateMerkleV2,
+            ),
+            (
+                "authority-object-merkle-v2",
+                fgit_types::RootLayoutVersion::AuthorityBoundObjectClosureMerkleV2,
+            ),
+        ] {
+            for format in ["sha1", "sha256"] {
+                let scratch = ScratchDirectory::new();
+                let command = vec![
+                    "init".to_owned(),
+                    scratch.0.to_string_lossy().into_owned(),
+                    "11111111111111111111111111111111".to_owned(),
+                    "22222222222222222222222222222222".to_owned(),
+                    "--creation-idempotency-key".to_owned(),
+                    "proof-layout-initialization".to_owned(),
+                    format.to_owned(),
+                    "--root-layout".to_owned(),
+                    layout_arg.to_owned(),
+                ];
+                assert!(matches!(run(&command), Ok(CliOutcome::Initialized(_))));
+                assert!(matches!(
+                    run(&command),
+                    Ok(CliOutcome::Initialized(
+                        fgit_node::NodeInitialization::IdenticalRetry
+                    ))
+                ));
+                let mut node = OneNode::open_existing(NodeConfig::new(
+                    scratch.0.clone(),
+                    TenantId::from_bytes([0x11; 16]),
+                    RepositoryId::from_bytes([0x22; 16]),
                 ))
-            ));
-            let mut node = OneNode::open_existing(NodeConfig::new(
-                scratch.0.clone(),
-                TenantId::from_bytes([0x11; 16]),
-                RepositoryId::from_bytes([0x22; 16]),
-            ))
-            .unwrap();
-            node.bring_into_service(fgit_types::HeadGeneration::FIRST)
                 .unwrap();
-            let materialized = node
-                .runtime()
-                .block_on(node.materialize_admission_in(&node.request_context()))
-                .unwrap();
-            assert_eq!(
-                materialized.root_layout(),
-                fgit_types::RootLayoutVersion::RefStateMerkleV2
-            );
-            node.shutdown().unwrap();
+                node.bring_into_service(fgit_types::HeadGeneration::FIRST)
+                    .unwrap();
+                let materialized = node
+                    .runtime()
+                    .block_on(node.materialize_admission_in(&node.request_context()))
+                    .unwrap();
+                assert_eq!(materialized.root_layout(), expected_layout);
+                node.shutdown().unwrap();
+            }
         }
     }
 

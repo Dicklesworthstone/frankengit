@@ -3,25 +3,30 @@
 use core::cell::Cell;
 
 use fgit_authority::{TerminalOutcome, outcome_index_proof, outcome_index_root};
-use fgit_codec::{CryptoBodyIdentity, RepositoryConfigurationBody, body_id, harness::genesis_head};
+use fgit_codec::{
+    CryptoBodyIdentity, RepositoryConfigurationBody, body_id,
+    harness::{commit_record, genesis_head},
+};
 use fgit_crypto::{
     IdentityDomain, object_closure_membership_proof, object_closure_merkle_root,
     object_closure_non_membership_proof, ref_state_membership_proof, ref_state_merkle_root,
-    ref_state_non_membership_proof,
+    ref_state_merkle_root_v2, ref_state_non_membership_proof,
 };
 use fgit_types::CANONICAL_CODEC_VERSION;
 use fgit_types::hash::{Digest, DigestBytes};
 use fgit_types::identity::{RepositoryCommitId, TxId};
 use fgit_types::layout::RootLayoutVersion;
 use fgit_types::native::{GitHashAlgorithm, GitOid, GitOidSha1};
-use fgit_types::numeric::DecisionSequence;
+use fgit_types::numeric::{DecisionSequence, HeadGeneration, PolicyEpoch};
 use fgit_types::refs::RefName;
 use fgit_types::vocabulary::DecisionOutcome;
 use fgit_verified_read::{
-    ObjectDisclosurePolicy, PinnedAuthorityHead, ReadResponse, RefDisclosurePolicy,
-    UnprovenReadAnswer, VerifiedMembership, VerifiedReadAnswer, VerifiedReadCapability,
-    VerifiedReadEnvelope, VerifiedReadRefusal, VerifiedReadResponseMode, authorize_object_absence,
-    authorize_ref_absence, negotiate_response_mode, refuse_forge_position_proof, verify_envelope,
+    ObjectClosureWitness, ObjectDisclosurePolicy, PinnedAuthorityHead, ReadResponse,
+    RefDisclosurePolicy, UnprovenReadAnswer, VerifiedMembership, VerifiedReadAnswer,
+    VerifiedReadAnswerV2, VerifiedReadCapability, VerifiedReadEnvelope, VerifiedReadEnvelopeV2,
+    VerifiedReadRefusal, VerifiedReadResponseMode, authorize_object_absence,
+    authorize_object_absence_witness, authorize_ref_absence, negotiate_response_mode,
+    refuse_forge_position_proof, verify_envelope, verify_envelope_v2,
 };
 
 struct AllowAll;
@@ -100,16 +105,13 @@ fn v1_configuration() -> (RepositoryConfigurationBody, Digest) {
     )
 }
 
-/// The cumulative layout for the object-family cases: only
-/// `RefStateAndObjectClosureMerkleV1` admits object-closure proofs
-/// (`RootLayoutVersion::admits_object_closure_membership_proof`), so a head
-/// under the ref-only V1 layout must refuse every honest object answer with
-/// `ObjectLayout(LayoutAdmitsNoProof)` — that is the layout contract working,
-/// not a bug. The ref-path fixtures below deliberately keep `v1_configuration`
-/// so both layouts stay covered.
-fn combined_configuration() -> (RepositoryConfigurationBody, Digest) {
+/// Authority-bound object-closure layout: only
+/// `AuthorityBoundObjectClosureMerkleV2` commits the cumulative object-closure
+/// Merkle root inside `RepositoryCommitRecord.object_closure_root` under the
+/// authority head's `latest_committed_rcr_id`.
+fn authority_bound_configuration() -> (RepositoryConfigurationBody, Digest) {
     let configuration = RepositoryConfigurationBody {
-        root_layout: RootLayoutVersion::RefStateAndObjectClosureMerkleV1,
+        root_layout: RootLayoutVersion::AuthorityBoundObjectClosureMerkleV2,
         object_format: GitHashAlgorithm::Sha1,
         hidden_ref_rules: Vec::new(),
     };
@@ -365,6 +367,10 @@ fn unproven_mode_stays_available_and_forge_positions_remain_refused() {
         negotiate_response_mode(VerifiedReadCapability::EnvelopeV1),
         VerifiedReadResponseMode::EnvelopeV1
     );
+    assert_eq!(
+        negotiate_response_mode(VerifiedReadCapability::EnvelopeV2),
+        VerifiedReadResponseMode::EnvelopeV2
+    );
     let expected_absent = name(b"refs/heads/missing");
     let unproven = ReadResponse::Unproven(Box::new(UnprovenReadAnswer::Ref {
         name: expected_absent.clone(),
@@ -408,26 +414,93 @@ fn unproven_mode_stays_available_and_forge_positions_remain_refused() {
 }
 
 #[test]
-fn an_object_envelope_verifies_against_the_pinned_object_closure_root() {
+fn an_object_envelope_verifies_only_when_witnessed_by_the_pinned_commit_record() {
     let objects = vec![oid(0x11), oid(0x22), oid(0x33)];
     let root = object_closure_merkle_root(&objects).expect("object closure root");
     let proof = object_closure_membership_proof(&objects, &oid(0x22)).expect("object proof");
-    let (configuration, configuration_root) = combined_configuration();
+    let (configuration, configuration_root) = authority_bound_configuration();
     let mut head = genesis_head();
     head.configuration_root = configuration_root;
-    let pinned = PinnedAuthorityHead::new_with_object_closure(head.clone(), root);
-    let envelope = VerifiedReadEnvelope::new(
+    head.ref_root = ref_state_merkle_root_v2(&[], None).expect("v2 empty ref root");
+
+    let mut rcr = commit_record();
+    rcr.repository_id = head.repository_id;
+    rcr.resulting_ref_root = head.ref_root;
+    rcr.object_closure_root = root;
+    rcr.policy_epoch = head.policy_epoch;
+    let rcr_id =
+        RepositoryCommitId::from_internal_object_id(body_id(&CryptoBodyIdentity, &rcr).unwrap())
+            .unwrap();
+    head.latest_committed_rcr_id = Some(rcr_id);
+    head.latest_repository_sequence = Some(rcr.repository_sequence);
+
+    let pinned = PinnedAuthorityHead::new(head.clone());
+    let envelope = VerifiedReadEnvelopeV2::new(
+        head.clone(),
+        Some(configuration.clone()),
+        VerifiedReadAnswerV2::ObjectMembership {
+            oid: oid(0x22),
+            witness: ObjectClosureWitness::SelectedCommitRecord(Box::new(rcr.clone())),
+            proof: Box::new(proof.clone()),
+        },
+    );
+    assert_eq!(
+        verify_envelope_v2(&pinned, &envelope),
+        Ok(VerifiedMembership::Object),
+    );
+
+    // Refusal/policy successor head carrying the same committed RCR continues to verify.
+    let mut successor_head = head.clone();
+    successor_head.generation = HeadGeneration::try_new(head.generation.get() + 1).unwrap();
+    successor_head.policy_epoch = PolicyEpoch::try_new(head.policy_epoch.get() + 1).unwrap();
+    let successor_pin = PinnedAuthorityHead::new(successor_head.clone());
+    let successor_envelope = VerifiedReadEnvelopeV2::new(
+        successor_head,
+        Some(configuration.clone()),
+        VerifiedReadAnswerV2::ObjectMembership {
+            oid: oid(0x22),
+            witness: ObjectClosureWitness::SelectedCommitRecord(Box::new(rcr.clone())),
+            proof: Box::new(proof.clone()),
+        },
+    );
+    assert_eq!(
+        verify_envelope_v2(&successor_pin, &successor_envelope),
+        Ok(VerifiedMembership::Object),
+    );
+
+    // Forged commit record whose object_closure_root was tampered is rejected by head-bound RCR ID.
+    let mut forged_rcr = rcr.clone();
+    forged_rcr.object_closure_root =
+        object_closure_merkle_root(&[oid(0x99)]).expect("forged object closure root");
+    let forged_proof =
+        object_closure_membership_proof(&[oid(0x99)], &oid(0x99)).expect("forged proof");
+    let forged_envelope = VerifiedReadEnvelopeV2::new(
+        head.clone(),
+        Some(configuration.clone()),
+        VerifiedReadAnswerV2::ObjectMembership {
+            oid: oid(0x99),
+            witness: ObjectClosureWitness::SelectedCommitRecord(Box::new(forged_rcr)),
+            proof: Box::new(forged_proof),
+        },
+    );
+    assert_eq!(
+        verify_envelope_v2(&pinned, &forged_envelope),
+        Err(VerifiedReadRefusal::ObjectWitnessHeadMismatch),
+    );
+
+    // Claiming GenesisEmpty on a committed head is rejected.
+    let genesis_claim_on_committed = VerifiedReadEnvelopeV2::new(
         head,
         Some(configuration),
-        VerifiedReadAnswer::ObjectMembership {
+        VerifiedReadAnswerV2::ObjectMembership {
             oid: oid(0x22),
+            witness: ObjectClosureWitness::GenesisEmpty,
             proof: Box::new(proof),
         },
     );
-
     assert_eq!(
-        verify_envelope(&pinned, &envelope),
-        Ok(VerifiedMembership::Object),
+        verify_envelope_v2(&pinned, &genesis_claim_on_committed),
+        Err(VerifiedReadRefusal::ObjectWitnessHeadMismatch),
     );
 }
 
@@ -460,10 +533,40 @@ fn denied_object_absence_queries_are_indistinguishable_and_never_reach_lookup() 
 }
 
 #[test]
-fn authorized_object_absence_verifies_across_v1_positions_and_membership_remains_permitted() {
+fn authorized_object_absence_verifies_across_genesis_and_committed_positions() {
+    let (configuration, configuration_root) = authority_bound_configuration();
+
+    // Genesis empty witness: no RCR exists yet (`latest_committed_rcr_id == None`).
+    let mut gen_head = genesis_head();
+    gen_head.configuration_root = configuration_root;
+    gen_head.ref_root = ref_state_merkle_root_v2(&[], None).expect("empty ref root");
+    let gen_pin = PinnedAuthorityHead::new(gen_head.clone());
+    let gen_proof =
+        object_closure_non_membership_proof(&[], &oid(0x15)).expect("genesis empty absence proof");
+    let gen_absence =
+        authorize_object_absence(&AllowAllObject, oid(0x15), |_| false).expect("authorized");
+    assert_eq!(
+        authorize_object_absence_witness(&AllowAllObject, &gen_proof),
+        Ok(())
+    );
+    let gen_envelope = VerifiedReadEnvelopeV2::new(
+        gen_head,
+        Some(configuration.clone()),
+        VerifiedReadAnswerV2::AuthorizedObjectAbsence {
+            absence: gen_absence,
+            witness: ObjectClosureWitness::GenesisEmpty,
+            proof: Box::new(gen_proof),
+        },
+    );
+    assert_eq!(
+        verify_envelope_v2(&gen_pin, &gen_envelope),
+        Ok(VerifiedMembership::ObjectAbsence)
+    );
+
+    // Committed positions: empty, before-first, between, after-last.
     let objects = vec![oid(0x11), oid(0x22), oid(0x33)];
     for (label, state, query) in [
-        ("empty", Vec::new(), oid(0x15)),
+        ("empty-committed", Vec::new(), oid(0x15)),
         ("before-first", objects.clone(), oid(0x05)),
         ("between", objects.clone(), oid(0x15)),
         ("after-last", objects, oid(0x40)),
@@ -472,20 +575,44 @@ fn authorized_object_absence_verifies_across_v1_positions_and_membership_remains
         let proof = object_closure_non_membership_proof(&state, &query).expect("absence proof");
         let absence = authorize_object_absence(&AllowAllObject, query, |_| false)
             .expect("authorized absence");
-        let (configuration, configuration_root) = combined_configuration();
+        assert_eq!(
+            authorize_object_absence_witness(&AllowAllObject, &proof),
+            Ok(())
+        );
+        if !state.is_empty() {
+            assert_eq!(
+                authorize_object_absence_witness(&DenyAllObject, &proof),
+                Err(VerifiedReadRefusal::ObjectNotFoundOrUnauthorized),
+                "hidden neighbour OIDs must be refused before returning an ordered witness"
+            );
+        }
         let mut head = genesis_head();
         head.configuration_root = configuration_root;
-        let pinned = PinnedAuthorityHead::new_with_object_closure(head.clone(), root);
-        let envelope = VerifiedReadEnvelope::new(
+        head.ref_root = ref_state_merkle_root_v2(&[], None).expect("empty ref root");
+        let mut rcr = commit_record();
+        rcr.repository_id = head.repository_id;
+        rcr.resulting_ref_root = head.ref_root;
+        rcr.object_closure_root = root;
+        rcr.policy_epoch = head.policy_epoch;
+        let rcr_id = RepositoryCommitId::from_internal_object_id(
+            body_id(&CryptoBodyIdentity, &rcr).unwrap(),
+        )
+        .unwrap();
+        head.latest_committed_rcr_id = Some(rcr_id);
+        head.latest_repository_sequence = Some(rcr.repository_sequence);
+
+        let pinned = PinnedAuthorityHead::new(head.clone());
+        let envelope = VerifiedReadEnvelopeV2::new(
             head,
-            Some(configuration),
-            VerifiedReadAnswer::AuthorizedObjectAbsence {
+            Some(configuration.clone()),
+            VerifiedReadAnswerV2::AuthorizedObjectAbsence {
                 absence,
+                witness: ObjectClosureWitness::SelectedCommitRecord(Box::new(rcr)),
                 proof: Box::new(proof),
             },
         );
         assert_eq!(
-            verify_envelope(&pinned, &envelope),
+            verify_envelope_v2(&pinned, &envelope),
             Ok(VerifiedMembership::ObjectAbsence),
             "the {label} object position must verify under the exact pin"
         );

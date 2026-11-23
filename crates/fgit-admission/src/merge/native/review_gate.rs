@@ -180,6 +180,13 @@ where
     ) -> Option<crate::ReceiveValidationAuthority> {
         self.inner.validation_authority(basis)
     }
+    fn expected_commit_closure_root(
+        &self,
+        basis: &PublicationBasis,
+        closure: &ValidatedClosure,
+    ) -> Result<fgit_types::Digest, RefusalCode> {
+        self.inner.expected_commit_closure_root(basis, closure)
+    }
 }
 impl<S, P> NativeMergeProjection<S> for GuardedProjection<'_, P>
 where

@@ -278,7 +278,8 @@ Complete independently pinned file proofs use the same read grant and --allow-so
   GET /api/v1/source/verified-blob?ref_hex=HEX&path_hex=HEX&expected_head=PIN
 This bodyless read returns a bounded binary canonical proof, requires an exact
 current-head pin, and rejects Idempotency-Key. Select --root-layout ref-merkle-v2
-when initializing a new repository; existing legacy roots are not migrated.
+or authority-object-merkle-v2 when initializing a new repository; existing legacy
+roots are not migrated.
 Use fg verify-read with a separately trusted head to check the complete response.
 Original tree witnesses include sibling entries within the authorized ref.
 See docs/VERIFIED_BLOB_READS.md for byte limits and the complete client flow.

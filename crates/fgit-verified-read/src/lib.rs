@@ -33,27 +33,30 @@ pub mod freshness;
 use fgit_authority::{OutcomeFailure, TerminalOutcome, verify_outcome_index_membership};
 use fgit_codec::{
     CODEC_MAJOR, CODEC_MINOR, CanonicalBody, CodecRefusal, CryptoBodyIdentity, DecodeLimits,
-    Decoder, Encoder, RepositoryAuthorityHeadBody, RepositoryConfigurationBody, RepositoryDecision,
-    RepositoryIncarnationConfigurationBody, RepositoryIncarnationConfigurationBodyV2_1,
-    RepositoryIncarnationConfigurationBodyV2_2, body_id, decode_body, encode_body,
+    Decoder, Encoder, RepositoryAuthorityHeadBody, RepositoryCommitRecord,
+    RepositoryConfigurationBody, RepositoryDecision, RepositoryIncarnationConfigurationBody,
+    RepositoryIncarnationConfigurationBodyV2_1, RepositoryIncarnationConfigurationBodyV2_2,
+    body_id, decode_body, encode_body,
 };
 use fgit_crypto::{
     MerkleProof, MerkleRefusal, ObjectClosureNeighbour, ObjectClosureNonMembershipProof,
-    RefStateNeighbour, RefStateNonMembershipProof, verify_object_closure_membership_under,
-    verify_object_closure_non_membership_under, verify_ref_state_membership_under,
-    verify_ref_state_non_membership_under,
+    RefStateNeighbour, RefStateNonMembershipProof, object_closure_merkle_root,
+    verify_object_closure_membership_under, verify_object_closure_non_membership_under,
+    verify_ref_state_membership_under, verify_ref_state_non_membership_under,
 };
 use fgit_types::hash::Digest;
-use fgit_types::identity::TxId;
+use fgit_types::identity::{RepositoryCommitId, TxId};
 use fgit_types::layout::RootLayoutVersion;
 use fgit_types::native::GitOid;
 use fgit_types::refs::RefName;
 use fgit_types::{DomainTag, SchemaFamily};
 
-/// The sole proof-envelope wire version this build understands.
+/// Re-exported freshness floor and verdict types.
 pub use freshness::{FreshnessRefusal, FreshnessVerdict, HeadChainFloor};
 
 pub const VERIFIED_READ_ENVELOPE_V1: u16 = 1;
+pub const VERIFIED_READ_ENVELOPE_V2: u16 = 2;
+pub const VERIFIED_READ_QUERY_V1: u16 = 1;
 
 /// A canonical, independently frameable Merkle membership proof.
 ///
@@ -331,8 +334,11 @@ pub fn decode_object_closure_non_membership_proof(
 pub enum VerifiedReadCapability {
     /// The client accepts only an ordinary, unproven response.
     Unproven,
-    /// The client accepts the version-one verified-read envelope.
+    /// The client accepts the version-one verified-read envelope (ref and outcome proofs).
     EnvelopeV1,
+    /// The client accepts the version-two verified-read envelope, which adds
+    /// authority-bound object-membership and ordered-absence proofs.
+    EnvelopeV2,
 }
 
 /// The response representation selected from a client capability.
@@ -342,6 +348,8 @@ pub enum VerifiedReadResponseMode {
     Unproven,
     /// Return a [`VerifiedReadEnvelope`] using version one.
     EnvelopeV1,
+    /// Return a [`VerifiedReadEnvelopeV2`] using version two.
+    EnvelopeV2,
 }
 
 /// Selects the response representation for one offered capability.
@@ -352,15 +360,18 @@ pub const fn negotiate_response_mode(
     match capability {
         VerifiedReadCapability::Unproven => VerifiedReadResponseMode::Unproven,
         VerifiedReadCapability::EnvelopeV1 => VerifiedReadResponseMode::EnvelopeV1,
+        VerifiedReadCapability::EnvelopeV2 => VerifiedReadResponseMode::EnvelopeV2,
     }
 }
 
 /// A head whose authenticity and desired snapshot semantics the client has
 /// already established independently of the serving cell.
+///
+/// The client pins ONLY the authenticated `RepositoryAuthorityHeadBody`; no
+/// external side digest or out-of-band object-closure root is ever accepted.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PinnedAuthorityHead {
     body: RepositoryAuthorityHeadBody,
-    object_closure_root: Option<Digest>,
 }
 
 impl PinnedAuthorityHead {
@@ -368,35 +379,13 @@ impl PinnedAuthorityHead {
     /// are checked.
     #[must_use]
     pub const fn new(body: RepositoryAuthorityHeadBody) -> Self {
-        Self {
-            body,
-            object_closure_root: None,
-        }
-    }
-
-    /// Pins the exact authority-head body and object closure root against which
-    /// subsequent responses are checked.
-    #[must_use]
-    pub const fn new_with_object_closure(
-        body: RepositoryAuthorityHeadBody,
-        object_closure_root: Digest,
-    ) -> Self {
-        Self {
-            body,
-            object_closure_root: Some(object_closure_root),
-        }
+        Self { body }
     }
 
     /// The exact pinned head body.
     #[must_use]
     pub const fn body(&self) -> &RepositoryAuthorityHeadBody {
         &self.body
-    }
-
-    /// The pinned object closure root, if configured.
-    #[must_use]
-    pub const fn object_closure_root(&self) -> Option<&Digest> {
-        self.object_closure_root.as_ref()
     }
 }
 
@@ -426,14 +415,182 @@ pub enum UnprovenReadAnswer {
     },
 }
 
-/// The two response representations a server may return after capability
+/// The response representations a server may return after capability
 /// negotiation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReadResponse {
     /// An ordinary response selected for a client without proof support.
     Unproven(Box<UnprovenReadAnswer>),
-    /// A response carrying a versioned proof envelope.
+    /// A response carrying a version-one proof envelope.
     Verified(Box<VerifiedReadEnvelope>),
+    /// A response carrying a version-two proof envelope.
+    VerifiedV2(Box<VerifiedReadEnvelopeV2>),
+}
+
+/// Canonical query target carried on the verified-read query wire frame.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VerifiedReadQueryTarget {
+    /// Request membership or authorized absence for one ref name.
+    Ref(RefName),
+    /// Request outcome-index membership for one sealed transaction identity.
+    Outcome(TxId),
+    /// Request authority-bound object-closure membership or authorized absence.
+    Object(GitOid),
+}
+
+/// Canonical wire frame for one verified-read query.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedReadQueryEnvelope {
+    version: u16,
+    capability: VerifiedReadCapability,
+    target: VerifiedReadQueryTarget,
+}
+
+impl VerifiedReadQueryEnvelope {
+    /// Constructs a version-one canonical verified-read query frame.
+    #[must_use]
+    pub const fn new(capability: VerifiedReadCapability, target: VerifiedReadQueryTarget) -> Self {
+        Self {
+            version: VERIFIED_READ_QUERY_V1,
+            capability,
+            target,
+        }
+    }
+
+    /// Constructs from a transport-decoded version, capability, and target.
+    pub fn from_versioned_parts(
+        version: u16,
+        capability: VerifiedReadCapability,
+        target: VerifiedReadQueryTarget,
+    ) -> Result<Self, VerifiedReadRefusal> {
+        if version != VERIFIED_READ_QUERY_V1 {
+            return Err(VerifiedReadRefusal::UnsupportedEnvelopeVersion { observed: version });
+        }
+        Ok(Self {
+            version,
+            capability,
+            target,
+        })
+    }
+
+    /// Accepted query wire version.
+    #[must_use]
+    pub const fn version(&self) -> u16 {
+        self.version
+    }
+
+    /// Client-advertised verified-read response capability tier.
+    #[must_use]
+    pub const fn capability(&self) -> VerifiedReadCapability {
+        self.capability
+    }
+
+    /// Queried target.
+    #[must_use]
+    pub const fn target(&self) -> &VerifiedReadQueryTarget {
+        &self.target
+    }
+}
+
+impl CanonicalBody for VerifiedReadQueryEnvelope {
+    const DOMAIN: DomainTag = DomainTag::from_static("frankengit/verified-read-query/v1");
+    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("verified-read-query");
+    const SCHEMA_MAJOR: u16 = 1;
+    const SCHEMA_MINOR: u16 = 0;
+
+    fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+        if self.version != VERIFIED_READ_QUERY_V1 {
+            return Err(CodecRefusal::VariantUnknown {
+                field: "VerifiedReadQueryEnvelope.version",
+                observed: u32::from(self.version),
+                offset: out.len().try_into().unwrap_or(u64::MAX),
+            });
+        }
+        out.write_scalar(self.version);
+        match self.capability {
+            VerifiedReadCapability::Unproven => out.write_raw_byte(0),
+            VerifiedReadCapability::EnvelopeV1 => out.write_raw_byte(1),
+            VerifiedReadCapability::EnvelopeV2 => out.write_raw_byte(2),
+        }
+        match &self.target {
+            VerifiedReadQueryTarget::Ref(name) => {
+                out.write_raw_byte(1);
+                out.write_ref_name(name)
+            }
+            VerifiedReadQueryTarget::Outcome(tx_id) => {
+                out.write_raw_byte(2);
+                out.write_internal_object_id(tx_id.as_internal_object_id())
+            }
+            VerifiedReadQueryTarget::Object(oid) => {
+                out.write_raw_byte(3);
+                out.write_git_oid(oid);
+                Ok(())
+            }
+        }
+    }
+
+    fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        let version = input.read_scalar::<u16>("verified_read_query.version")?;
+        let capability_offset = input.offset();
+        let capability = match input.read_raw_byte("verified_read_query.capability.variant")? {
+            0 => VerifiedReadCapability::Unproven,
+            1 => VerifiedReadCapability::EnvelopeV1,
+            2 => VerifiedReadCapability::EnvelopeV2,
+            observed => {
+                return Err(CodecRefusal::VariantUnknown {
+                    field: "VerifiedReadCapability",
+                    observed: u32::from(observed),
+                    offset: capability_offset,
+                });
+            }
+        };
+        let offset = input.offset();
+        let target = match input.read_raw_byte("verified_read_query.target.variant")? {
+            1 => VerifiedReadQueryTarget::Ref(input.read_ref_name()?),
+            2 => {
+                let tx_id = TxId::from_internal_object_id(input.read_internal_object_id()?)
+                    .map_err(CodecRefusal::from)?;
+                VerifiedReadQueryTarget::Outcome(tx_id)
+            }
+            3 => VerifiedReadQueryTarget::Object(input.read_git_oid()?),
+            observed => {
+                return Err(CodecRefusal::VariantUnknown {
+                    field: "VerifiedReadQueryTarget",
+                    observed: u32::from(observed),
+                    offset,
+                });
+            }
+        };
+        Ok(Self {
+            version,
+            capability,
+            target,
+        })
+    }
+}
+
+/// Encodes one canonical verified-read query frame.
+pub fn encode_verified_read_query(
+    query: &VerifiedReadQueryEnvelope,
+) -> Result<Vec<u8>, VerifiedReadRefusal> {
+    encode_body(query).map_err(|refusal| VerifiedReadRefusal::WireDecode(Box::new(refusal)))
+}
+
+/// Decodes and independently verifies one canonical verified-read query frame.
+pub fn decode_verified_read_query(
+    bytes: &[u8],
+    limits: DecodeLimits,
+) -> Result<VerifiedReadQueryEnvelope, VerifiedReadRefusal> {
+    let query = decode_body::<VerifiedReadQueryEnvelope>(bytes, limits)
+        .map_err(|refusal| VerifiedReadRefusal::WireDecode(Box::new(refusal)))?;
+    if query.version != VERIFIED_READ_QUERY_V1 {
+        return Err(VerifiedReadRefusal::UnsupportedEnvelopeVersion {
+            observed: query.version,
+        });
+    }
+    verify_canonical_frame(bytes, limits, &query)
+        .map_err(|refusal| VerifiedReadRefusal::WireDecode(Box::new(refusal)))?;
+    Ok(query)
 }
 
 /// An authorization policy at the read-serving boundary.
@@ -596,6 +753,48 @@ where
     Ok(AuthorizedObjectAbsence { oid })
 }
 
+/// Authorizes every additional object identity revealed by an ordered object
+/// absence proof.
+///
+/// The serving boundary must call this after [`authorize_object_absence`] and
+/// proof construction, before returning the witness: a permitted query can
+/// still have a hidden neighbouring object OID.
+///
+/// # Errors
+///
+/// Returns [`VerifiedReadRefusal::ObjectNotFoundOrUnauthorized`] when any
+/// neighbour object identity disclosed by the witness is outside the caller's
+/// authorized scope.
+pub fn authorize_object_absence_witness<P>(
+    policy: &P,
+    proof: &ObjectClosureNonMembershipProof,
+) -> Result<(), VerifiedReadRefusal>
+where
+    P: ObjectDisclosurePolicy + ?Sized,
+{
+    let permitted = match proof {
+        ObjectClosureNonMembershipProof::EmptyClosure => true,
+        ObjectClosureNonMembershipProof::BeforeFirst { first } => {
+            policy.permits_object_disclosure(first.oid())
+        }
+        ObjectClosureNonMembershipProof::Between {
+            predecessor,
+            successor,
+        } => {
+            policy.permits_object_disclosure(predecessor.oid())
+                && policy.permits_object_disclosure(successor.oid())
+        }
+        ObjectClosureNonMembershipProof::AfterLast { last } => {
+            policy.permits_object_disclosure(last.oid())
+        }
+    };
+    if permitted {
+        Ok(())
+    } else {
+        Err(VerifiedReadRefusal::ObjectNotFoundOrUnauthorized)
+    }
+}
+
 /// One answer that a version-one envelope can carry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VerifiedReadAnswer {
@@ -629,17 +828,68 @@ pub enum VerifiedReadAnswer {
         /// Ordered neighbour evidence for that absence.
         proof: Box<RefStateNonMembershipProof>,
     },
-    /// An object identity and the membership path under the object closure root.
+}
+
+/// Authority-bound witness tying an object-closure Merkle root directly to the
+/// client's pinned `RepositoryAuthorityHeadBody`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ObjectClosureWitness {
+    /// Repository genesis (`latest_committed_rcr_id == None` and
+    /// `latest_repository_sequence == None`), committing to the empty Merkle
+    /// object closure without a committed `RepositoryCommitRecord`.
+    GenesisEmpty,
+    /// The committed `RepositoryCommitRecord` whose canonical identity equals
+    /// `pinned.body().latest_committed_rcr_id` and carries the cumulative
+    /// Merkle `object_closure_root`.
+    SelectedCommitRecord(Box<RepositoryCommitRecord>),
+}
+
+/// One answer that a version-two envelope can carry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VerifiedReadAnswerV2 {
+    /// A ref and the membership path under the pinned head's `ref_root`.
+    RefMembership {
+        /// Ref name claimed by the serving cell.
+        name: RefName,
+        /// Native object identity claimed for `name`.
+        oid: GitOid,
+        /// Merkle path generated from the canonical ref-state layout.
+        proof: Box<MerkleProof>,
+    },
+    /// A terminal outcome and the membership path under the pinned head's
+    /// `outcome_index_root`.
+    OutcomeMembership {
+        /// Transaction identity claimed by the serving cell.
+        tx_id: TxId,
+        /// Terminal outcome claimed for `tx_id`.
+        outcome: Box<TerminalOutcome>,
+        /// Merkle path generated from the canonical outcome-index layout.
+        proof: Box<MerkleProof>,
+    },
+    /// An authorization-gated ref absence and its ordered Merkle witness.
+    AuthorizedRefAbsence {
+        /// The name whose absence was authorized for disclosure.
+        absence: AuthorizedRefAbsence,
+        /// Ordered neighbour evidence for that absence.
+        proof: Box<RefStateNonMembershipProof>,
+    },
+    /// An object identity, its authority-bound commit witness, and its
+    /// membership path under the cumulative object-closure Merkle root.
     ObjectMembership {
         /// Object identity claimed by the serving cell.
         oid: GitOid,
+        /// Authority-bound witness deriving `object_closure_root` from `pinned`.
+        witness: ObjectClosureWitness,
         /// Merkle path generated from the canonical object-closure layout.
         proof: Box<MerkleProof>,
     },
-    /// An authorization-gated object absence and its ordered V1 Merkle witness.
+    /// An authorization-gated object absence, its authority-bound commit
+    /// witness, and its ordered Merkle non-membership proof.
     AuthorizedObjectAbsence {
         /// The object identity whose absence was authorized for disclosure.
         absence: AuthorizedObjectAbsence,
+        /// Authority-bound witness deriving `object_closure_root` from `pinned`.
+        witness: ObjectClosureWitness,
         /// Ordered neighbour evidence for that absence.
         proof: Box<ObjectClosureNonMembershipProof>,
     },
@@ -885,6 +1135,195 @@ pub fn decode_verified_read_envelope(
     let envelope = decode_body::<VerifiedReadEnvelope>(bytes, limits)
         .map_err(|refusal| VerifiedReadRefusal::WireDecode(Box::new(refusal)))?;
     if envelope.version != VERIFIED_READ_ENVELOPE_V1 {
+        return Err(VerifiedReadRefusal::UnsupportedEnvelopeVersion {
+            observed: envelope.version,
+        });
+    }
+    verify_canonical_frame(bytes, limits, &envelope)
+        .map_err(|refusal| VerifiedReadRefusal::WireDecode(Box::new(refusal)))?;
+    Ok(envelope)
+}
+
+/// A version-two proof response capable of carrying authority-bound object
+/// membership and authorized object absence answers alongside ref and outcome
+/// proofs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedReadEnvelopeV2 {
+    version: u16,
+    head: RepositoryAuthorityHeadBody,
+    configuration: Option<VerifiedReadConfiguration>,
+    answer: VerifiedReadAnswerV2,
+}
+
+impl VerifiedReadEnvelopeV2 {
+    /// Constructs a version-two envelope.
+    #[must_use]
+    pub fn new(
+        head: RepositoryAuthorityHeadBody,
+        configuration: Option<RepositoryConfigurationBody>,
+        answer: VerifiedReadAnswerV2,
+    ) -> Self {
+        let configuration = configuration.map(VerifiedReadConfiguration::RepositoryV1);
+        Self::new_with_exact_configuration(head, configuration, answer)
+    }
+
+    /// Constructs a version-two envelope carrying the exact selected
+    /// configuration schema.
+    #[must_use]
+    pub const fn new_with_exact_configuration(
+        head: RepositoryAuthorityHeadBody,
+        configuration: Option<VerifiedReadConfiguration>,
+        answer: VerifiedReadAnswerV2,
+    ) -> Self {
+        Self {
+            version: VERIFIED_READ_ENVELOPE_V2,
+            head,
+            configuration,
+            answer,
+        }
+    }
+
+    /// Validates and constructs an envelope from a transport-decoded version.
+    ///
+    /// # Errors
+    ///
+    /// [`VerifiedReadRefusal::UnsupportedEnvelopeVersion`] when `version` is
+    /// not [`VERIFIED_READ_ENVELOPE_V2`].
+    pub fn from_versioned_parts(
+        version: u16,
+        head: RepositoryAuthorityHeadBody,
+        configuration: Option<RepositoryConfigurationBody>,
+        answer: VerifiedReadAnswerV2,
+    ) -> Result<Self, VerifiedReadRefusal> {
+        let configuration = configuration.map(VerifiedReadConfiguration::RepositoryV1);
+        Self::from_versioned_parts_with_exact_configuration(version, head, configuration, answer)
+    }
+
+    /// Validates and constructs an envelope carrying the exact selected
+    /// configuration schema from a transport-decoded version.
+    ///
+    /// # Errors
+    ///
+    /// [`VerifiedReadRefusal::UnsupportedEnvelopeVersion`] when `version` is
+    /// not [`VERIFIED_READ_ENVELOPE_V2`].
+    pub fn from_versioned_parts_with_exact_configuration(
+        version: u16,
+        head: RepositoryAuthorityHeadBody,
+        configuration: Option<VerifiedReadConfiguration>,
+        answer: VerifiedReadAnswerV2,
+    ) -> Result<Self, VerifiedReadRefusal> {
+        if version != VERIFIED_READ_ENVELOPE_V2 {
+            return Err(VerifiedReadRefusal::UnsupportedEnvelopeVersion { observed: version });
+        }
+        Ok(Self {
+            version,
+            head,
+            configuration,
+            answer,
+        })
+    }
+
+    /// The accepted envelope version.
+    #[must_use]
+    pub const fn version(&self) -> u16 {
+        self.version
+    }
+
+    /// The head body carried by the serving cell.
+    #[must_use]
+    pub const fn head(&self) -> &RepositoryAuthorityHeadBody {
+        &self.head
+    }
+
+    /// The configuration body used to establish a non-legacy root layout.
+    #[must_use]
+    pub const fn configuration(&self) -> Option<&RepositoryConfigurationBody> {
+        match self.configuration.as_ref() {
+            Some(VerifiedReadConfiguration::RepositoryV1(configuration)) => Some(configuration),
+            Some(
+                VerifiedReadConfiguration::RepositoryIncarnationV2(_)
+                | VerifiedReadConfiguration::RepositoryIncarnationV2_1(_)
+                | VerifiedReadConfiguration::RepositoryIncarnationV2_2(_),
+            )
+            | None => None,
+        }
+    }
+
+    /// The exact configuration body whose identity the verifier binds to the
+    /// pinned head when a proof needs a non-legacy layout.
+    #[must_use]
+    pub const fn exact_configuration(&self) -> Option<&VerifiedReadConfiguration> {
+        self.configuration.as_ref()
+    }
+
+    /// The claimed answer and proof path.
+    #[must_use]
+    pub const fn answer(&self) -> &VerifiedReadAnswerV2 {
+        &self.answer
+    }
+}
+
+impl CanonicalBody for VerifiedReadEnvelopeV2 {
+    const DOMAIN: DomainTag = DomainTag::from_static("frankengit/verified-read-envelope/v2");
+    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("verified-read-envelope-v2");
+    const SCHEMA_MAJOR: u16 = 2;
+    const SCHEMA_MINOR: u16 = 0;
+
+    fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+        if self.version != VERIFIED_READ_ENVELOPE_V2 {
+            return Err(CodecRefusal::VariantUnknown {
+                field: "VerifiedReadEnvelopeV2.version",
+                observed: u32::from(self.version),
+                offset: out.len().try_into().unwrap_or(u64::MAX),
+            });
+        }
+        out.write_scalar(self.version);
+        self.head.write_payload(out)?;
+        write_configuration(out, self.configuration.as_ref())?;
+        write_answer_v2(out, &self.answer)
+    }
+
+    fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        let version = input.read_scalar::<u16>("verified_read_envelope_v2.version")?;
+        let head = RepositoryAuthorityHeadBody::read_payload(input)?;
+        let configuration = read_configuration(input)?;
+        let answer = read_answer_v2(input)?;
+        Ok(Self {
+            version,
+            head,
+            configuration,
+            answer,
+        })
+    }
+}
+
+/// Encodes one version-two verified-read envelope for an untrusted relay.
+///
+/// # Errors
+///
+/// Returns [`VerifiedReadRefusal::WireDecode`] if a field cannot be represented
+/// by the canonical codec.
+pub fn encode_verified_read_envelope_v2(
+    envelope: &VerifiedReadEnvelopeV2,
+) -> Result<Vec<u8>, VerifiedReadRefusal> {
+    encode_body(envelope).map_err(|refusal| VerifiedReadRefusal::WireDecode(Box::new(refusal)))
+}
+
+/// Decodes one version-two relayed envelope without trusting the relay's chosen
+/// head.
+///
+/// # Errors
+///
+/// Returns [`VerifiedReadRefusal::UnsupportedEnvelopeVersion`] for a wire
+/// version other than [`VERIFIED_READ_ENVELOPE_V2`], and
+/// [`VerifiedReadRefusal::WireDecode`] for hostile or malformed codec bytes.
+pub fn decode_verified_read_envelope_v2(
+    bytes: &[u8],
+    limits: DecodeLimits,
+) -> Result<VerifiedReadEnvelopeV2, VerifiedReadRefusal> {
+    let envelope = decode_body::<VerifiedReadEnvelopeV2>(bytes, limits)
+        .map_err(|refusal| VerifiedReadRefusal::WireDecode(Box::new(refusal)))?;
+    if envelope.version != VERIFIED_READ_ENVELOPE_V2 {
         return Err(VerifiedReadRefusal::UnsupportedEnvelopeVersion {
             observed: envelope.version,
         });
@@ -1170,16 +1609,6 @@ fn write_answer(out: &mut Encoder, answer: &VerifiedReadAnswer) -> Result<(), Co
             out.write_ref_name(absence.name())?;
             write_non_membership_proof_payload(out, proof)
         }
-        VerifiedReadAnswer::ObjectMembership { oid, proof } => {
-            out.write_raw_byte(4);
-            out.write_git_oid(oid);
-            write_merkle_proof_payload(out, proof)
-        }
-        VerifiedReadAnswer::AuthorizedObjectAbsence { absence, proof } => {
-            out.write_raw_byte(5);
-            out.write_git_oid(absence.oid());
-            write_object_non_membership_proof_payload(out, proof)
-        }
     }
 }
 
@@ -1208,18 +1637,138 @@ fn read_answer(input: &mut Decoder<'_>) -> Result<VerifiedReadAnswer, CodecRefus
             },
             proof: Box::new(read_non_membership_proof_payload(input)?),
         }),
-        4 => Ok(VerifiedReadAnswer::ObjectMembership {
+        observed => Err(CodecRefusal::VariantUnknown {
+            field: "VerifiedReadAnswer",
+            observed: u32::from(observed),
+            offset,
+        }),
+    }
+}
+
+fn write_object_closure_witness(
+    out: &mut Encoder,
+    witness: &ObjectClosureWitness,
+) -> Result<(), CodecRefusal> {
+    match witness {
+        ObjectClosureWitness::GenesisEmpty => {
+            out.write_raw_byte(0);
+            Ok(())
+        }
+        ObjectClosureWitness::SelectedCommitRecord(record) => {
+            out.write_raw_byte(1);
+            record.write_payload(out)
+        }
+    }
+}
+
+fn read_object_closure_witness(
+    input: &mut Decoder<'_>,
+) -> Result<ObjectClosureWitness, CodecRefusal> {
+    let offset = input.offset();
+    match input.read_raw_byte("object_closure_witness.variant")? {
+        0 => Ok(ObjectClosureWitness::GenesisEmpty),
+        1 => RepositoryCommitRecord::read_payload(input)
+            .map(Box::new)
+            .map(ObjectClosureWitness::SelectedCommitRecord),
+        observed => Err(CodecRefusal::VariantUnknown {
+            field: "ObjectClosureWitness",
+            observed: u32::from(observed),
+            offset,
+        }),
+    }
+}
+
+fn write_answer_v2(out: &mut Encoder, answer: &VerifiedReadAnswerV2) -> Result<(), CodecRefusal> {
+    match answer {
+        VerifiedReadAnswerV2::RefMembership { name, oid, proof } => {
+            out.write_raw_byte(1);
+            out.write_ref_name(name)?;
+            out.write_git_oid(oid);
+            write_merkle_proof_payload(out, proof)
+        }
+        VerifiedReadAnswerV2::OutcomeMembership {
+            tx_id,
+            outcome,
+            proof,
+        } => {
+            out.write_raw_byte(2);
+            RepositoryDecision::write_canonical(
+                out,
+                &RepositoryDecision {
+                    tx_id: *tx_id,
+                    decision_sequence: outcome.decision_sequence,
+                    outcome: outcome.outcome,
+                },
+            )?;
+            write_merkle_proof_payload(out, proof)
+        }
+        VerifiedReadAnswerV2::AuthorizedRefAbsence { absence, proof } => {
+            out.write_raw_byte(3);
+            out.write_ref_name(absence.name())?;
+            write_non_membership_proof_payload(out, proof)
+        }
+        VerifiedReadAnswerV2::ObjectMembership {
+            oid,
+            witness,
+            proof,
+        } => {
+            out.write_raw_byte(4);
+            out.write_git_oid(oid);
+            write_object_closure_witness(out, witness)?;
+            write_merkle_proof_payload(out, proof)
+        }
+        VerifiedReadAnswerV2::AuthorizedObjectAbsence {
+            absence,
+            witness,
+            proof,
+        } => {
+            out.write_raw_byte(5);
+            out.write_git_oid(absence.oid());
+            write_object_closure_witness(out, witness)?;
+            write_object_non_membership_proof_payload(out, proof)
+        }
+    }
+}
+
+fn read_answer_v2(input: &mut Decoder<'_>) -> Result<VerifiedReadAnswerV2, CodecRefusal> {
+    let offset = input.offset();
+    match input.read_raw_byte("verified_read_envelope_v2.answer.variant")? {
+        1 => Ok(VerifiedReadAnswerV2::RefMembership {
+            name: input.read_ref_name()?,
             oid: input.read_git_oid()?,
             proof: Box::new(read_merkle_proof_payload(input)?),
         }),
-        5 => Ok(VerifiedReadAnswer::AuthorizedObjectAbsence {
+        2 => {
+            let decision = RepositoryDecision::read_canonical(input)?;
+            Ok(VerifiedReadAnswerV2::OutcomeMembership {
+                tx_id: decision.tx_id,
+                outcome: Box::new(TerminalOutcome {
+                    decision_sequence: decision.decision_sequence,
+                    outcome: decision.outcome,
+                }),
+                proof: Box::new(read_merkle_proof_payload(input)?),
+            })
+        }
+        3 => Ok(VerifiedReadAnswerV2::AuthorizedRefAbsence {
+            absence: AuthorizedRefAbsence {
+                name: input.read_ref_name()?,
+            },
+            proof: Box::new(read_non_membership_proof_payload(input)?),
+        }),
+        4 => Ok(VerifiedReadAnswerV2::ObjectMembership {
+            oid: input.read_git_oid()?,
+            witness: read_object_closure_witness(input)?,
+            proof: Box::new(read_merkle_proof_payload(input)?),
+        }),
+        5 => Ok(VerifiedReadAnswerV2::AuthorizedObjectAbsence {
             absence: AuthorizedObjectAbsence {
                 oid: input.read_git_oid()?,
             },
+            witness: read_object_closure_witness(input)?,
             proof: Box::new(read_object_non_membership_proof_payload(input)?),
         }),
         observed => Err(CodecRefusal::VariantUnknown {
-            field: "VerifiedReadAnswer",
+            field: "VerifiedReadAnswerV2",
             observed: u32::from(observed),
             offset,
         }),
@@ -1253,10 +1802,11 @@ pub enum VerifiedMembership {
     /// An outcome membership proof verified against the pinned head's
     /// `outcome_index_root`.
     Outcome,
-    /// An object membership proof verified against the pinned object closure root.
+    /// An object membership proof verified against the authority-bound object
+    /// closure root selected by the pinned head.
     Object,
     /// An authorization-gated object non-membership proof verified against the
-    /// pinned object closure root.
+    /// authority-bound object closure root selected by the pinned head.
     ObjectAbsence,
 }
 
@@ -1275,15 +1825,18 @@ pub enum VerifiedReadRefusal {
     /// The configuration body does not identify to the pinned head's
     /// `configuration_root`.
     ConfigurationRootMismatch,
+    /// The carried commit-record witness could not be canonically identified.
+    CommitRecordIdentityUnavailable,
+    /// The carried object-closure witness does not match the pinned authority head.
+    ObjectWitnessHeadMismatch,
     /// The canonical wire body was truncated, non-canonical, or otherwise
     /// refused before a proof could be considered.
     WireDecode(Box<CodecRefusal>),
     /// The selected layout does not admit a ref-state membership proof.
     RefLayout(Box<MerkleRefusal>),
-    /// The selected layout does not admit an object closure membership proof.
+    /// The selected layout does not admit an authority-bound object-closure
+    /// membership proof.
     ObjectLayout(Box<MerkleRefusal>),
-    /// The client pinned head does not carry an object closure root.
-    ObjectClosureRootUnavailable,
     /// The Merkle path did not verify against the pinned root.
     ProofRejected,
     /// Canonical outcome encoding or its verifier refused the answer.
@@ -1318,10 +1871,15 @@ impl fmt::Display for VerifiedReadRefusal {
             Self::ConfigurationRootMismatch => formatter.write_str(
                 "the carried configuration body does not match the pinned head configuration root",
             ),
+            Self::CommitRecordIdentityUnavailable => {
+                formatter.write_str("the carried commit-record witness has no canonical identity")
+            }
+            Self::ObjectWitnessHeadMismatch => formatter.write_str(
+                "the carried object-closure witness does not match the pinned authority head",
+            ),
             Self::WireDecode(refusal) => write!(formatter, "verified-read wire decode refused: {refusal}"),
             Self::RefLayout(refusal) => write!(formatter, "ref proof layout refused: {refusal}"),
             Self::ObjectLayout(refusal) => write!(formatter, "object proof layout refused: {refusal}"),
-            Self::ObjectClosureRootUnavailable => formatter.write_str("the pinned head carries no object closure root"),
             Self::ProofRejected => {
                 formatter.write_str("the claimed Merkle path does not verify against the pinned root")
             }
@@ -1339,7 +1897,8 @@ impl fmt::Display for VerifiedReadRefusal {
 
 impl std::error::Error for VerifiedReadRefusal {}
 
-/// Verifies one claimed membership answer against an exact client-pinned head.
+/// Verifies one version-one claimed membership answer against an exact
+/// client-pinned head.
 ///
 /// The result establishes only membership in the selected root of `pinned`.
 /// The caller must authenticate and choose that pin through the authority-head
@@ -1349,9 +1908,9 @@ impl std::error::Error for VerifiedReadRefusal {}
 /// # Errors
 ///
 /// A typed refusal names a version, pin, configuration, layout, encoding, or
-/// proof failure. An authorized ref absence verifies only through the V1
-/// ordered non-membership shape; no missing-proof fallback is accepted as a
-/// verified negative answer.
+/// proof failure. An authorized ref absence verifies only through the ordered
+/// non-membership shape; no missing-proof fallback is accepted as a verified
+/// negative answer.
 pub fn verify_envelope(
     pinned: &PinnedAuthorityHead,
     envelope: &VerifiedReadEnvelope,
@@ -1410,27 +1969,116 @@ pub fn verify_envelope(
                 Err(VerifiedReadRefusal::ProofRejected)
             }
         }
-        VerifiedReadAnswer::ObjectMembership { oid, proof } => {
+    }
+}
+
+/// Verifies one version-two claimed membership or authorized-absence answer
+/// against an exact client-pinned head.
+///
+/// Object membership and authorized object absence answers derive their
+/// Merkle `object_closure_root` strictly from `pinned.body()`: either the
+/// canonical empty Merkle closure at genesis (`GenesisEmpty` when
+/// `latest_committed_rcr_id` and `latest_repository_sequence` are both `None`),
+/// or the canonical `RepositoryCommitRecord` whose `body_id` equals
+/// `pinned.body().latest_committed_rcr_id` under
+/// `RootLayoutVersion::AuthorityBoundObjectClosureMerkleV2`. Neither the
+/// serving cell nor any caller-supplied out-of-band digest can select the root.
+///
+/// # Errors
+///
+/// Returns a typed [`VerifiedReadRefusal`] on version mismatch, head mismatch,
+/// configuration-root mismatch, non-authority-bound object layout, commit
+/// witness mismatch, or Merkle proof rejection.
+pub fn verify_envelope_v2(
+    pinned: &PinnedAuthorityHead,
+    envelope: &VerifiedReadEnvelopeV2,
+) -> Result<VerifiedMembership, VerifiedReadRefusal> {
+    if envelope.version != VERIFIED_READ_ENVELOPE_V2 {
+        return Err(VerifiedReadRefusal::UnsupportedEnvelopeVersion {
+            observed: envelope.version,
+        });
+    }
+    if envelope.head != pinned.body {
+        return Err(VerifiedReadRefusal::PinnedHeadMismatch);
+    }
+
+    match &envelope.answer {
+        VerifiedReadAnswerV2::RefMembership { name, oid, proof } => {
             let layout = selected_ref_layout(pinned.body(), envelope.exact_configuration())?;
-            let root = pinned
-                .object_closure_root()
-                .ok_or(VerifiedReadRefusal::ObjectClosureRootUnavailable)?;
-            let verified = verify_object_closure_membership_under(layout, root, oid, proof)
-                .map_err(|refusal| VerifiedReadRefusal::ObjectLayout(Box::new(refusal)))?;
+            let verified =
+                verify_ref_state_membership_under(layout, &pinned.body.ref_root, name, oid, proof)
+                    .map_err(|refusal| VerifiedReadRefusal::RefLayout(Box::new(refusal)))?;
+            if verified {
+                Ok(VerifiedMembership::Ref)
+            } else {
+                Err(VerifiedReadRefusal::ProofRejected)
+            }
+        }
+        VerifiedReadAnswerV2::OutcomeMembership {
+            tx_id,
+            outcome,
+            proof,
+        } => {
+            let verified = verify_outcome_index_membership(
+                &pinned.body.outcome_index_root,
+                *tx_id,
+                outcome.as_ref(),
+                proof.as_ref(),
+            )
+            .map_err(|refusal| VerifiedReadRefusal::Outcome(Box::new(refusal)))?;
+            if verified {
+                Ok(VerifiedMembership::Outcome)
+            } else {
+                Err(VerifiedReadRefusal::ProofRejected)
+            }
+        }
+        VerifiedReadAnswerV2::AuthorizedRefAbsence { absence, proof } => {
+            let layout = selected_ref_layout(pinned.body(), envelope.exact_configuration())?;
+            let verified = verify_ref_state_non_membership_under(
+                layout,
+                &pinned.body.ref_root,
+                absence.name(),
+                proof.as_ref(),
+            )
+            .map_err(|refusal| VerifiedReadRefusal::RefLayout(Box::new(refusal)))?;
+            if verified {
+                Ok(VerifiedMembership::RefAbsence)
+            } else {
+                Err(VerifiedReadRefusal::ProofRejected)
+            }
+        }
+        VerifiedReadAnswerV2::ObjectMembership {
+            oid,
+            witness,
+            proof,
+        } => {
+            let (layout, closure_root) = verified_object_closure_root(
+                pinned.body(),
+                envelope.exact_configuration(),
+                witness,
+            )?;
+            let verified =
+                verify_object_closure_membership_under(layout, &closure_root, oid, proof)
+                    .map_err(|refusal| VerifiedReadRefusal::ObjectLayout(Box::new(refusal)))?;
             if verified {
                 Ok(VerifiedMembership::Object)
             } else {
                 Err(VerifiedReadRefusal::ProofRejected)
             }
         }
-        VerifiedReadAnswer::AuthorizedObjectAbsence { absence, proof } => {
-            let layout = selected_ref_layout(pinned.body(), envelope.exact_configuration())?;
-            let root = pinned
-                .object_closure_root()
-                .ok_or(VerifiedReadRefusal::ObjectClosureRootUnavailable)?;
+        VerifiedReadAnswerV2::AuthorizedObjectAbsence {
+            absence,
+            witness,
+            proof,
+        } => {
+            let (layout, closure_root) = verified_object_closure_root(
+                pinned.body(),
+                envelope.exact_configuration(),
+                witness,
+            )?;
             let verified = verify_object_closure_non_membership_under(
                 layout,
-                root,
+                &closure_root,
                 absence.oid(),
                 proof.as_ref(),
             )
@@ -1440,6 +2088,46 @@ pub fn verify_envelope(
             } else {
                 Err(VerifiedReadRefusal::ProofRejected)
             }
+        }
+    }
+}
+
+fn verified_object_closure_root(
+    pinned: &RepositoryAuthorityHeadBody,
+    configuration: Option<&VerifiedReadConfiguration>,
+    witness: &ObjectClosureWitness,
+) -> Result<(RootLayoutVersion, Digest), VerifiedReadRefusal> {
+    let layout = selected_ref_layout(pinned, configuration)?;
+    if !layout.commits_authority_object_closure_merkle() {
+        return Err(VerifiedReadRefusal::ObjectLayout(Box::new(
+            MerkleRefusal::LayoutAdmitsNoProof { version: layout },
+        )));
+    }
+    match witness {
+        ObjectClosureWitness::GenesisEmpty => {
+            if pinned.latest_committed_rcr_id.is_some()
+                || pinned.latest_repository_sequence.is_some()
+            {
+                return Err(VerifiedReadRefusal::ObjectWitnessHeadMismatch);
+            }
+            let root = object_closure_merkle_root(&[])
+                .map_err(|refusal| VerifiedReadRefusal::ObjectLayout(Box::new(refusal)))?;
+            Ok((layout, root))
+        }
+        ObjectClosureWitness::SelectedCommitRecord(record) => {
+            let object = body_id(&CryptoBodyIdentity, record.as_ref())
+                .map_err(|_| VerifiedReadRefusal::CommitRecordIdentityUnavailable)?;
+            let record_id = RepositoryCommitId::from_internal_object_id(object)
+                .map_err(|_| VerifiedReadRefusal::CommitRecordIdentityUnavailable)?;
+            if pinned.latest_committed_rcr_id != Some(record_id)
+                || record.repository_id != pinned.repository_id
+                || pinned.latest_repository_sequence != Some(record.repository_sequence)
+                || record.resulting_ref_root != pinned.ref_root
+                || record.policy_epoch > pinned.policy_epoch
+            {
+                return Err(VerifiedReadRefusal::ObjectWitnessHeadMismatch);
+            }
+            Ok((layout, record.object_closure_root))
         }
     }
 }
@@ -1531,6 +2219,29 @@ mod codec_verify_tests {
             decode_object_closure_non_membership_proof(&obj_bytes, DecodeLimits::default())
                 .expect("decode obj absence"),
             obj_absence
+        );
+
+        let query = VerifiedReadQueryEnvelope::new(
+            VerifiedReadCapability::EnvelopeV2,
+            VerifiedReadQueryTarget::Object(GitOid::Sha1(fgit_types::GitOidSha1::from_bytes(
+                [0x44; 20],
+            ))),
+        );
+        let query_bytes = encode_verified_read_query(&query).expect("encode query");
+        let parsed_query =
+            fgit_codec_verify::parse_frame(&query_bytes).expect("independent parse query");
+        assert_eq!(
+            parsed_query.domain,
+            VerifiedReadQueryEnvelope::DOMAIN.as_str()
+        );
+        assert_eq!(
+            parsed_query.family,
+            VerifiedReadQueryEnvelope::SCHEMA_FAMILY.as_str()
+        );
+        assert_eq!(
+            decode_verified_read_query(&query_bytes, DecodeLimits::default())
+                .expect("decode query"),
+            query
         );
     }
 }

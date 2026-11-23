@@ -50,6 +50,7 @@ fn fixture(
             record.source_ref.clone(),
             record.source_commit,
         )])),
+        selected_closure: crate::PermittedObjectClosure::default(),
         root_layout: RootLayoutVersion::LegacyWholeBody,
         forge: CanonicalForgePositionState::try_new(context.repository_id, Vec::new()).unwrap(),
         outbox: CanonicalOutboxState::try_new(context.repository_id, Vec::new()).unwrap(),

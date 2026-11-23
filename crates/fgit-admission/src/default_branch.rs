@@ -25,7 +25,7 @@ use crate::evidence::{AdmissionAuthentication, evidence_root, head_change::HeadC
 use crate::merge::native::{NativeMergeProjection, protection};
 use crate::{
     AdmissionContext, AdmissionError, AdmissionLimits, CanonicalRefState, CommitMaterialization,
-    PermittedObjectClosure, ProjectionFailure, permitted_object_closure_root, ref_state_root,
+    PermittedObjectClosure, ProjectionFailure, ref_state_root,
 };
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -428,7 +428,19 @@ where
         authentication,
     )
     .map_err(ProjectionFailure::Unavailable)?;
-    let closure = PermittedObjectClosure::default();
+    let (closure, committed_closure_root) =
+        crate::merge::native::storage::read_carried_object_closure(
+            store,
+            cx,
+            basis,
+            layout,
+            &|| projection.merge_checkpoint(cx).is_err(),
+        )
+        .await
+        .map_err(|error| error.into_projection_unavailable(RefusalCode::EvidenceInvalid))?;
+    projection
+        .merge_checkpoint(cx)
+        .map_err(ProjectionFailure::Unavailable)?;
     let roots = ResultingRoots {
         ref_root: resulting_ref_root,
         forge_position_root: basis.body().forge_position_root,
@@ -449,8 +461,7 @@ where
         canonical_request_digest: seal.canonical_request_digest,
         ref_delta_root: delta_root,
         resulting_ref_root,
-        object_closure_root: permitted_object_closure_root(&closure)
-            .map_err(ProjectionFailure::Unavailable)?,
+        object_closure_root: committed_closure_root,
         forge_event_batch_root: evidence_root(&evidence.forge)
             .map_err(ProjectionFailure::Unavailable)?,
         resulting_forge_position_root: roots.forge_position_root,

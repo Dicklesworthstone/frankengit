@@ -1375,12 +1375,37 @@ pub struct PreparedCanonicalCommit {
 pub struct PreparedCanonicalClosure {
     closure: PermittedObjectClosure,
     root: Digest,
+    root_layout: RootLayoutVersion,
+    validated_input_root: Digest,
+    validated_input_objects: BTreeSet<fgit_types::GitOid>,
+    inherited_objects: Option<BTreeSet<fgit_types::GitOid>>,
     frame: Option<Vec<u8>>,
 }
 
 impl PreparedCanonicalClosure {
-    fn matches(&self, closure: &ValidatedClosure) -> bool {
-        self.root == closure.object_closure_root && self.closure.objects == closure.objects
+    fn matches_for_layout(
+        &self,
+        closure: &ValidatedClosure,
+        root_layout: RootLayoutVersion,
+        inherited: Option<&PermittedObjectClosure>,
+    ) -> bool {
+        if self.validated_input_root != closure.object_closure_root
+            || self.validated_input_objects != closure.objects
+        {
+            return false;
+        }
+        if root_layout.commits_authority_object_closure_merkle() {
+            let Some(inherited) = inherited else {
+                return false;
+            };
+            self.root_layout == root_layout
+                && self.inherited_objects.as_ref() == Some(&inherited.objects)
+        } else {
+            !self.root_layout.commits_authority_object_closure_merkle()
+                && self.inherited_objects.is_none()
+                && self.root == closure.object_closure_root
+                && self.closure.objects == closure.objects
+        }
     }
 }
 
@@ -1644,6 +1669,24 @@ where
     fn validation_authority(&self, basis: &PublicationBasis) -> Option<ReceiveValidationAuthority> {
         let _ = basis;
         None
+    }
+
+    /// Expected `RepositoryCommitRecord::object_closure_root` for a commit
+    /// materialized against `basis` after [`Self::snapshot_async`] prepared
+    /// `basis`.
+    ///
+    /// Under whole-body per-decision layouts (`0, 1, 2, 4, 5`) this equals
+    /// `closure.object_closure_root`. Under
+    /// [`RootLayoutVersion::AuthorityBoundObjectClosureMerkleV2`] (`6`) it is
+    /// the Merkle apex over the union of `basis`'s cumulative admitted closure
+    /// and `closure.objects`.
+    fn expected_commit_closure_root(
+        &self,
+        basis: &PublicationBasis,
+        closure: &ValidatedClosure,
+    ) -> Result<Digest, RefusalCode> {
+        let _ = basis;
+        Ok(closure.object_closure_root)
     }
 }
 
@@ -2004,7 +2047,8 @@ pub fn ref_state_root(
             ref_state_merkle_root(&entries).map_err(|_| RefusalCode::InternalInvariantBreach)
         }
         RootLayoutVersion::RefStateMerkleV2
-        | RootLayoutVersion::RefStateAndObjectClosureMerkleV2 => {
+        | RootLayoutVersion::RefStateAndObjectClosureMerkleV2
+        | RootLayoutVersion::AuthorityBoundObjectClosureMerkleV2 => {
             let entries = state
                 .refs()
                 .iter()
@@ -2013,6 +2057,25 @@ pub fn ref_state_root(
             fgit_crypto::ref_state_merkle_root_v2(&entries, state.head_target())
                 .map_err(|_| RefusalCode::InternalInvariantBreach)
         }
+    }
+}
+
+/// Computes the layout-selected commitment for an RCR's staged object closure.
+///
+/// Under [`RootLayoutVersion::AuthorityBoundObjectClosureMerkleV2`] (`6`),
+/// returns the domain-separated Merkle apex over `closure.objects()`; under
+/// earlier layouts (`0, 1, 2, 4, 5`), returns the historical whole-body
+/// [`permitted_object_closure_root`].
+pub fn object_closure_root(
+    layout: RootLayoutVersion,
+    closure: &PermittedObjectClosure,
+) -> Result<Digest, RefusalCode> {
+    if layout.commits_authority_object_closure_merkle() {
+        let ordered = closure.objects().iter().copied().collect::<Vec<_>>();
+        fgit_crypto::object_closure_merkle_root(&ordered)
+            .map_err(|_| RefusalCode::InternalInvariantBreach)
+    } else {
+        permitted_object_closure_root(closure)
     }
 }
 
@@ -2188,6 +2251,45 @@ pub fn prepare_canonical_commit_reusing_closure(
     evidence: CommitEvidence,
     reusable: Option<PreparedCanonicalClosure>,
 ) -> Result<PreparedCanonicalCommit, RefusalCode> {
+    prepare_canonical_commit_for_layout_reusing_closure(
+        basis,
+        request,
+        fold,
+        closure,
+        current,
+        root_layout,
+        None,
+        evidence,
+        reusable,
+    )
+}
+
+/// Prepares a canonical commit, uniting `inherited_closure` with `closure` and
+/// computing the cumulative Merkle root whenever `root_layout` commits an
+/// authority-bound object-closure Merkle tree (`AuthorityBoundObjectClosureMerkleV2`).
+///
+/// The incoming `ValidatedClosure` is still checked against its own
+/// [`permitted_object_closure_root`] first so quarantine validation cannot be
+/// bypassed on any layout. On `AuthorityBoundObjectClosureMerkleV2`, a
+/// non-genesis `basis` (`latest_committed_rcr_id.is_some()`) requires
+/// `inherited_closure` to be `Some` and fails closed otherwise.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "pure preparation binds basis, request, fold, incoming closure, \
+              current refs, layout, inherited cumulative closure, evidence, \
+              and optional cached encoding without hidden side state"
+)]
+pub fn prepare_canonical_commit_for_layout_reusing_closure(
+    basis: &PublicationBasis,
+    request: &TransactionRequest,
+    fold: &TransactionFoldReport,
+    closure: &ValidatedClosure,
+    current: CanonicalRefState,
+    root_layout: RootLayoutVersion,
+    inherited_closure: Option<&PermittedObjectClosure>,
+    evidence: CommitEvidence,
+    reusable: Option<PreparedCanonicalClosure>,
+) -> Result<PreparedCanonicalCommit, RefusalCode> {
     let effects = fold
         .effects()
         .ok_or(RefusalCode::ConflictingSemanticEffects)?;
@@ -2197,18 +2299,50 @@ pub fn prepare_canonical_commit_reusing_closure(
 
     let next_ref_state = current.apply(&effects.refs)?;
     let ref_root = ref_state_root(root_layout, &next_ref_state)?;
-    let object_closure = match reusable.filter(|prepared| prepared.matches(closure)) {
+    let empty_inherited = PermittedObjectClosure::default();
+    let effective_inherited = if root_layout.commits_authority_object_closure_merkle() {
+        match inherited_closure {
+            Some(inherited) => Some(inherited),
+            None if basis.body().latest_committed_rcr_id.is_none() => Some(&empty_inherited),
+            None => return Err(RefusalCode::ObjectClosureIncomplete),
+        }
+    } else {
+        None
+    };
+    let object_closure = match reusable
+        .filter(|prepared| prepared.matches_for_layout(closure, root_layout, effective_inherited))
+    {
         Some(prepared) => prepared,
         None => {
-            let objects = PermittedObjectClosure::new(closure.objects.clone());
-            let root = permitted_object_closure_root(&objects)?;
-            if root != closure.object_closure_root {
+            let incoming = PermittedObjectClosure::new(closure.objects.clone());
+            let incoming_root = permitted_object_closure_root(&incoming)?;
+            if incoming_root != closure.object_closure_root {
                 return Err(RefusalCode::ObjectClosureIncomplete);
             }
-            PreparedCanonicalClosure {
-                closure: objects,
-                root,
-                frame: None,
+            if let Some(inherited) = effective_inherited {
+                let mut united_set = inherited.objects.clone();
+                united_set.extend(closure.objects.iter().copied());
+                let united = PermittedObjectClosure::new(united_set);
+                let root = object_closure_root(root_layout, &united)?;
+                PreparedCanonicalClosure {
+                    closure: united,
+                    root,
+                    root_layout,
+                    validated_input_root: incoming_root,
+                    validated_input_objects: closure.objects.clone(),
+                    inherited_objects: Some(inherited.objects.clone()),
+                    frame: None,
+                }
+            } else {
+                PreparedCanonicalClosure {
+                    closure: incoming,
+                    root: incoming_root,
+                    root_layout,
+                    validated_input_root: incoming_root,
+                    validated_input_objects: closure.objects.clone(),
+                    inherited_objects: None,
+                    frame: None,
+                }
             }
         }
     };
@@ -3235,12 +3369,19 @@ fn prepare_commit_publication(
     basis: &PublicationBasis,
     tx_id: TxId,
     semantic: &fgit_authority::SemanticRequest,
-    closure: &ValidatedClosure,
+    expected_object_closure_root: Digest,
     materialization: CommitMaterialization,
     cumulative_outcomes: &CumulativeOutcomes,
     expected_head_token: fgit_authority::AuthorityVersionToken,
 ) -> Result<fgit_chronicle::VerifiedPublication, AdmissionError> {
-    validate_commit_materialization(context, basis, tx_id, semantic, closure, &materialization)?;
+    validate_commit_materialization(
+        context,
+        basis,
+        tx_id,
+        semantic,
+        expected_object_closure_root,
+        &materialization,
+    )?;
     let mut plan = PublicationPlan::open(basis.clone())?;
     plan.commit(materialization.record);
     Ok(plan.seal(
@@ -3734,7 +3875,7 @@ where
                 receipt.token(),
                 tx_id,
                 &lowered.semantic,
-                closure,
+                closure.object_closure_root,
                 *materialization,
                 &cumulative_outcomes,
             )?,
@@ -3830,7 +3971,7 @@ pub(crate) fn publish_commit<S>(
     expected: fgit_authority::AuthorityVersionToken,
     tx_id: TxId,
     semantic: &fgit_authority::SemanticRequest,
-    closure: &ValidatedClosure,
+    expected_object_closure_root: Digest,
     materialization: CommitMaterialization,
     cumulative_outcomes: &CumulativeOutcomes,
 ) -> Result<Option<fgit_authority::TerminalOutcome>, AdmissionError>
@@ -3842,7 +3983,7 @@ where
         basis,
         tx_id,
         semantic,
-        closure,
+        expected_object_closure_root,
         materialization,
         cumulative_outcomes,
         expected,
@@ -3855,7 +3996,7 @@ fn validate_commit_materialization(
     basis: &PublicationBasis,
     tx_id: TxId,
     semantic: &fgit_authority::SemanticRequest,
-    closure: &ValidatedClosure,
+    expected_object_closure_root: Digest,
     materialization: &CommitMaterialization,
 ) -> Result<(), AdmissionError> {
     let record = &materialization.record;
@@ -3875,7 +4016,7 @@ fn validate_commit_materialization(
             "RCR request digest",
         ));
     }
-    if record.object_closure_root != closure.object_closure_root {
+    if record.object_closure_root != expected_object_closure_root {
         return Err(AdmissionError::MaterializationMismatch(
             "RCR object closure root",
         ));
@@ -4635,19 +4776,25 @@ where
             tx_id,
         )
         .await?;
+        let mut expected_object_closure_root = closure.object_closure_root;
         let planned = match preparation {
-            PublicationPreparation::Commit(prepared) => complete_async_commit_materialization(
-                projection
-                    .materialize_commit_async(
-                        store,
-                        cx,
-                        &basis,
-                        &prepared.request,
-                        &prepared.fold,
-                        closure,
-                    )
-                    .await,
-            )?,
+            PublicationPreparation::Commit(prepared) => {
+                expected_object_closure_root = projection
+                    .expected_commit_closure_root(&basis, closure)
+                    .map_err(AdmissionError::AsyncProjectionUnavailable)?;
+                complete_async_commit_materialization(
+                    projection
+                        .materialize_commit_async(
+                            store,
+                            cx,
+                            &basis,
+                            &prepared.request,
+                            &prepared.fold,
+                            closure,
+                        )
+                        .await,
+                )?
+            }
             PublicationPreparation::Refuse(code) => PlannedPublication::Refuse(code),
         };
         projection
@@ -4678,7 +4825,7 @@ where
                     receipt.token(),
                     tx_id,
                     &lowered.semantic,
-                    closure,
+                    expected_object_closure_root,
                     *materialization,
                     &cumulative_outcomes,
                 )
@@ -4755,7 +4902,7 @@ pub(crate) async fn publish_commit_async<S>(
     expected: fgit_authority::AuthorityVersionToken,
     tx_id: TxId,
     semantic: &fgit_authority::SemanticRequest,
-    closure: &ValidatedClosure,
+    expected_object_closure_root: Digest,
     materialization: CommitMaterialization,
     cumulative_outcomes: &CumulativeOutcomes,
 ) -> Result<Option<fgit_authority::TerminalOutcome>, AdmissionError>
@@ -4767,7 +4914,7 @@ where
         basis,
         tx_id,
         semantic,
-        closure,
+        expected_object_closure_root,
         materialization,
         cumulative_outcomes,
         expected,

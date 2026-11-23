@@ -770,7 +770,7 @@ where
                     receipt.token(),
                     tx_id,
                     &attempt.request,
-                    sealed.closure,
+                    sealed.closure.object_closure_root,
                     materialization,
                     &cumulative,
                 )?
@@ -929,6 +929,9 @@ where
                 .await?
             }
             MergePlan::Commit(next_state) => {
+                let expected_object_closure_root = projection
+                    .expected_commit_closure_root(&basis, sealed.closure)
+                    .map_err(AdmissionError::AsyncProjectionUnavailable)?;
                 let materialization = match commitments
                     .materialize_merge_async(
                         store,
@@ -974,7 +977,7 @@ where
                     receipt.token(),
                     tx_id,
                     &attempt.request,
-                    sealed.closure,
+                    expected_object_closure_root,
                     materialization,
                     &cumulative,
                 )

@@ -53,11 +53,12 @@ where
         projection,
     )
     .await?;
-    stage(
+    stage_at(
         store,
         cx,
         repository,
         b"frankengit/admission/object-closure/v1/",
+        prepared.materialization.record.object_closure_root,
         &prepared.closure,
         projection,
     )

@@ -195,6 +195,33 @@
         "policy_root": { "$ref": "#/$defs/Digest" }
       }
     },
+    "RepositoryIncarnationConfigurationV22": {
+      "description": "Version-2.2 repository configuration carrying incarnation identity, optional policy root, and optional capability-revocation root.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root_layout", "object_format", "repository_incarnation_id"],
+      "properties": {
+        "root_layout": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "code point from the closed RootLayoutVersion vocabulary"
+        },
+        "object_format": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "code point from the closed GitHashAlgorithm vocabulary"
+        },
+        "repository_incarnation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$",
+          "description": "16 raw bytes, lowercase hex"
+        },
+        "policy_root": { "$ref": "#/$defs/Digest" },
+        "capability_revocation_root": { "$ref": "#/$defs/Digest" }
+      }
+    },
     "DecisionOutcome": {
       "description": "The terminal outcome of one decision: committed, or refused with a reason.",
       "oneOf": [
@@ -268,6 +295,17 @@
             "variant": { "const": "RepositoryIncarnationV2_1" },
             "discriminant": { "const": 3 },
             "body": { "$ref": "#/$defs/RepositoryIncarnationConfigurationV21" }
+          }
+        },
+        {
+          "description": "RepositoryIncarnationConfigurationBodyV2_2 schema v2.2, carrying policy and capability-revocation roots.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant", "body"],
+          "properties": {
+            "variant": { "const": "RepositoryIncarnationV2_2" },
+            "discriminant": { "const": 4 },
+            "body": { "$ref": "#/$defs/RepositoryIncarnationConfigurationV22" }
           }
         }
       ]
@@ -434,6 +472,191 @@
             "variant": { "const": "AfterLast" },
             "discriminant": { "const": 3 },
             "last": { "$ref": "#/$defs/ObjectClosureNeighbour" }
+          }
+        }
+      ]
+    },
+    "ObjectClosureWitness": {
+      "description": "Authority-bound witness deriving object_closure_root strictly from the client-pinned authority head.",
+      "oneOf": [
+        {
+          "description": "Genesis empty closure when latest_committed_rcr_id and latest_repository_sequence are absent.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant"],
+          "properties": {
+            "variant": { "const": "GenesisEmpty" },
+            "discriminant": { "const": 0 }
+          }
+        },
+        {
+          "description": "The committed RepositoryCommitRecord whose identity equals pinned.latest_committed_rcr_id.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant", "record"],
+          "properties": {
+            "variant": { "const": "SelectedCommitRecord" },
+            "discriminant": { "const": 1 },
+            "record": { "$ref": "#/properties/RcrV1" }
+          }
+        }
+      ]
+    },
+    "VerifiedReadAnswerV2": {
+      "description": "One V2 proof answer including authority-bound object membership and absence variants.",
+      "oneOf": [
+        {
+          "description": "One named ref and a path proving its membership in the pinned ref root.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant", "name", "oid", "proof"],
+          "properties": {
+            "variant": { "const": "RefMembership" },
+            "discriminant": { "const": 1 },
+            "name": {
+              "type": "string",
+              "pattern": "^[0-9a-f]*$",
+              "minLength": 2,
+              "maxLength": 2048
+            },
+            "oid": { "$ref": "#/$defs/GitOid" },
+            "proof": { "$ref": "#/$defs/VerifiedReadMerkleProofPayload" }
+          }
+        },
+        {
+          "description": "One terminal decision and a path proving its outcome-index membership.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant", "decision", "proof"],
+          "properties": {
+            "variant": { "const": "OutcomeMembership" },
+            "discriminant": { "const": 2 },
+            "decision": { "$ref": "#/$defs/RepositoryDecision" },
+            "proof": { "$ref": "#/$defs/VerifiedReadMerkleProofPayload" }
+          }
+        },
+        {
+          "description": "A disclosure-authorized requested name and ordered non-membership witness.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant", "name", "proof"],
+          "properties": {
+            "variant": { "const": "AuthorizedRefAbsence" },
+            "discriminant": { "const": 3 },
+            "name": {
+              "type": "string",
+              "pattern": "^[0-9a-f]*$",
+              "minLength": 2,
+              "maxLength": 2048
+            },
+            "proof": { "$ref": "#/$defs/RefStateNonMembershipProof" }
+          }
+        },
+        {
+          "description": "One object identity, its authority-bound commit witness, and its Merkle membership proof.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant", "oid", "witness", "proof"],
+          "properties": {
+            "variant": { "const": "ObjectMembership" },
+            "discriminant": { "const": 4 },
+            "oid": { "$ref": "#/$defs/GitOid" },
+            "witness": { "$ref": "#/$defs/ObjectClosureWitness" },
+            "proof": { "$ref": "#/$defs/VerifiedReadMerkleProofPayload" }
+          }
+        },
+        {
+          "description": "A disclosure-authorized absent object identity, its authority-bound commit witness, and its ordered Merkle non-membership proof.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant", "oid", "witness", "proof"],
+          "properties": {
+            "variant": { "const": "AuthorizedObjectAbsence" },
+            "discriminant": { "const": 5 },
+            "oid": { "$ref": "#/$defs/GitOid" },
+            "witness": { "$ref": "#/$defs/ObjectClosureWitness" },
+            "proof": { "$ref": "#/$defs/ObjectClosureNonMembershipProof" }
+          }
+        }
+      ]
+    },
+    "VerifiedReadCapability": {
+      "description": "Client-advertised verified-read response capability tier.",
+      "oneOf": [
+        {
+          "description": "Client accepts unproven answers without Merkle witnesses.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant"],
+          "properties": {
+            "variant": { "const": "Unproven" },
+            "discriminant": { "const": 0 }
+          }
+        },
+        {
+          "description": "Client accepts V1 ref and outcome proof envelopes.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant"],
+          "properties": {
+            "variant": { "const": "EnvelopeV1" },
+            "discriminant": { "const": 1 }
+          }
+        },
+        {
+          "description": "Client accepts V2 ref, outcome, and authority-bound object proof envelopes.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant"],
+          "properties": {
+            "variant": { "const": "EnvelopeV2" },
+            "discriminant": { "const": 2 }
+          }
+        }
+      ]
+    },
+    "VerifiedReadQueryTarget": {
+      "description": "Tagged question target inside a verified-read query envelope.",
+      "oneOf": [
+        {
+          "description": "Query membership or authorized absence of one ref name.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant", "name"],
+          "properties": {
+            "variant": { "const": "Ref" },
+            "discriminant": { "const": 1 },
+            "name": {
+              "type": "string",
+              "pattern": "^[0-9a-f]*$",
+              "minLength": 2,
+              "maxLength": 2048
+            }
+          }
+        },
+        {
+          "description": "Query terminal outcome membership for one transaction identity.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant", "tx_id"],
+          "properties": {
+            "variant": { "const": "Outcome" },
+            "discriminant": { "const": 2 },
+            "tx_id": {
+              "allOf": [{ "$ref": "#/$defs/DerivedId" }],
+              "description": "domain-bound derived identity: frankengit/ref-txn/v2"
+            }
+          }
+        },
+        {
+          "description": "Query membership or authorized absence of one native object identity.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant", "oid"],
+          "properties": {
+            "variant": { "const": "Object" },
+            "discriminant": { "const": 3 },
+            "oid": { "$ref": "#/$defs/GitOid" }
           }
         }
       ]
@@ -727,6 +950,39 @@
         "head": { "$ref": "#/properties/AuthorityHeadV1" },
         "configuration": { "$ref": "#/$defs/VerifiedReadConfiguration" },
         "answer": { "$ref": "#/$defs/VerifiedReadAnswer" }
+      }
+    },
+    "VerifiedReadEnvelopeV2V2": {
+      "description": "A version-two relayed answer whose ref, outcome, or authority-bound object proof verifies strictly against the client's pinned authority head.",
+      "x-schema": { "family": "verified-read-envelope-v2", "major": 2, "minor": 0, "domain": "frankengit/verified-read-envelope/v2" },
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "head", "answer"],
+      "properties": {
+        "version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "head": { "$ref": "#/properties/AuthorityHeadV1" },
+        "configuration": { "$ref": "#/$defs/VerifiedReadConfiguration" },
+        "answer": { "$ref": "#/$defs/VerifiedReadAnswerV2" }
+      }
+    },
+    "VerifiedReadQueryV1": {
+      "description": "A canonical verified-read query carrying the client capability tier and ref, outcome, or object target.",
+      "x-schema": { "family": "verified-read-query", "major": 1, "minor": 0, "domain": "frankengit/verified-read-query/v1" },
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "capability", "target"],
+      "properties": {
+        "version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "capability": { "$ref": "#/$defs/VerifiedReadCapability" },
+        "target": { "$ref": "#/$defs/VerifiedReadQueryTarget" }
       }
     },
     "RepositoryCreationAttemptV1": {

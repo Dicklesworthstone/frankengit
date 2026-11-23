@@ -655,6 +655,41 @@ pub static REPOSITORY_INCARNATION_CONFIGURATION_V2_1: StructureDescriptor = Stru
     ],
 };
 
+pub static REPOSITORY_INCARNATION_CONFIGURATION_V2_2: StructureDescriptor = StructureDescriptor {
+    name: "repository-incarnation-configuration-v2-2",
+    doc: "Version-2.2 repository configuration carrying incarnation identity, optional policy root, and optional capability-revocation root.",
+    fields: &[
+        FieldDescriptor {
+            name: "root_layout",
+            ty: FieldType::CodePoint {
+                vocabulary: "RootLayoutVersion",
+            },
+            cardinality: Cardinality::Required,
+            doc: "Authenticated root layout needed to interpret the head roots.",
+        },
+        FieldDescriptor {
+            name: "object_format",
+            ty: FieldType::CodePoint {
+                vocabulary: "GitHashAlgorithm",
+            },
+            cardinality: Cardinality::Required,
+            doc: "Permanent native Git object identity algorithm.",
+        },
+        opaque(
+            "repository_incarnation_id",
+            "Minted incarnation preventing a delete/recreate location alias.",
+        ),
+        root_opt(
+            "policy_root",
+            "Policy root bound to this incarnation, absent when none is published.",
+        ),
+        root_opt(
+            "capability_revocation_root",
+            "Capability-revocation generation root bound to this incarnation, absent when none is published.",
+        ),
+    ],
+};
+
 pub static VERIFIED_READ_CONFIGURATION: UnionDescriptor = UnionDescriptor {
     name: "verified-read-configuration",
     doc: "A version-tagged configuration body, inlined only when the answer needs one.",
@@ -687,6 +722,16 @@ pub static VERIFIED_READ_CONFIGURATION: UnionDescriptor = UnionDescriptor {
                 "body",
                 "repository-incarnation-configuration-v2-1",
                 "Exact V2.1 configuration payload, without a nested canonical frame.",
+            )],
+        },
+        UnionVariant {
+            name: "RepositoryIncarnationV2_2",
+            discriminant: 4,
+            doc: "RepositoryIncarnationConfigurationBodyV2_2 schema v2.2, carrying policy and capability-revocation roots.",
+            fields: &[structure(
+                "body",
+                "repository-incarnation-configuration-v2-2",
+                "Exact V2.2 configuration payload, without a nested canonical frame.",
             )],
         },
     ],
@@ -817,6 +862,199 @@ pub static VERIFIED_READ_ANSWER: UnionDescriptor = UnionDescriptor {
     ],
 };
 
+/// Authority-bound witness tying an object-closure Merkle root to the pinned head.
+pub static OBJECT_CLOSURE_WITNESS: UnionDescriptor = UnionDescriptor {
+    name: "object-closure-witness",
+    doc: "Authority-bound witness deriving object_closure_root strictly from the client-pinned authority head.",
+    variants: &[
+        UnionVariant {
+            name: "GenesisEmpty",
+            discriminant: 0,
+            doc: "Genesis empty closure when latest_committed_rcr_id and latest_repository_sequence are absent.",
+            fields: &[],
+        },
+        UnionVariant {
+            name: "SelectedCommitRecord",
+            discriminant: 1,
+            doc: "The committed RepositoryCommitRecord whose identity equals pinned.latest_committed_rcr_id.",
+            fields: &[structure(
+                "record",
+                "rcr",
+                "Exact RepositoryCommitRecord payload carrying object_closure_root.",
+            )],
+        },
+    ],
+};
+
+/// The claimed proof answer in a version-two verified-read envelope.
+pub static VERIFIED_READ_ANSWER_V2: UnionDescriptor = UnionDescriptor {
+    name: "verified-read-answer-v2",
+    doc: "One V2 proof answer including authority-bound object membership and absence variants.",
+    variants: &[
+        UnionVariant {
+            name: "RefMembership",
+            discriminant: 1,
+            doc: "One named ref and a path proving its membership in the pinned ref root.",
+            fields: &[
+                bytes("name", 1, REF_NAME_MAX, "Validated claimed ref-name bytes."),
+                git_oid("oid", "Claimed native object identity."),
+                structure(
+                    "proof",
+                    "verified-read-merkle-proof-payload",
+                    "Membership path for the named ref leaf.",
+                ),
+            ],
+        },
+        UnionVariant {
+            name: "OutcomeMembership",
+            discriminant: 2,
+            doc: "One terminal decision and a path proving its outcome-index membership.",
+            fields: &[
+                structure(
+                    "decision",
+                    "repository-decision",
+                    "Canonical terminal decision selected by the transaction identity.",
+                ),
+                structure(
+                    "proof",
+                    "verified-read-merkle-proof-payload",
+                    "Membership path for the canonical outcome leaf.",
+                ),
+            ],
+        },
+        UnionVariant {
+            name: "AuthorizedRefAbsence",
+            discriminant: 3,
+            doc: "A disclosure-authorized requested name and ordered non-membership witness.",
+            fields: &[
+                bytes(
+                    "name",
+                    1,
+                    REF_NAME_MAX,
+                    "Validated requested ref-name bytes; authorization happened before lookup.",
+                ),
+                FieldDescriptor {
+                    name: "proof",
+                    ty: FieldType::Union {
+                        name: "ref-state-non-membership-proof",
+                    },
+                    cardinality: Cardinality::Required,
+                    doc: "Ordered absence witness under the pinned ref root.",
+                },
+            ],
+        },
+        UnionVariant {
+            name: "ObjectMembership",
+            discriminant: 4,
+            doc: "One object identity, its authority-bound commit witness, and its Merkle membership proof.",
+            fields: &[
+                git_oid("oid", "Claimed native object identity."),
+                FieldDescriptor {
+                    name: "witness",
+                    ty: FieldType::Union {
+                        name: "object-closure-witness",
+                    },
+                    cardinality: Cardinality::Required,
+                    doc: "Authority-bound witness selecting object_closure_root from the pinned head.",
+                },
+                structure(
+                    "proof",
+                    "verified-read-merkle-proof-payload",
+                    "Membership path for the object leaf.",
+                ),
+            ],
+        },
+        UnionVariant {
+            name: "AuthorizedObjectAbsence",
+            discriminant: 5,
+            doc: "A disclosure-authorized absent object identity, its authority-bound commit witness, and its ordered Merkle non-membership proof.",
+            fields: &[
+                git_oid(
+                    "oid",
+                    "Requested absent object identity; authorization happened before lookup.",
+                ),
+                FieldDescriptor {
+                    name: "witness",
+                    ty: FieldType::Union {
+                        name: "object-closure-witness",
+                    },
+                    cardinality: Cardinality::Required,
+                    doc: "Authority-bound witness selecting object_closure_root from the pinned head.",
+                },
+                FieldDescriptor {
+                    name: "proof",
+                    ty: FieldType::Union {
+                        name: "object-closure-non-membership-proof",
+                    },
+                    cardinality: Cardinality::Required,
+                    doc: "Ordered absence witness under the authority-bound object closure root.",
+                },
+            ],
+        },
+    ],
+};
+
+/// Capability tier advertised by a verified-read query envelope.
+pub static VERIFIED_READ_CAPABILITY: UnionDescriptor = UnionDescriptor {
+    name: "verified-read-capability",
+    doc: "Client-advertised verified-read response capability tier.",
+    variants: &[
+        UnionVariant {
+            name: "Unproven",
+            discriminant: 0,
+            doc: "Client accepts unproven answers without Merkle witnesses.",
+            fields: &[],
+        },
+        UnionVariant {
+            name: "EnvelopeV1",
+            discriminant: 1,
+            doc: "Client accepts V1 ref and outcome proof envelopes.",
+            fields: &[],
+        },
+        UnionVariant {
+            name: "EnvelopeV2",
+            discriminant: 2,
+            doc: "Client accepts V2 ref, outcome, and authority-bound object proof envelopes.",
+            fields: &[],
+        },
+    ],
+};
+
+/// Question target carried inside a verified-read query envelope.
+pub static VERIFIED_READ_QUERY_TARGET: UnionDescriptor = UnionDescriptor {
+    name: "verified-read-query-target",
+    doc: "Tagged question target inside a verified-read query envelope.",
+    variants: &[
+        UnionVariant {
+            name: "Ref",
+            discriminant: 1,
+            doc: "Query membership or authorized absence of one ref name.",
+            fields: &[bytes(
+                "name",
+                1,
+                REF_NAME_MAX,
+                "Validated requested ref-name bytes.",
+            )],
+        },
+        UnionVariant {
+            name: "Outcome",
+            discriminant: 2,
+            doc: "Query terminal outcome membership for one transaction identity.",
+            fields: &[derived(
+                "tx_id",
+                TXN_DOMAIN,
+                "Requested sealed transaction identity.",
+            )],
+        },
+        UnionVariant {
+            name: "Object",
+            discriminant: 3,
+            doc: "Query membership or authorized absence of one native object identity.",
+            fields: &[git_oid("oid", "Requested native object identity.")],
+        },
+    ],
+};
+
 /// Every nested structure, by name.
 pub static STRUCTURES: &[&StructureDescriptor] = &[
     &REPOSITORY_DECISION,
@@ -826,6 +1064,7 @@ pub static STRUCTURES: &[&StructureDescriptor] = &[
     &REPOSITORY_INCARNATION_CONFIGURATION_V2,
     &OBJECT_CLOSURE_NEIGHBOUR,
     &REPOSITORY_INCARNATION_CONFIGURATION_V2_1,
+    &REPOSITORY_INCARNATION_CONFIGURATION_V2_2,
 ];
 
 /// Every union, by name.
@@ -835,6 +1074,10 @@ pub static UNIONS: &[&UnionDescriptor] = &[
     &REF_STATE_NON_MEMBERSHIP_PROOF,
     &VERIFIED_READ_ANSWER,
     &OBJECT_CLOSURE_NON_MEMBERSHIP_PROOF,
+    &OBJECT_CLOSURE_WITNESS,
+    &VERIFIED_READ_ANSWER_V2,
+    &VERIFIED_READ_CAPABILITY,
+    &VERIFIED_READ_QUERY_TARGET,
 ];
 
 /// The fields a `Structure` reference resolves to.
@@ -1200,6 +1443,77 @@ pub static OUTBOX_EFFECT_STATE: SchemaDescriptor = SchemaDescriptor {
     ],
 };
 
+/// `frankengit/verified-read-envelope/v2` — relayed V2 proof envelope with authority-bound object witnesses.
+pub static VERIFIED_READ_ENVELOPE_V2: SchemaDescriptor = SchemaDescriptor {
+    family: "verified-read-envelope-v2",
+    major: 2,
+    minor: 0,
+    domain: "frankengit/verified-read-envelope/v2",
+    doc: "A version-two relayed answer whose ref, outcome, or authority-bound object proof verifies strictly against the client's pinned authority head.",
+    fields: &[
+        FieldDescriptor {
+            name: "version",
+            ty: FieldType::Scalar(ScalarWidth::U16),
+            cardinality: Cardinality::Required,
+            doc: "Verified-read envelope grammar version; V2 (2) is the only accepted value for this family.",
+        },
+        structure(
+            "head",
+            "authority-head",
+            "Carried authority head, compared byte-for-byte to the client pin.",
+        ),
+        FieldDescriptor {
+            name: "configuration",
+            ty: FieldType::Union {
+                name: "verified-read-configuration",
+            },
+            cardinality: Cardinality::Optional,
+            doc: "Exact optional configuration body required to interpret the selected root layout.",
+        },
+        FieldDescriptor {
+            name: "answer",
+            ty: FieldType::Union {
+                name: "verified-read-answer-v2",
+            },
+            cardinality: Cardinality::Required,
+            doc: "The ref, outcome, or authority-bound object membership/absence claim and its witness.",
+        },
+    ],
+};
+
+/// `frankengit/verified-read-query/v1` — canonical wire query envelope.
+pub static VERIFIED_READ_QUERY: SchemaDescriptor = SchemaDescriptor {
+    family: "verified-read-query",
+    major: 1,
+    minor: 0,
+    domain: "frankengit/verified-read-query/v1",
+    doc: "A canonical verified-read query carrying the client capability tier and ref, outcome, or object target.",
+    fields: &[
+        FieldDescriptor {
+            name: "version",
+            ty: FieldType::Scalar(ScalarWidth::U16),
+            cardinality: Cardinality::Required,
+            doc: "Verified-read query grammar version; V1 (1) is the only accepted value.",
+        },
+        FieldDescriptor {
+            name: "capability",
+            ty: FieldType::Union {
+                name: "verified-read-capability",
+            },
+            cardinality: Cardinality::Required,
+            doc: "Maximum verified-read response capability accepted by the querying client.",
+        },
+        FieldDescriptor {
+            name: "target",
+            ty: FieldType::Union {
+                name: "verified-read-query-target",
+            },
+            cardinality: Cardinality::Required,
+            doc: "The ref, outcome, or object question being asked.",
+        },
+    ],
+};
+
 pub static DESCRIBED: &[&SchemaDescriptor] = &[
     &AUTHORITY_HEAD,
     &DECISION_BATCH,
@@ -1210,6 +1524,8 @@ pub static DESCRIBED: &[&SchemaDescriptor] = &[
     &VERIFIED_READ_REF_NON_MEMBERSHIP_PROOF,
     &VERIFIED_READ_OBJECT_NON_MEMBERSHIP_PROOF,
     &VERIFIED_READ_ENVELOPE,
+    &VERIFIED_READ_ENVELOPE_V2,
+    &VERIFIED_READ_QUERY,
     &REPOSITORY_CREATION_ATTEMPT,
     &HIDDEN_REF_POLICY,
     &OUTBOX_DELIVERY_RECEIPT,

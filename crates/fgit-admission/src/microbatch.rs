@@ -116,6 +116,7 @@ struct BatchAttempt {
     state: Option<BatchRefState>,
     snapshot: Option<AdmissionSnapshot>,
     snapshot_refusal: Option<RefusalCode>,
+    expected_closure_root: Digest,
     publication: PublicationPlan,
     roots: ResultingRoots,
 }
@@ -124,6 +125,7 @@ impl BatchAttempt {
     fn new(
         basis: PublicationBasis,
         snapshot: Result<AdmissionSnapshot, RefusalCode>,
+        expected_closure_root: Digest,
     ) -> Result<Self, AdmissionError> {
         let (snapshot, state, snapshot_refusal) = match snapshot {
             Ok(snapshot) => {
@@ -150,6 +152,7 @@ impl BatchAttempt {
             state,
             snapshot,
             snapshot_refusal,
+            expected_closure_root,
         })
     }
 
@@ -184,7 +187,6 @@ impl BatchAttempt {
         &mut self,
         context: &AdmissionContext,
         lowered: &LoweredRequest,
-        closure: &ValidatedClosure,
         prepared: &PreparedCommit,
         materialization: CommitMaterialization,
     ) -> Result<(), AdmissionError> {
@@ -193,7 +195,7 @@ impl BatchAttempt {
             &self.basis,
             prepared.request.tx_id,
             &lowered.semantic,
-            closure,
+            self.expected_closure_root,
             &materialization,
         )?;
         let effects = prepared
@@ -640,7 +642,8 @@ where
             } else {
                 projection.snapshot(&basis, &authenticated)
             };
-            let mut attempt = BatchAttempt::new(basis.clone(), snapshot)?;
+            let mut attempt =
+                BatchAttempt::new(basis.clone(), snapshot, input.closure.object_closure_root)?;
             for index in start..end {
                 if known[index].is_some() {
                     continue;
@@ -660,13 +663,7 @@ where
                             tx_id,
                         )? {
                             PlannedPublication::Commit(materialization) => {
-                                attempt.commit(
-                                    context,
-                                    lowered,
-                                    input.closure,
-                                    &prepared,
-                                    *materialization,
-                                )?;
+                                attempt.commit(context, lowered, &prepared, *materialization)?;
                                 continue;
                             }
                             PlannedPublication::Refuse(code) => code,
@@ -758,6 +755,7 @@ where
     let chunk_size = bounds()?.max_decisions() as usize;
     let mut known = vec![None; plan.lowered.len()];
     let mut validation = input.validation_basis;
+    let mut owned_closure_root = input.closure.object_closure_root;
     let mut cumulative_cache: Option<CumulativeOutcomes> = None;
     let mut seals = Vec::with_capacity(plan.lowered.len());
     for lowered in plan
@@ -838,7 +836,7 @@ where
                 &basis,
                 plan,
                 &known,
-                input.closure.object_closure_root,
+                owned_closure_root,
             )
             .await?;
             let stale = validation.filter(|validation| validation.head != basis.id());
@@ -868,12 +866,19 @@ where
             // witness. Retain it before our own chunk changes visible refs or
             // closure; the next chunk must not need to cross the earlier
             // foreign edge again. A snapshot refusal never grants this step.
-            if snapshot.is_ok()
-                && let Some(validation) = &mut validation
-            {
-                validation.head = basis.id();
-            }
-            let mut attempt = BatchAttempt::new(basis.clone(), snapshot)?;
+            let expected_closure_root = if snapshot.is_ok() {
+                let expected = projection
+                    .expected_commit_closure_root(&basis, input.closure)
+                    .map_err(AdmissionError::AsyncProjectionUnavailable)?;
+                owned_closure_root = expected;
+                if let Some(validation) = &mut validation {
+                    validation.head = basis.id();
+                }
+                expected
+            } else {
+                input.closure.object_closure_root
+            };
+            let mut attempt = BatchAttempt::new(basis.clone(), snapshot, expected_closure_root)?;
             for index in start..end {
                 if known[index].is_some() {
                     continue;
@@ -896,13 +901,7 @@ where
                                 .await,
                         )? {
                             PlannedPublication::Commit(materialization) => {
-                                attempt.commit(
-                                    context,
-                                    lowered,
-                                    input.closure,
-                                    &prepared,
-                                    *materialization,
-                                )?;
+                                attempt.commit(context, lowered, &prepared, *materialization)?;
                                 continue;
                             }
                             PlannedPublication::Refuse(code) => code,

@@ -15,8 +15,12 @@
 use fgit_codec::harness as support;
 use fgit_codec::{
     CanonicalBody, Encoder, RepositoryConfigurationBody, RepositoryIncarnationConfigurationBody,
+    RepositoryIncarnationConfigurationBodyV2_2,
 };
-use fgit_crypto::{MerkleProof, RefStateNeighbour, RefStateNonMembershipProof};
+use fgit_crypto::{
+    MerkleProof, ObjectClosureNeighbour, ObjectClosureNonMembershipProof, RefStateNeighbour,
+    RefStateNonMembershipProof,
+};
 use fgit_schema::descriptor::{Cardinality, FieldDescriptor, FieldType, SchemaDescriptor};
 use fgit_schema::registry;
 use fgit_types::identity::RepositoryIncarnationId;
@@ -25,8 +29,11 @@ use fgit_types::native::GitHashAlgorithm;
 use fgit_types::native::{GitOid, GitOidSha1};
 use fgit_types::refs::RefName;
 use fgit_verified_read::{
-    MerkleProofBody, RefDisclosurePolicy, RefStateNonMembershipProofBody, VerifiedReadAnswer,
-    VerifiedReadEnvelope, authorize_ref_absence,
+    MerkleProofBody, ObjectClosureNonMembershipProofBody, ObjectClosureWitness,
+    ObjectDisclosurePolicy, RefDisclosurePolicy, RefStateNonMembershipProofBody,
+    VerifiedReadAnswer, VerifiedReadAnswerV2, VerifiedReadCapability, VerifiedReadEnvelope,
+    VerifiedReadEnvelopeV2, VerifiedReadQueryEnvelope, VerifiedReadQueryTarget,
+    authorize_object_absence, authorize_ref_absence,
 };
 
 /// Consumes the bytes one field's VALUE occupies, returning the new offset.
@@ -617,4 +624,82 @@ fn verified_read_envelope_descriptor_accounts_for_every_answer_and_configuration
         },
     );
     assert_describes(&registry::VERIFIED_READ_ENVELOPE, &payload_of(&absence));
+
+    assert_identity::<ObjectClosureNonMembershipProofBody>(
+        &registry::VERIFIED_READ_OBJECT_NON_MEMBERSHIP_PROOF,
+    );
+    let obj_between = ObjectClosureNonMembershipProof::Between {
+        predecessor: Box::new(ObjectClosureNeighbour::new(wire_oid(0x11), wire_proof())),
+        successor: Box::new(ObjectClosureNeighbour::new(wire_oid(0x22), wire_proof())),
+    };
+    assert_describes(
+        &registry::VERIFIED_READ_OBJECT_NON_MEMBERSHIP_PROOF,
+        &payload_of(&ObjectClosureNonMembershipProofBody::new(
+            obj_between.clone(),
+        )),
+    );
+
+    assert_identity::<VerifiedReadEnvelopeV2>(&registry::VERIFIED_READ_ENVELOPE_V2);
+    let head = support::genesis_head();
+    let cfg_v2_2 = RepositoryIncarnationConfigurationBodyV2_2 {
+        root_layout: RootLayoutVersion::AuthorityBoundObjectClosureMerkleV2,
+        object_format: GitHashAlgorithm::Sha1,
+        repository_incarnation_id: RepositoryIncarnationId::from_bytes([0x43; 16]),
+        policy_root: None,
+        capability_revocation_root: None,
+    };
+    let obj_member_v2 = VerifiedReadEnvelopeV2::new_with_exact_configuration(
+        head.clone(),
+        Some(fgit_verified_read::VerifiedReadConfiguration::RepositoryIncarnationV2_2(cfg_v2_2)),
+        VerifiedReadAnswerV2::ObjectMembership {
+            oid: wire_oid(0x31),
+            witness: ObjectClosureWitness::SelectedCommitRecord(Box::new(support::commit_record())),
+            proof: Box::new(wire_proof()),
+        },
+    );
+    assert_describes(
+        &registry::VERIFIED_READ_ENVELOPE_V2,
+        &payload_of(&obj_member_v2),
+    );
+
+    struct PermitAllObjects;
+    impl ObjectDisclosurePolicy for PermitAllObjects {
+        fn permits_object_disclosure(&self, _oid: &GitOid) -> bool {
+            true
+        }
+    }
+    let obj_abs_token =
+        authorize_object_absence(&PermitAllObjects, wire_oid(0x15), |_| false).expect("authorized");
+    let obj_absence_v2 = VerifiedReadEnvelopeV2::new(
+        head,
+        Some(wire_configuration_v1()),
+        VerifiedReadAnswerV2::AuthorizedObjectAbsence {
+            absence: obj_abs_token,
+            witness: ObjectClosureWitness::GenesisEmpty,
+            proof: Box::new(obj_between),
+        },
+    );
+    assert_describes(
+        &registry::VERIFIED_READ_ENVELOPE_V2,
+        &payload_of(&obj_absence_v2),
+    );
+
+    assert_identity::<VerifiedReadQueryEnvelope>(&registry::VERIFIED_READ_QUERY);
+    for (cap, target) in [
+        (
+            VerifiedReadCapability::Unproven,
+            VerifiedReadQueryTarget::Ref(wire_name(b"refs/heads/main")),
+        ),
+        (
+            VerifiedReadCapability::EnvelopeV1,
+            VerifiedReadQueryTarget::Outcome(support::tx_id()),
+        ),
+        (
+            VerifiedReadCapability::EnvelopeV2,
+            VerifiedReadQueryTarget::Object(wire_oid(0x44)),
+        ),
+    ] {
+        let q = VerifiedReadQueryEnvelope::new(cap, target);
+        assert_describes(&registry::VERIFIED_READ_QUERY, &payload_of(&q));
+    }
 }
