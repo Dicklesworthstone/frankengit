@@ -20,7 +20,7 @@ use fgit_types::{PrincipalId, RefusalCode, RepositoryAuthorityHeadId, TxId};
 use std::collections::BTreeMap;
 use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, Weak};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NotificationThreadState {
@@ -110,17 +110,77 @@ const fn inbox_kind_for(kind: NotificationTargetKind) -> InboxKind {
     }
 }
 
-fn projection_file_gate(path: &Path) -> Arc<AsyncMutex<()>> {
-    static GATES: OnceLock<Mutex<BTreeMap<PathBuf, Arc<AsyncMutex<()>>>>> = OnceLock::new();
-    let gates = GATES.get_or_init(|| Mutex::new(BTreeMap::new()));
-    let mut guard = gates
+// Holders and queued requests own the mutex. The registry only makes a live
+// mutex discoverable by another node handle opening the same projection.
+pub(super) struct ProjectionPath(Arc<Path>);
+
+type FileGate = AsyncMutex<ProjectionPath>;
+static PROJECTION_GATES: Mutex<BTreeMap<Arc<Path>, Weak<FileGate>>> = Mutex::new(BTreeMap::new());
+
+impl Drop for ProjectionPath {
+    fn drop(&mut self) {
+        let mut gates = PROJECTION_GATES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A new reader may already have replaced our expired weak reference.
+        // Only retire an expired entry while holding the lookup lock.
+        if gates
+            .get(&self.0)
+            .is_some_and(|gate| gate.strong_count() == 0)
+        {
+            gates.remove(&self.0);
+        }
+    }
+}
+
+pub(super) fn projection_file_gate(path: &Path) -> Arc<FileGate> {
+    let mut gates = PROJECTION_GATES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    Arc::clone(
-        guard
-            .entry(path.to_path_buf())
-            .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
-    )
+    if let Some(gate) = gates.get(path).and_then(Weak::upgrade) {
+        return gate;
+    }
+    let path = Arc::<Path>::from(path);
+    let gate = Arc::new(AsyncMutex::new(ProjectionPath(Arc::clone(&path))));
+    gates.insert(path, Arc::downgrade(&gate));
+    gate
+}
+
+#[cfg(test)]
+pub(super) fn projection_gate_count_under(root: &Path) -> usize {
+    PROJECTION_GATES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .keys()
+        .filter(|path| path.starts_with(root))
+        .count()
+}
+
+async fn lock_projection_file(
+    path: &Path,
+    request: &NodeRequestContext,
+    native: &asupersync::Cx,
+) -> Result<OwnedMutexGuard<ProjectionPath>, NotificationReadRefusal> {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
+    let lock = OwnedMutexGuard::lock(projection_file_gate(path), native);
+    let mut lock = std::pin::pin!(lock);
+    let mut cancel = std::pin::pin!(request.authority().wait_for_local_cancel_request());
+    let result = poll_fn(|task| {
+        // A parked mutex waiter otherwise wakes only when the holder unlocks.
+        if cancel.as_mut().poll(task).is_ready() {
+            return Poll::Ready(Err(LockError::Cancelled));
+        }
+        lock.as_mut().poll(task)
+    })
+    .await;
+    result.map_err(|error| match error {
+        LockError::Cancelled => NotificationReadRefusal::projection(InboxError::Storage(
+            fgit_projection::ProjectionError::Interrupted("inbox_acquire_projection_gate"),
+        )),
+        _ => NotificationReadRefusal::InvalidProjection,
+    })
 }
 
 fn has_valid_sqlite_header_or_empty(path: &Path) -> bool {
@@ -456,18 +516,7 @@ impl OneNode {
             include_muted,
         };
         let projection_path = self.notification_inbox_projection_path(binding.principal, kind);
-        let file_gate = projection_file_gate(&projection_path);
-        let _file_lease =
-            OwnedMutexGuard::lock(file_gate, &cx)
-                .await
-                .map_err(|error| match error {
-                    LockError::Cancelled => NotificationReadRefusal::projection(
-                        InboxError::Storage(fgit_projection::ProjectionError::Interrupted(
-                            "inbox_acquire_projection_gate",
-                        )),
-                    ),
-                    _ => NotificationReadRefusal::InvalidProjection,
-                })?;
+        let _file_lease = lock_projection_file(&projection_path, request, &cx).await?;
         let snapshot = InboxSnapshot { binding, rows };
         let (sync_outcome, page) =
             match run_inbox_projection_once(&cx, &projection_path, snapshot.clone(), query).await {

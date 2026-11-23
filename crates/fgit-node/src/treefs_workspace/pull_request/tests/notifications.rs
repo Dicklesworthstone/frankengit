@@ -390,3 +390,128 @@ fn persisted_inbox_projection_reuses_watermark_invalidates_on_advance_and_rebuil
     );
     reopened.shutdown().unwrap();
 }
+
+#[test]
+fn completed_recipient_and_kind_reads_leave_no_process_gates() {
+    use crate::treefs_workspace::notifications::projection_gate_count_under;
+
+    let scratch = Scratch::new();
+    let node = node(&scratch, GitHashAlgorithm::Sha1);
+    advance_with_issue(&node);
+    let head = snapshot(&node).basis().id();
+    for id in 1..=8 {
+        let recipient = PrincipalId::from_bytes([id; 16]);
+        let reader = LoopbackReceiveSession::authenticated(
+            recipient,
+            IdempotencyKey::new(b"read-inbox".to_vec()).unwrap(),
+        );
+        for kind in [
+            NotificationTargetKind::Issue,
+            NotificationTargetKind::Discussion,
+            NotificationTargetKind::PullRequest,
+        ] {
+            let page = node
+                .runtime()
+                .block_on(node.read_notification_inbox_for_kind_in(
+                    &node.request_context(),
+                    &reader,
+                    kind,
+                    0,
+                    10,
+                    None,
+                    false,
+                    false,
+                ))
+                .unwrap();
+            assert_eq!(page.binding.principal, recipient);
+            assert_eq!(page.binding.authority_head, head);
+            assert!(
+                page.threads.is_empty(),
+                "the issue belongs to a different principal"
+            );
+            assert!(
+                node.notification_inbox_projection_path(recipient, kind)
+                    .is_file()
+            );
+            assert_eq!(projection_gate_count_under(node.storage_root()), 0);
+        }
+    }
+    assert_eq!(snapshot(&node).basis().id(), head);
+    node.shutdown().unwrap();
+}
+
+#[test]
+fn queued_reader_cancels_while_a_reopened_reader_rebuilds_the_same_file() {
+    use crate::treefs_workspace::notifications::{
+        projection_file_gate, projection_gate_count_under,
+    };
+    use std::time::{Duration, Instant};
+
+    let scratch = Scratch::new();
+    let first = node(&scratch, GitHashAlgorithm::Sha1);
+    advance_with_issue(&first);
+    let reader = session("read-shared-inbox");
+    let read = |node: &OneNode, request: &crate::NodeRequestContext| {
+        node.runtime()
+            .block_on(node.read_notification_inbox_in(request, &reader, 0, 10, None, false, false))
+    };
+    let original = read(&first, &first.request_context()).unwrap();
+    assert_eq!(original.threads.len(), 1);
+    let mut reopened = OneNode::open_existing(scratch.config(GitHashAlgorithm::Sha1)).unwrap();
+    let head = reopened
+        .runtime()
+        .block_on(reopened.authenticate_authority_head())
+        .unwrap();
+    reopened
+        .bring_into_service(head.receipt().generation())
+        .unwrap();
+
+    let path = first.notification_inbox_projection_path(principal(), NotificationTargetKind::Issue);
+    fs::write(&path, b"corrupt projection to rebuild").unwrap();
+    let gate = projection_file_gate(&path);
+    let cancelled = first.request_context();
+    let rebuilt = std::thread::scope(|threads| {
+        // Drop the holder before scoped joins, including on assertion failure.
+        let holder = gate.try_lock_owned().unwrap();
+        let cancelled_read = threads.spawn(|| read(&first, &cancelled));
+        let next_read = threads.spawn(|| read(&reopened, &reopened.request_context()));
+        let wait_for = |count| {
+            let until = Instant::now() + Duration::from_secs(10);
+            while gate.waiters() != count {
+                assert!(
+                    Instant::now() < until,
+                    "expected {count} queued readers, observed {}",
+                    gate.waiters()
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        wait_for(2);
+        cancelled.cancel();
+        wait_for(1);
+        assert!(
+            matches!(cancelled_read.join().unwrap(), Err(NotificationReadRefusal::Projection(error))
+            if matches!(*error, fgit_projection::inbox::InboxError::Storage(fgit_projection::ProjectionError::Interrupted("inbox_acquire_projection_gate"))))
+        );
+        drop(holder);
+        next_read.join().unwrap().unwrap()
+    });
+    drop(gate);
+    assert_eq!(projection_gate_count_under(first.storage_root()), 0);
+    assert_eq!(rebuilt.binding, original.binding);
+    assert_eq!(rebuilt.threads[0].title, original.threads[0].title);
+    assert_eq!(
+        rebuilt.sync_outcome,
+        Some(InboxSyncOutcome::InstalledGeneration)
+    );
+    let reused = read(&first, &first.request_context()).unwrap();
+    assert_eq!(reused.binding, rebuilt.binding);
+    assert_eq!(reused.sync_outcome, Some(InboxSyncOutcome::ReusedWatermark));
+    assert_eq!(projection_gate_count_under(first.storage_root()), 0);
+    assert_eq!(
+        snapshot(&first).basis().id(),
+        original.binding.authority_head
+    );
+    reopened.shutdown().unwrap();
+    first.shutdown().unwrap();
+}
