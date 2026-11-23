@@ -66,6 +66,7 @@ pub(super) fn try_write(
             &selection.keys,
             &held_ids,
             &limits.pack,
+            None,
             live,
         );
         checkpoint(live)?;
