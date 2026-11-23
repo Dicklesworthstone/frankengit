@@ -112,7 +112,8 @@ may still commit. Loss of a client response never proves that a push did not
 commit; use the native report-status and canonical repository state.
 
 The configured ingress, processing, terminal-response and cleanup envelopes
-bound accepted work. Raw Git and SSH both retain the existing flags:
+bound accepted work. Raw Git, SSH and smart HTTP accept these flags in both
+single-repository and routed modes where available:
 
 ```text
 --session-timeout-secs
@@ -123,6 +124,10 @@ bound accepted work. Raw Git and SSH both retain the existing flags:
 --pack-max-expanded-mib
 --pack-cache-mib
 ```
+
+For a fixed upload work deadline, set `--session-secs-per-mib 0` and
+`--session-max-extension-secs 0`. With work scaling enabled, the session can
+use additional time for admitted bytes up to the configured extension.
 
 The pack computation cache defaults to 64 MiB across a service's request
 children. `--pack-cache-mib` accepts 0..65536 MiB; zero disables retention.

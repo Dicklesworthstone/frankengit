@@ -395,6 +395,37 @@ fn argument_and_numeric_limits_refuse_before_open() {
 }
 
 #[test]
+fn routed_http_uses_the_configured_work_extension_for_each_repository() {
+    let record = record();
+    let defaults = arguments(&[]);
+    let base = configuration(&record, &parse(&defaults).unwrap(), 2).unwrap();
+    let args = arguments(&[
+        "--session-secs-per-mib",
+        "2",
+        "--session-max-extension-secs",
+        "17",
+    ]);
+    let configured = configuration(&record, &parse(&args).unwrap(), 2).unwrap();
+    let scaling = fgit_node::GitDaemonSessionWorkScaling::try_new(
+        Duration::from_secs(2) / 1_048_576,
+        Duration::from_secs(17),
+    )
+    .unwrap();
+    let expected = base.with_git_daemon_session_work_scaling(scaling);
+    assert_eq!(format!("{configured:?}"), format!("{expected:?}"));
+    let invalid = arguments(&[
+        "--session-secs-per-mib",
+        "0",
+        "--session-max-extension-secs",
+        "17",
+    ]);
+    assert_eq!(
+        configuration(&record, &parse(&invalid).unwrap(), 2).unwrap_err(),
+        "invalid session work scaling"
+    );
+}
+
+#[test]
 fn cache_retention_is_divided_without_weakening_selected_transfer_profiles() {
     let record = record();
     let args = arguments(&[]);

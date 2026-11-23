@@ -27,6 +27,7 @@ pub(super) const USAGE: &str = "usage: fg serve-http <numeric-loopback-address>
   [--allow-receive] [--allow-issues] [--allow-outcomes] [--allow-pulls] [--allow-source]
   [--max-sessions <1..1000000>] [--max-in-flight <1..16>]
   [--idle-timeout-secs <1..86400>] [--session-timeout-secs <1..3600>]
+  [--session-secs-per-mib <n>] [--session-max-extension-secs <n>]
   [--processing-timeout-secs <1..3600>] [--continuous --stop-file <absent-path>]
   [--receive-max-input-mib <1..1024>] [--receive-max-expanded-mib <1..65536>]
   [--pack-max-expanded-mib <1..65536>] [--pack-max-blob-mib <non-zero>]
@@ -256,6 +257,8 @@ fn parse(arguments: &[String]) -> Result<Options<'_>, String> {
                     | "--max-in-flight"
                     | "--idle-timeout-secs"
                     | "--session-timeout-secs"
+                    | "--session-secs-per-mib"
+                    | "--session-max-extension-secs"
                     | "--processing-timeout-secs"
                     | "--receive-max-input-mib"
                     | "--receive-max-expanded-mib"
@@ -452,6 +455,7 @@ fn configuration(
             Some(bytes("--receive-max-input-mib", 128, 1024)?),
             Some(bytes("--receive-max-expanded-mib", 4096, 65536)?),
         );
+    config = crate::guarded_git_server::apply_session_work_scaling(config, flags)?;
     if flags.contains_key("--pack-max-expanded-mib") {
         config =
             config.with_selected_pack_byte_envelope(bytes("--pack-max-expanded-mib", 1, 65536)?);

@@ -228,32 +228,7 @@ pub(crate) fn apply_session_and_envelope_flags(
                 .map_err(|_| "invalid session timeout".to_owned())?,
         );
     }
-    if flags.contains_key("--session-secs-per-mib")
-        || flags.contains_key("--session-max-extension-secs")
-    {
-        let rate = flags
-            .get("--session-secs-per-mib")
-            .map(|v| integer(v, "--session-secs-per-mib", true))
-            .transpose()?
-            .unwrap_or(1);
-        let extension = flags
-            .get("--session-max-extension-secs")
-            .map(|v| integer(v, "--session-max-extension-secs", true))
-            .transpose()?
-            .unwrap_or(if rate == 0 {
-                0
-            } else {
-                GitDaemonSessionWorkScaling::DEFAULT
-                    .max_extension()
-                    .as_secs()
-            });
-        let scaling = GitDaemonSessionWorkScaling::try_new(
-            Duration::from_secs(rate) / 1_048_576,
-            Duration::from_secs(extension),
-        )
-        .map_err(|_| "invalid session work scaling".to_owned())?;
-        configuration = configuration.with_git_daemon_session_work_scaling(scaling);
-    }
+    configuration = apply_session_work_scaling(configuration, flags)?;
     let input = flags
         .get("--receive-max-input-mib")
         .map(|v| mib(v, "--receive-max-input-mib"))
@@ -285,6 +260,40 @@ pub(crate) fn apply_session_and_envelope_flags(
         );
     }
     apply_receive_lfs_flag(configuration, flags)
+}
+
+/// Apply the same bounded per-byte work extension to Git, SSH and HTTP sessions.
+pub(crate) fn apply_session_work_scaling(
+    mut configuration: NodeConfig,
+    flags: &BTreeMap<&str, &str>,
+) -> Result<NodeConfig, String> {
+    if flags.contains_key("--session-secs-per-mib")
+        || flags.contains_key("--session-max-extension-secs")
+    {
+        let rate = flags
+            .get("--session-secs-per-mib")
+            .map(|v| integer(v, "--session-secs-per-mib", true))
+            .transpose()?
+            .unwrap_or(1);
+        let extension = flags
+            .get("--session-max-extension-secs")
+            .map(|v| integer(v, "--session-max-extension-secs", true))
+            .transpose()?
+            .unwrap_or(if rate == 0 {
+                0
+            } else {
+                GitDaemonSessionWorkScaling::DEFAULT
+                    .max_extension()
+                    .as_secs()
+            });
+        let scaling = GitDaemonSessionWorkScaling::try_new(
+            Duration::from_secs(rate) / 1_048_576,
+            Duration::from_secs(extension),
+        )
+        .map_err(|_| "invalid session work scaling".to_owned())?;
+        configuration = configuration.with_git_daemon_session_work_scaling(scaling);
+    }
+    Ok(configuration)
 }
 
 /// The same explicit custody requirement on HTTP, SSH and raw Git receive.
