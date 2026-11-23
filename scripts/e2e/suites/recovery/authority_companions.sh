@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../../lib.sh
 . "${FGE_LIB:-$E2E_ROOT/lib.sh}"
 fge_init authority-companions
 fge_kind e2e-binary
@@ -49,4 +50,23 @@ for format in sha1 sha256; do
     expect_exit "$id-cleanup" 0 test ! -e "$quarantine"
     expect_exit "$id-after" 0 "$FG_BIN" authority-backup export "$root/dest/authority.fsqlite" "$root/after" "${export_args[@]}"
     expect_exit "$id-identical-restored-image" 0 cmp "$root/before" "$root/after"
+
+    # A surviving hard-link alias and a complete, controlled set of closed
+    # staging files exercise cleanup after publication. Only the reopened
+    # destination database decides what the later export contains.
+    mkdir "$quarantine"
+    ln "$root/dest/authority.fsqlite" "$quarantine/authority.fsqlite"
+    for suffix in -journal -shm -wal -wal-fec -wal-fec.lock .fsqlite-shm \
+        -fsqlite-ns-gate -fsqlite-ns-use .fsqlite-migration-state \
+        -lock-shared -lock-reserved -lock-pending -wal-cert -wal-cert-head; do
+        : > "$quarantine/authority.fsqlite$suffix"
+    done
+    all_exit=0
+    fge_capture "$id-all-companions" "${restore[@]}" --resume || all_exit=$?
+    fge_assert_exit "$id-all-companions" 0 "$all_exit"
+    if [[ "$all_exit" -eq 0 ]]; then
+        expect_exit "$id-all-cleaned" 0 test ! -e "$quarantine"
+        expect_exit "$id-all-export" 0 "$FG_BIN" authority-backup export "$root/dest/authority.fsqlite" "$root/all" "${export_args[@]}"
+        expect_exit "$id-all-identical" 0 cmp "$root/before" "$root/all"
+    fi
 done
