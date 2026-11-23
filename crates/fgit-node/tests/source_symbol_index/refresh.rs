@@ -370,40 +370,82 @@ fn whole_corpus_limits_cannot_be_bypassed_by_a_zero_blob_read_refresh() {
     node.shutdown().unwrap();
 }
 
-#[test]
-fn reused_declarations_cannot_hide_global_exhaustion_behind_a_later_local_omission() {
-    let root = Scratch::new();
-    let (node, base) = fixture(&root, GitHashAlgorithm::Sha256);
-    // Ten individually small tables share one native blob. Their declarations
-    // still count at each current path, exactly as a full rebuild counts them.
-    let body = b"fn A() {}\n".repeat(1_990);
-    let paths: Vec<_> = (0..10)
+// Each path contributes all its declarations even when its table and blob are shared.
+fn add_symbol_declaration_budget_fixture(
+    node: &OneNode,
+    base: GitOid,
+    declarations: usize,
+) -> GenerationActivation {
+    const PER_FILE: usize = 1_990;
+    const LINE: &[u8] = b"fn A() {}\n";
+    let body = LINE.repeat(PER_FILE);
+    let paths: Vec<_> = (0..declarations.div_ceil(PER_FILE))
         .map(|n| format!("a-{n:02}.rs").into_bytes())
         .collect();
     let files: Vec<_> = paths
         .iter()
-        .map(|path| (path.as_slice(), body.as_slice()))
+        .enumerate()
+        .map(|(index, path)| {
+            let count = (declarations - index * PER_FILE).min(PER_FILE);
+            (path.as_slice(), &body[..count * LINE.len()])
+        })
         .collect();
-    let commit = add_files(&node, base, &files, b"symbol-near-global-limit");
-    let first = build(&node, None);
+    let mut commit = base;
+    for (batch, group) in files.chunks(10).enumerate() {
+        commit = add_files(
+            node,
+            commit,
+            group,
+            format!("symbol-budget-{batch}").as_bytes(),
+        );
+    }
+    let first = build(node, None);
     assert_eq!(
-        search(
-            &node,
-            &ordinary(),
-            Default::default(),
-            data::MAX_INDEX_BYTES
-        )
-        .unwrap()
-        .indexed_declarations,
-        19_900
+        search(node, &ordinary(), Default::default(), data::MAX_INDEX_BYTES)
+            .unwrap()
+            .indexed_declarations,
+        declarations
     );
     let malformed = [b"fn New() {}\n".repeat(200), b"fn Broken() {\n".to_vec()].concat();
     add_files(
-        &node,
+        node,
         commit,
         &[(b"z-broken.rs", &malformed)],
         b"symbol-global-limit-before-omission",
     );
+    first
+}
+
+#[test]
+fn repository_budget_allows_a_local_omission_above_the_interactive_declaration_limit() {
+    let root = Scratch::new();
+    let (node, base) = fixture(&root, GitHashAlgorithm::Sha256);
+    let first = add_symbol_declaration_budget_fixture(&node, base, 19_900);
+    let rebuilt = full_candidate(&node, &first);
+    let (_, refreshed, stats) = refresh(&node, &first, Default::default()).unwrap();
+    assert_eq!(refreshed.generation_id, rebuilt);
+    assert_eq!(stats.reused_files, 10);
+    let report = search(
+        &node,
+        &ordinary(),
+        Default::default(),
+        data::MAX_INDEX_BYTES,
+    )
+    .unwrap();
+    assert_eq!(report.indexed_declarations, 19_900);
+    assert_eq!(report.omissions.len(), 1);
+    assert_eq!(report.omissions[0].path, b"z-broken.rs");
+    node.shutdown().unwrap();
+}
+
+#[test]
+fn reused_declarations_cannot_hide_global_exhaustion_behind_a_later_local_omission() {
+    let root = Scratch::new();
+    let (node, base) = fixture(&root, GitHashAlgorithm::Sha256);
+    // The malformed file has 200 valid declarations before its syntax error.
+    // Both builders must encounter the repository ceiling first.
+    let first =
+        add_symbol_declaration_budget_fixture(&node, base, data::MAX_INDEX_DECLARATIONS - 100);
     for incremental in [false, true] {
         let mut called = false;
         let mut barrier = |_| {
@@ -435,10 +477,13 @@ fn reused_declarations_cannot_hide_global_exhaustion_behind_a_later_local_omissi
                 ))
                 .map(|_| ())
         };
-        assert!(matches!(result,
-            Err(AccessError::Index(data::Error::Table(data::TableError::Syntax(error))))
-                if error.kind == fgit_forge::source_symbols::SymbolSyntaxErrorKind::DeclarationLimit
-        ));
+        assert!(
+            matches!(&result,
+                Err(AccessError::Index(data::Error::Table(data::TableError::Syntax(error))))
+                    if error.kind == fgit_forge::source_symbols::SymbolSyntaxErrorKind::DeclarationLimit
+            ),
+            "incremental={incremental}, barrier_called={called}, result={result:?}"
+        );
         assert!(
             !called,
             "resource refusal precedes staging for incremental={incremental}"
