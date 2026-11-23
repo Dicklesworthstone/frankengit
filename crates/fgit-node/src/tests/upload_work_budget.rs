@@ -57,6 +57,45 @@ fn upload_disclosure_inherits_only_the_remaining_database_wall_clock() {
 }
 
 #[test]
+fn explicitly_supplied_default_policy_limits_upload_database_time() {
+    let scratch = ScratchDirectory::new();
+    let policy = BudgetPolicy::finite_defaults();
+    let config = test_config(scratch.path().to_path_buf()).with_runtime_budgets(policy);
+    let (node, _) = OneNode::init(config).unwrap();
+    let database = policy.limits_for(BudgetClass::Database);
+    let class_timeout = database.timeout.unwrap();
+    let mut session = GitDaemonSessionDeadline::new(
+        GitDaemonSessionTimeout::try_new(class_timeout + Duration::from_secs(60)).unwrap(),
+        GitDaemonSessionWorkScaling::FLAT,
+    );
+    let request = node.upload_request_context(&session);
+    let bound = request.authority().attached_native_cx().unwrap().budget();
+    let remaining = bound.remaining(node.runtime.now());
+    assert!(
+        remaining
+            .deadline
+            .is_some_and(|time| !time.is_zero() && time <= class_timeout)
+    );
+    assert_eq!(bound.poll_quota, database.poll_quota);
+    assert_eq!(bound.cost_quota, database.cost_quota);
+    assert_eq!(bound.priority, database.priority);
+
+    session.started -= class_timeout + Duration::from_secs(58);
+    let request = node.upload_request_context(&session);
+    let left = request
+        .authority()
+        .attached_native_cx()
+        .unwrap()
+        .budget()
+        .remaining(node.runtime.now());
+    assert!(
+        left.deadline
+            .is_some_and(|time| !time.is_zero() && time <= Duration::from_secs(2))
+    );
+    node.shutdown().unwrap();
+}
+
+#[test]
 fn selected_upload_allowance_is_shared_bounded_and_never_added_twice() {
     let deadline = session_deadline();
     let twin = deadline.clone();
