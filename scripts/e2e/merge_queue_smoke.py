@@ -91,16 +91,21 @@ class Campaign:
         require(type(report["decision_sequence"]) is int and report["decision_sequence"] > 0, "decision sequence")
         return report
 
-    def pull(self, action, number, version, source_ref, source_tip, target_tip, key):
+    def pull(self, action, number, version, source_ref, source_tip, target_tip, key, *,
+             title=None, refusal=None):
         report = document(self.run([
             "pr", action, self.node, TENANT, REPOSITORY, number, "--trusted-local",
             "--object-format", self.algorithm, "--principal", PRINCIPAL,
             "--idempotency-key", key, "--expected-version", version,
             "--source-ref", source_ref, "--target-ref", TARGET,
             "--expected-source", source_tip, "--expected-target", target_tip,
-            "--title", f"Queue PR {number} {key}", "--body", "Native queue lifecycle é",
-        ]))
-        require(report["command_committed"] is True and report["refs_changed"] is False, "PR metadata publication")
+            "--title", f"Queue PR {number} {key}" if title is None else title,
+            "--body", "Native queue lifecycle é",
+        ], 0 if refusal is None else 3))
+        require(report["command_committed"] is (refusal is None), "PR metadata commit flag")
+        require(report["refusal_code"] == refusal and report["refs_changed"] is False,
+                "PR metadata decision and ref effects")
+        return report
 
 
 def enqueue_flags(pull, pull_version, reference, source, target, priority=0):
@@ -490,11 +495,14 @@ def campaign(binary, root, algorithm):
     moved_refs = c.run(refs_args).stdout
     require(moved_refs != refs_before, "target fixture did not move authority")
     c.mutate("enqueue", 1, 6, "moved", enqueue_flags(11, 2, "refs/heads/third", third, f["target"]), "TargetRefMoved")
-    c.pull("update", 11, 2, "refs/heads/third", third, advance, "refresh-target")
+    updated = c.pull("update", 11, 2, "refs/heads/third", third, advance, "refresh-target")
     refreshed = enqueue_flags(11, 3, "refs/heads/third", third, advance)
     c.mutate("enqueue", 1, 6, "refreshed", refreshed)
     verify_queue(c.show(1), 7, [11])
-    c.pull("close", 11, 3, "refs/heads/third", third, advance, "close-third")
+    c.pull("close", 11, 3, "refs/heads/third", third, advance, "close-third", refusal="EvidenceStale")
+    closed = c.pull("close", 11, 3, "refs/heads/third", third, advance, "close-third-exact",
+                    title=updated["data"]["title"])
+    require(closed["data"] == updated["data"], "closing retains the exact recorded PR data")
     c.mutate("enqueue", 3, 0, "closed", enqueue_flags(11, 4, "refs/heads/third", third, advance),
              "ProtectedRefTransitionDenied")
     settled = c.show(1)
