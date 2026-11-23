@@ -1,4 +1,4 @@
-# FG-041b: ordered-residue Lean lane
+# FG-041 ordered-residue Lean proof and trace replay
 
 Run the local, fail-closed checker with:
 
@@ -36,7 +36,8 @@ finite empirical evidence, not hidden universal proof assumptions.
 
 ## Non-claims
 
-This is a machine-checked theorem about the contained Lean model. It is not a
-proof that the Rust implementation refines the model, a proof-equivalence
-lane, a durable-publication proof, or a source of canonical runtime authority.
-Those require the future FG-041c trace-refinement and bridge work.
+The kernel checks theorems about the contained Lean model. The reference
+goldens and two scheduled executions provide finite comparisons with the Rust
+reference model. General implementation refinement and native durable
+publication require additional evidence. The repository authority head
+continues to decide publication.

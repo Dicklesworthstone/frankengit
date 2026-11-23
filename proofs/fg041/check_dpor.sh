@@ -8,6 +8,7 @@ if [[ $(cat "$proof_dir/lean-toolchain") != "$toolchain" ]]; then
   echo 'fg041 proof lane refusal: DPOR toolchain differs from the pinned model checker' >&2
   exit 2
 fi
+bridge=''
 if [[ -n ${FGIT_PROOF_BRIDGE_BIN:-} ]]; then
   bridge=$(realpath -- "$FGIT_PROOF_BRIDGE_BIN")
 fi
@@ -21,7 +22,7 @@ if rg -n -w '(sorry|admit)' Refinement.lean; then
   exit 2
 fi
 set -C
-if [[ -n ${bridge:-} ]]; then
+if [[ -n $bridge ]]; then
   "$bridge" dpor "$root/crates/fgit-reference/tests/goldens/cas_loss_retry.fgtrace" >Vectors.lean
 else
   (cd "$root" && cargo run --locked --quiet -p fgit-proof-bridge --bin fgit-proof-bridge-gen -- dpor) >Vectors.lean
