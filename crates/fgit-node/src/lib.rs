@@ -10901,7 +10901,7 @@ impl OneNode {
             && (prepared.request.options.ofs_delta()
                 || pack.payload.receipt().ofs_delta_count() == 0)
         {
-            pack.payload.fresh_reader(live)?
+            pack.payload.fresh_reader(live).map_err(PackWriteError::from)?
         } else {
             None
         };
