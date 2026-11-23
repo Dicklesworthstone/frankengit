@@ -17,8 +17,8 @@ fn derived_names_and_structural_bytes_match_owned_parsing_in_both_formats() {
         let mut tree = b"100644 file\0".to_vec();
         tree.extend(vec![0x21; width]);
         let commit =
-            format!("tree {hex}\nauthor A <a@b> 0 +0000\ncommitter A <a@b> 0 +0000\n\nmessage\n");
-        let tag = format!("object {hex}\ntype commit\ntag v1\ntagger A <a@b> 0 +0000\n\nrelease\n");
+            format!("tree {hex}\nauthor A <a@b> 1 +0000\ncommitter A <a@b> 1 +0000\n\nmessage\n");
+        let tag = format!("object {hex}\ntype commit\ntag v1\ntagger A <a@b> 1 +0000\n\nrelease\n");
         for (kind, bytes) in [
             (ObjectType::Blob, b"hello\n".as_slice()),
             (ObjectType::Tree, tree.as_slice()),
@@ -71,6 +71,18 @@ fn identification_preserves_size_and_profile_refusals() {
         );
     }
     let limits = ParseLimits::default();
+    let epoch = b"tree 1111111111111111111111111111111111111111\nauthor A <a@b> 0 +0000\ncommitter A <a@b> 0 +0000\n\nepoch";
+    assert_eq!(
+        identify_object_body(
+            format,
+            ObjectType::Commit,
+            epoch,
+            AcceptanceProfile::StrictCreate,
+            &limits
+        ),
+        Err(ObjectError::MalformedSignatureDate)
+    );
+    assert!(identify_object_body(format, ObjectType::Commit, epoch, profile, &limits).is_ok());
     for (kind, malformed) in [
         (ObjectType::Tree, b"100644 incomplete".as_slice()),
         (ObjectType::Commit, b" continuation\n"),
