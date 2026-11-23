@@ -74,6 +74,7 @@ fn sparse_updates_preserve_large_inherited_maps_and_every_sequential_rcr() {
         for blocking in [false, true] {
             let (authority, staging, projection) =
                 setup(&context, &initial, Some("refs/heads/main"));
+            let initial_versions = authority.inner.issued_versions();
             let actual = if blocking {
                 admit_validated_receive(
                     &authority.inner,
@@ -84,7 +85,9 @@ fn sparse_updates_preserve_large_inherited_maps_and_every_sequential_rcr() {
                 )
                 .unwrap()
             } else {
-                run(&authority, &context, &input, &projection)
+                let result = run(&authority, &context, &input, &projection);
+                assert_eq!(authority.publications.load(Ordering::SeqCst), 2);
+                result
             };
             assert_eq!(actual.session, expected.session);
             assert_eq!(actual.command_statuses(), expected.command_statuses());
@@ -95,7 +98,11 @@ fn sparse_updates_preserve_large_inherited_maps_and_every_sequential_rcr() {
                 expected_records,
                 "every RCR and its intermediate ref commitment must match the sequential oracle"
             );
-            assert_eq!(authority.publications.load(Ordering::SeqCst), 2);
+            assert_eq!(
+                authority.inner.issued_versions(),
+                initial_versions + 2,
+                "both drivers must publish exactly two new head versions"
+            );
             verify_outcomes(&authority.inner, &context, &actual);
         }
         assert_eq!(
