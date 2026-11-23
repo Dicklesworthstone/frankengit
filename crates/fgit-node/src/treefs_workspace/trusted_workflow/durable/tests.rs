@@ -444,63 +444,71 @@ fn serve(node: &mut OneNode) {
         .unwrap();
 }
 
+pub(super) fn workflow_node(
+    temp: &Temp,
+    format: GitHashAlgorithm,
+) -> (OneNode, NodeConfig, GitOid) {
+    let source = temp.0.join("source");
+    fs::create_dir_all(source.join("refs/heads")).unwrap();
+    fs::write(source.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    fs::write(source.join("config"), match format {
+        GitHashAlgorithm::Sha1 => "[core]\nrepositoryformatversion = 0\nbare = true\n",
+        GitHashAlgorithm::Sha256 => "[core]\nrepositoryformatversion = 1\nbare = true\n[extensions]\nobjectformat = sha256\n",
+    }).unwrap();
+    let workflow = loose(
+        &source,
+        format,
+        GitObjectKind::Blob,
+        "blob",
+        SOURCE.as_bytes(),
+    );
+    let tree = [b"100644 workflow.yml\0".as_slice(), workflow.as_bytes()].concat();
+    let workflow_tree = loose(&source, format, GitObjectKind::Tree, "tree", &tree);
+    let tree = [b"40000 ci\0".as_slice(), workflow_tree.as_bytes(), &tree].concat();
+    let tree = loose(&source, format, GitObjectKind::Tree, "tree", &tree);
+    let body = format!(
+        "tree {tree}\nauthor Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\n\nworkflow input\n"
+    );
+    let tip = loose(
+        &source,
+        format,
+        GitObjectKind::Commit,
+        "commit",
+        body.as_bytes(),
+    );
+    fs::write(source.join("refs/heads/main"), format!("{tip}\n")).unwrap();
+    let config = NodeConfig::new(
+        temp.0.join("node"),
+        TenantId::from_bytes([0x41; 16]),
+        RepositoryId::from_bytes([0x42; 16]),
+    )
+    .with_object_format(format)
+    .with_worker_threads(2);
+    let (mut node, _) = OneNode::init(config.clone()).unwrap();
+    serve(&mut node);
+    let imported = node
+        .runtime()
+        .block_on(node.import_loose_git_directory_durable_in(
+            &node.request_context(),
+            &source,
+            PrincipalId::from_bytes([0x43; 16]),
+            b"workflow-custody-fixture",
+        ))
+        .unwrap();
+    assert!(
+        imported
+            .commands
+            .iter()
+            .all(|command| matches!(command.terminal.outcome, DecisionOutcome::Committed { .. }))
+    );
+    (node, config, tip)
+}
+
 #[test]
 fn actual_node_jobs_reopen_exact_evidence_without_publishing_or_reexecution() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let temp = Temp::new();
-        let source = temp.0.join("source");
-        fs::create_dir_all(source.join("refs/heads")).unwrap();
-        fs::write(source.join("HEAD"), "ref: refs/heads/main\n").unwrap();
-        fs::write(source.join("config"), match format {
-            GitHashAlgorithm::Sha1 => "[core]\nrepositoryformatversion = 0\nbare = true\n",
-            GitHashAlgorithm::Sha256 => "[core]\nrepositoryformatversion = 1\nbare = true\n[extensions]\nobjectformat = sha256\n",
-        }).unwrap();
-        let workflow = loose(
-            &source,
-            format,
-            GitObjectKind::Blob,
-            "blob",
-            SOURCE.as_bytes(),
-        );
-        let tree = [b"100644 workflow.yml\0".as_slice(), workflow.as_bytes()].concat();
-        let workflow_tree = loose(&source, format, GitObjectKind::Tree, "tree", &tree);
-        let tree = [b"40000 ci\0".as_slice(), workflow_tree.as_bytes(), &tree].concat();
-        let tree = loose(&source, format, GitObjectKind::Tree, "tree", &tree);
-        let body = format!(
-            "tree {tree}\nauthor Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\n\nworkflow input\n"
-        );
-        let tip = loose(
-            &source,
-            format,
-            GitObjectKind::Commit,
-            "commit",
-            body.as_bytes(),
-        );
-        fs::write(source.join("refs/heads/main"), format!("{tip}\n")).unwrap();
-        let config = NodeConfig::new(
-            temp.0.join("node"),
-            TenantId::from_bytes([0x41; 16]),
-            RepositoryId::from_bytes([0x42; 16]),
-        )
-        .with_object_format(format)
-        .with_worker_threads(2);
-        let (mut node, _) = OneNode::init(config.clone()).unwrap();
-        serve(&mut node);
-        let imported = node
-            .runtime()
-            .block_on(node.import_loose_git_directory_durable_in(
-                &node.request_context(),
-                &source,
-                PrincipalId::from_bytes([0x43; 16]),
-                b"workflow-custody-fixture",
-            ))
-            .unwrap();
-        assert!(
-            imported.commands.iter().all(|command| matches!(
-                command.terminal.outcome,
-                DecisionOutcome::Committed { .. }
-            ))
-        );
+        let (node, config, tip) = workflow_node(&temp, format);
         let stale_head = node
             .runtime()
             .block_on(node.materialize_admission_in(&node.request_context()))

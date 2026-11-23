@@ -14,6 +14,8 @@ use std::path::PathBuf;
 
 mod journal;
 mod metadata;
+#[cfg(test)]
+mod tests;
 
 struct Budget {
     jobs: usize,
