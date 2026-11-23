@@ -207,7 +207,7 @@ mod loose_import;
 mod merge_delivery;
 mod node_lanes;
 mod pack_spool;
-mod smart_http;
+pub mod smart_http;
 /// HTTP `search-initial`/`context-initial` for an in-process host (see the fn).
 pub use smart_http::{source_agent_context_json, source_index_json, source_retrieval_json};
 mod termination;
