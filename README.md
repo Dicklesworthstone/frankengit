@@ -35,6 +35,8 @@ connection, retry, shutdown and verification obligations are in
 
 ## Current one-node integration boundary
 
+The November 22 compiler runs at `6194cf96` and `72db4b11` both stopped in sponsored-agent admission before producing a native `fg` binary. The [dated reality check and bridge plan](docs/REALITY_CHECK_AND_BRIDGE_PLAN.md) records the compiler diagnostics, what ran against a retained binary, and the remaining team, agent, recovery and release tests.
+
 The checked-in `fgit-cli` library contains a narrow, configuration-free one-node
 surface for exercising the same authority, admission, and object-selection
 abstractions the finished system will use. It does not consult a configuration
