@@ -290,7 +290,7 @@ impl Display for CliRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => formatter.write_str(
-                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] [--root-layout legacy|ref-merkle-v2|authority-object-merkle-v2] [--initial-branch <name>] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256] [--root-layout legacy|ref-merkle-v2|authority-object-merkle-v2]; fg lfs --help; fg verify-read --help; fg queue --help; fg inbox --help; fg agent context --help; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <non-zero> --max-in-flight <non-zero>] [--receive-principal <principal-id-hex>] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>] [--received-pack-cache-mib <0..65536>]; fg at <storage-root> <tenant-id-hex> <repository-id-hex> <position> [refs|prs|checks <pr-number>|diff <other-position>] [--actor <principal-id-hex>] [--expected-incarnation <id>]",
+                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] [--root-layout legacy|ref-merkle-v2|authority-object-merkle-v2] [--initial-branch <name>] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256] [--root-layout legacy|ref-merkle-v2|authority-object-merkle-v2]; fg lfs --help; fg verify-read --help; fg queue --help; fg inbox --help; fg agent context --help; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <non-zero> --max-in-flight <non-zero>] [--receive-principal <principal-id-hex>] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>] [--received-pack-cache-mib <0..65536>] [--enable-ref-in-want] [--enable-object-info]; fg at <storage-root> <tenant-id-hex> <repository-id-hex> <position> [refs|prs|checks <pr-number>|diff <other-position>] [--actor <principal-id-hex>] [--expected-incarnation <id>]",
             ),
             Self::UnsupportedObjectFormat(token) => write!(
                 formatter,
@@ -1035,6 +1035,9 @@ struct ServeEnvelope {
     pack_cache_bytes: Option<usize>,
     /// Shared received-pack representations, independent of computation cache.
     received_pack_cache_bytes: Option<usize>,
+    /// Optional protocol-v2 extensions; each requires its own operator opt-in.
+    enable_ref_in_want: bool,
+    enable_object_info: bool,
 }
 
 impl ServeEnvelope {
@@ -1095,6 +1098,9 @@ impl ServeEnvelope {
         if let Some(bytes) = self.received_pack_cache_bytes {
             configuration = configuration.with_received_pack_cache_bytes(bytes);
         }
+        configuration = configuration
+            .with_upload_pack_ref_in_want(self.enable_ref_in_want)
+            .with_upload_pack_object_info(self.enable_object_info);
         self.apply_pack_envelope(configuration)
     }
 
@@ -1201,6 +1207,21 @@ fn extract_serve_envelope(
     let mut index = 0;
     while index < arguments.len() {
         let argument = &arguments[index];
+        if is_serve {
+            let feature = match argument.as_str() {
+                "--enable-ref-in-want" => Some(&mut envelope.enable_ref_in_want),
+                "--enable-object-info" => Some(&mut envelope.enable_object_info),
+                _ => None,
+            };
+            if let Some(enabled) = feature {
+                if *enabled {
+                    return Err(CliRefusal::Usage);
+                }
+                *enabled = true;
+                index += 1;
+                continue;
+            }
+        }
         if (is_serve || is_export) && argument == "--pack-max-blob-mib" {
             if envelope.pack_max_blob_bytes.is_some() {
                 return Err(CliRefusal::Usage);
@@ -2190,6 +2211,46 @@ mod tests {
             let (retained, envelope) = super::extract_serve_envelope(&argv).unwrap();
             assert_eq!(retained, argv);
             assert_eq!(envelope.pack_max_blob_bytes, None);
+        }
+    }
+
+    #[test]
+    fn optional_upload_pack_features_are_serve_only_and_independent() {
+        for (extra, want_ref, object_info) in [
+            (vec![], false, false),
+            (vec!["--enable-ref-in-want"], true, false),
+            (vec!["--enable-object-info"], false, true),
+            (
+                vec!["--enable-ref-in-want", "--enable-object-info"],
+                true,
+                true,
+            ),
+        ] {
+            let (retained, envelope) = super::extract_serve_envelope(&serve_argv(&extra)).unwrap();
+            assert_eq!(retained, serve_argv(&[]));
+            let config = envelope
+                .apply(NodeConfig::new(
+                    PathBuf::from("not-opened"),
+                    TenantId::from_bytes([0x11; 16]),
+                    RepositoryId::from_bytes([0x22; 16]),
+                ))
+                .unwrap();
+            assert_eq!(config.upload_pack_ref_in_want_enabled(), want_ref);
+            assert_eq!(config.upload_pack_object_info_enabled(), object_info);
+        }
+        for flag in ["--enable-ref-in-want", "--enable-object-info"] {
+            assert!(matches!(
+                super::extract_serve_envelope(&serve_argv(&[flag, flag])),
+                Err(CliRefusal::Usage)
+            ));
+            for command in ["init", "import", "export", "doctor"] {
+                let mut argv = serve_argv(&[flag]);
+                argv[0] = command.into();
+                let (retained, envelope) = super::extract_serve_envelope(&argv).unwrap();
+                assert_eq!(retained, argv);
+                assert!(!envelope.enable_ref_in_want);
+                assert!(!envelope.enable_object_info);
+            }
         }
     }
 

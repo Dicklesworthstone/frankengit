@@ -14,7 +14,7 @@ use std::net::{SocketAddr, TcpListener, ToSocketAddrs};
 use std::path::PathBuf;
 use std::time::Duration;
 
-const USAGE: &str = "usage: fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <1..1000000> --max-in-flight <1..16> | --continuous --stop-file <absent-path> [--max-in-flight <1..16>]] [--receive-principal <principal-id-hex> [--allow-unauthenticated-network-push]] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--processing-timeout-secs <non-zero>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>] [--received-pack-cache-mib <0..65536>] [--require-lfs-payloads <absolute-private-directory>]";
+const USAGE: &str = "usage: fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <1..1000000> --max-in-flight <1..16> | --continuous --stop-file <absent-path> [--max-in-flight <1..16>]] [--receive-principal <principal-id-hex> [--allow-unauthenticated-network-push]] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--processing-timeout-secs <non-zero>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>] [--received-pack-cache-mib <0..65536>] [--enable-ref-in-want] [--enable-object-info] [--require-lfs-payloads <absolute-private-directory>]";
 
 struct Prepared {
     /// The operator explicitly accepted that any network peer can push as the
@@ -66,6 +66,13 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
                 return Err(format!("duplicate {argument}"));
             }
             unauthenticated_network_push = true;
+            index += 1;
+            continue;
+        }
+        if UPLOAD_PACK_FEATURE_FLAGS.contains(&argument) {
+            if flags.insert(argument, "").is_some() {
+                return Err(format!("duplicate {argument}"));
+            }
             index += 1;
             continue;
         }
@@ -216,6 +223,20 @@ pub(crate) const SESSION_AND_ENVELOPE_FLAGS: [&str; 10] = [
     "--require-lfs-payloads",
 ];
 
+/// Optional protocol-v2 extensions, disabled by default like upstream Git.
+pub(crate) const UPLOAD_PACK_FEATURE_FLAGS: [&str; 2] =
+    ["--enable-ref-in-want", "--enable-object-info"];
+
+/// Select the same independent upload-pack extensions for every transport.
+pub(crate) fn apply_upload_pack_features(
+    configuration: NodeConfig,
+    flags: &BTreeMap<&str, &str>,
+) -> NodeConfig {
+    configuration
+        .with_upload_pack_ref_in_want(flags.contains_key("--enable-ref-in-want"))
+        .with_upload_pack_object_info(flags.contains_key("--enable-object-info"))
+}
+
 /// Apply [`SESSION_AND_ENVELOPE_FLAGS`] to a node configuration.
 pub(crate) fn apply_session_and_envelope_flags(
     mut configuration: NodeConfig,
@@ -259,7 +280,7 @@ pub(crate) fn apply_session_and_envelope_flags(
             fgit_cli::parse_received_pack_cache_mib(value).map_err(|error| error.to_string())?,
         );
     }
-    apply_receive_lfs_flag(configuration, flags)
+    apply_receive_lfs_flag(apply_upload_pack_features(configuration, flags), flags)
 }
 
 /// Apply the same bounded per-byte work extension to Git, SSH and HTTP sessions.
@@ -569,6 +590,35 @@ mod tests {
             vec!["--pack-max-blob-mib"],
         ] {
             assert!(parse(&arguments(&flags)).is_err(), "{flags:?}");
+        }
+    }
+
+    #[test]
+    fn optional_upload_pack_features_are_independent_and_do_not_enable_push() {
+        for (extra, want_ref, object_info) in [
+            (vec![], false, false),
+            (vec!["--enable-ref-in-want"], true, false),
+            (vec!["--enable-object-info"], false, true),
+            (
+                vec!["--enable-ref-in-want", "--enable-object-info"],
+                true,
+                true,
+            ),
+        ] {
+            let selected = parse(&arguments(&extra)).unwrap();
+            assert_eq!(
+                selected.configuration.upload_pack_ref_in_want_enabled(),
+                want_ref
+            );
+            assert_eq!(
+                selected.configuration.upload_pack_object_info_enabled(),
+                object_info
+            );
+            assert!(!selected.receive_enabled);
+        }
+        for flag in UPLOAD_PACK_FEATURE_FLAGS {
+            assert!(parse(&arguments(&[flag, flag])).is_err());
+            assert!(parse(&arguments(&[flag, "true"])).is_err());
         }
     }
 

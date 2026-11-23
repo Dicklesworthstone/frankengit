@@ -3,6 +3,8 @@ use super::*;
 use crate::{GitDaemonSessionDeadline, GitDaemonSessionWorkScaling};
 use std::time::Instant;
 
+mod fabric_clock;
+
 fn session_deadline() -> GitDaemonSessionDeadline {
     GitDaemonSessionDeadline::new(
         GitDaemonSessionTimeout::try_new(Duration::from_secs(10)).unwrap(),

@@ -42,7 +42,7 @@ const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository
   [--session-secs-per-mib <n>] [--session-max-extension-secs <n>]
   [--continuous --stop-file <path>]
   [--processing-timeout-secs <1..3600>] [--receive-max-input-mib <1..1024>]
-  [--receive-max-expanded-mib <1..65536>] [--pack-max-expanded-mib <1..65536>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>] [--received-pack-cache-mib <0..65536>]
+  [--receive-max-expanded-mib <1..65536>] [--pack-max-expanded-mib <1..65536>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>] [--received-pack-cache-mib <0..65536>] [--enable-ref-in-want] [--enable-object-info]
   [--trusted-origin <origin>]
   [--index-state-dir <private-directory> --index-state init|resume
    --index-profile lexical|symbols|both --index-format sha1|sha256
@@ -450,6 +450,8 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                 | "--workflow-refresh-queue-head"
                 | "--workflow-pull-requests"
                 | "--workflow-artifact-logs"
+                | "--enable-ref-in-want"
+                | "--enable-object-info"
         );
         if !boolean
             && !matches!(
@@ -762,6 +764,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             Some(bytes("--receive-max-expanded-mib", 4096, 65536)?),
         );
     config = crate::guarded_git_server::apply_session_work_scaling(config, &flags)?;
+    config = crate::guarded_git_server::apply_upload_pack_features(config, &flags);
     // Served packs stream through scratch custody (frankengit-8xyq), so the
     // node's default upload envelope stands unless the operator names one.
     if flags.contains_key("--pack-max-expanded-mib") {
@@ -1195,6 +1198,37 @@ mod tests {
         .map(str::to_owned)
         .collect()
     }
+    #[test]
+    fn optional_upload_pack_features_are_independent_and_do_not_enable_push() {
+        for (extra, want_ref, object_info) in [
+            (vec![], false, false),
+            (vec!["--enable-ref-in-want"], true, false),
+            (vec!["--enable-object-info"], false, true),
+            (
+                vec!["--enable-ref-in-want", "--enable-object-info"],
+                true,
+                true,
+            ),
+        ] {
+            let mut args = arguments();
+            args.extend(extra.into_iter().map(str::to_owned));
+            let selected = parse(&args).unwrap();
+            assert_eq!(selected.config.upload_pack_ref_in_want_enabled(), want_ref);
+            assert_eq!(
+                selected.config.upload_pack_object_info_enabled(),
+                object_info
+            );
+            assert!(!selected.allow_receive);
+        }
+        for flag in crate::guarded_git_server::UPLOAD_PACK_FEATURE_FLAGS {
+            for extra in [[flag, flag], [flag, "true"]] {
+                let mut args = arguments();
+                args.extend(extra.map(str::to_owned));
+                assert!(parse(&args).is_err());
+            }
+        }
+    }
+
     #[test]
     fn required_lfs_custody_neither_enables_transfers_nor_grants_receive() {
         #[cfg(unix)]

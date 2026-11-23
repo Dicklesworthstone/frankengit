@@ -3,6 +3,7 @@ use std::cell::RefCell;
 mod basename_ordering;
 mod incremental_walk;
 mod object_info;
+mod optional_extensions;
 mod projection_cache;
 mod received_pack_reuse;
 mod ref_in_want;
@@ -471,24 +472,46 @@ fn fixture(format: GitHashAlgorithm) -> Fixture {
 }
 
 fn fixture_with_public_body(format: GitHashAlgorithm, public_body: Vec<u8>) -> Fixture {
-    fixture_with_public_blob(format, |node| {
-        node.put_git_object(ObjectType::Blob, public_body)
-            .unwrap()
-            .identity()
-    })
+    fixture_with_configuration(format, public_body, |config| config)
+}
+
+fn fixture_with_configuration(
+    format: GitHashAlgorithm,
+    public_body: Vec<u8>,
+    configure: impl FnOnce(NodeConfig) -> NodeConfig,
+) -> Fixture {
+    fixture_with_configured_public_blob(
+        format,
+        |node| {
+            node.put_git_object(ObjectType::Blob, public_body)
+                .unwrap()
+                .identity()
+        },
+        configure,
+    )
 }
 
 fn fixture_with_public_blob(
     format: GitHashAlgorithm,
     public_blob: impl FnOnce(&OneNode) -> GitOid,
 ) -> Fixture {
+    fixture_with_configured_public_blob(format, public_blob, |config| config)
+}
+
+fn fixture_with_configured_public_blob(
+    format: GitHashAlgorithm,
+    public_blob: impl FnOnce(&OneNode) -> GitOid,
+    configure: impl FnOnce(NodeConfig) -> NodeConfig,
+) -> Fixture {
     let scratch = Scratch::new();
-    let config = NodeConfig::new(
-        scratch.0.clone(),
-        TenantId::from_bytes([0x62; 16]),
-        RepositoryId::from_bytes([0x63; 16]),
-    )
-    .with_object_format(format);
+    let config = configure(
+        NodeConfig::new(
+            scratch.0.clone(),
+            TenantId::from_bytes([0x62; 16]),
+            RepositoryId::from_bytes([0x63; 16]),
+        )
+        .with_object_format(format),
+    );
     let (mut node, _) = OneNode::init(config.clone()).unwrap();
     node.bring_into_service(HeadGeneration::FIRST).unwrap();
     let put = |kind, body| node.put_git_object(kind, body).unwrap().identity();

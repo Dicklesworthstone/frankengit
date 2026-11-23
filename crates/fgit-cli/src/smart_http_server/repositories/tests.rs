@@ -430,6 +430,32 @@ fn routed_http_uses_the_configured_work_extension_for_each_repository() {
 }
 
 #[test]
+fn optional_upload_pack_features_apply_independently_to_catalog_routes() {
+    for (extra, want_ref, object_info) in [
+        (vec![], false, false),
+        (vec!["--enable-ref-in-want"], true, false),
+        (vec!["--enable-object-info"], false, true),
+        (
+            vec!["--enable-ref-in-want", "--enable-object-info"],
+            true,
+            true,
+        ),
+    ] {
+        let args = arguments(&extra);
+        let options = parse(&args).unwrap();
+        for count in [1, MAX_HTTP_REPOSITORY_ROUTES] {
+            let config = configuration(&record(), &options, count).unwrap();
+            assert_eq!(config.upload_pack_ref_in_want_enabled(), want_ref);
+            assert_eq!(config.upload_pack_object_info_enabled(), object_info);
+        }
+    }
+    for flag in crate::guarded_git_server::UPLOAD_PACK_FEATURE_FLAGS {
+        assert!(parse(&arguments(&[flag, flag])).is_err());
+        assert!(parse(&arguments(&[flag, "true"])).is_err());
+    }
+}
+
+#[test]
 fn cache_retention_is_divided_without_weakening_selected_transfer_profiles() {
     let record = record();
     let args = arguments(&[]);
