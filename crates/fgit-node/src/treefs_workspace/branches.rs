@@ -3,6 +3,7 @@
 
 use super::publication::receive_error;
 use super::{NodeWorkspaceRefusal, workspace_request_live};
+use crate::ancestry_metadata::{AncestryMetadataAccess, VerifiedCommitMetadata};
 use crate::quarantine_validator::ProductionReceiveQuarantineHandoff;
 use crate::{
     LoopbackReceiveSession, NodeReceiveTransportRefusal, NodeRequestContext, OneNode,
@@ -56,7 +57,9 @@ fn parse_commit_oid(
 /// is reported as one after the whole history below `tip` is seen. A parent
 /// outside the closure is an integrity refusal, never a guess. The walk stops
 /// at the first sighting of `ancestor`, so a short fast-forward reads only the
-/// new commits; cancellation is checked before every read.
+/// new commits; cancellation is checked before every read. Reusable native
+/// parent metadata avoids body reads after the first query, but never chooses
+/// the current closure, widens parser limits or supplies a cached query answer.
 fn is_fast_forward(
     source: &VerifiedFabricPackSource,
     format: GitHashAlgorithm,
@@ -64,6 +67,7 @@ fn is_fast_forward(
     tip: GitOid,
     closure: &BTreeSet<GitOid>,
     parse_limits: &ParseLimits,
+    ancestry: Option<&AncestryMetadataAccess<'_>>,
     mut live: impl FnMut() -> bool,
 ) -> Result<bool, NodeWorkspaceRefusal> {
     if ancestor == tip {
@@ -76,28 +80,79 @@ fn is_fast_forward(
         if !live() {
             return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
         }
-        let (kind, body) = source
-            .read_object(&id)
-            .map_err(|_| invalid("commit object could not be read during fast-forward check"))?;
-        if kind != ObjectType::Commit {
-            return Err(invalid("non-commit object encountered in commit ancestry"));
+        if !closure.contains(&id) {
+            return Err(invalid(
+                "commit ancestry leaves the authority-selected closure during fast-forward check",
+            ));
         }
-        let ParsedObject::Commit(parsed) = parse_object_body(
-            ObjectType::Commit,
-            &body,
-            AcceptanceProfile::GitCompatibleImport,
-            parse_limits,
-        )
-        .map_err(|_| invalid("commit parsing failed during fast-forward check"))?
-        else {
-            return Err(invalid("parsed object was not a commit"));
+        // Runtime liveness remains mandatory even when no object read occurs.
+        if source.session_checkpoint().is_err() || !source.database_read_is_live() {
+            return Err(invalid(
+                "commit object could not be read during fast-forward check",
+            ));
+        }
+        let cached = ancestry.and_then(|cache| {
+            cache
+                .lookup(id, parse_limits, source.buffered_object_limit())
+                .and_then(Result::ok)
+        });
+        let (parents, parsed) = if let Some(entry) = cached {
+            (entry.into_frontier_metadata().into_parents(), None)
+        } else {
+            let (kind, body) = source.read_object(&id).map_err(|_| {
+                invalid("commit object could not be read during fast-forward check")
+            })?;
+            if kind != ObjectType::Commit {
+                return Err(invalid("non-commit object encountered in commit ancestry"));
+            }
+            #[cfg(test)]
+            if let Some(cache) = ancestry {
+                cache.record_body_read();
+            }
+            // A cache certificate verifies native bytes independently. Its
+            // stricter tree-header checks are optional here: historical input
+            // which it cannot retain still uses the original branch parser.
+            let entry = ancestry
+                .filter(|cache| cache.is_enabled())
+                .and_then(|_| VerifiedCommitMetadata::parse(id, &body, parse_limits).ok());
+            if let Some(entry) = entry {
+                if let Some(cache) = ancestry {
+                    cache.insert(&entry);
+                }
+                (entry.into_frontier_metadata().into_parents(), None)
+            } else {
+                let ParsedObject::Commit(parsed) = parse_object_body(
+                    ObjectType::Commit,
+                    &body,
+                    AcceptanceProfile::GitCompatibleImport,
+                    parse_limits,
+                )
+                .map_err(|_| invalid("commit parsing failed during fast-forward check"))?
+                else {
+                    return Err(invalid("parsed object was not a commit"));
+                };
+                (Vec::new(), Some(parsed))
+            }
         };
-
-        for parent_bytes in parsed.parent_references() {
+        if !live() {
+            return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
+        }
+        if source.session_checkpoint().is_err() || !source.database_read_is_live() {
+            return Err(invalid(
+                "commit object could not be read during fast-forward check",
+            ));
+        }
+        let parents = parents.into_iter().map(Ok).chain(
+            parsed
+                .iter()
+                .flat_map(|commit| commit.parent_references())
+                .map(|bytes| parse_commit_oid(bytes, format)),
+        );
+        for parent in parents {
             if !live() {
                 return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
             }
-            let parent_oid = parse_commit_oid(parent_bytes, format)?;
+            let parent_oid = parent?;
             if !closure.contains(&parent_oid) {
                 return Err(invalid(
                     "commit ancestry leaves the authority-selected closure during fast-forward check",
@@ -313,6 +368,7 @@ impl OneNode {
             session_is_live: None,
         };
         let mut live = || workspace_request_live(request);
+        let ancestry = AncestryMetadataAccess::for_node(self);
         // Check branch kinds using verified object bytes, not object-ID shape.
         // The materialized basis closure already established visible reachability before kind disclosure.
         for command in attempt.request.ref_commands() {
@@ -350,6 +406,7 @@ impl OneNode {
                         oid,
                         materialized.selected_closure().closure().objects(),
                         &parse_limits,
+                        Some(&ancestry),
                         &mut live,
                     )?
                 {
