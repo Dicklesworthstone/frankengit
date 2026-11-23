@@ -9003,7 +9003,7 @@ impl OneNode {
                     &node.authority,
                     &initialization_cx,
                     repository_id,
-                    config.root_layout,
+                    root_layout,
                     PermittedObjectClosure::default(),
                 ),
         ) {
