@@ -2872,10 +2872,6 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
         let provider =
             DurableAdmissionEvidence::from_bodies(self.context.clone(), basis, request, bodies)
                 .map_err(async_projection_unavailable)?;
-        self.materializer
-            .stage_evidence_bodies_in(authority, &stage_context, &provider.bodies, &is_cancelled)
-            .await
-            .map_err(async_projection_unavailable)?;
         let evidence = provider
             .commit_evidence(basis, request, fold)
             .map_err(AsyncProjectionFailure::Unavailable)?;
@@ -2900,6 +2896,7 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
         )
         .map_err(AsyncProjectionFailure::Refuse)?;
         ensure_materializer_catch_up_live(&is_cancelled).map_err(async_projection_unavailable)?;
+        require_authenticated_head_layout(root_layout).map_err(async_projection_unavailable)?;
         // The last refusal exit is behind us: this attempt stages a commit.
         // Its objects become durable names before any frame or head names
         // them; a replan finds them published (frankengit-tz5z). Publication
@@ -2913,41 +2910,21 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
                 .publish(publication.fabric, &mut || !is_cancelled())
                 .map_err(|error| AsyncProjectionFailure::Unavailable(publication_refusal(error)))?;
         }
-        let ref_root = self
-            .materializer
-            .stage_ref_state_for_layout_in(
-                authority,
-                cx,
-                self.context.repository_id,
-                root_layout,
-                prepared.next_ref_state().clone(),
-            )
-            .await
-            .map_err(async_projection_unavailable)?;
-        if ref_root != prepared.ref_root() {
-            return Err(AsyncProjectionFailure::Unavailable(
-                RefusalCode::InternalInvariantBreach,
-            ));
-        }
-        let closure_key = admission_immutable_key(
-            ADMISSION_CLOSURE_KEY_PREFIX,
-            self.context.repository_id,
-            prepared.object_closure_root(),
+        // Stage the opaque preparation's exact evidence, ref state and closure
+        // together where the existing immutable batch envelope permits. No
+        // successful placement is cached here: each selected store must accept
+        // the bytes even on a pure-preparation cache hit or after a CAS replan.
+        // A storage failure may leave unreferenced objects or a staged prefix,
+        // but no RCR or authority head can publish this attempt before success.
+        evidence_staging::stage_commit_in(
+            authority,
+            &stage_context,
+            &provider.bodies,
+            &mut prepared,
+            &is_cancelled,
         )
-        .map_err(|error| {
-            async_projection_unavailable(AdmissionMaterializationRefusal::Key(error))
-        })?;
-        let closure_frame = prepared.object_closure_frame().map_err(|error| {
-            async_projection_unavailable(AdmissionMaterializationRefusal::CanonicalFrame(error))
-        })?;
-        ensure_materializer_catch_up_live(&is_cancelled).map_err(async_projection_unavailable)?;
-        // Never cache successful placement here. StoreInstanceId can repeat
-        // across independently configured databases, and this projection can
-        // receive another authority on a later call. The selected store owns
-        // its own committed-byte cache, cancellation and closed-store checks.
-        stage_immutable_frame(authority, cx, &closure_key, closure_frame)
-            .await
-            .map_err(async_projection_unavailable)?;
+        .await
+        .map_err(async_projection_unavailable)?;
         ensure_materializer_catch_up_live(&is_cancelled).map_err(async_projection_unavailable)?;
         let (materialization, closure) = prepared.into_materialization_and_closure();
         if let Ok(mut cached) = self.prepared_closure.lock() {

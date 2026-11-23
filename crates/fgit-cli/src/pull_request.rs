@@ -62,6 +62,8 @@ usage: fg pr labels --help
   Read the PR's independent exact-version label set.
 usage: fg pr set-labels --help
   Replace or clear labels without changing PR versions, refs or approvals.
+usage: fg pr add-labels --help
+  Add labels while preserving concurrent additions and the existing label set.
 
 Every metadata mutation supplies complete metadata, even close; no latest-tip lookup or
 implicit metadata clearing occurs. --body '' explicitly selects an empty body.
@@ -82,7 +84,7 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
     }
     if arguments
         .first()
-        .is_some_and(|argument| matches!(argument.as_str(), "labels" | "set-labels"))
+        .is_some_and(|argument| matches!(argument.as_str(), "labels" | "set-labels" | "add-labels"))
     {
         return labels::run(arguments, &mut std::io::stdout().lock());
     }

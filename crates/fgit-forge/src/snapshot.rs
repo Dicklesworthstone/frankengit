@@ -490,6 +490,7 @@ pub fn apply_forge_event_to_prs(
             | ForgeEventPayload::MergeQueueChangedNative(_)
             | ForgeEventPayload::PullRequestCommentedNative(_)
             | ForgeEventPayload::PullRequestLabelsChangedNative(_)
+            | ForgeEventPayload::PullRequestLabelsAddedNative(_)
             | ForgeEventPayload::WorkflowCheckObservedNative(_)
             | ForgeEventPayload::CandidateWorkflowCheckObservedNative(_) => {
                 // Reviews and queues belong to their own aggregate and do not fabricate

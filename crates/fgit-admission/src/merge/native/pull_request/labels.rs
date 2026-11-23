@@ -1,4 +1,4 @@
-//! Independent, exact-version PR labels through the shared metadata publisher.
+//! Independent PR labels through the shared metadata publisher.
 //! Current PR visibility is checked on every CAS basis; content and review
 //! versions, branch tips and policy are never advanced by label replacement.
 
@@ -10,7 +10,9 @@ use fgit_authority::{
 };
 use fgit_chronicle::PublicationBasis;
 use fgit_codec::CanonicalForgePositionState;
-use fgit_forge::event::pull_request_labels::PullRequestLabelsCommand;
+use fgit_forge::event::pull_request_labels::{
+    MAX_LABELS, PullRequestLabelsCommand, selected_labels,
+};
 use fgit_forge::{
     AggregateId, AggregateVersion, ExpectedVersion, ForgeEvent, ForgeEventBatch, ForgeEventPayload,
     PullRequestNumber,
@@ -25,6 +27,9 @@ use crate::{
     AdmissionContext, AdmissionError, AdmissionLimits, AdmissionSnapshot, PermittedObjectClosure,
     ProjectionFailure, ValidatedClosure,
 };
+
+mod addition;
+pub use addition::{addition_proposal, admit_addition_async};
 
 /// The sealed event binds the complete set, exact label predecessor, PR and
 /// authenticated actor. A CAS loser never refreshes any submitted field.
@@ -66,6 +71,12 @@ pub(crate) fn verify_event_seal(
     event: &ForgeEvent,
     attempt: &SealAttempt,
 ) -> Result<(), RefusalCode> {
+    if matches!(
+        event.payload,
+        ForgeEventPayload::PullRequestLabelsAddedNative(_)
+    ) {
+        return addition::verify_event_seal(context, event, attempt);
+    }
     let (
         AggregateId::PullRequestLabels(number),
         ForgeEventPayload::PullRequestLabelsChangedNative(change),
@@ -173,12 +184,34 @@ where
             return Err(ProjectionFailure::Refuse(RefusalCode::HiddenRefUnauthorized).into());
         }
         let previous = frontier(store, cx, &resolved.forge, number).await?;
+        if matches!(
+            event.payload,
+            ForgeEventPayload::PullRequestLabelsAddedNative(_)
+        ) {
+            // Version exhaustion, like set capacity, is evaluated only after
+            // current capability and native-subject disclosure have passed.
+            addition::next_version(previous.as_ref().map(|(event, _)| event))
+                .map_err(ProjectionFailure::Refuse)?;
+        }
         if previous
             .as_ref()
             .map_or(0, |(previous, _)| previous.version.get())
             != event.version.get() - 1
         {
             return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceStale).into());
+        }
+        if let ForgeEventPayload::PullRequestLabelsAddedNative(change) = &event.payload {
+            let before = previous
+                .as_ref()
+                .and_then(|(event, _)| selected_labels(&event.payload))
+                .map_or(&[][..], |(_, labels)| labels);
+            let expected = union(before, &change.additions);
+            if expected.len() > MAX_LABELS {
+                return Err(ProjectionFailure::Refuse(RefusalCode::ResourceBudgetExceeded).into());
+            }
+            if change.validate().is_err() || change.labels != expected {
+                return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid).into());
+            }
         }
         projection
             .merge_checkpoint(cx)
@@ -190,6 +223,16 @@ where
             objects: BTreeSet::new(),
         })
     }
+}
+
+fn union(previous: &[String], additions: &[String]) -> Vec<String> {
+    previous
+        .iter()
+        .chain(additions)
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// One bounded full-state event selected by the exact authenticated forge root.
@@ -226,6 +269,7 @@ pub(super) async fn frontier<S: AsyncAuthorityStore + ?Sized>(
         || !matches!(
             event.payload,
             ForgeEventPayload::PullRequestLabelsChangedNative(_)
+                | ForgeEventPayload::PullRequestLabelsAddedNative(_)
         )
     {
         return Err(unavailable(RefusalCode::EvidenceInvalid));

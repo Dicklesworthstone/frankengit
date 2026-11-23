@@ -5,13 +5,15 @@
 //! result publishes repository state or proves that a failed call did nothing.
 
 use super::{
-    ADMISSION_FORGE_EVENT_BATCH_KEY_PREFIX, ADMISSION_INVARIANT_EVIDENCE_KEY_PREFIX,
-    ADMISSION_OUTBOX_EFFECT_BATCH_KEY_PREFIX, ADMISSION_POLICY_DECISION_KEY_PREFIX,
-    ADMISSION_PRINCIPAL_SNAPSHOT_KEY_PREFIX, ADMISSION_RETENTION_DELTA_KEY_PREFIX,
+    ADMISSION_CLOSURE_KEY_PREFIX, ADMISSION_FORGE_EVENT_BATCH_KEY_PREFIX,
+    ADMISSION_INVARIANT_EVIDENCE_KEY_PREFIX, ADMISSION_OUTBOX_EFFECT_BATCH_KEY_PREFIX,
+    ADMISSION_POLICY_DECISION_KEY_PREFIX, ADMISSION_PRINCIPAL_SNAPSHOT_KEY_PREFIX,
+    ADMISSION_REF_STATE_KEY_PREFIX, ADMISSION_RETENTION_DELTA_KEY_PREFIX,
     AdmissionMaterializationRefusal, AsyncAuthorityStore, CanonicalBody, DecisionEvidenceBodies,
     Digest, ImmutableKey, PutOutcome, RefusalCode, RepositoryId, admission_immutable_key,
     encode_body, ensure_materializer_catch_up_live, evidence_root, stage_immutable_frame,
 };
+use fgit_admission::PreparedCanonicalCommit;
 use fgit_authority::{MAX_IMMUTABLE_BATCH_BYTES, MAX_IMMUTABLE_BATCH_ITEMS};
 
 pub(super) async fn stage_decision_in<S, C>(
@@ -24,73 +26,56 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
+    let mut batch = EvidenceBatch::new(store, cx, cancelled);
+    batch.decision(bodies).await?;
+    batch.flush().await
+}
+
+/// Stage one already validated ref commit's exact evidence and successor bodies.
+/// The opaque preparation owns the root/body binding; callers cannot replace it
+/// with a digest or an arbitrary frame. These are still independent immutable
+/// puts, never a publication or a proof that a failed operation staged nothing.
+/// Native object promotion and every semantic check precede this call; an RCR
+/// and its authority head may be published only after it completes.
+pub(super) async fn stage_commit_in<S, C>(
+    store: &S,
+    cx: &S::Context,
+    bodies: &DecisionEvidenceBodies,
+    prepared: &mut PreparedCanonicalCommit,
+    cancelled: &C,
+) -> Result<(), AdmissionMaterializationRefusal>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
     let repository = bodies.principal_snapshot().repository_id();
     let mut batch = EvidenceBatch::new(store, cx, cancelled);
+    batch.decision(bodies).await?;
     batch.check()?;
-    let principal = bodies
-        .principal_snapshot()
-        .id()
-        .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?;
-    let identity = principal.as_internal_object_id();
-    let root = Digest::new(identity.algorithm(), *identity.digest());
-    let frame = bodies
-        .principal_snapshot()
-        .encode()
+    let frame = prepared
+        .ref_state_frame()
         .map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
     batch
         .push(
             repository,
-            ADMISSION_PRINCIPAL_SNAPSHOT_KEY_PREFIX,
-            root,
+            ADMISSION_REF_STATE_KEY_PREFIX,
+            prepared.ref_root(),
             frame,
         )
         .await?;
     batch.check()?;
-    let root = bodies
-        .policy_decision()
-        .root()
-        .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?;
-    let frame = bodies
-        .policy_decision()
-        .encode()
+    let closure_root = prepared.object_closure_root();
+    let closure_frame = prepared
+        .object_closure_frame()
         .map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
     batch
-        .push(
+        .finish_borrowed(
             repository,
-            ADMISSION_POLICY_DECISION_KEY_PREFIX,
-            root,
-            frame,
+            ADMISSION_CLOSURE_KEY_PREFIX,
+            closure_root,
+            closure_frame,
         )
-        .await?;
-    batch
-        .body(
-            repository,
-            ADMISSION_INVARIANT_EVIDENCE_KEY_PREFIX,
-            bodies.invariant_evidence(),
-        )
-        .await?;
-    batch
-        .body(
-            repository,
-            ADMISSION_FORGE_EVENT_BATCH_KEY_PREFIX,
-            bodies.forge_event_batch(),
-        )
-        .await?;
-    batch
-        .body(
-            repository,
-            ADMISSION_OUTBOX_EFFECT_BATCH_KEY_PREFIX,
-            bodies.outbox_effect_batch(),
-        )
-        .await?;
-    batch
-        .body(
-            repository,
-            ADMISSION_RETENTION_DELTA_KEY_PREFIX,
-            bodies.retention_delta(),
-        )
-        .await?;
-    batch.flush().await
+        .await
 }
 
 pub(super) struct EvidenceBatch<'a, S: AsyncAuthorityStore + ?Sized, C: Fn() -> bool + Sync> {
@@ -110,6 +95,72 @@ impl<'a, S: AsyncAuthorityStore + ?Sized, C: Fn() -> bool + Sync> EvidenceBatch<
             entries: Vec::new(),
             bytes: 0,
         }
+    }
+
+    async fn decision(
+        &mut self,
+        bodies: &DecisionEvidenceBodies,
+    ) -> Result<(), AdmissionMaterializationRefusal> {
+        let repository = bodies.principal_snapshot().repository_id();
+        self.check()?;
+        let principal = bodies
+            .principal_snapshot()
+            .id()
+            .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?;
+        let identity = principal.as_internal_object_id();
+        let root = Digest::new(identity.algorithm(), *identity.digest());
+        let frame = bodies
+            .principal_snapshot()
+            .encode()
+            .map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
+        self.push(
+            repository,
+            ADMISSION_PRINCIPAL_SNAPSHOT_KEY_PREFIX,
+            root,
+            frame,
+        )
+        .await?;
+        self.check()?;
+        let root = bodies
+            .policy_decision()
+            .root()
+            .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?;
+        let frame = bodies
+            .policy_decision()
+            .encode()
+            .map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
+        self.push(
+            repository,
+            ADMISSION_POLICY_DECISION_KEY_PREFIX,
+            root,
+            frame,
+        )
+        .await?;
+        self.body(
+            repository,
+            ADMISSION_INVARIANT_EVIDENCE_KEY_PREFIX,
+            bodies.invariant_evidence(),
+        )
+        .await?;
+        self.body(
+            repository,
+            ADMISSION_FORGE_EVENT_BATCH_KEY_PREFIX,
+            bodies.forge_event_batch(),
+        )
+        .await?;
+        self.body(
+            repository,
+            ADMISSION_OUTBOX_EFFECT_BATCH_KEY_PREFIX,
+            bodies.outbox_effect_batch(),
+        )
+        .await?;
+        self.body(
+            repository,
+            ADMISSION_RETENTION_DELTA_KEY_PREFIX,
+            bodies.retention_delta(),
+        )
+        .await?;
+        Ok(())
     }
 
     fn check(&self) -> Result<(), AdmissionMaterializationRefusal> {
@@ -154,6 +205,36 @@ impl<'a, S: AsyncAuthorityStore + ?Sized, C: Fn() -> bool + Sync> EvidenceBatch<
         self.bytes += bytes;
         self.entries.push((key, frame));
         Ok(())
+    }
+
+    /// Complete the pending group with an already encoded final body. Copy it
+    /// only when it fits that group, whose total bytes remain at most 1 MiB.
+    /// A larger or standalone closure keeps its borrowed, reusable encoding
+    /// and the original single-body admission envelope instead.
+    pub(super) async fn finish_borrowed(
+        &mut self,
+        repository: RepositoryId,
+        namespace: &[u8],
+        root: Digest,
+        frame: &[u8],
+    ) -> Result<(), AdmissionMaterializationRefusal> {
+        self.check()?;
+        let key = admission_immutable_key(namespace, repository, root)
+            .map_err(AdmissionMaterializationRefusal::Key)?;
+        let bytes = key.as_bytes().len().saturating_add(frame.len());
+        if self.entries.is_empty()
+            || self.entries.len() == MAX_IMMUTABLE_BATCH_ITEMS
+            || bytes > MAX_IMMUTABLE_BATCH_BYTES.saturating_sub(self.bytes)
+            || frame.len() > self.store.limits().body_bytes
+        {
+            self.flush().await?;
+            self.check()?;
+            stage_immutable_frame(self.store, self.cx, &key, frame).await?;
+            return self.check();
+        }
+        self.bytes += bytes;
+        self.entries.push((key, frame.to_vec()));
+        self.flush().await
     }
 
     pub(super) async fn flush(&mut self) -> Result<(), AdmissionMaterializationRefusal> {

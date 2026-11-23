@@ -12,6 +12,124 @@ fn command(body: &str) -> Result<PullRequestLabelsCommand, ApiError> {
     Request::parse(&envelope)?.unwrap().command(body.as_bytes())
 }
 
+fn addition(body: &str) -> Result<PullRequestLabelsIntent, ApiError> {
+    let raw = format!(
+        "POST /tenant/repo.git/api/v1/pulls/7/labels/add HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    let envelope = head::parse(raw.as_bytes(), HttpLimits::default())
+        .unwrap()
+        .unwrap();
+    let request = Request::parse(&envelope)?.unwrap();
+    assert!(request.is_mutation());
+    assert!(request.is_addition());
+    assert!(request.command(body.as_bytes()).is_err());
+    request.addition(body.as_bytes())
+}
+
+#[test]
+fn additions_sort_exact_labels_without_accepting_replacement_preconditions() {
+    let intent = addition("label=triage&label=bug&label=%20exact%20&label=%C3%A9").unwrap();
+    assert_eq!(intent.number.get(), 7);
+    assert_eq!(intent.labels, [" exact ", "bug", "triage", "é"]);
+    assert!(command("label=triage&label=bug").is_err());
+    for invalid in [
+        "",
+        "label=",
+        "label=+",
+        "label=bug&label=bug",
+        "label=bug&label=%62ug",
+        "label=bug&expected_version=0",
+        "label=bug&expected_version=1",
+        "clear_labels=true",
+        "label=bug&clear_labels=true",
+        "label=bug&clear_labels=false",
+        "label=bug&actor=trusted",
+        "label=bug&expected_head=ignored",
+        "label=bug&number=99",
+        "label=bug&object_format=sha1",
+        "labels=bug",
+        "label=x%00y",
+        "label=x%0Ay",
+        "label=x%C2%85y",
+        "label=%FF",
+        "label=%",
+    ] {
+        assert!(addition(invalid).is_err(), "{invalid}");
+    }
+}
+
+#[test]
+fn additive_label_count_and_decoded_byte_bounds_keep_valid_maxima() {
+    assert!(addition(&format!("label={}", "é".repeat(MAX_LABEL_BYTES / 2))).is_ok());
+    assert!(addition(&format!("label={}", "é".repeat(MAX_LABEL_BYTES / 2 + 1))).is_err());
+    let labels = (0..MAX_LABELS)
+        .map(|index| format!("label=label-{index:02}"))
+        .collect::<Vec<_>>()
+        .join("&");
+    assert_eq!(addition(&labels).unwrap().labels.len(), MAX_LABELS);
+    assert!(addition(&format!("{labels}&label=overflow")).is_err());
+    assert!(addition(&format!("label={}", "x".repeat(MAX_FORM_BYTES))).is_err());
+    let raw = "POST /repo.git/api/v1/pulls/7/labels/add HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\nTransfer-Encoding: chunked\r\n\r\n";
+    let envelope = head::parse(raw.as_bytes(), HttpLimits::default())
+        .unwrap()
+        .unwrap();
+    let request = Request::parse(&envelope).unwrap().unwrap();
+    assert!(request.addition(&vec![b'x'; MAX_FORM_BYTES + 1]).is_err());
+}
+
+#[test]
+fn additive_route_requires_post_with_no_snapshot_or_read_grammar() {
+    for (method, suffix, headers) in [
+        ("GET", "1/labels/add", ""),
+        ("HEAD", "1/labels/add", ""),
+        ("DELETE", "1/labels/add", ""),
+        (
+            "POST",
+            "1/labels/add?expected_head=ignored",
+            "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n",
+        ),
+        (
+            "POST",
+            "1/labels/add",
+            "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 0\r\n",
+        ),
+        (
+            "POST",
+            "1/labels/add",
+            "Content-Type: application/json\r\nContent-Length: 1\r\n",
+        ),
+        (
+            "POST",
+            "1/labels/add",
+            "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 8193\r\n",
+        ),
+        (
+            "POST",
+            "1/labels/add",
+            "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\nGit-Protocol: version=2\r\n",
+        ),
+        (
+            "POST",
+            "01/labels/add",
+            "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n",
+        ),
+        (
+            "POST",
+            "0/labels/add",
+            "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n",
+        ),
+    ] {
+        let raw = format!(
+            "{method} /repo.git/api/v1/pulls/{suffix} HTTP/1.1\r\nHost: local\r\n{headers}\r\n"
+        );
+        let envelope = head::parse(raw.as_bytes(), HttpLimits::default())
+            .unwrap()
+            .unwrap();
+        assert!(Request::parse(&envelope).is_err(), "{raw}");
+    }
+}
+
 #[test]
 fn explicit_replacement_and_clear_bind_the_label_version_and_preserve_spelling() {
     let result = command("expected_version=0&label=triage&label=bug&label=%20exact%20").unwrap();

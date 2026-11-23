@@ -138,8 +138,12 @@ second origin. A remote TLS deployment needs a separate client or an explicitly
 managed local gateway; this command implements the native loopback profile.
 
 `--token-file` is required in URL mode and forbidden in input-file mode. It
-contains exactly 64 lowercase hexadecimal characters, optionally followed by
-one LF or CRLF. The file must be regular; on Unix it must have no group or other
+contains either exactly 64 lowercase hexadecimal characters for an ordinary
+credential or `fgagent_` followed by 64 lowercase hexadecimal characters for a
+sponsored credential, optionally followed by one LF or CRLF. Sponsored requests
+require the independent `source-verified-read` grant; the client preserves the
+complete bearer and the server authenticates its current scope and revocation.
+The file must be regular; on Unix it must have no group or other
 permission bits. The client checks opened-file and path metadata before and
 after reading and refuses detectable replacement or modification.
 

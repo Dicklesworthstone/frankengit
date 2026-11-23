@@ -351,14 +351,15 @@ fn pull_write_grants_do_not_imply_reads_issues_or_recovery_and_descriptors_are_m
     let mut options = fixture.options.clone();
     options.outcomes = false;
     let mut backend = NodeTools::open(options).unwrap();
-    // PR lifecycle, comment, append and independent label replacement tools.
-    assert_eq!(backend.tools().len(), 8);
+    // PR lifecycle, comment, append and independent label mutation tools.
+    assert_eq!(backend.tools().len(), 9);
     for tool in backend.tools() {
         assert!(
             is_tool(tool.name)
                 || tool.name == super::super::pull_comments::WRITE
                 || tool.name == super::super::pull_comments::APPEND
                 || tool.name == super::super::pull_labels::WRITE
+                || tool.name == super::super::pull_labels::ADD
         );
         assert!(backend.is_mutation(tool.name));
     }

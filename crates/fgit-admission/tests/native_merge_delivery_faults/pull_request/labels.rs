@@ -4,6 +4,8 @@ use fgit_admission::merge::native::pull_request::{self as native, labels};
 use fgit_forge::ForgeEventPayload;
 use fgit_forge::event::pull_request_labels::PullRequestLabelsCommand;
 
+mod addition;
+
 fn command(previous: u64, values: &[&str]) -> PullRequestLabelsCommand {
     PullRequestLabelsCommand {
         number: PullRequestNumber::FIRST,

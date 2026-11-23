@@ -20,6 +20,8 @@ requirements, prepare, prepare-pulls, status and inspect make no network request
 The branch principal must be selected independently; source attribution is not authority.
 Every requested branch must be absent and under the exact selected namespace.
 Git objects must already be authorized and reachable in the destination.
+Sponsored credentials require source-branch-create and outcomes-read independently;
+the selected principal is the agent, and every new_commit must be a current visible branch tip.
 Preserve the returned plan_sha256. Continue a paused run with the same plan and keys.
 Exit 0: operation succeeded (prepare/status may report incomplete progress).
 Exit 1: native refusal. Exit 2: argument/preflight refusal. Exit 3: paused/unresolved.

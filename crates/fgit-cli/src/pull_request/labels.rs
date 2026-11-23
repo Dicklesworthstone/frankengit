@@ -1,4 +1,4 @@
-//! Exact-version PR label replacement through the independent canonical stream.
+//! Exact replacement and additive PR labels through the independent canonical stream.
 #[cfg(test)]
 mod tests;
 
@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use fgit_admission::merge::native::pull_request::PullRequestView;
 use fgit_authority::{IdempotencyKey, TerminalOutcome};
-use fgit_forge::event::pull_request_labels::{MAX_LABELS, PullRequestLabelsCommand, validate_labels};
+use fgit_forge::event::pull_request_labels::{MAX_LABELS, PullRequestLabelsCommand, PullRequestLabelsIntent, validate_labels};
 use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber};
 use fgit_node::{LoopbackReceiveSession, NodeConfig, OneNode};
 use fgit_types::{DecisionOutcome, GitHashAlgorithm, PrincipalId, RepositoryAuthorityHeadId, RepositoryId, TenantId, TxId};
@@ -24,6 +24,10 @@ usage: fg pr set-labels <storage-root> <tenant-id> <repository-id> <number>
   --expected-version <labels_version; 0 if never set>
   (--label <literal-text> [--label <literal-text> ...] | --clear-labels)
   [--object-format sha1|sha256]
+usage: fg pr add-labels <storage-root> <tenant-id> <repository-id> <number>
+  --trusted-local --principal <id> --idempotency-key <key>
+  --label <literal-text> [--label <literal-text> ...]
+  [--object-format sha1|sha256]
 
 Replace the complete label set of an existing visible native PR. Labels have
 their own exact version; this does not change the PR lifecycle version, refs,
@@ -32,9 +36,13 @@ Supply at most 32 distinct nonblank labels, each at most 64 UTF-8 bytes without
 control characters. Input order is canonicalized; spelling and spaces are kept.
 An unset label stream reads as labels_version 0 and an empty set. Clearing an
 existing set advances its label version; it does not make the stream unset.
-Retry an uncertain write with the identical principal, key, PR number, expected
-label version and complete label set. Never refresh its version or change its
-key while reconciling an unknown outcome. No latest-state read invents a receipt.
+Add-labels unions the exact additions with the current set, including after a
+competing update. It accepts no expected version or clear flag. The complete
+union must still fit 32 labels. Its receipt echoes additions, not the final set,
+and leaves labels_version null; read labels separately for current state.
+Retry an uncertain write with the identical operation, principal, key, PR number,
+labels and any original expected version. Never refresh its version or change
+its key while reconciling an unknown outcome. No latest-state read invents a receipt.
 Exit 0: complete read or committed replacement; 3: canonical refusal;
 4: PR absent or hidden; 2: input/infrastructure/cleanup/output failure.";
 
@@ -52,6 +60,7 @@ struct Options {
 enum Operation {
     Read { expected_head: Option<RepositoryAuthorityHeadId> },
     Set { principal: PrincipalId, key: Vec<u8>, command: PullRequestLabelsCommand },
+    Add { principal: PrincipalId, key: Vec<u8>, intent: PullRequestLabelsIntent },
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
@@ -61,9 +70,10 @@ fn parse(args: &[String]) -> Result<Options, String> {
     }
     let writing = match args[0].as_str() {
         "labels" => false,
-        "set-labels" => true,
+        "set-labels" | "add-labels" => true,
         _ => return Err(USAGE.into()),
     };
+    let adding = args[0] == "add-labels";
     if args[1].is_empty() { return Err("storage root is required".into()); }
     let number = PullRequestNumber::try_new(decimal(&args[4])?).ok_or("a positive PR number is required")?;
     let mut flags = BTreeMap::new();
@@ -78,13 +88,14 @@ fn parse(args: &[String]) -> Result<Options, String> {
             trusted = true;
             continue;
         }
-        if writing && flag == "--clear-labels" {
+        if writing && !adding && flag == "--clear-labels" {
             if clear { return Err("duplicate --clear-labels".into()); }
             clear = true;
             continue;
         }
         if flag != "--object-format" && !(if writing {
-            matches!(flag, "--principal" | "--idempotency-key" | "--expected-version" | "--label")
+            matches!(flag, "--principal" | "--idempotency-key" | "--label")
+                || (!adding && flag == "--expected-version")
         } else { flag == "--expected-head" }) {
             return Err(format!("unknown or inapplicable PR labels option: {flag}"));
         }
@@ -110,18 +121,22 @@ fn parse(args: &[String]) -> Result<Options, String> {
         }
         labels.sort();
         validate_labels(&labels).map_err(|_| "invalid or duplicate PR labels")?;
-        let version = decimal(required("--expected-version")?)?;
-        let expected_version = if version == 0 { ExpectedVersion::NewStream } else {
-            let version = AggregateVersion::try_new(version).ok_or("invalid label version")?;
-            version.next().map_err(|_| "label version exhausted")?;
-            ExpectedVersion::Exactly(version)
-        };
         let principal = PrincipalId::from_hex(required("--principal")?).map_err(|_| "invalid principal ID")?;
         let key = required("--idempotency-key")?.as_bytes().to_vec();
         IdempotencyKey::new(key.clone()).map_err(|_| "invalid bounded idempotency key")?;
-        let command = PullRequestLabelsCommand { number, expected_version, labels };
-        command.proposed_event(principal).map_err(|_| "invalid PR labels command")?;
-        Operation::Set { principal, key, command }
+        if adding {
+            Operation::Add { principal, key, intent: PullRequestLabelsIntent { number, labels } }
+        } else {
+            let version = decimal(required("--expected-version")?)?;
+            let expected_version = if version == 0 { ExpectedVersion::NewStream } else {
+                let version = AggregateVersion::try_new(version).ok_or("invalid label version")?;
+                version.next().map_err(|_| "label version exhausted")?;
+                ExpectedVersion::Exactly(version)
+            };
+            let command = PullRequestLabelsCommand { number, expected_version, labels };
+            command.proposed_event(principal).map_err(|_| "invalid PR labels command")?;
+            Operation::Set { principal, key, command }
+        }
     } else {
         Operation::Read { expected_head: flags.get("--expected-head").map(|value| parse_head(value)).transpose()? }
     };
@@ -166,6 +181,11 @@ pub(super) fn run(args: &[String], out: &mut impl Write) -> Result<u8, String> {
                 node.runtime().block_on(node.admit_pull_request_labels_durable_in(&context, &session, command, Default::default()))
                     .map(Completed::Set).map_err(|error| error.to_string())
             }
+            Operation::Add { principal, key, intent } => {
+                let session = LoopbackReceiveSession::authenticated(*principal, IdempotencyKey::new(key.clone()).map_err(|_| "invalid key")?);
+                node.runtime().block_on(node.admit_pull_request_add_labels_durable_in(&context, &session, intent, Default::default()))
+                    .map(Completed::Set).map_err(|error| error.to_string())
+            }
         }
     })();
     let cleanup = node.shutdown().err().map(|error| error.to_string());
@@ -185,8 +205,8 @@ pub(super) fn run(args: &[String], out: &mut impl Write) -> Result<u8, String> {
         }
         Err(error) => {
             let error = with_cleanup(error, cleanup.as_deref());
-            Err(if matches!(options.operation, Operation::Set { .. }) {
-                format!("no terminal PR label outcome returned: {error}; this does not prove non-commit. Retry the identical principal, key, PR number, expected label version and complete label set; do not refresh expectations or replace the key")
+            Err(if matches!(options.operation, Operation::Set { .. } | Operation::Add { .. }) {
+                format!("no terminal PR label outcome returned: {error}; this does not prove non-commit. Retry the identical operation, principal, key, PR number, labels and any original version; do not refresh expectations or replace the key")
             } else { format!("PR labels read failed: {error}; no complete result returned") })
         }
     }
@@ -219,20 +239,26 @@ fn read_report(options: &Options, incarnation: &str, head: RepositoryAuthorityHe
     ))
 }
 fn mutation_report(options: &Options, incarnation: &str, tx: TxId, terminal: &TerminalOutcome, cleanup: Option<&str>) -> Result<String, String> {
-    let Operation::Set { principal, command, .. } = &options.operation else { return Err("invalid label result operation".into()); };
+    let (principal, labels, expected, action, profile) = match &options.operation {
+        Operation::Set { principal, command, .. } => {
+            let expected = match command.expected_version { ExpectedVersion::NewStream => 0, ExpectedVersion::Exactly(version) => version.get() };
+            (principal, &command.labels, Some(expected), "set-labels", "")
+        }
+        Operation::Add { principal, intent, .. } => (principal, &intent.labels, None, "add-labels", "\"command_profile\":\"pull-request.add-labels.v1\","),
+        Operation::Read { .. } => return Err("invalid label result operation".into()),
+    };
     let (outcome, committed, rcr, code, refusal) = match terminal.outcome {
         DecisionOutcome::Committed { repository_commit_id } => ("committed", true, quote(&repository_commit_id.to_string()), "null".into(), "null".into()),
         DecisionOutcome::Refused { code, refusal_record_id } => ("refused", false, "null".into(), quote(&format!("{code:?}")), quote(&refusal_record_id.to_string())),
     };
-    let expected = match command.expected_version { ExpectedVersion::NewStream => 0, ExpectedVersion::Exactly(version) => version.get() };
     Ok(format!(concat!(
-        "{{\"type\":\"pull_request_labels_publication\",\"schema_version\":1,\"action\":\"set-labels\",\"tenant_id\":{},\"repository_id\":{},",
-        "\"repository_incarnation\":{},\"object_format\":{},\"principal_id\":{},\"number\":{},\"expected_version\":{},\"labels\":{},\"labels_version\":{},",
+        "{{\"type\":\"pull_request_labels_publication\",\"schema_version\":1,\"action\":{},\"tenant_id\":{},\"repository_id\":{},",
+        "\"repository_incarnation\":{},\"object_format\":{},\"principal_id\":{},\"number\":{},{}\"expected_version\":{},\"labels\":{},\"labels_version\":{},",
         "\"tx_id\":{},\"decision_sequence\":{},\"outcome\":{},\"command_committed\":{},\"repository_commit_id\":{},\"refusal_code\":{},\"refusal_record_id\":{},",
         "\"refs_changed\":false,\"pull_request_version_changed\":false,\"historical_outcome\":true,\"outcome_unknown\":false,\"read_only\":false,\"delivery_acknowledged\":null,\"node_closed\":{},\"cleanup_error\":{}}}"),
-        quote(&options.tenant.to_string()), quote(&options.repository.to_string()), quote(incarnation), quote(options.format.as_str()), quote(&principal.to_string()),
-        quote(&command.number.get().to_string()), quote(&expected.to_string()), labels_json(&command.labels),
-        if committed { quote(&(expected + 1).to_string()) } else { "null".into() },
+        quote(action), quote(&options.tenant.to_string()), quote(&options.repository.to_string()), quote(incarnation), quote(options.format.as_str()), quote(&principal.to_string()),
+        quote(&options.number.get().to_string()), profile, expected.map_or_else(|| "null".into(), |version| quote(&version.to_string())), labels_json(labels),
+        if committed { expected.and_then(|version| version.checked_add(1)).map_or_else(|| "null".into(), |version| quote(&version.to_string())) } else { "null".into() },
         quote(&tx.to_string()), quote(&terminal.decision_sequence.get().to_string()),
         quote(outcome), committed, rcr, code, refusal, cleanup.is_none(), cleanup.map_or_else(|| "null".into(), quote),
     ))

@@ -184,12 +184,12 @@ impl BatchAttempt {
     }
 
     fn commit(
-        &mut self,
+        mut self,
         context: &AdmissionContext,
         lowered: &LoweredRequest,
         prepared: &PreparedCommit,
         materialization: CommitMaterialization,
-    ) -> Result<(), AdmissionError> {
+    ) -> Result<Self, AdmissionError> {
         validate_commit_materialization(
             context,
             &self.basis,
@@ -210,25 +210,42 @@ impl BatchAttempt {
                 "microbatch non-ref effects",
             ));
         }
-        let next = self.state()?.refs.apply(&effects.refs).map_err(|_| {
-            AdmissionError::MaterializationMismatch("microbatch successor ref state")
-        })?;
-        let next_refs = next.refs().clone();
-        self.state
-            .as_mut()
+        // Consume the private attempt while advancing its owned ref map. Any
+        // failure discards the attempt, never a partially advanced state. The
+        // materializer's independently checked successor remains unchanged.
+        let mut state = self
+            .state
+            .take()
             .ok_or(AdmissionError::MaterializationMismatch(
                 "microbatch ref state",
-            ))?
-            .refs = next;
-        self.snapshot
+            ))?;
+        state.refs = state.refs.into_applied(&effects.refs).map_err(|_| {
+            AdmissionError::MaterializationMismatch("microbatch successor ref state")
+        })?;
+        self.state = Some(state);
+
+        // The fold snapshot already equals the prior in-batch ref state.
+        // Apply only this accepted command's net effects; copying the entire
+        // repository here makes independent single-ref commands quadratic.
+        let snapshot = self
+            .snapshot
             .as_mut()
             .ok_or(AdmissionError::MaterializationMismatch(
                 "microbatch snapshot",
-            ))?
-            .refs = next_refs;
+            ))?;
+        for (name, effect) in &effects.refs {
+            match effect {
+                fgit_reference::effect::RefEffect::Set(oid) => {
+                    snapshot.refs.insert(name.clone(), *oid);
+                }
+                fgit_reference::effect::RefEffect::Delete => {
+                    snapshot.refs.remove(name);
+                }
+            }
+        }
         self.roots = materialization.roots;
         self.publication.commit(materialization.record);
-        Ok(())
+        Ok(self)
     }
 
     /// Refusal records carry their final ordinal before hashing or staging.
@@ -663,7 +680,12 @@ where
                             tx_id,
                         )? {
                             PlannedPublication::Commit(materialization) => {
-                                attempt.commit(context, lowered, &prepared, *materialization)?;
+                                attempt = attempt.commit(
+                                    context,
+                                    lowered,
+                                    &prepared,
+                                    *materialization,
+                                )?;
                                 continue;
                             }
                             PlannedPublication::Refuse(code) => code,
@@ -901,7 +923,12 @@ where
                                 .await,
                         )? {
                             PlannedPublication::Commit(materialization) => {
-                                attempt.commit(context, lowered, &prepared, *materialization)?;
+                                attempt = attempt.commit(
+                                    context,
+                                    lowered,
+                                    &prepared,
+                                    *materialization,
+                                )?;
                                 continue;
                             }
                             PlannedPublication::Refuse(code) => code,

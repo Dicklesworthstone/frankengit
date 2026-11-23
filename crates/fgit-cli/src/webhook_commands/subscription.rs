@@ -34,7 +34,8 @@ pub(super) fn require_subscription(
             | ForgeEventPayload::PullRequestChangedNative(_) => "pull_request",
             ForgeEventPayload::PullRequestReviewedNative(_) => "pull_request_review",
             ForgeEventPayload::PullRequestCommentedNative(_) => "pull_request_commented",
-            ForgeEventPayload::PullRequestLabelsChangedNative(_) => "pull_request_labels",
+            ForgeEventPayload::PullRequestLabelsChangedNative(_)
+            | ForgeEventPayload::PullRequestLabelsAddedNative(_) => "pull_request_labels",
             ForgeEventPayload::IssueChangedNative(_) => "issue",
             ForgeEventPayload::DiscussionChangedNative(_) => "discussion",
             ForgeEventPayload::MilestoneChangedNative(_) => "milestone",

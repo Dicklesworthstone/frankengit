@@ -311,10 +311,48 @@ def run_format(binary, algorithm):
             require(listing() == pinned, "output-failure recovery duplicated publication")
             require(recovered["command_committed"] is True, "output-failure recovery")
             output_fault = True
+
+        # Every invocation reopens the real durable node. Additions have their own
+        # sealed profile and never substitute a current set for a historical receipt.
+        labels_before = document(invoke(binary, read_args("labels", 7)))
+        original_addition = read_args("add-labels", 7, "--principal", PRINCIPAL,
+                                      "--idempotency-key", "pr-label-add-original",
+                                      "--label", "bug")
+        first_addition = document(invoke(binary, original_addition))
+        require(first_addition["action"] == "add-labels"
+                and first_addition["command_profile"] == "pull-request.add-labels.v1"
+                and first_addition["expected_version"] is None
+                and first_addition["labels_version"] is None
+                and first_addition["labels"] == ["bug"]
+                and first_addition["command_committed"] is True,
+                "addition receipt fabricated a current set or version")
+        second_addition = document(invoke(binary, read_args(
+            "add-labels", 7, "--principal", PRINCIPAL,
+            "--idempotency-key", "pr-label-add-overlap", "--label", "urgent", "--label", "bug")))
+        require(second_addition["command_committed"] is True, "overlapping addition refused")
+        current_labels = document(invoke(binary, read_args("labels", 7)))
+        require(current_labels["labels"] == ["bug", "urgent"]
+                and current_labels["labels_version"] == "2"
+                and current_labels["pull_request_version"] == labels_before["pull_request_version"],
+                "additions lost labels or changed PR content")
+        cleared = document(invoke(binary, read_args(
+            "set-labels", 7, "--principal", PRINCIPAL,
+            "--idempotency-key", "pr-label-clear", "--expected-version", "2", "--clear-labels")))
+        require(cleared["labels_version"] == "3", "exact clear after additions")
+        cleared_snapshot = document(invoke(binary, read_args("labels", 7)))
+        require(document(invoke(binary, original_addition)) == first_addition,
+                "original addition receipt changed after clear and reopen")
+        require(document(invoke(binary, read_args("labels", 7))) == cleared_snapshot,
+                "historical addition retry restored cleared labels")
+        for extra in [["--expected-version", "3"], ["--clear-labels"]]:
+            require(not invoke(binary, original_addition + extra, 2).stdout,
+                    "addition accepted a replacement control")
+        require(document(invoke(binary, read_args("labels", 7))) == cleared_snapshot,
+                "rejected addition changed the selected head")
         require(invoke(binary, refs_args).stdout == refs_after, "post-merge metadata changed code refs")
         print(json.dumps(dict(type="pull_request_smoke", format=algorithm, passed=True, rust_executed=True,
                               malformed_requests=len(negatives), output_failure_exercised=output_fault,
-                              fresh_processes=True, merge_integration=True)))
+                              fresh_processes=True, merge_integration=True, additive_labels=True)))
 
 
 def self_test():

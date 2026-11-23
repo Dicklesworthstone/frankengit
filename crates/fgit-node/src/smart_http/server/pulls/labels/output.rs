@@ -4,7 +4,8 @@
 use fgit_admission::merge::native::pull_request::{PullRequestPage, PullRequestView};
 use fgit_authority::TerminalOutcome;
 use fgit_forge::ExpectedVersion;
-use fgit_forge::event::pull_request_labels::{PullRequestLabelsCommand, validate_labels};
+use fgit_forge::event::pull_request_labels::{PullRequestLabelsCommand, PullRequestLabelsIntent, validate_labels};
+use fgit_forge::PullRequestNumber;
 use fgit_types::{DecisionOutcome, PrincipalId, TxId};
 
 use super::super::super::issues::{ApiError, Page, quote};
@@ -92,7 +93,11 @@ pub(super) fn publication(
     tx: TxId,
     terminal: TerminalOutcome,
 ) -> Result<String, ApiError> {
-    let binding = format!(
+    publication_with_binding(&binding(node, principal), command, tx, terminal)
+}
+
+fn binding(node: &OneNode, principal: PrincipalId) -> String {
+    format!(
         concat!(
             "\"tenant_id\":{},\"repository_id\":{},\"repository_incarnation\":{},",
             "\"object_format\":{},\"principal_id\":{}"
@@ -102,8 +107,20 @@ pub(super) fn publication(
         quote(&node.repository_incarnation_id().to_string()),
         quote(node.object_format.as_str()),
         quote(&principal.to_string()),
-    );
-    publication_with_binding(&binding, command, tx, terminal)
+    )
+}
+
+pub(super) fn addition_publication(
+    node: &OneNode,
+    principal: PrincipalId,
+    intent: &PullRequestLabelsIntent,
+    tx: TxId,
+    terminal: TerminalOutcome,
+) -> Result<String, ApiError> {
+    if intent.labels.is_empty() {
+        return Err(ApiError::unknown());
+    }
+    publication_fields(&binding(node, principal), intent.number, &intent.labels, None, tx, terminal)
 }
 
 fn publication_with_binding(
@@ -112,20 +129,34 @@ fn publication_with_binding(
     tx: TxId,
     terminal: TerminalOutcome,
 ) -> Result<String, ApiError> {
-    validate_labels(&command.labels).map_err(|_| ApiError::unknown())?;
     let expected = match command.expected_version {
         ExpectedVersion::NewStream => 0,
         ExpectedVersion::Exactly(version) => version.get(),
+    };
+    publication_fields(binding, command.number, &command.labels, Some(expected), tx, terminal)
+}
+
+fn publication_fields(
+    binding: &str,
+    number: PullRequestNumber,
+    labels: &[String],
+    expected: Option<u64>,
+    tx: TxId,
+    terminal: TerminalOutcome,
+) -> Result<String, ApiError> {
+    validate_labels(labels).map_err(|_| ApiError::unknown())?;
+    let (action, profile) = if expected.is_some() {
+        ("set-labels", "")
+    } else {
+        ("add-labels", "\"command_profile\":\"pull-request.add-labels.v1\",")
     };
     let (outcome, version, commit, refusal, code, code_point) = match terminal.outcome {
         DecisionOutcome::Committed {
             repository_commit_id,
         } => (
             "committed",
-            expected
-                .checked_add(1)
-                .ok_or_else(ApiError::unknown)?
-                .to_string(),
+            expected.map(|version| version.checked_add(1).ok_or_else(ApiError::unknown))
+                .transpose()?.map_or_else(|| "null".to_owned(), |version| version.to_string()),
             quote(&repository_commit_id.to_string()),
             "null".to_owned(),
             "null".to_owned(),
@@ -146,16 +177,18 @@ fn publication_with_binding(
     Ok(format!(
         concat!(
             "{{\"type\":\"pull_request_labels_publication\",\"schema_version\":1,{},",
-            "\"number\":{},\"action\":\"set-labels\",\"expected_version\":{},",
+            "\"number\":{},\"action\":{},{}\"expected_version\":{},",
             "\"labels\":{},\"labels_version\":{},\"tx_id\":{},\"outcome\":{},",
             "\"decision_sequence\":{},\"repository_commit_id\":{},\"refusal_record_id\":{},",
             "\"refusal_code\":{},\"refusal_code_point\":{},\"refs_changed\":false,",
             "\"pull_request_version_changed\":false,\"delivery_acknowledged\":null}}"
         ),
         binding,
-        command.number.get(),
-        expected,
-        array(&command.labels),
+        number.get(),
+        quote(action),
+        profile,
+        expected.map_or_else(|| "null".to_owned(), |version| version.to_string()),
+        array(labels),
         version,
         quote(&tx.to_string()),
         quote(outcome),

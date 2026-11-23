@@ -47,7 +47,8 @@ where
         stopped(cancelled)?;
         match (&envelope.event.payload, envelope.event.aggregate) {
             (
-                ForgeEventPayload::PullRequestLabelsChangedNative(_),
+                ForgeEventPayload::PullRequestLabelsChangedNative(_)
+                | ForgeEventPayload::PullRequestLabelsAddedNative(_),
                 AggregateId::PullRequestLabels(number),
             ) if grants.pulls => {
                 let version = envelope.event.version;
@@ -172,7 +173,8 @@ pub(super) fn permitted(
     }
     match (&event.payload, event.aggregate) {
         (
-            ForgeEventPayload::PullRequestLabelsChangedNative(_),
+            ForgeEventPayload::PullRequestLabelsChangedNative(_)
+            | ForgeEventPayload::PullRequestLabelsAddedNative(_),
             AggregateId::PullRequestLabels(number),
         ) => grants.pulls && visibility.labels.contains(&number),
         (ForgeEventPayload::MilestoneChangedNative(_), AggregateId::Milestone(_)) => grants.issues,

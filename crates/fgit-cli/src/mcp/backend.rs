@@ -272,6 +272,7 @@ pub(super) fn tools_for_options(options: &Options) -> Vec<Tool> {
         tools.push(pull_comments::write_tool());
         tools.push(pull_comments::append_tool());
         tools.push(pull_labels::write_tool());
+        tools.push(pull_labels::add_tool());
     }
     if options.writes.source {
         if options.agent_token_file.is_some() {
@@ -389,7 +390,7 @@ impl ReadTools for NodeTools {
             || (self.options.writes.pulls
                 && matches!(
                     name,
-                    pull_comments::WRITE | pull_comments::APPEND | pull_labels::WRITE
+                    pull_comments::WRITE | pull_comments::APPEND | pull_labels::WRITE | pull_labels::ADD
                 ))
             || (self.options.writes.source && source_writes::is_tool(name))
             || (self.options.writes.source && tags::is_write(name))
@@ -451,6 +452,9 @@ impl NodeTools {
         }
         if self.options.writes.pulls && name == pull_labels::WRITE {
             return pull_labels::write(self, args);
+        }
+        if self.options.writes.pulls && name == pull_labels::ADD {
+            return pull_labels::add(self, args);
         }
         if self.options.writes.source && source_writes::is_tool(name) {
             return source_writes::call(self, name, args);
@@ -747,9 +751,10 @@ mod tests {
     #[test]
     fn server_tool_catalog_matches_fgit_schema_registry_and_refuses_planted_drift() {
         let server_names = all_registered_tool_names();
-        assert_eq!(server_names.len(), 102);
+        assert_eq!(server_names.len(), 103);
         assert!(server_names.contains(&pull_labels::READ));
         assert!(server_names.contains(&pull_labels::WRITE));
+        assert!(server_names.contains(&pull_labels::ADD));
         assert!(server_names.contains(&"frankengit_pull_search"));
         assert!(server_names.contains(&pull_writes::REOPEN));
         assert!(server_names.contains(&pull_writes::RETARGET));

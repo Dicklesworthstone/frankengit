@@ -16,9 +16,11 @@ export function labelsReply(observation = observed(), extra = {}) {
     labels: structuredClone(pr.labels ?? ['bug']), read_only: true, transaction_created: false, ...extra };
 }
 export function labelsTerminal(pending, outcome = 'committed', extra = {}) {
+  const additive = pending.action === 'add-labels';
   return { ...ids, object_format: pending.scope.format, type: 'pull_request_labels_publication',
-    number: pending.number, action: 'set-labels', expected_version: pending.fields.expected_version,
-    labels: structuredClone(pending.fields.labels), labels_version: outcome === 'committed' ? pending.fields.expected_version + 1 : null,
+    number: pending.number, action: pending.action, expected_version: additive ? null : pending.fields.expected_version,
+    ...(additive ? { command_profile: 'pull-request.add-labels.v1' } : {}),
+    labels: structuredClone(pending.fields.labels), labels_version: outcome === 'committed' && !additive ? pending.fields.expected_version + 1 : null,
     principal_id: actor, tx_id: 'labels-transaction', decision_sequence: 8, outcome,
     repository_commit_id: outcome === 'committed' ? 'labels-rcr' : null,
     refusal_record_id: outcome === 'refused' ? 'labels-refusal' : null,
@@ -45,7 +47,7 @@ export async function clientFixture({ observation = observed(), read = null, dis
     calls.push(call);
     if (request) { const response = await request(call, client); if (response) return response; }
     if (url.pathname.endsWith('/outcomes')) return recover ? recover(call, client.pending) : json(labelsOutcome());
-    if (url.pathname.endsWith('/labels')) return init.method === 'GET'
+    if (/\/labels(?:\/add)?$/.test(url.pathname)) return init.method === 'GET'
       ? read ? read(call) : json(labelsReply(observation))
       : dispatch ? dispatch(call, client.pending) : json(labelsTerminal(client.pending));
     if (url.pathname.endsWith('/pulls')) return json(page({ object_format: observation.object_format,

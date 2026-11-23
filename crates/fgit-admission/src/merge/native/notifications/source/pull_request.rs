@@ -257,14 +257,17 @@ where
             }
             (
                 AggregateId::PullRequestLabels(number),
-                ForgeEventPayload::PullRequestLabelsChangedNative(change),
+                payload @ (ForgeEventPayload::PullRequestLabelsChangedNative(_)
+                | ForgeEventPayload::PullRequestLabelsAddedNative(_)),
             ) => {
                 // Label metadata participates in activity ordering, without
                 // changing the content/review subject or inventing an opener.
                 let thread = threads
                     .get_mut(number)
                     .ok_or_else(|| unavailable(RefusalCode::EvidenceMissing))?;
-                activity(thread, change.actor, principal, false)?;
+                let (actor, _) = fgit_forge::event::pull_request_labels::selected_labels(payload)
+                    .ok_or_else(|| unavailable(RefusalCode::EvidenceInvalid))?;
+                activity(thread, actor, principal, false)?;
             }
             (
                 AggregateId::PullRequestConversation(number),

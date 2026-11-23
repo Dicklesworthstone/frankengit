@@ -32,6 +32,9 @@ along the requested path. Whole proof and object verification precede output.
 URL mode uses the authenticated source-read endpoint, requires --token-file,
 and accepts numeric loopback HTTP only, matching fg serve-http. No redirects,
 DNS, HTTPS downgrade, ambient credentials, or automatic head discovery.
+Token files accept ordinary read tokens or canonical fgagent_ bearers. Sponsored
+credentials require the independent source-verified-read grant at the server;
+source-read does not grant proof disclosure.
 Input mode reads a bounded regular canonical proof file and uses no network.
 
 Default output is the exact verified blob bytes on stdout. --output publishes a
@@ -316,19 +319,20 @@ fn stable_file(
 }
 
 fn token(path: &Path, deadline: Instant) -> Result<String, Error> {
-    let bytes = read_regular(path, 66, "credential_file", true, deadline)?;
+    let maximum = fgit_node::agent_credentials::TOKEN_PREFIX.len() + 64 + 2;
+    let bytes = read_regular(path, maximum, "credential_file", true, deadline)?;
     let token = bytes
         .strip_suffix(b"\r\n")
         .or_else(|| bytes.strip_suffix(b"\n"))
         .unwrap_or(&bytes);
-    if token.len() != 64
-        || !token
+    let ordinary = token.len() == 64
+        && token
             .iter()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
-    {
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte));
+    if !ordinary && !fgit_node::agent_credentials::valid_agent_credential_token(token) {
         return Err(Error::new(
             "credential_file",
-            "token file must contain 64 lowercase hexadecimal characters and at most one final newline",
+            "token file must contain an ordinary 64-character lowercase hexadecimal token or canonical fgagent_ bearer and at most one final LF or CRLF",
         ));
     }
     String::from_utf8(token.to_vec())

@@ -138,7 +138,8 @@ pub fn prepare_event(
                 fgit_forge::AggregateId::PullRequestConversation(_)
             )
         }
-        ForgeEventPayload::PullRequestLabelsChangedNative(_) => {
+        ForgeEventPayload::PullRequestLabelsChangedNative(_)
+        | ForgeEventPayload::PullRequestLabelsAddedNative(_) => {
             matches!(
                 event.aggregate,
                 fgit_forge::AggregateId::PullRequestLabels(_)
@@ -174,8 +175,12 @@ pub fn prepare_event(
         .map_err(|_| RefusalCode::EvidenceInvalid)?;
     let entity = ForgeEntityId::new(label);
     let (kind, required_objects, ref_effect) = match &event.payload {
-        ForgeEventPayload::PullRequestLabelsChangedNative(change) => {
-            if change.actor != context.principal_id
+        ForgeEventPayload::PullRequestLabelsChangedNative(_)
+        | ForgeEventPayload::PullRequestLabelsAddedNative(_) => {
+            let (actor, _) =
+                fgit_forge::event::pull_request_labels::selected_labels(&event.payload)
+                    .ok_or(RefusalCode::EvidenceInvalid)?;
+            if actor != context.principal_id
                 || !attempt.request.ref_commands().is_empty()
                 || !closure.objects.is_empty()
             {

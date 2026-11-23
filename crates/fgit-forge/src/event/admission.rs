@@ -12,6 +12,7 @@ pub enum ForgeCommandProfile {
     AppendIssueCommentV1,
     AddIssueAssigneesV1,
     AddIssueLabelsV1,
+    AddPullRequestLabelsV1,
     AppendPullRequestCommentV1,
     AppendDiscussionCommentV1,
     /// Unrecognized semantics never gain append eligibility.
@@ -46,6 +47,13 @@ pub const fn classify_event(
             {
                 ForgeOperation::IssueAddLabels
             }
+            _ => ForgeOperation::Unknown,
+        },
+        ForgeCommandProfile::AddPullRequestLabelsV1 => match (&event.aggregate, &event.payload) {
+            (
+                crate::AggregateId::PullRequestLabels(_),
+                ForgeEventPayload::PullRequestLabelsAddedNative(_),
+            ) => ForgeOperation::PullRequestAddLabels,
             _ => ForgeOperation::Unknown,
         },
         ForgeCommandProfile::AppendPullRequestCommentV1 => {
@@ -110,7 +118,8 @@ pub const fn classify_event(
                 ForgeOperation::WorkflowCheck
             }
             ForgeEventPayload::PullRequestCommentedNative(_) => ForgeOperation::PullRequestComment,
-            ForgeEventPayload::PullRequestLabelsChangedNative(_) => {
+            ForgeEventPayload::PullRequestLabelsChangedNative(_)
+            | ForgeEventPayload::PullRequestLabelsAddedNative(_) => {
                 ForgeOperation::PullRequestLabelsChange
             }
         },
@@ -124,6 +133,61 @@ mod tests {
     use crate::event::issue::{IssueCommand, IssueEdit};
     use crate::{AggregateVersion, ExpectedVersion, IssueNumber};
     use fgit_types::PrincipalId;
+
+    #[test]
+    fn pr_label_addition_requires_its_exact_profile_aggregate_and_required_kind() {
+        use crate::event::pull_request_labels::{
+            PullRequestLabelsCommand, PullRequestLabelsIntent,
+        };
+        use crate::{AggregateId, PullRequestNumber};
+        use fgit_calm::CoordinationClass;
+        let intent = PullRequestLabelsIntent {
+            number: PullRequestNumber::FIRST,
+            labels: vec!["triage".into()],
+        };
+        let actor = PrincipalId::from_bytes([7; 16]);
+        let event = intent.commitment_event(actor).unwrap();
+        let rule = classify_event(&event, ForgeCommandProfile::AddPullRequestLabelsV1);
+        assert_eq!(rule.replan, ForgeReplanPolicy::RevalidateAppend);
+        assert_eq!(rule.coordination, CoordinationClass::HeadCasRequired);
+        for profile in [
+            ForgeCommandProfile::ExactVersion,
+            ForgeCommandProfile::Unknown,
+            ForgeCommandProfile::AppendIssueCommentV1,
+            ForgeCommandProfile::AddIssueAssigneesV1,
+            ForgeCommandProfile::AddIssueLabelsV1,
+            ForgeCommandProfile::AppendPullRequestCommentV1,
+            ForgeCommandProfile::AppendDiscussionCommentV1,
+        ] {
+            assert_eq!(
+                classify_event(&event, profile).replan,
+                ForgeReplanPolicy::PreservePreconditions
+            );
+        }
+        let strict = PullRequestLabelsCommand {
+            number: intent.number,
+            expected_version: ExpectedVersion::NewStream,
+            labels: intent.labels,
+        }
+        .proposed_event(actor)
+        .unwrap();
+        assert_eq!(
+            classify_event(&strict, ForgeCommandProfile::AddPullRequestLabelsV1).replan,
+            ForgeReplanPolicy::PreservePreconditions,
+        );
+        for aggregate in [
+            AggregateId::PullRequest(PullRequestNumber::FIRST),
+            AggregateId::PullRequestConversation(PullRequestNumber::FIRST),
+            AggregateId::Issue(IssueNumber::FIRST),
+        ] {
+            let mut wrong = event.clone();
+            wrong.aggregate = aggregate;
+            assert_eq!(
+                classify_event(&wrong, ForgeCommandProfile::AddPullRequestLabelsV1).replan,
+                ForgeReplanPolicy::PreservePreconditions,
+            );
+        }
+    }
 
     #[test]
     fn only_an_explicit_additive_profile_can_replan_its_matching_action() {

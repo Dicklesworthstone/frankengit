@@ -5,9 +5,9 @@ are available through the CLI, MCP, repository HTTP API and PR browser. Open,
 closed and merged PRs retain their label sets. A legacy merge-only receipt has
 no native metadata subject and cannot acquire labels through these commands.
 
-Labels have an independent canonical aggregate and exact version. Replacing
+Labels have an independent canonical aggregate and exact version. Updating
 labels does not advance the PR lifecycle/content version, move refs, change the
-review subject, or make an approval stale. Every committed replacement records
+review subject, or make an approval stale. Every committed label operation records
 the authenticated actor. There is no separate label database or catalog.
 
 ## Complete replacement and exact identity
@@ -52,6 +52,34 @@ historical outcome, not the current set. A current read cannot establish whether
 a missing response committed, because another writer may already have replaced
 the same labels.
 
+## Additions that preserve other writers' labels
+
+The separate `add-labels` operation supplies a PR number, one or more literal
+labels and an original durable retry key. It accepts no expected version, clear
+flag or removal. Admission unions the original additions with the complete label
+set at its authenticated current head. If another writer wins publication first,
+the same sealed intent is revalidated and unioned with that winner's set before
+another publication attempt. Current credentials, PR visibility and the 32-label
+limit still apply on every attempt; overflow is a canonical refusal, never a
+truncated set. An addition whose labels are already present still records its
+own committed event and advances the independent label version.
+
+Additions use the distinct sealed profile `pull-request.add-labels.v1` and
+required event kind 29. Exact replacement keeps its existing profile and event
+kind 27: a stale replacement is still refused. Each additive event retains both
+the original additions and the complete resulting set, so current and retained
+reads need only the selected label frontier. Readers that do not support the new
+required event kind fail closed; upgrade readers before using additions.
+
+An addition receipt has `action:"add-labels"`, the explicit `command_profile`,
+the original `labels` additions, and `null` for both `expected_version` and
+`labels_version`. It does not claim to be the complete set or reveal a later
+selected version. Read labels separately for the current set. Retry an uncertain
+addition with the identical operation, repository binding, principal, PR number,
+additions and original key. Once terminal, its original outcome is immutable:
+retrying an old successful addition after a later clear does not restore the
+cleared labels. A new user intent to add them again needs a new key.
+
 ## CLI
 
 The CLI is a trusted local operator interface over an existing repository. The
@@ -80,8 +108,19 @@ fg pr set-labels "$STORAGE" "$TENANT" "$REPOSITORY" 41 \
   --expected-version 1 --clear-labels
 ```
 
-The write parser requires either one or more `--label` arguments or
-`--clear-labels`, never both or neither. `fg pr list` and `fg pr show` include
+Add labels while preserving other labels, without first reading a version:
+
+```sh
+fg pr add-labels "$STORAGE" "$TENANT" "$REPOSITORY" 41 \
+  --trusted-local --object-format "$OBJECT_FORMAT" \
+  --principal "$PRINCIPAL" --idempotency-key pr-41-add-labels \
+  --label bug --label 'needs review'
+```
+
+The replacement parser requires either one or more `--label` arguments or
+`--clear-labels`, never both or neither. The addition parser requires one or more
+`--label` arguments and rejects `--expected-version` and `--clear-labels`.
+`fg pr list` and `fg pr show` include
 `labels`, `labels_version` and `labels_actor`. A list can require several labels:
 
 ```sh
@@ -96,7 +135,7 @@ both `--after` and the previous `--expected-head` snapshot token. An exact label
 read also accepts `--expected-head`; it reads the retained snapshot subject to
 current branch disclosure, rather than silently refreshing to latest state.
 
-CLI exit codes are 0 for a complete read or committed replacement, 3 for a
+CLI exit codes are 0 for a complete read or committed label operation, 3 for a
 canonical refusal, 4 for a missing/hidden dedicated labels lookup, and 2 for an
 input, infrastructure, cleanup or output error. A known terminal receipt is
 preserved in output-error diagnostics; such errors cannot establish rollback.
@@ -104,7 +143,7 @@ preserved in output-error diagnostics; such errors cannot establish rollback.
 ## MCP
 
 `frankengit_pull_labels` requires the existing PR read launch grant.
-`frankengit_pull_set_labels` requires the independent PR write launch grant and
+`frankengit_pull_set_labels` and `frankengit_pull_add_labels` require the independent PR write launch grant and
 authenticated principal. Writes do not imply reads or recovery. Sponsored agents
 use their canonical `pulls-read` or `pulls-write` operation scope in addition to
 the launch ceiling; tool arguments cannot supply identity or broaden scopes.
@@ -133,6 +172,20 @@ returns a complete repository-bound report with `found`, the label fields,
 `pull_request_version`, `snapshot_token`, `read_only:true` and
 `transaction_created:false`.
 
+Addition arguments for `frankengit_pull_add_labels`:
+
+```json
+{
+  "number":"41",
+  "idempotency_key":"pr-41-add-labels",
+  "labels":["bug","needs review"]
+}
+```
+
+For additions, `labels` must be nonempty. Extra fields, including
+`expected_version`, `clear_labels` and caller-selected identity, are rejected.
+The write grant does not imply permission to read the resulting label set.
+
 `frankengit_pull_list` accepts optional `labels:["bug","needs review"]`, an
 exact AND filter applied before pagination. Keep the same array contents,
 `next_after` and `snapshot_token` for continuation. Both list and show include
@@ -148,6 +201,7 @@ access rules. Both PR branches remain subject to canonical disclosure policy.
 ```text
 GET  {REPO_URL}/api/v1/pulls/{number}/labels
 POST {REPO_URL}/api/v1/pulls/{number}/labels
+POST {REPO_URL}/api/v1/pulls/{number}/labels/add
 ```
 
 A dedicated GET accepts optional `expected_head`. It returns a
@@ -180,10 +234,26 @@ The complete body is framed and validated before admission. POST reports use
 action `set-labels`; a returned canonical refusal is a terminal outcome, while
 an uncertain delivery requires recovery of the original command identity.
 
+The separate `/labels/add` endpoint takes only repeated `label` form fields,
+with the same authenticated write grant, original `Idempotency-Key`, closed
+request envelope and bounded body. It rejects an empty set, `expected_version`
+and `clear_labels`. For example:
+
+```sh
+curl --fail-with-body --header @/secure/pr-writer.headers \
+  --header 'Idempotency-Key: pr-41-add-labels' \
+  --data-urlencode 'label=bug' \
+  --data-urlencode 'label=needs review' \
+  "$REPO_URL/api/v1/pulls/41/labels/add"
+```
+
 PR list requests accept repeated `label` query fields with the same AND
 semantics. Existing PR list and show responses include the label set, independent
-version and actor. The browser exposes the labels and filter and uses the same
-exact replacement flow. See [the PR HTTP contract](HTTP_PULL_REQUEST_API.md) and
+version and actor. The browser exposes separate addition and exact replacement
+forms. Preparing additions does not require a label-version read; sending and
+recovering them retains the exact original intent and key. Its historical receipt
+does not replace the displayed current label set: an explicit refresh observes
+the resulting set. See [the PR HTTP contract](HTTP_PULL_REQUEST_API.md) and
 [browser PR workflow](PR_BROWSER_COLLABORATION.md) for deployment and session rules.
 
 ## Validation scope

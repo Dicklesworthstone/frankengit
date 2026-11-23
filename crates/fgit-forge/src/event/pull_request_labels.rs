@@ -1,4 +1,4 @@
-//! Exact label replacement in an independent PR aggregate. Labels never
+//! Exact replacement and additive intents in an independent PR aggregate. Labels never
 //! advance the PR content version or change a review's compared subject.
 
 use super::{ForgeEvent, ForgeEventPayload, invalid_native};
@@ -18,9 +18,27 @@ pub struct PullRequestLabelsCommand {
     pub labels: Vec<String>,
 }
 
+/// Add exactly this nonempty set without selecting a mutable label predecessor.
+/// The actor and original additions stay sealed while admission derives the
+/// complete after-set from the currently authenticated labels frontier.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PullRequestLabelsIntent {
+    pub number: PullRequestNumber,
+    pub labels: Vec<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NativePullRequestLabelsEvent {
     pub actor: PrincipalId,
+    pub labels: Vec<String>,
+}
+
+/// One additive intent and its independently validated full label after-set.
+/// Keeping the full set preserves bounded frontier reads after many additions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NativePullRequestLabelsAddedEvent {
+    pub actor: PrincipalId,
+    pub additions: Vec<String>,
     pub labels: Vec<String>,
 }
 
@@ -62,6 +80,68 @@ impl PullRequestLabelsCommand {
     }
 }
 
+impl PullRequestLabelsIntent {
+    /// Version one and the initial after-set are identity commitment material,
+    /// not a chosen publication position or a claim about current labels.
+    pub fn commitment_event(&self, actor: PrincipalId) -> Result<ForgeEvent, RefusalCode> {
+        validate_additions(&self.labels).map_err(|_| RefusalCode::EvidenceInvalid)?;
+        Ok(ForgeEvent {
+            aggregate: AggregateId::PullRequestLabels(self.number),
+            version: AggregateVersion::FIRST,
+            payload: ForgeEventPayload::PullRequestLabelsAddedNative(
+                NativePullRequestLabelsAddedEvent {
+                    actor,
+                    additions: self.labels.clone(),
+                    labels: self.labels.clone(),
+                },
+            ),
+        })
+    }
+}
+
+fn validate_additions(labels: &[String]) -> Result<(), CodecRefusal> {
+    validate_labels(labels)?;
+    if labels.is_empty() {
+        return Err(invalid_native("pull_request_labels.additions"));
+    }
+    Ok(())
+}
+
+/// Complete current labels and their actor, regardless of how they were set.
+/// Both canonical kinds carry a full after-set; readers need only one frontier.
+#[must_use]
+pub fn selected_labels(payload: &ForgeEventPayload) -> Option<(PrincipalId, &[String])> {
+    match payload {
+        ForgeEventPayload::PullRequestLabelsChangedNative(change) => {
+            Some((change.actor, &change.labels))
+        }
+        ForgeEventPayload::PullRequestLabelsAddedNative(change) => {
+            Some((change.actor, &change.labels))
+        }
+        _ => None,
+    }
+}
+
+fn read_labels(input: &mut Decoder<'_>) -> Result<Vec<String>, CodecRefusal> {
+    let count = input
+        .clone()
+        .read_scalar::<u32>("pull_request_labels.labels")?;
+    if count as usize > MAX_LABELS {
+        return Err(invalid_native("pull_request_labels.count"));
+    }
+    let labels = input.read_sequence("pull_request_labels.labels", |input| {
+        let bytes = input.read_bytes("pull_request_labels.label")?;
+        if bytes.len() > MAX_LABEL_BYTES {
+            return Err(invalid_native("pull_request_labels.label_limit"));
+        }
+        std::str::from_utf8(bytes)
+            .map(str::to_owned)
+            .map_err(|_| invalid_native("pull_request_labels.utf8"))
+    })?;
+    validate_labels(&labels)?;
+    Ok(labels)
+}
+
 impl NativePullRequestLabelsEvent {
     pub(super) fn write(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
         validate_labels(&self.labels)?;
@@ -73,23 +153,44 @@ impl NativePullRequestLabelsEvent {
 
     pub(super) fn read(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
         let actor = PrincipalId::from_bytes(input.read_opaque_id("pull_request_labels.actor")?);
-        let count = input
-            .clone()
-            .read_scalar::<u32>("pull_request_labels.labels")?;
-        if count as usize > MAX_LABELS {
-            return Err(invalid_native("pull_request_labels.count"));
-        }
-        let labels = input.read_sequence("pull_request_labels.labels", |input| {
-            let bytes = input.read_bytes("pull_request_labels.label")?;
-            if bytes.len() > MAX_LABEL_BYTES {
-                return Err(invalid_native("pull_request_labels.label_limit"));
-            }
-            std::str::from_utf8(bytes)
-                .map(str::to_owned)
-                .map_err(|_| invalid_native("pull_request_labels.utf8"))
-        })?;
-        validate_labels(&labels)?;
+        let labels = read_labels(input)?;
         Ok(Self { actor, labels })
+    }
+}
+
+impl NativePullRequestLabelsAddedEvent {
+    pub fn validate(&self) -> Result<(), CodecRefusal> {
+        validate_additions(&self.additions)?;
+        validate_labels(&self.labels)?;
+        if self
+            .additions
+            .iter()
+            .any(|label| self.labels.binary_search(label).is_err())
+        {
+            return Err(invalid_native("pull_request_labels.missing_addition"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn write(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+        self.validate()?;
+        out.write_opaque_id(self.actor.as_bytes());
+        for labels in [&self.additions, &self.labels] {
+            out.write_sequence("pull_request_labels.labels", labels, |out, label| {
+                out.write_bytes("pull_request_labels.label", label.as_bytes())
+            })?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn read(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        let value = Self {
+            actor: PrincipalId::from_bytes(input.read_opaque_id("pull_request_labels.actor")?),
+            additions: read_labels(input)?,
+            labels: read_labels(input)?,
+        };
+        value.validate()?;
+        Ok(value)
     }
 }
 
@@ -98,12 +199,16 @@ pub(super) fn validate_event(event: &ForgeEvent) -> Result<(), CodecRefusal> {
         != matches!(
             event.payload,
             ForgeEventPayload::PullRequestLabelsChangedNative(_)
+                | ForgeEventPayload::PullRequestLabelsAddedNative(_)
         )
     {
         return Err(invalid_native("pull_request_labels.aggregate_kind"));
     }
     if let ForgeEventPayload::PullRequestLabelsChangedNative(change) = &event.payload {
         validate_labels(&change.labels)?;
+    }
+    if let ForgeEventPayload::PullRequestLabelsAddedNative(change) = &event.payload {
+        change.validate()?;
     }
     Ok(())
 }
@@ -178,6 +283,63 @@ mod tests {
             (0..=MAX_LABELS).map(|n| format!("label-{n:02}")).collect(),
         ] {
             assert!(validate_labels(&labels).is_err());
+        }
+    }
+
+    #[test]
+    fn additions_have_distinct_required_bytes_and_bounded_complete_frontiers() {
+        let actor = PrincipalId::from_bytes([7; 16]);
+        let intent = PullRequestLabelsIntent {
+            number: PullRequestNumber::FIRST,
+            labels: vec!["bug".into(), "é".into()],
+        };
+        let event = intent.commitment_event(actor).unwrap();
+        let mut payload = Encoder::new();
+        event.write_payload(&mut payload).unwrap();
+        let mut expected = Encoder::new();
+        expected.write_scalar(0_u64);
+        expected.write_scalar(15_u32);
+        expected.write_scalar(1_u64);
+        expected.write_scalar(1_u64);
+        expected.write_scalar(29_u32);
+        expected.write_opaque_id(actor.as_bytes());
+        for _ in 0..2 {
+            expected.write_scalar(2_u32);
+            expected.write_bytes("label", b"bug").unwrap();
+            expected.write_bytes("label", "é".as_bytes()).unwrap();
+        }
+        assert_eq!(payload.into_bytes(), expected.into_bytes());
+        let frame = encode_body(&event).unwrap();
+        assert_eq!(
+            decode_body::<ForgeEvent>(&frame, DecodeLimits::DEFAULT).unwrap(),
+            event
+        );
+        for length in 0..frame.len() {
+            assert!(decode_body::<ForgeEvent>(&frame[..length], DecodeLimits::DEFAULT).is_err());
+        }
+        let mut empty = intent.clone();
+        empty.labels.clear();
+        assert!(empty.commitment_event(actor).is_err());
+        for mutation in 0..4 {
+            let mut changed = event.clone();
+            if mutation == 0 {
+                changed.aggregate = AggregateId::PullRequest(PullRequestNumber::FIRST);
+            } else {
+                let ForgeEventPayload::PullRequestLabelsAddedNative(change) = &mut changed.payload
+                else {
+                    unreachable!()
+                };
+                match mutation {
+                    1 => change.additions.clear(),
+                    2 => {
+                        change.labels.remove(0);
+                    }
+                    _ => {
+                        change.labels = (0..=MAX_LABELS).map(|n| format!("label-{n:02}")).collect();
+                    }
+                };
+            }
+            assert!(encode_body(&changed).is_err(), "mutation {mutation}");
         }
     }
 }

@@ -58,6 +58,43 @@ Output is terminal-control escaped and bounded to 8 MiB (to accommodate escaped
 1 MiB selections), with at most a 10-second output wait within the command
 budget. Error diagnostics retain a completed result after an output failure.
 
+## Sponsored task branches
+
+The same operator accepts private token files containing a canonical
+`fgagent_` bearer. It uses the existing independently granted
+`source-branch-create` and `outcomes-read` operations. Candidate preparation,
+source publication, source reading and PR metadata grants imply neither.
+The listener still needs its source and receive ceilings.
+
+Select the **agent principal**, not its sponsor, in `scope.principal_id`.
+Choose a namespace inside the credential's immutable ref ceiling, such as
+`refs/heads/agent/`, and supply each exact `new_commit` independently.
+For a sponsored creation the native server requires that commit to be a
+**current visible branch tip** when it publishes. Historical reachability,
+a retained object or a tag target alone is insufficient. The client does not
+infer a source ref, choose a default branch, refresh a stale tip or widen the
+credential. An agent with no source-read grant can receive the exact tip from
+its sponsor.
+
+Use the same `prepare`, `run`, `recover` and `status` commands and selection
+schema shown here. Every create still requires an absent destination, changes
+no file contents, and imports no Git objects. The server checks current
+credential expiry/revocation, destination visibility, ref scope and ordinary
+branch protection. A missing grant or authentication refusal is an unresolved
+operation, never an invented canonical refusal or evidence of rollback.
+
+The original request and plan fingerprint the entire bearer, including its
+prefix, without saving the bearer. A rotated credential for the same agent may
+recover the original outcome but cannot send the next branch or retry the old
+body under a different fingerprint. Original agent/sponsor provenance returned
+by the native outcome reader is validated and retained in the journal; later
+credentials cannot replace it. HTTP denial, lost replies and cancellation
+continue to use the existing exact-key custody rules.
+
+Both ordinary and sponsored token files permit one optional LF or CRLF.
+Digest pins remain exactly 64 lowercase hexadecimal characters; accepting
+sponsored credentials does not widen manifest or request hashes.
+
 ## Derive requirements from an existing PR migration
 
 A [prepared native PR migration](NATIVE_PULL_IMPORT.md) already contains exact
@@ -162,8 +199,10 @@ Only `POST /api/v1/source/branches/create` can be sent. There is no force,
 expected-old override, rename, delete, implicit tip refresh or fallback.
 The target must be absent even if an occupied branch has the desired tip.
 The commit must already be authorized and reachable through visible native
-history. Import the Git objects separately. Receive and outcomes-read grants
-are required for execution; PR-write authority does not imply either grant.
+history for an ordinary credential; sponsored creation uses the current-tip
+restriction above. Import the Git objects separately. Ordinary execution needs
+receive and outcomes-read grants; sponsored execution needs source-branch-create
+and outcomes-read. PR-write authority does not imply either pair.
 
 Preparation is offline and validates the entire selection before generating
 keys. It saves the sorted requirements, original credential fingerprint and

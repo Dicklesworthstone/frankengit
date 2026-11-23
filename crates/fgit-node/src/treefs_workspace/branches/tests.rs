@@ -601,5 +601,6 @@ fn fast_forward_checks_stay_exact_beyond_four_thousand_ninety_six_commits() {
     }
 }
 
+mod ancestry;
 mod default_branch;
 mod transactions;

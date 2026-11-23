@@ -2,6 +2,8 @@
 //! Real native label publication, authority snapshots and durable original-key
 //! retries through the production TCP service in both Git object formats.
 
+#[path = "pull_request_labels_http/addition.rs"]
+mod addition;
 #[path = "pull_request_http/support.rs"]
 mod support;
 

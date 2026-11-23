@@ -270,6 +270,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
       const editable = current && labelsPanel.observed?.reply.found;
       labelsPanel.input.disabled = labelsPanel.clear.disabled = !editable || busy || Boolean(pending);
       labelsPanel.stage.disabled = !editable || busy || Boolean(pending);
+      labelsPanel.addInput.disabled = labelsPanel.addStage.disabled = !current || !labelsPanel.row.data || busy || Boolean(pending);
     }
     for (const control of inlineButtons) control.disabled = !connected || busy || Boolean(pending) || !selected || Boolean(selected.stale);
     nodes['comment-location'].replaceChildren();
@@ -445,7 +446,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
       ? `Labels at this snapshot: ${labelNames(initialLabels.labels)} · labels version ${initialLabels.version}`
       : 'This PR response does not include labels. Load labels to check whether this server supports them.');
     labelStatus.id = 'pr-labels-status';
-    item(doc, labelSection, 'p', 'Labels organize open, closed, and merged PRs. Replacing them preserves PR metadata, branch tips, and existing approvals. Load this selected snapshot before editing; a concurrent label replacement refuses the saved version.');
+    item(doc, labelSection, 'p', 'Labels organize open, closed, and merged PRs. Label changes preserve PR metadata, branch tips, and existing approvals.');
     const panel = { row, observed: null, stale: false };
     panel.load = button(labelSection, 'Load labels at this snapshot', () => run('read', async guard => {
       if (labelsPanel !== panel || selected?.row !== row || selected.stale || panel.stale) fail('Reload and select the intended PR before loading labels.');
@@ -471,7 +472,25 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
       }
     }));
     panel.load.id = 'pr-labels-load';
+    const addForm = element(doc, 'form'); addForm.id = 'pr-labels-add-form';
+    item(doc, addForm, 'h4', 'Add labels');
+    item(doc, addForm, 'p', 'Add 1 through 32 distinct labels while preserving other labels, including independent additions. Each label may use at most 64 UTF-8 bytes. Adding labels does not require loading a labels version.');
+    const addLabel = item(doc, addForm, 'label', 'Labels to add, one per line');
+    panel.addInput = element(doc, 'textarea'); panel.addInput.id = 'pr-labels-add-values'; panel.addInput.rows = 4;
+    panel.addInput.maxLength = 2079; panel.addInput.spellcheck = false; addLabel.append(panel.addInput);
+    panel.addStage = item(doc, addForm, 'button', 'Prepare add labels — do not send'); panel.addStage.id = 'pr-labels-add-stage'; panel.addStage.type = 'submit';
+    addForm.addEventListener('submit', event => {
+      event.preventDefault();
+      void run('stage', async guard => {
+        if (labelsPanel !== panel || selected?.row !== row || selected.stale || panel.stale || !row.data) fail('Reload and select the intended native PR before adding labels.');
+        await client.stageAddLabels(row.number, labelsFromLines(panel.addInput.value)); guard(); nodes.confirm.checked = false;
+        status(`Label additions prepared for PR #${row.number}. Other labels will be preserved. Nothing sent. Review the requested additions below, then explicitly confirm Send/Retry.`);
+      });
+    });
+    labelSection.append(addForm);
     const labelsForm = element(doc, 'form'); labelsForm.id = 'pr-labels-form';
+    item(doc, labelsForm, 'h4', 'Replace all labels');
+    item(doc, labelsForm, 'p', 'Load this selected snapshot before replacing the complete set. A concurrent label change refuses the saved version. Omitted labels will be removed.');
     const inputLabel = item(doc, labelsForm, 'label', 'Replacement labels, one per line');
     panel.input = element(doc, 'textarea'); panel.input.id = 'pr-labels-values'; panel.input.rows = 4; panel.input.maxLength = 2079; panel.input.spellcheck = false;
     inputLabel.append(panel.input);
@@ -647,11 +666,12 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
       } else status(`Comment outcome unknown (${result.state}). Keep the original request and recover or retry it unchanged.`);
       return;
     }
-    if (result.action === 'set-labels') {
+    if (['set-labels', 'add-labels'].includes(result.action)) {
       nodes.confirm.checked = false;
       if (result.terminal) {
         if (labelsPanel?.row.number === result.number) { labelsPanel.observed = null; labelsPanel.stale = true; }
         status(`Canonical ${result.outcome}: transaction ${result.tx}${result.rcr ? `, record ${result.rcr}` : `, refusal ${result.refusal}`}. ` +
+          (result.action === 'add-labels' ? 'This receipt records the requested additions. ' : '') +
           'Reload the PR to observe its current labels before editing again. PR metadata, branch tips and existing approvals are unchanged; external delivery is not established.');
       } else status(`Labels outcome unknown (${result.state}). Keep the original request and recover or retry it unchanged.`);
       return;

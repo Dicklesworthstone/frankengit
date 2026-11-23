@@ -7,7 +7,7 @@ import { captureSourceEdit, oid } from './operator/source_edit_candidate.mjs';
 import { captureVerifiedSourceEdit, SOURCE_PACKAGE_BYTES, SOURCE_EXPECTED_BYTES } from './operator/source_edit_from_package.mjs';
 import { saveSourceEditResultPlan } from './operator/source_edit_result_plan.mjs';
 import { parse, fail, clock } from './operator/source_edit_wire.mjs';
-import { isCredentialToken, isAgentCredentialToken, MAX_CREDENTIAL_TOKEN_BYTES } from './operator/credential_token.mjs';
+import { isCredentialToken, MAX_CREDENTIAL_TOKEN_BYTES } from './operator/credential_token.mjs';
 import { saveSourceEdit, saveVerifiedSourceEdit, loadSourceEdit, stageSourceApply, dispatchSourceApply, recoverSourceApply, inspectSourceApply } from './operator/source_edit_publish.mjs';
 
 const USAGE = `node scripts/fg_source_edit.mjs plan-results --source-expected PRIVATE_SOURCE_JSON
@@ -30,8 +30,10 @@ All commands accept --timeout-ms 1..300000 (default 30000). Paths are normalized
 absolute owner-private paths. Inspect the saved capture.json before stage/apply.
 plan-results commits to desired local file bytes without credentials or network.
 prepare uses native exact-patch and bundle inspection without publication.
-prepare and prepare-verified accept canonical sponsored source-candidates tokens.
-Sponsored tokens cannot apply or recover through this source-publication tool.
+Canonical sponsored credentials use independent scopes: source-candidates for
+prepare/prepare-verified, source-publish for apply, and outcomes-read for recover.
+Native admission enforces current branch/path ceilings and revocation. Stage the
+agent principal itself, never its sponsor; recovery retains the original key.
 prepare-verified retains source evidence and checks candidate preimages/tree effects.
 An explicit parent_tree_profile:"verified-parent-trees-v1" with patch_profile
 retains commit-verified parent metadata for partial-directory edits. prepare-verified
@@ -122,8 +124,7 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
       const tokenBytes = await privateFile(f.get('--token-file'), MAX_CREDENTIAL_TOKEN_BYTES + 2, time.check); let token;
       try {
         token = tokenBytes.toString('utf8').replace(/\r?\n$/, '');
-        if (!isCredentialToken(token) || (isAgentCredentialToken(token) &&
-            !['prepare', 'prepare-verified'].includes(op))) fail('source_edit_credential');
+        if (!isCredentialToken(token)) fail('source_edit_credential');
       } finally { tokenBytes.fill(0); }
       const ca = f.has('--ca-file') ? await privateFile(f.get('--ca-file'), 131072, time.check) : undefined;
       if (op === 'prepare' || op === 'prepare-verified') {

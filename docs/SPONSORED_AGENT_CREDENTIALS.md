@@ -304,9 +304,13 @@ source-only agent acquire [portable source packages](SELECTED_SOURCE_PACKAGE_OPE
 [context byte proofs](SPARSE_SOURCE_PROOFS.md), and
 [verified source archives](VERIFIED_SOURCE_ARCHIVE.md) using pinned commit/tree/blob
 reads. It accepts only the current ref and optional head/commit comparisons;
-it cannot select a historical or arbitrary object. The package command's optional
-`--native-fg` authority-proof mode rejects sponsored tokens before acquisition
-because `verified-blob` remains outside this grant. No new MCP tool is introduced.
+it cannot select a historical or arbitrary object. The native `fg verify-read --token-file` client also accepts canonical sponsored
+bearers with the independent `source-verified-read` grant. The package command's
+optional `--native-fg` mode requires both `source-read` for acquisition and
+`source-verified-read` for its native authority-proof requests. Each request
+checks the current credential; a missing proof scope or revocation prevents
+package publication without changing credentials or falling back. No new MCP
+tool is introduced.
 
 A source grant covers the repository's visible current source. Path selectors
 and query limits narrow an individual request; they are not a stored sparse-path
@@ -497,6 +501,13 @@ The new branch must be absent, fall within the credential's immutable ref
 ceiling, and point to an explicitly supplied **current visible branch tip**.
 A retained object, a tag tip or a historical ancestor alone is insufficient.
 Creation imports no objects and changes no source files.
+
+The shipped [branch bootstrap operator](NATIVE_BRANCH_BOOTSTRAP.md#sponsored-task-branches)
+also accepts this credential with an independent `outcomes-read` grant. Select
+the agent principal and retain the original plan and keys. Its create-only
+requests preserve the complete credential fingerprint; a rotated credential can
+recover that agent's original outcome but cannot submit the next branch or
+retransmit the old request under a new fingerprint.
 
 Issue a credential with both creation and publication when the agent should
 start a branch and then edit it:

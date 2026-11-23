@@ -292,7 +292,7 @@ fn issue_search_registry_reuses_read_authority_with_bounded_candidate_continuati
 #[test]
 fn test_registry_is_valid_and_sorted() {
     assert!(validate_registry(REGISTRY).is_ok());
-    assert_eq!(REGISTRY.len(), 106);
+    assert_eq!(REGISTRY.len(), 107);
     // Milestone edits expose an explicit null date clear as a real JSON Schema
     // union; a literal "string|null" type would not describe callable input.
     assert!(fgit_schema::emit::mcp_schema().contains("\"type\": [\"string\", \"null\"]"));
@@ -625,8 +625,8 @@ fn test_generated_artifacts_byte_stability() {
         .iter()
         .find(|a| a.name == "mcp_tools.json")
         .unwrap();
-    assert!(mcp_tools.contents.contains("\"total_count\": 106"));
-    assert!(mcp_tools.contents.contains("\"active_count\": 102"));
+    assert!(mcp_tools.contents.contains("\"total_count\": 107"));
+    assert!(mcp_tools.contents.contains("\"active_count\": 103"));
     assert!(
         mcp_tools
             .contents
@@ -649,7 +649,7 @@ fn test_generated_artifacts_byte_stability() {
         .iter()
         .find(|a| a.name == "mcp_parity_manifest.json")
         .unwrap();
-    assert!(mcp_parity.contents.contains("\"total_tools\": 106"));
+    assert!(mcp_parity.contents.contains("\"total_tools\": 107"));
 }
 
 #[test]
@@ -659,7 +659,7 @@ fn test_server_parity_and_planted_drift() {
         .filter(|entry| entry.support_profile == SupportProfile::Active)
         .map(|entry| entry.name)
         .collect();
-    assert_eq!(active_names.len(), 102);
+    assert_eq!(active_names.len(), 103);
     assert!(active_names.contains(&"frankengit_issue_add_assignees"));
     assert!(active_names.contains(&"frankengit_issue_add_labels"));
     assert!(active_names.contains(&"frankengit_pull_append_comment"));

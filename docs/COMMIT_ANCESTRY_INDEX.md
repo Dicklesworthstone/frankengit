@@ -196,6 +196,36 @@ Missing/empty provenance is refused. Accept a campaign only when the process
 exits successfully and its final record reports 168/168 samples with every
 oracle matched. Keep the raw file, including slow samples and A-A controls.
 
+## Incremental native branch metadata reuse
+
+The native branch fast-forward consumer in
+[`branches.rs`](../crates/fgit-node/src/treefs_workspace/branches.rs) now shares
+the node's bounded native-verified parent metadata cache with merge preparation
+and publication. A branch update, including each member of an atomic branch
+transaction, still traverses the exact parents of its selected tip. Repeated
+queries can reuse those parsed parents without reading and hashing the same
+historical commit bodies again. No ancestry answer is cached.
+
+Each lookup rechecks membership in the operation's authenticated closure,
+native object/parser limits, and request liveness. Every traversed parent must
+remain in that selected closure, including on a hit. Scope includes the object
+store, tenant, repository, incarnation and native hash format. Disabled, evicted,
+busy or missing entries use the original object walk. A narrower parser or
+object envelope retains the cold path's refusal; a historical commit outside
+the metadata cache's stricter tree-header profile keeps the original native
+parser instead of being newly rejected. Ref publication, exact-old checks,
+protection, recovery and authority-head CAS remain ordinary admission work.
+
+The focused source tests are
+[`branches/tests/ancestry.rs`](../crates/fgit-node/src/treefs_workspace/branches/tests/ancestry.rs).
+They cover both Git hash domains, real cold/warm branch publication, service
+reopen with shared metadata, discarded/disabled and evicted caches, immutable
+terminal retries, selected-closure refusals, tighter object/parser budgets,
+every cooperative cancellation checkpoint, and historical-parser fallback.
+Their read counters measure the ancestry mechanism; they do not establish a
+wall-time, CPU or end-to-end throughput claim. This addition does not persist
+generation numbers or complete the GRAPH-001 integration obligation below.
+
 ## Remaining obligation
 
 This slice does not complete `x2mv.4.36` or upgrade the `GRAPH-001` registry's

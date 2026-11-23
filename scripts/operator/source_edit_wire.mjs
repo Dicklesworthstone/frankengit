@@ -2,7 +2,7 @@
 import { request as http } from 'node:http';
 import { request as https } from 'node:https';
 import { createHash } from 'node:crypto';
-import { isCredentialToken, isAgentCredentialToken } from './credential_token.mjs';
+import { isCredentialToken } from './credential_token.mjs';
 export const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 export class SourceEditError extends Error {
   constructor(code, status = null) { super(code); this.name = 'SourceEditError'; this.code = code; this.status = status; }
@@ -93,8 +93,9 @@ export function upload(command, payload, kind) {
 // exposed to the durable owner, which records responsibility before entering.
 export async function exchange(address, credential, operation, body, time, maximum, key = null) {
   endpoint(address); time.check(); integer(maximum, 1, 18 * 1024 * 1024);
-  if (!isCredentialToken(credential) ||
-      (isAgentCredentialToken(credential) && !['prepare', 'inspect'].includes(operation))) fail('source_edit_credential');
+  // Token syntax does not grant an operation. The native route authenticates
+  // current source-candidates, source-publish or outcomes-read independently.
+  if (!isCredentialToken(credential)) fail('source_edit_credential');
   if (!['prepare', 'inspect', 'apply', 'outcomes'].includes(operation) ||
       (['apply', 'outcomes'].includes(operation) ? typeof key !== 'string' || !/^[\x21-\x7e]{1,256}$/.test(key) : key !== null) ||
       (operation === 'outcomes' ? body !== null : !body || !Buffer.isBuffer(body.bytes))) fail('source_edit_operation');

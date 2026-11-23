@@ -38,6 +38,21 @@ where
     ) -> Result<ForgeEvent, ProjectionFailure> {
         Ok(submitted.clone())
     }
+    /// Some additions need the selected full-state frontier as well as its
+    /// position. Reads remain pinned to the already authenticated forge root.
+    fn plan_event_async<'a>(
+        &'a self,
+        _store: &'a S,
+        _cx: &'a S::Context,
+        context: &'a AdmissionContext,
+        submitted: &'a ForgeEvent,
+        resolved: &'a NativeMergeBasis,
+    ) -> impl Future<Output = Result<ForgeEvent, PreparationFailure>> + Send + 'a {
+        async move {
+            self.plan_event(context, submitted, resolved)
+                .map_err(Into::into)
+        }
+    }
     fn validate<'a>(
         &'a self,
         store: &'a S,
@@ -139,7 +154,9 @@ where
                 .merge_checkpoint(cx)
                 .map_err(ProjectionFailure::Unavailable)?;
             let rule = classify_event(&event, validation.command_profile());
-            let planned = validation.plan_event(context, &event, &resolved)?;
+            let planned = validation
+                .plan_event_async(store, cx, context, &event, &resolved)
+                .await?;
             if planned != event && rule.replan != ForgeReplanPolicy::RevalidateAppend {
                 return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid).into());
             }
