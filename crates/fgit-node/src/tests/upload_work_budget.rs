@@ -37,7 +37,11 @@ fn upload_fabric_time_is_greeting_anchored_and_bounded_by_both_clocks() {
     );
     assert_eq!(native.budget().poll_quota, database.poll_quota);
     assert_eq!(native.budget().cost_quota, database.cost_quota);
-    assert_eq!(native.budget().priority, database.priority);
+    // Compare to an ordinary Database request after the runtime has applied
+    // the node root and the scheduling priority of its finite timeout.
+    let baseline = node.request_context();
+    let baseline = baseline.authority().attached_native_cx().unwrap().budget();
+    assert_eq!(native.budget().priority, baseline.priority);
     assert!(
         node.runtime()
             .block_on(node.read_authority_head_in(&request))
