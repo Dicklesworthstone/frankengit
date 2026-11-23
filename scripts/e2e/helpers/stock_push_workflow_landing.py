@@ -96,7 +96,7 @@ def queue(f, action, version, key, flags, expected):
         "queue", action, *f.scope, 1, "--trusted-local", "--expected-incarnation", f.incarnation,
         "--object-format", f.format, "--principal", PRINCIPAL, "--idempotency-key", key,
         "--expected-version", version, "--target-ref", TARGET, "--source-ref", REF,
-        "--pull-request", f.current + 1, "--expected-pull-version", 1,
+        "--pull-request", 1, "--expected-pull-version", 2,
         "--expected-source-tip", f.tips[f.current], "--expected-target-tip", f.base, *flags,
     ], 0 if expected else 3))
     assert result["node_closed"] and result["cleanup_error"] is None
@@ -134,15 +134,25 @@ def lifecycle(campaign, fmt):
         assert f"{REF}:{REF}" in porcelain and "[up to date]" not in porcelain, porcelain
         shutil.copyfile(transcript / "receipt.tsv", f.root / "pinned-push.tsv")
         assert refs(f) == {**initial, REF: tip}
-        f.current = 1
-        f.tips[1] = tip
-        f.open_pull()
+        status, body = server.request("GET", "/api/v1/pulls/1/checks")
+        former = json.loads(body)
+        assert status == 200 and former["source_current"] is False, former
+        assert former["source_tip"] == f.tips[0] and int(former["pull_request_version"]) == 1, former
+        updated = json.loads(campaign.invoke("refresh-existing-pull", [
+            "pr", "update", *f.scope, 1, "--trusted-local", "--principal", PRINCIPAL,
+            "--idempotency-key", "refresh-pushed-subject", "--expected-version", 1,
+            "--source-ref", REF, "--target-ref", TARGET, "--expected-source", tip,
+            "--expected-target", f.base, "--title", "Continuous native check",
+            "--body", "Actual retained workflow evidence", "--object-format", fmt,
+        ]))
+        assert updated["command_committed"] and not updated["refs_changed"], updated
+        f.tips[0] = tip
         server.wait(lambda _: f.effects_count() == 2 and all(
             (e / "settled").is_file() for e in event_directories(f)))
-        status, body = server.request("GET", "/api/v1/pulls/2/checks")
+        status, body = server.request("GET", "/api/v1/pulls/1/checks")
         empty = json.loads(body)
         assert status == 200 and empty["source_current"] and empty["source_tip"] == tip, empty
-        assert empty["complete"] and empty["checks"] == [], empty
+        assert int(empty["pull_request_version"]) == 2 and empty["complete"] and empty["checks"] == [], empty
         queue(f, "enqueue", 0, "enqueue-pushed-tip", ["--priority", 0], True)
         stale = queue(f, "land", 1, "prior-success-cannot-land", ["--expected-policy-epoch", epoch], False)
         assert refs(f)[TARGET] == f.base
@@ -164,12 +174,13 @@ def lifecycle(campaign, fmt):
         ]))
         assert file["source_commit"] == tip and bytes.fromhex(file["bytes_hex"]) == b"new bytes"
         pull = json.loads(campaign.invoke("merged-pr", [
-            "pr", "show", *f.scope, 2, "--trusted-local", "--object-format", fmt]))
-        assert pull["pull_request"]["state"] == "merged", pull
+            "pr", "show", *f.scope, 1, "--trusted-local", "--object-format", fmt]))
+        assert pull["pull_request"]["state"] == "merged" and pull["pull_request"]["version"] == 3, pull
         drained, _ = server.stop()
         assert not drained["requires_reconciliation"] and not drained["execution_retried"], drained
     campaign.record(fmt, "stock-push-http-check-protected-fast-forward", source=tip,
-                    former_target=f.base, former_check=prior["id"], check=checked["id"],
+                    former_target=f.base, pull_request=1, refreshed_version=2,
+                    former_check=prior["id"], check=checked["id"],
                     workflow_graph=graph, publisher=checked["publisher"], job=checked["job"],
                     old_tip_refusal=stale["refusal_code"],
                     wrong_job_refusal=wrong["refusal_code"], oracle_pin=PIN,
