@@ -49,15 +49,17 @@ for format in sha1 sha256; do
   run=$("$ORACLE" create-run "$PIN" "initial-search-$format")
   "$ORACLE" run "$PIN" "$run" . -- init --quiet --bare --initial-branch=main --object-format="$format" bare
   {
-    printf 'commit refs/heads/main\ncommitter A <a@example.invalid> 1720000000 +0000\ndata 6\ncorpus\n'
+    printf 'commit refs/heads/main\nmark :1\ncommitter A <a@example.invalid> 1720000000 +0000\ndata 6\ncorpus\n'
     for file in src/Thing.rs src/comment.rs src2/Thing.rs; do
       printf 'M 100644 inline %s\ndata %s\n' "$file" "$(wc -c < "$WORK/src/$file")"
       cat "$WORK/src/$file"
       printf '\n'
     done
-    printf 'done\n'
+    printf 'commit refs/heads/next\ncommitter A <a@example.invalid> 1720000001 +0000\ndata 4\nnext\nfrom :1\n'
+    printf 'M 100644 inline src/NextThing.rs\ndata 22\npub fn NextThing() {}\n\ndone\n'
   } | "$ORACLE" run "$PIN" "$run" bare -- fast-import --quiet
   tip=$("$ORACLE" run "$PIN" "$run" bare -- rev-parse refs/heads/main)
+  next_tip=$("$ORACLE" run "$PIN" "$run" bare -- rev-parse refs/heads/next)
   fge_phase action
   setup_exit=0
   {
@@ -112,4 +114,8 @@ PY
     python3 "$E2E_ROOT/helpers/initial_search_labels.py" "$WORK" "$WORK/src" "$format" "$tip"
   fge_assert_exit "SEARCH-INITIAL-013$suffix" 2 "$work_exit" 'the same three-channel request refuses an insufficient work budget'
   fge_assert_contains "SEARCH-INITIAL-014$suffix" "$(cat "$WORK/work.json.err")" 'resource_limit' 'budget exhaustion is visible'
+  fge_run_timeout 180 "search-initial-service-$format" python3 "$E2E_ROOT/helpers/initial_search_maintenance.py" \
+    "$FG_BIN" "$WORK/service" "$format" "$run/work/bare" "$tip" "$next_tip" || true
+  fge_assert_exit "SEARCH-INITIAL-015$suffix" 0 "$FGE_LAST_EXIT" \
+    'a scoped reader gets both maintained indexes at the new tip after restart and a pulls-only reader is refused'
 done
