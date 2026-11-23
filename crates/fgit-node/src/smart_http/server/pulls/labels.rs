@@ -1,4 +1,4 @@
-//! Exact-version PR label replacement shares native PR authority and durable
+//! Exact replacement and additive PR labels share native PR authority and durable
 //! retry recovery. Labels never move refs or advance the PR content stream.
 
 mod output;
@@ -64,8 +64,8 @@ pub(super) fn execute(
         .principal_id();
     // Complete framing before the node can seal a mutation. The command is
     // immutable across CAS retries and original-key outcome recovery.
-    let command = if request.is_mutation() {
-        Some(request.command(&read_form(reader, framing, limits)?)?)
+    let body = if request.is_mutation() {
+        Some(read_form(reader, framing, limits)?)
     } else {
         None
     };
@@ -74,23 +74,30 @@ pub(super) fn execute(
     let maximum = usize::try_from(maximum_response)
         .unwrap_or(usize::MAX)
         .min(output::MAX_REPLY_BYTES);
-    if let Some(command) = command {
-        command
-            .proposed_event(principal)
-            .map_err(|_| ApiError::bad("invalid_pull_request_labels"))?;
-        let (tx, terminal) = drive_request_while(
-            node,
-            &context,
-            node.admit_pull_request_labels_durable_in(
+    if let Some(body) = body {
+        let (tx, terminal, body) = if request.is_addition() {
+            let intent = request.addition(&body)?;
+            let (tx, terminal) = drive_request_while(
+                node,
                 &context,
-                session,
-                &command,
-                Default::default(),
-            ),
-            &mut live,
-        )
-        .map_err(admission_error)?;
-        let body = output::publication(node, principal, &command, tx, terminal)?;
+                node.admit_pull_request_add_labels_durable_in(&context, session, &intent, Default::default()),
+                &mut live,
+            ).map_err(admission_error)?;
+            let body = output::addition_publication(node, principal, &intent, tx, terminal)?;
+            (tx, terminal, body)
+        } else {
+            let command = request.command(&body)?;
+            command.proposed_event(principal)
+                .map_err(|_| ApiError::bad("invalid_pull_request_labels"))?;
+            let (tx, terminal) = drive_request_while(
+                node,
+                &context,
+                node.admit_pull_request_labels_durable_in(&context, session, &command, Default::default()),
+                &mut live,
+            ).map_err(admission_error)?;
+            let body = output::publication(node, principal, &command, tx, terminal)?;
+            (tx, terminal, body)
+        };
         if body.len() > maximum {
             eprintln!(
                 "PR label HTTP response limit after canonical outcome for transaction {tx}; recover the original key"

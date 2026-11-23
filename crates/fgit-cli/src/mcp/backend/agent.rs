@@ -106,6 +106,7 @@ pub(super) fn operation(options: &Options, name: &str) -> Option<u32> {
         | "frankengit_pull_comment"
         | "frankengit_pull_append_comment"
         | "frankengit_pull_set_labels"
+        | "frankengit_pull_add_labels"
             if options.writes.pulls =>
         {
             Some(PULLS_WRITE)

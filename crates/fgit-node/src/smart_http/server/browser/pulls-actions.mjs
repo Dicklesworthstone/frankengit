@@ -25,6 +25,12 @@ export function pullLabelsCommand(fields) {
     expected_version: integer(fields.expected_version, 'PR labels version', 0, Number.MAX_SAFE_INTEGER - 1),
     labels: pullLabels(fields.labels) };
 }
+export function addPullLabelsCommand(fields) {
+  keys(fields, ['object_format', 'labels']);
+  const labels = pullLabels(fields.labels);
+  if (!labels.length) fail('Choose at least one PR label to add.');
+  return { object_format: format(fields.object_format), labels };
+}
 export function collaborationCommand(action, fields) {
   if (!['approve', 'request-changes', 'withdraw', 'merge'].includes(action)) fail('Unsupported review action.');
   keys(fields, [...SUBJECT_FIELDS, 'merge_base', 'candidate_commit', 'method', ...(action === 'merge' ? ['required_reviewer'] : ['expected_version', 'reason'])]);
@@ -60,6 +66,7 @@ export function fastForwardCommand(fields) {
 }
 export function command(action, fields) {
   if (action === 'set-labels') return pullLabelsCommand(fields);
+  if (action === 'add-labels') return addPullLabelsCommand(fields);
   if (action === 'comment') return commentCommand(fields);
   if (action === 'append-comment') return appendCommentCommand(fields);
   if (action === 'fast-forward') return fastForwardCommand(fields);
@@ -68,6 +75,7 @@ export function command(action, fields) {
 export function requestPath(number, action) {
   integer(number, 'PR number', 1);
   if (action === 'set-labels') return `pulls/${number}/labels`;
+  if (action === 'add-labels') return `pulls/${number}/labels/add`;
   if (action === 'comment') return `pulls/${number}/comments`;
   if (action === 'append-comment') return `pulls/${number}/comments/append`;
   if (!['open', 'update', 'close', 'reopen', 'retarget', 'approve', 'request-changes', 'withdraw', 'merge', 'fast-forward'].includes(action)) fail('Unknown action.');
@@ -81,7 +89,7 @@ export function requestBody(action, fields, bundle, nonce) {
   const encoded = form(action === 'set-labels' ? {
     expected_version: normalized.expected_version,
     ...(normalized.labels.length ? { label: normalized.labels } : { clear_labels: 'true' }),
-  } : ['comment', 'append-comment'].includes(action) ? {
+  } : action === 'add-labels' ? { label: normalized.labels } : ['comment', 'append-comment'].includes(action) ? {
     ...(action === 'comment' ? { expected_version: normalized.expected_version } : {}), body: normalized.body,
     ...(normalized.anchor ? sourceCommentFields(normalized.anchor) : {}) } : normalized);
   if (!/^[0-9a-f]{32}$/.test(nonce)) fail('Invalid request nonce.');
@@ -104,11 +112,13 @@ export function publication(reply, pending, status) {
   const metadata = ['open', 'update', 'close', 'reopen', 'retarget'].includes(pending.action);
   if (metadata) {
     if (reply.type !== 'pull_request_publication' || reply.number !== pending.number || reply.expected_version !== pending.fields.expected_version) fail('Wrong terminal PR command.');
-  } else if (pending.action === 'set-labels') {
+  } else if (['set-labels', 'add-labels'].includes(pending.action)) {
+    const additive = pending.action === 'add-labels', expected = additive ? null : pending.fields.expected_version;
     if (reply.type !== 'pull_request_labels_publication' || reply.number !== pending.number ||
-        reply.expected_version !== pending.fields.expected_version || reply.refs_changed !== false ||
+        reply.expected_version !== expected || reply.refs_changed !== false ||
         reply.pull_request_version_changed !== false ||
-        reply.labels_version !== (reply.outcome === 'committed' ? pending.fields.expected_version + 1 : null) ||
+        reply.labels_version !== (reply.outcome === 'committed' && !additive ? expected + 1 : null) ||
+        (additive && reply.command_profile !== 'pull-request.add-labels.v1') ||
         JSON.stringify(pullLabels(reply.labels, true)) !== JSON.stringify(pending.fields.labels)) fail('Wrong terminal PR labels command.');
   } else if (['comment', 'append-comment'].includes(pending.action)) {
     const expected = pending.action === 'comment' ? pending.fields.expected_version : null;

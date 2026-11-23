@@ -122,6 +122,7 @@ const ADDITIONS: &[McpToolEntry] = &[
     milestones::OPEN,
     milestones::REOPEN,
     milestones::SHOW,
+    pull_labels::ADD,
     pull_append::ENTRY,
     check_evidence::READ,
     pull_labels::READ,

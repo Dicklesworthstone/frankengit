@@ -1,8 +1,8 @@
 //! Bounded label grammar: explicit full replacement or explicit clear, with
-//! the caller's exact label-stream version. No implicit fetch/merge on retry.
+//! the caller's exact label-stream version, or a separate explicit addition.
 
 use fgit_forge::event::pull_request_labels::{
-    MAX_LABEL_BYTES, MAX_LABELS, PullRequestLabelsCommand, validate_labels,
+    MAX_LABEL_BYTES, MAX_LABELS, PullRequestLabelsCommand, PullRequestLabelsIntent, validate_labels,
 };
 use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber};
 use fgit_types::RepositoryAuthorityHeadId;
@@ -20,6 +20,7 @@ pub(in crate::smart_http::server) struct Request<'a> {
     pub number: PullRequestNumber,
     pub expected_head: Option<RepositoryAuthorityHeadId>,
     mutation: bool,
+    addition: bool,
 }
 
 impl<'a> Request<'a> {
@@ -33,7 +34,11 @@ impl<'a> Request<'a> {
         let Some((repository_route, suffix)) = path.split_once("/api/v1/pulls/") else {
             return Ok(None);
         };
-        let Some(number) = suffix.strip_suffix("/labels") else {
+        let (number, addition) = if let Some(number) = suffix.strip_suffix("/labels/add") {
+            (number, true)
+        } else if let Some(number) = suffix.strip_suffix("/labels") {
+            (number, false)
+        } else {
             return Ok(None);
         };
         if repository_route.len() < 2
@@ -55,6 +60,9 @@ impl<'a> Request<'a> {
         }
         let (mutation, expected_head) = match head.method {
             "GET" => {
+                if addition {
+                    return Err(ApiError::method());
+                }
                 if !matches!(
                     head.body,
                     BodyFraming::Empty | BodyFraming::ContentLength(0)
@@ -101,6 +109,7 @@ impl<'a> Request<'a> {
             number,
             expected_head,
             mutation,
+            addition,
         }))
     }
 
@@ -108,8 +117,34 @@ impl<'a> Request<'a> {
         self.mutation
     }
 
+    pub(super) const fn is_addition(&self) -> bool {
+        self.addition
+    }
+
+    pub(super) fn addition(&self, bytes: &[u8]) -> Result<PullRequestLabelsIntent, ApiError> {
+        if !self.mutation || !self.addition {
+            return Err(ApiError::bad("not_an_addition"));
+        }
+        if bytes.len() > MAX_FORM_BYTES {
+            return Err(ApiError::too_large());
+        }
+        let mut labels = Vec::new();
+        for (key, value) in parse_form_with_field_limit(bytes, MAX_LABELS, "label", MAX_LABEL_BYTES)? {
+            if key != "label" {
+                return Err(ApiError::bad("unknown_duplicate_or_inapplicable_field"));
+            }
+            labels.push(value);
+        }
+        if labels.is_empty() {
+            return Err(ApiError::bad("nonempty_label_additions_required"));
+        }
+        labels.sort();
+        validate_labels(&labels).map_err(|_| ApiError::bad("invalid_labels"))?;
+        Ok(PullRequestLabelsIntent { number: self.number, labels })
+    }
+
     pub(super) fn command(&self, bytes: &[u8]) -> Result<PullRequestLabelsCommand, ApiError> {
-        if !self.mutation {
+        if !self.mutation || self.addition {
             return Err(ApiError::bad("not_a_mutation"));
         }
         if bytes.len() > MAX_FORM_BYTES {

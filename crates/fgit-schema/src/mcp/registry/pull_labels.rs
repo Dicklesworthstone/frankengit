@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 //! Independent label replacement does not advance PR content or review subjects.
-use super::super::types::{FieldClassification, McpField, McpToolEntry};
+use super::super::types::{FieldClassification, InputAuthorityRootRequirement, McpField, McpToolEntry};
 
 const fn base(name: &str) -> McpToolEntry {
     let mut index = 0;
@@ -96,13 +96,57 @@ pub(super) const WRITE: McpToolEntry = McpToolEntry {
     ..base("frankengit_pull_update")
 };
 
+const fn addition_receipt_fields() -> [McpField; WRITE.output_fields.len() + 1] {
+    let mut fields = [WRITE.output_fields[0]; WRITE.output_fields.len() + 1];
+    let mut index = 0;
+    while index < WRITE.output_fields.len() {
+        fields[index] = WRITE.output_fields[index];
+        let name = fields[index].name;
+        if !super::less(name, "expected_version") && !super::less("expected_version", name) {
+            fields[index].field_type = "null";
+            fields[index].max_bytes = None;
+            fields[index].description = "Null: canonical admission selects the current label predecessor.";
+        } else if !super::less(name, "labels_version") && !super::less("labels_version", name) {
+            fields[index].field_type = "null";
+            fields[index].max_bytes = None;
+            fields[index].description = "Null: the terminal receipt does not invent the selected or current label version.";
+        } else if !super::less(name, "labels") && !super::less("labels", name) {
+            fields[index].description = "Exact original label additions, not the final or current complete set.";
+        } else if !super::less(name, "action") && !super::less("action", name) {
+            fields[index].description = "add-labels.";
+        }
+        index += 1;
+    }
+    fields[index] = output("command_profile", "string", "pull-request.add-labels.v1: the sealed addition profile.", Some(26));
+    fields
+}
+
+pub(super) const ADD: McpToolEntry = McpToolEntry {
+    name: "frankengit_pull_add_labels",
+    description: "Add literal labels to an existing visible PR while preserving the current set and concurrent additions. No expected version or clear is accepted. The complete union must fit 32 labels. Retry the identical additions and original key; original terminal recovery cannot undo later replacements. Labels grant no authority.",
+    authority_root: InputAuthorityRootRequirement::ServerSelectedHead,
+    input_fields: &[
+        WRITE.input_fields[0],
+        WRITE.input_fields[2],
+        McpField {
+            description: "1..32 unique nonblank literal additions, each at most 64 UTF-8 bytes without controls. Order is canonicalized; spelling is preserved.",
+            ..WRITE.input_fields[3]
+        },
+    ],
+    output_fields: &addition_receipt_fields(),
+    refusal_codes: &["tool_not_granted", "principal_not_bound", "required_argument_missing", "expected_string", "unknown_argument", "invalid_decimal_string", "positive_pull_number_required", "invalid_idempotency_key", "labels_required", "labels_must_be_array", "too_many_labels", "label_must_be_string", "invalid_pull_labels", "nonempty_label_additions_required", "mutation_outcome_unknown"],
+    cli_command: "fg pr add-labels",
+    rest_api_path: "POST /{repository}/api/v1/pulls/{number}/labels/add",
+    ..WRITE
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::mcp::{InputAuthorityRootRequirement, ReadMutationClass, find_tool, validate_tool_entry};
     #[test]
     fn labels_keep_independent_read_and_exact_version_write_contracts() {
-        for entry in [READ, WRITE] {
+        for entry in [READ, WRITE, ADD] {
             validate_tool_entry(&entry).unwrap();
             assert_eq!(find_tool(entry.name), Some(&entry));
         }
@@ -111,9 +155,14 @@ mod tests {
         assert_eq!(WRITE.authority_root, InputAuthorityRootRequirement::ExactPredecessorVersion);
         assert_eq!(WRITE.input_fields.iter().map(|field| field.name).collect::<Vec<_>>(), ["number", "expected_version", "idempotency_key", "labels"]);
         assert!(WRITE.input_fields.iter().all(|field| field.required));
-        for entry in [READ, WRITE] {
+        for entry in [READ, WRITE, ADD] {
             assert!(!entry.output_fields.iter().any(|field| field.name == "idempotency_key"));
         }
         assert_eq!(WRITE.input_fields[3].classification, FieldClassification::UntrustedContent);
+        assert_eq!(ADD.authority_root, InputAuthorityRootRequirement::ServerSelectedHead);
+        assert_eq!(ADD.input_fields.iter().map(|field| field.name).collect::<Vec<_>>(), ["number", "idempotency_key", "labels"]);
+        for name in ["expected_version", "labels_version"] {
+            assert_eq!(ADD.output_fields.iter().find(|field| field.name == name).unwrap().field_type, "null");
+        }
     }
 }

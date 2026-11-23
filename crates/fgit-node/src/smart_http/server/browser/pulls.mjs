@@ -390,6 +390,9 @@ export class PullClient {
     return this.#stage(number, 'set-labels', { object_format: selected.binding.format,
       expected_version: reply.labels_version, labels }, null);
   }
+  async stageAddLabels(number, labels) {
+    return this.#stage(number, 'add-labels', { object_format: this.#selected().format, labels }, null);
+  }
   async stageComment(number, version, body, anchor = undefined) {
     return this.#stage(number, 'comment', { object_format: this.#selected().format, expected_version: version, body,
       ...(anchor === undefined ? {} : { anchor }) }, null);
@@ -504,8 +507,8 @@ export class PullClient {
       });
       const result = publication(response.value, p, response.status);
       this.#pending = null;
-      if (!['comment', 'append-comment', 'set-labels'].includes(p.action)) this.invalidateCandidate();
-      return p.action === 'set-labels' ? { ...result, action: p.action, number: p.number }
+      if (!['comment', 'append-comment', 'set-labels', 'add-labels'].includes(p.action)) this.invalidateCandidate();
+      return ['set-labels', 'add-labels'].includes(p.action) ? { ...result, action: p.action, number: p.number }
         : ['comment', 'append-comment'].includes(p.action) ? { ...result, action: p.action } : result;
     } catch (error) { error.outcomeUnknown = true; throw error; }
     finally { this.#busy = false; }
@@ -516,9 +519,9 @@ export class PullClient {
     try {
       const response = await this.#transport.request('outcomes', { method: 'POST', key: p.key, read: false, maximum: 32 * 1024 });
       const result = recovery(response.value, p);
-      if (result.terminal) { this.#pending = null; if (!['comment', 'append-comment', 'set-labels'].includes(p.action)) this.invalidateCandidate(); }
+      if (result.terminal) { this.#pending = null; if (!['comment', 'append-comment', 'set-labels', 'add-labels'].includes(p.action)) this.invalidateCandidate(); }
       else { p.observedTx = result.tx; p.observedPrincipal = result.principal; if (result.tx) p.sent = true; }
-      return p.action === 'set-labels' ? { ...result, action: p.action, number: p.number }
+      return ['set-labels', 'add-labels'].includes(p.action) ? { ...result, action: p.action, number: p.number }
         : ['comment', 'append-comment'].includes(p.action) ? { ...result, action: p.action } : result;
     } finally { this.#busy = false; }
   }

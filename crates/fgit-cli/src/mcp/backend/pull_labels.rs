@@ -1,4 +1,6 @@
-//! Independent PR label reads and exact complete-set replacement.
+//! Independent PR label reads, exact replacement and explicit additive intents.
+mod addition;
+pub(super) use addition::{ADD, add, add_tool};
 use super::super::json::{self, Object, Value, object, text};
 use super::super::protocol::{Tool, ToolError};
 use super::mutations as common;
