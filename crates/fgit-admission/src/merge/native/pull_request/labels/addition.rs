@@ -116,7 +116,10 @@ where
         context: &'a AdmissionContext,
         submitted: &'a ForgeEvent,
         resolved: &'a NativeMergeBasis,
-    ) -> Result<ForgeEvent, PreparationFailure> {
+    ) -> Result<ForgeEvent, PreparationFailure>
+    where
+        P: 'a,
+    {
         let (
             AggregateId::PullRequestLabels(number),
             ForgeEventPayload::PullRequestLabelsAddedNative(change),

@@ -47,7 +47,10 @@ where
         context: &'a AdmissionContext,
         submitted: &'a ForgeEvent,
         resolved: &'a NativeMergeBasis,
-    ) -> impl Future<Output = Result<ForgeEvent, PreparationFailure>> + Send + 'a {
+    ) -> impl Future<Output = Result<ForgeEvent, PreparationFailure>> + Send + 'a
+    where
+        P: 'a,
+    {
         async move {
             self.plan_event(context, submitted, resolved)
                 .map_err(Into::into)
