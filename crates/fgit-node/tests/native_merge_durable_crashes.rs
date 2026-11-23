@@ -302,7 +302,7 @@ impl AsyncAdmissionProjection<CrashAuthority> for Projection<'_> {
         &self,
         basis: &PublicationBasis,
         closure: &ValidatedClosure,
-    ) -> Result<fgit_types::Digest, ProjectionFailure> {
+    ) -> Result<fgit_types::Digest, fgit_types::RefusalCode> {
         <DurableAsyncAdmissionProjection as AsyncAdmissionProjection<
             fgit_authority::FsqliteAuthorityStore,
         >>::expected_commit_closure_root(&self.inner, basis, closure)

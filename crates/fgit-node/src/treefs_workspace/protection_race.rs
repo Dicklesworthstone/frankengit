@@ -51,7 +51,7 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for ActivateDuringMerge<'_>
         &self,
         basis: &PublicationBasis,
         closure: &ValidatedClosure,
-    ) -> Result<fgit_types::Digest, ProjectionFailure> {
+    ) -> Result<fgit_types::Digest, fgit_types::RefusalCode> {
         self.inner.expected_commit_closure_root(basis, closure)
     }
     async fn materialize_refusal_async<'a>(

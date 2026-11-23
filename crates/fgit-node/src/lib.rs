@@ -2892,9 +2892,9 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
             request,
             fold,
             closure,
-            inherited_closure,
             current,
             root_layout,
+            inherited_closure,
             evidence,
             reusable,
         )

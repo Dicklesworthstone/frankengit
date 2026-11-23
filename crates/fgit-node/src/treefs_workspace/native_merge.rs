@@ -705,7 +705,7 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for NodeNativeMergeProjecti
         &self,
         basis: &PublicationBasis,
         closure: &ValidatedClosure,
-    ) -> Result<fgit_types::Digest, ProjectionFailure> {
+    ) -> Result<fgit_types::Digest, fgit_types::RefusalCode> {
         self.inner.expected_commit_closure_root(basis, closure)
     }
 
