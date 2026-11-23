@@ -144,7 +144,7 @@ mod tests {
 
     #[test]
     fn malformed_invocations_refuse_before_opening_storage() {
-        for context in [false, true] {
+        for mode in [Mode::Initial, Mode::Context, Mode::Progressive] {
             for repeated in ["sha1", "sha256"] {
                 let arguments = args(&[
                     "--trusted-local",
@@ -156,7 +156,7 @@ mod tests {
                     "term_hex=74",
                 ]);
                 assert_eq!(
-                    run(&arguments, context),
+                    run(&arguments, mode),
                     Err("duplicate --object-format".into())
                 );
             }
