@@ -4380,7 +4380,7 @@ impl<'n> FabricReadCeiling<'n> {
         let floors = self
             .node
             .service_config
-            .runtime_budgets()
+            .runtime_budgets
             .limits_for(AUTHORITY_CONTEXT_BUDGET_CLASS);
         let limits = ClassLimits {
             timeout: Some(earned - now),
@@ -8020,7 +8020,7 @@ pub struct NodeConfig {
     store_instance: StoreInstanceId,
     authority_limits: AuthorityLimits,
     worker_threads: usize,
-    runtime_budgets: Option<BudgetPolicy>,
+    runtime_budgets: BudgetPolicy,
     /// An explicit creation/open expectation. An unspecified value defers to
     /// the authenticated repository configuration when opening an existing
     /// repository, while initialization selects the conservative SHA-1
@@ -8155,7 +8155,7 @@ impl NodeConfig {
             },
             serving_cell: ServingCell::Unidentified,
             worker_threads: 1,
-            runtime_budgets: None,
+            runtime_budgets: BudgetPolicy::finite_defaults(),
             object_format: None,
             root_layout: RootLayoutVersion::LegacyWholeBody,
             initial_branch: None,
@@ -8231,7 +8231,7 @@ impl NodeConfig {
     /// validation still rejects an unbounded service class at node open.
     #[must_use]
     pub const fn with_runtime_budgets(mut self, runtime_budgets: BudgetPolicy) -> Self {
-        self.runtime_budgets = Some(runtime_budgets);
+        self.runtime_budgets = runtime_budgets;
         self
     }
 
@@ -8240,10 +8240,7 @@ impl NodeConfig {
     /// inherited time, work, cost or shutdown limits.
     #[must_use]
     pub const fn runtime_budgets(&self) -> BudgetPolicy {
-        match self.runtime_budgets {
-            Some(policy) => policy,
-            None => BudgetPolicy::finite_defaults(),
-        }
+        self.runtime_budgets
     }
 
     /// Selects the native Git object identity domain.
@@ -9343,7 +9340,7 @@ impl OneNode {
         }
 
         let runtime = RuntimeProfile::production(config.worker_threads)
-            .with_budgets(config.runtime_budgets())
+            .with_budgets(config.runtime_budgets)
             .build()
             .map_err(NodeRefusal::from)?;
         let authority_path = authority_database_path(&config.storage_root)?;
@@ -9688,38 +9685,25 @@ impl OneNode {
         self.session_request_context_with_timeout(deadline.budget())
     }
 
-    /// The greeting starts both clocks. An explicitly configured Database
-    /// class imposes the initial ceiling, and only verified fabric reads can
-    /// earn more Database time. With the default runtime profile the transport
-    /// owns this clock. The outer transport bounds both the initial ceiling
-    /// and any time those reads earn.
+    /// The greeting starts both clocks. Only verified fabric reads can earn
+    /// Database time; the outer transport bounds both initial and earned time.
     fn upload_request_context(&self, deadline: &GitDaemonSessionDeadline) -> NodeRequestContext {
         let transport = deadline.remaining().unwrap_or_default();
-        let explicit = self.service_config.runtime_budgets;
-        let wall = match explicit {
-            Some(policy) => policy
-                .limits_for(AUTHORITY_CONTEXT_BUDGET_CLASS)
-                .timeout
-                .map_or(transport, |timeout| {
-                    let verified = deadline
-                        .shared
-                        .verified_fabric_bytes
-                        .load(Ordering::Relaxed);
-                    let earned = deadline.scaling.extension(verified);
-                    timeout
-                        .saturating_add(earned)
-                        .saturating_sub(deadline.started.elapsed())
-                        .min(transport)
-                }),
-            None => transport,
-        };
-        let class = match explicit {
-            Some(policy) => policy.limits_for(AUTHORITY_CONTEXT_BUDGET_CLASS),
-            None => self
-                .service_config
-                .runtime_budgets()
-                .limits_for(AUTHORITY_CONTEXT_BUDGET_CLASS),
-        };
+        let class = self
+            .service_config
+            .runtime_budgets
+            .limits_for(AUTHORITY_CONTEXT_BUDGET_CLASS);
+        let wall = class.timeout.map_or(transport, |timeout| {
+            let verified = deadline
+                .shared
+                .verified_fabric_bytes
+                .load(Ordering::Relaxed);
+            let earned = deadline.scaling.extension(verified);
+            timeout
+                .saturating_add(earned)
+                .saturating_sub(deadline.started.elapsed())
+                .min(transport)
+        });
         let authority = FsqliteCx::new();
         let limits = ClassLimits {
             timeout: Some(wall),
@@ -9765,7 +9749,7 @@ impl OneNode {
             timeout: Some(timeout),
             ..self
                 .service_config
-                .runtime_budgets()
+                .runtime_budgets
                 .limits_for(AUTHORITY_CONTEXT_BUDGET_CLASS)
         };
         let authority = FsqliteCx::new();
@@ -9803,7 +9787,7 @@ impl OneNode {
             timeout: Some(wall_clock.duration()),
             ..self
                 .service_config
-                .runtime_budgets()
+                .runtime_budgets
                 .limits_for(AUTHORITY_CONTEXT_BUDGET_CLASS)
         };
         let authority = FsqliteCx::new();
@@ -9836,7 +9820,7 @@ impl OneNode {
             timeout: Some(deadline.remaining().unwrap_or_default()),
             ..self
                 .service_config
-                .runtime_budgets()
+                .runtime_budgets
                 .limits_for(SELECTED_PACK_BUDGET_CLASS)
         };
         let context = FsqliteCx::new();
@@ -12368,7 +12352,7 @@ impl OneNode {
     ) -> FsqliteCx {
         let floors = self
             .service_config
-            .runtime_budgets()
+            .runtime_budgets
             .limits_for(AUTHORITY_CONTEXT_BUDGET_CLASS);
         let poll_quota = u64::from(floors.poll_quota)
             .max(admitted_bytes / 64)
@@ -13699,7 +13683,7 @@ mod tests {
                 timeout: Some(timeout),
                 ..node
                     .service_config
-                    .runtime_budgets()
+                    .runtime_budgets
                     .limits_for(super::AUTHORITY_CONTEXT_BUDGET_CLASS)
             };
             let authority = FsqliteCx::new();

@@ -671,26 +671,6 @@ fn explicit_database_policy_cannot_extend_a_shorter_transport_deadline() {
 }
 
 #[test]
-fn implicit_database_profile_serves_a_pack_beyond_the_generic_class_timeout() {
-    let generic_timeout = BudgetPolicy::finite_defaults()
-        .limits_for(BudgetClass::Database)
-        .timeout
-        .unwrap();
-    let delay = generic_timeout + Duration::from_secs(1);
-    let (served, response, _) = run_one_node_session(
-        None,
-        delay + Duration::from_secs(15),
-        GitDaemonSessionWorkScaling::DEFAULT,
-        Negotiation::FinishAfter(delay),
-    );
-    assert!(
-        matches!(served, Ok(GitDaemonSessionOutcome::Pack(_))),
-        "{served:?}"
-    );
-    assert!(response.starts_with(b"0008NAK\nPACK"));
-}
-
-#[test]
 fn only_verified_disclosure_work_can_extend_the_database_clock_for_a_real_pack() {
     let database = Duration::from_secs(3);
     let delay = Duration::from_secs(4);
