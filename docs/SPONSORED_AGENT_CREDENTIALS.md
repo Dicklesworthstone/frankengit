@@ -502,6 +502,13 @@ ceiling, and point to an explicitly supplied **current visible branch tip**.
 A retained object, a tag tip or a historical ancestor alone is insufficient.
 Creation imports no objects and changes no source files.
 
+The shipped [branch bootstrap operator](NATIVE_BRANCH_BOOTSTRAP.md#sponsored-task-branches)
+also accepts this credential with an independent `outcomes-read` grant. Select
+the agent principal and retain the original plan and keys. Its create-only
+requests preserve the complete credential fingerprint; a rotated credential can
+recover that agent's original outcome but cannot submit the next branch or
+retransmit the old request under a new fingerprint.
+
 Issue a credential with both creation and publication when the agent should
 start a branch and then edit it:
 

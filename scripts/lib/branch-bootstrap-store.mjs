@@ -10,6 +10,7 @@ import { readPrivateOperatorFile, readSynchronizedOperatorRecord, saveOperatorRe
 import { BOOTSTRAP_LIMITS as L, encode, hash, fail, fields, pin, bounded, canonical, selection,
   createRequest, checkedRequest, outcomeBinding, publication, matchOutcome } from './branch-bootstrap-protocol.mjs';
 import { validateOutcomeReply } from '../operator/transaction_outcome.mjs';
+import { isCredentialToken, MAX_CREDENTIAL_TOKEN_BYTES } from '../operator/credential_token.mjs';
 
 export const requestName = i => `request-${String(i+1).padStart(6,'0')}.json`;
 const attemptName = i => `attempt-${String(i+1).padStart(6,'0')}`;
@@ -43,8 +44,11 @@ export async function syncDirectory(root) {
 }
 export async function readToken(tokenFile, check) {
   path(tokenFile);await directory(dirname(tokenFile));await outsideWorktree(dirname(tokenFile));
-  const bytes=await readPrivateOperatorFile(tokenFile,65,check);
-  try{const token=bytes.toString('utf8').replace(/\n$/,'');pin(token);return token;}finally{bytes.fill(0);}
+  const bytes=await readPrivateOperatorFile(tokenFile,MAX_CREDENTIAL_TOKEN_BYTES+2,check);
+  try{
+    const token=bytes.toString('utf8').replace(/\r?\n$/,'');
+    if(!isCredentialToken(token))fail('credential');return token;
+  }finally{bytes.fill(0);}
 }
 export async function inventory(root, maximum, check) {
   const names=[];

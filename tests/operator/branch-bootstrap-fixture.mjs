@@ -8,14 +8,14 @@ import { hash, outcomeBinding } from '../../scripts/lib/branch-bootstrap-protoco
 
 export const TOKEN='aa'.repeat(32), ROTATED='bb'.repeat(32);
 export const SCOPE={tenant_id:'11'.repeat(16),repository_id:'22'.repeat(16),repository_incarnation:'33'.repeat(16),principal_id:'44'.repeat(16),object_format:'sha1'};
-export const wire=value=>JSON.stringify(value).replace(/"decision_sequence":"([0-9]+)"/g,'"decision_sequence":$1');
+export const wire=value=>JSON.stringify(value).replace(/"(decision_sequence|authenticated_at|expires_at)":"([0-9]+)"/g,'"$1":$2');
 export function absent(scope=SCOPE){return {type:'transaction_outcome',schema_version:1,...outcomeBinding(scope),selector:'transaction',command_index:null,
   state:'key_not_observed',terminal:false,transaction:null,decision:null,read_only:true,request_reexecuted:false,
   absence_proves_non_commit:false,session_completeness_established:false};}
-export async function fixture(t,{format='sha1',branches=3,behavior={},existing=[],temporaryParent=tmpdir()}={}){
+export async function fixture(t,{format='sha1',branches=3,behavior={},existing=[],temporaryParent=tmpdir(),token=TOKEN,rotatedToken=ROTATED}={}){
   // Custody paths are canonical by contract; macOS's default TMPDIR is an alias.
   const root=await realpath(await mkdtemp(join(temporaryParent,'fg-bootstrap-')));await chmod(root,0o700);
-  const tokenFile=join(root,'token');await writeFile(tokenFile,`${TOKEN}\n`,{mode:0o600});
+  const tokenFile=join(root,'token');await writeFile(tokenFile,`${token}\n`,{mode:0o600});
   const scope={...SCOPE,object_format:format},requests=[],outcomes=new Map(),publications=new Map(),refs=new Map(existing),sockets=new Set();
   let sequence=9007199254740991n,posts=0;
   const server=createServer(async(req,res)=>{
@@ -24,7 +24,7 @@ export async function fixture(t,{format='sha1',branches=3,behavior={},existing=[
       for await(const chunk of req){size+=chunk.length;assert(size<=16384);chunks.push(chunk);}
       const body=Buffer.concat(chunks).toString('utf8'),key=req.headers['idempotency-key'];
       assert.equal(req.method,'POST');assert(/^fgbb1-[0-9a-f]{32}-[0-9a-f]{64}$/.test(key));
-      assert([`Bearer ${TOKEN}`,`Bearer ${ROTATED}`].includes(req.headers.authorization));
+      assert([`Bearer ${token}`,`Bearer ${rotatedToken}`].includes(req.headers.authorization));
       assert.equal(req.headers['accept-encoding'],'identity');
       const call={path:req.url,key,body,token:req.headers.authorization};requests.push(call);
       if(req.url==='/repo/api/v1/outcomes'){

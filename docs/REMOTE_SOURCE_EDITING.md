@@ -70,10 +70,10 @@ canonical `fgagent_` token with the independently issued
 scope. Both `prepare` and `prepare-verified` retain every token byte and accept
 an optional final LF or CRLF. The server authenticates the canonical grant on
 each call; source-read or history permission alone does not authorize candidate
-work. The client refuses sponsored `apply` and `recover` before reading a journal
-or opening a socket. A prepared artifact can be handed to a separately authorized
-ordinary publisher through the existing staging flow; the artifact stores no
-bearer or publication grant. The browser source editor and sponsored MCP profile
+work. Publication and outcome recovery require the separate `source-publish` and
+`outcomes-read` grants described below. The staged principal remains the agent,
+not its sponsor. A prepared artifact stores no bearer or publication grant;
+publication still uses the existing explicit staging and one-shot dispatch flow. The browser source editor and sponsored MCP profile
 retain their existing scope boundaries.
 
 The shared source transport identifies the project as

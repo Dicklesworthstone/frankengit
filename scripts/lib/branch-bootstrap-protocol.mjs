@@ -7,6 +7,7 @@ import { performance } from 'node:perf_hooks';
 import { outcomeScope, outcomeEndpoint, lookupOutcome, validateOutcomeReply, parseOutcomeJson }
   from '../operator/transaction_outcome.mjs';
 import { recordDigest } from './forge-operator-io.mjs';
+import { isCredentialToken } from '../operator/credential_token.mjs';
 
 export const BOOTSTRAP_LIMITS = Object.freeze({ branches: 8192, file: 1024 * 1024,
   request: 16384, requestBytes: 64 * 1024 * 1024, reply: 16384,
@@ -175,7 +176,10 @@ function post(r, token, {signal,timeoutMs,ca}) {
   });
 }
 export async function operateBranch(raw, token, options = {}) {
-  const r=checkedRequest(raw); pin(token);
+  const r=checkedRequest(raw);
+  // A canonical bearer spelling is not a grant. The server authenticates the
+  // independent creation/outcome scopes, current visible tip and ref ceiling.
+  if(!isCredentialToken(token))fail('credential');
   fields(options,['send','timeoutMs','signal','ca','known','publication'],[]);
   const signal=options.signal, send=options.send??false;if(typeof send!=='boolean')fail('send');
   const timeoutMs=bounded(options.timeoutMs??30000,1,300000), deadline=performance.now()+timeoutMs;

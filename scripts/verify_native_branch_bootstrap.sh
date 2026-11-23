@@ -8,4 +8,5 @@ node --check scripts/lib/branch-bootstrap.mjs
 node --check scripts/lib/branch-bootstrap-pulls.mjs
 node --check scripts/bootstrap_native_branches.mjs
 node --test tests/operator/branch_bootstrap.test.mjs tests/operator/branch_bootstrap_pulls.test.mjs \
-  tests/operator/branch_bootstrap_cli.test.mjs tests/operator/branch_bootstrap_lifecycle.test.mjs
+  tests/operator/branch_bootstrap_cli.test.mjs tests/operator/branch_bootstrap_lifecycle.test.mjs \
+  tests/operator/sponsored_branch_bootstrap.test.mjs
