@@ -1196,22 +1196,21 @@ FrankenGit does **not** claim a fictional standardized “protocol v2 push” co
 
 Compatibility is differential against pinned upstream Git versions and source-derived/adversarial corpora. “Clone worked once” is not evidence of compatibility.
 
-Tier A, the declared narrow tier, is the executable form of that rule. Its rows
-are in [`registries/compatibility_tiers.tsv`](registries/compatibility_tiers.tsv)
-(see the [matrix's Tier A section](docs/GIT_COMPATIBILITY_MATRIX.md#tier-a-the-declared-differential-tier)).
-`./scripts/verify.sh tier-a` runs them against pinned git-2.54.0 over `git://`
-and writes a per-row `tier_a_receipt.json`; the receipt is the claim. Last
-observed receipt (2026-10-21, revision `18f77336`, clean tree, receipt sha256
-`b98bfaa2…`): verdict **pass**, all 18 rows and 624 of 624 checks. Those checks
-cover import, v0 and v2 advertisement, clone, full and incremental fetch over
-v0, v1 and v2, and push, in SHA-1 and SHA-256, against seven corpora. The
-largest is about 20,100 objects, and the push node runs at `fg serve`'s default
-budgets: that push took about 17 s and that import about 15 s. Three
-divergences are declared (DIV-TA-001..003). That is an observation at that
-revision for the `git://` carrier only, not a standing claim and not general
-Git compatibility; re-run the lane for the current state.
+Tier A covers pinned Git 2.54.0 over `git://` in SHA-1 and SHA-256 across
+seven repository histories. The latest observed optimized run on November 23,
+2026, at `665f9e36` **failed two of 18 rows**. Import, clone, fetch, push and
+the other advertisement rows passed. Across 652 checks, the 28 failures came
+from v2 advertisement. FrankenGit offered `ref-in-want` and `object-info`
+where the pinned stock default omitted them. The earlier October 21 run at
+`18f77336` passed all 624 checks in its then-current suite.
 
-See [`docs/GIT_COMPATIBILITY_MATRIX.md`](docs/GIT_COMPATIBILITY_MATRIX.md).
+`./scripts/verify.sh tier-a` builds the native executable, runs the declared
+rows and writes `tier_a_receipt.json`. The November comparison ran those same
+rows and the receipt generator with the separately built release-profile
+executable. Its receipt SHA-256 is `488d1d375a3b58f1fc217387d46ac166c4a0b0025288ea7b5f53b3c15c5f79ae`.
+[Declared rows](registries/compatibility_tiers.tsv) ·
+[Compatibility matrix](docs/GIT_COMPATIBILITY_MATRIX.md#tier-a-the-declared-differential-tier) ·
+[Dated assessment](docs/REALITY_CHECK_AND_BRIDGE_PLAN.md)
 
 ---
 
