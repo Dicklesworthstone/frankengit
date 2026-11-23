@@ -76,7 +76,7 @@ fn sparse_updates_preserve_large_inherited_maps_and_every_sequential_rcr() {
                 setup(&context, &initial, Some("refs/heads/main"));
             let actual = if blocking {
                 admit_validated_receive(
-                    &authority,
+                    &authority.inner,
                     &context,
                     &input,
                     AdmissionLimits::default(),
