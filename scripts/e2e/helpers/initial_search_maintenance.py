@@ -153,8 +153,8 @@ def main():
             original_hits = current(endpoint, reader, fmt, b"Thing", updated)
             status, exhausted_body = progressive(reader, b"Thing", context_max_source_bytes=1)
             assert status == 200
-            original, failed = map(json.loads, exhausted_body.splitlines())
-            assert original == {"phase": "Initial", "answer": original_hits}
+            saved_initial, failed = map(json.loads, exhausted_body.splitlines())
+            assert saved_initial == {"phase": "Initial", "answer": original_hits}
             assert failed == {"phase": "RefinementFailed", "code": "resource_limit"}
             denied_status, denied_body = progressive(restricted)
             early_status, early_body = progressive(reader, max_work=32)
