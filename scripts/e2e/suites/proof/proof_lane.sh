@@ -355,10 +355,20 @@ else
 
   prf_dpor_log=$(fge_artifact_path fg041-dpor.log)
   prf_dpor_exit=0
-  bash "$PRF_REPO/proofs/fg041/check_dpor.sh" >"$prf_dpor_log" 2>&1 || prf_dpor_exit=$?
+  bash "$PRF_CHECK" --dpor >"$prf_dpor_log" 2>&1 || prf_dpor_exit=$?
   fge_field dpor_replay_exit "$prf_dpor_exit"
   fge_assert_eq fg041-dpor-refinement 0 "$prf_dpor_exit" \
     'the kernel replays the reference model for both orders of the competing head updates'
+
+  prf_missing_exit=0
+  FGIT_PROOF_BRIDGE_BIN="$FGE_ARTIFACT_DIR/missing-bridge" bash "$PRF_CHECK" --dpor \
+    >"$FGE_ARTIFACT_DIR/fg041-missing-dpor-bridge.log" 2>&1 || prf_missing_exit=$?
+  fge_assert_eq fg041-explicit-dpor-bridge-unavailable 2 "$prf_missing_exit" \
+    'requesting replay with a missing bridge must refuse'
+  fge_assert_contains fg041-missing-dpor-bridge-reason \
+    "$(cat "$FGE_ARTIFACT_DIR/fg041-missing-dpor-bridge.log")" \
+    'specified DPOR bridge is not executable' \
+    'a caller can distinguish a missing reference bridge from a Lean toolchain refusal'
 fi
 
 fge_phase teardown

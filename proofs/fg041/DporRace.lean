@@ -32,6 +32,14 @@ def coversBothWinners (traces : List Trace) : Bool :=
     writers == others && first != second
   | _ => false
 
+/-- A repeated winner cannot certify two schedules, even if both histories
+    pass their individual publication and generation checks. -/
+theorem equal_winners_are_rejected (first second : Trace) (left right : List Nat) (winner : Nat)
+    (h₁ : sealedWritersAndWinner first = some (left, winner))
+    (h₂ : sealedWritersAndWinner second = some (right, winner)) :
+    coversBothWinners [first, second] = false := by
+  simp [coversBothWinners, h₁, h₂]
+
 theorem both_sealed_writers_win_once : coversBothWinners FgitBridge.all = true := by decide
 
 end FrankenGit.Proof.DporRace
