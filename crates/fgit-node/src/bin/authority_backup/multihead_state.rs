@@ -7,34 +7,13 @@ use std::path::{Path, PathBuf};
 
 use super::super::super::{parent, publish_new, regular, require_absent, sync_directory};
 use fgit_authority::StoreInstanceId;
+#[cfg(test)]
+use fgit_authority_fsqlite::companions::WAL;
+use fgit_authority_fsqlite::companions::{self, DATABASE, JOURNAL, LOCAL_STATE, SHM, WAL_SET};
 
 const INTENT: &str = ".authority-restore-intent";
 const LOCK: &str = ".restore-lock";
 const QUARANTINE: &str = ".authority-restore-quarantine";
-const DATABASE: &str = "authority.fsqlite";
-const WAL: &str = "authority.fsqlite-wal";
-const JOURNAL: &str = "authority.fsqlite-journal";
-const SHM: &str = "authority.fsqlite-shm";
-/// The WAL and its RaptorQ repair sidecar (fsqlite >= 0.4), which also
-/// persists the repair-symbol pragma. They move as one unit under the WAL's
-/// crash rules and are never discarded like `-shm`.
-const WAL_SET: [&str; 2] = [WAL, "authority.fsqlite-wal-fec"];
-/// Engine records bound to the quarantine path and its WAL generation
-/// (fsqlite >= 0.4): namespace gate/use records, the migration marker, lock
-/// files and parallel-WAL commit certificates. The final location opens with
-/// its own. Moving the certificates made the final open fail permanently on
-/// resume, so they stay behind and are removed only by `cleanup`, which runs
-/// after the final location's whole-image verification has passed.
-const LOCAL_STATE: [&str; 8] = [
-    "authority.fsqlite-fsqlite-ns-gate",
-    "authority.fsqlite-fsqlite-ns-use",
-    "authority.fsqlite.fsqlite-migration-state",
-    "authority.fsqlite-lock-shared",
-    "authority.fsqlite-lock-reserved",
-    "authority.fsqlite-lock-pending",
-    "authority.fsqlite-wal-cert",
-    "authority.fsqlite-wal-cert-head",
-];
 const MAGIC: &[u8; 8] = b"FGARM002";
 
 /// One OS lock is retained until verification, close and cleanup finish. This
@@ -123,11 +102,14 @@ impl Custody {
         require_absent(&self.root.join(SHM))?;
         let quarantine = self.root.join(QUARANTINE);
         let present = exists(&quarantine, true)?;
+        if present {
+            companions::validate_closed_image(&quarantine).map_err(|e| e.to_string())?;
+        }
         let database = exists(&quarantine.join(DATABASE), false)?;
         exists(&quarantine.join(JOURNAL), false)?;
         exists(&quarantine.join(SHM), false)?;
         for name in LOCAL_STATE {
-            exists(&quarantine.join(name), false)?;
+            require_absent(&self.root.join(name))?;
         }
         // Every check precedes the first rename: a refusal changes no path.
         let mut public_names = Vec::new();
@@ -178,10 +160,11 @@ impl Custody {
         if !exists(&quarantine, true)? {
             return Err("missing verified quarantine".into());
         }
+        companions::validate_closed_image(&quarantine).map_err(|e| e.to_string())?;
         let database = quarantine.join(DATABASE);
         regular(&database)?;
         require_absent(&self.root.join(DATABASE))?;
-        for name in WAL_SET {
+        for name in WAL_SET.into_iter().chain(LOCAL_STATE) {
             require_absent(&self.root.join(name))?;
         }
         require_absent(&self.root.join(JOURNAL))?;
@@ -246,25 +229,15 @@ impl Custody {
         }
         let quarantine = self.root.join(QUARANTINE);
         if exists(&quarantine, true)? {
-            let owned = [DATABASE, JOURNAL, SHM]
-                .into_iter()
-                .chain(WAL_SET)
-                .chain(LOCAL_STATE);
-            for name in owned.clone() {
-                exists(&quarantine.join(name), false)?;
-            }
-            for name in owned {
+            companions::validate_closed_image(&quarantine).map_err(|e| e.to_string())?;
+            for name in companions::image_files() {
                 let path = quarantine.join(name);
                 if exists(&path, false)? {
                     fs::remove_file(path).map_err(|e| e.to_string())?;
                 }
             }
-            fs::remove_dir(&quarantine).map_err(|e| {
-                format!(
-                    "owned quarantine cleanup refused: {e}; retained entries: {}",
-                    retained_entries(&quarantine)
-                )
-            })?;
+            fs::remove_dir(&quarantine)
+                .map_err(|e| format!("owned quarantine cleanup refused: {e}"))?;
         }
         sync_directory(&self.root).map_err(|e| e.to_string())
     }
@@ -281,24 +254,6 @@ fn same_file(left: &Path, right: &Path) -> Result<bool, String> {
 #[cfg(not(unix))]
 fn same_file(_: &Path, _: &Path) -> Result<bool, String> {
     Err("cannot prove the quarantine alias is the published file on this platform".into())
-}
-/// Name (at most eight of) the entries that kept a directory from being
-/// removed, so an operator can resolve them; nothing here deletes them.
-fn retained_entries(directory: &Path) -> String {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return "unreadable".into();
-    };
-    let mut names: Vec<String> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
-    let total = names.len();
-    names.truncate(8);
-    if total > names.len() {
-        names.push(format!("... {} more", total - names.len()));
-    }
-    names.join(", ")
 }
 fn create_private(path: &Path) -> Result<(), String> {
     let mut builder = fs::DirBuilder::new();

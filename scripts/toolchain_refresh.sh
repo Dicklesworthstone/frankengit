@@ -55,7 +55,7 @@ cd "$ROOT" || exit 2
 
 SCHEMA="frankengit.toolchain-refresh.v1"
 PIN_FILE="rust-toolchain.toml"
-GATES="docs constitution"
+GATES="docs constitution authority-companions"
 
 candidate=""
 dry_run=0

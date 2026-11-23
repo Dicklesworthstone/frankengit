@@ -172,6 +172,7 @@
 mod adaptive_retry;
 mod body_cache;
 mod classify;
+pub mod companions;
 mod engine;
 mod envelope;
 mod interpret;
