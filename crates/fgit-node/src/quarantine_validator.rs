@@ -10,6 +10,7 @@
 #[cfg(unix)]
 mod lfs;
 mod received_pack_restore;
+pub(crate) use received_pack_restore::Restoration;
 mod reused_targets;
 mod typed_closure;
 

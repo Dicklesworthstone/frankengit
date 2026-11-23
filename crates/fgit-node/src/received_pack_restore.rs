@@ -14,7 +14,7 @@ use fgit_pack::{
 use fgit_types::{GitHashAlgorithm, GitOid, RefusalCode};
 
 use crate::received_pack::persistence::DurableStore;
-use crate::{MaterializedAdmission, NodePackMaterializationRefusal, OneNode};
+use crate::{CeiledFabricSource, MaterializedAdmission, NodePackMaterializationRefusal, OneNode};
 
 impl OneNode {
     pub(crate) fn durable_received_pack_store(&self) -> DurableStore {
@@ -41,6 +41,7 @@ impl OneNode {
         keys: &[PackOrderKey],
         held: &BTreeSet<GitOid>,
         limits: &PackLimits,
+        reads: Option<&CeiledFabricSource<'_, '_>>,
         live: &mut impl FnMut() -> bool,
     ) -> Result<(), NodePackMaterializationRefusal> {
         checkpoint(live)?;
@@ -163,12 +164,13 @@ impl OneNode {
             if budget.charge_work(raw_bytes, &restore_limits).is_err() {
                 break;
             }
-            match validator.restore_received_pack(
+            match validator.restore_received_pack_bounded(
                 &pack,
                 &candidate.objects,
                 &authorized,
                 &mut budget,
                 live,
+                crate::quarantine_validator::Restoration::Received(reads),
             ) {
                 Ok(Some(pending)) => {
                     // Restoration is read-only: do not rewrite disk custody or

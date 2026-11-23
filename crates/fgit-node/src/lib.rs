@@ -1180,6 +1180,7 @@ impl SelectedPackData {
 /// Private fields prevent callers from substituting wants after work admission.
 #[derive(Debug)]
 struct PreparedUploadPack {
+    deadline: GitDaemonSessionDeadline,
     basis: PublicationBasis,
     request: PackRequest,
     /// Identity-sorted for the source's allocation-free ordering-hint lookup.
@@ -4292,8 +4293,10 @@ struct FabricReadCeiling<'n> {
     base: Instant,
     /// The deadline the Database context is currently armed with.
     armed: Cell<Instant>,
-    /// Verified object bytes the reads have delivered.
+    /// Non-network callers own their own counter. Upload phases use the one
+    /// counter on the original session so a phase boundary cannot reset its cap.
     bytes: Cell<u64>,
+    session: Option<&'n GitDaemonSessionDeadline>,
 }
 
 impl<'n> FabricReadCeiling<'n> {
@@ -4312,12 +4315,36 @@ impl<'n> FabricReadCeiling<'n> {
             base,
             armed: Cell::new(base),
             bytes: Cell::new(0),
+            session: None,
         })
+    }
+
+    fn for_upload(
+        node: &'n OneNode,
+        context: &FsqliteCx,
+        session: &'n GitDaemonSessionDeadline,
+    ) -> Option<Self> {
+        let mut ceiling = Self::new(node, context, session.scaling)?;
+        let class = node
+            .service_config
+            .runtime_budgets
+            .limits_for(AUTHORITY_CONTEXT_BUDGET_CLASS);
+        ceiling.base = session.started.checked_add(class.timeout?)?;
+        ceiling.session = Some(session);
+        Some(ceiling)
     }
 
     fn note_read(&self, bytes: usize) {
         let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
-        self.bytes.set(self.bytes.get().saturating_add(bytes));
+        if let Some(session) = self.session {
+            let _ = session.shared.verified_fabric_bytes.try_update(
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+                |verified| Some(verified.saturating_add(bytes)),
+            );
+        } else {
+            self.bytes.set(self.bytes.get().saturating_add(bytes));
+        }
     }
 
     /// Re-arms `context` when the delivered bytes have earned a later deadline
@@ -4327,12 +4354,18 @@ impl<'n> FabricReadCeiling<'n> {
     /// and cost quotas of the context it replaces. A context already stopped
     /// is never revived, and a deadline already in the past is never granted.
     fn rearm(&self, context: &FsqliteCx) {
-        let Some(earned) = self
-            .base
-            .checked_add(self.scaling.extension(self.bytes.get()))
-        else {
+        let bytes = self.session.map_or_else(
+            || self.bytes.get(),
+            |session| session.shared.verified_fabric_bytes.load(Ordering::Relaxed),
+        );
+        let Some(mut earned) = self.base.checked_add(self.scaling.extension(bytes)) else {
             return;
         };
+        if let Some(session) = self.session
+            && let Some(outer) = session.started.checked_add(session.budget())
+        {
+            earned = earned.min(outer);
+        }
         let now = Instant::now();
         if earned <= self.armed.get() || earned <= now || context.is_cancel_requested() {
             return;
@@ -4340,6 +4373,9 @@ impl<'n> FabricReadCeiling<'n> {
         let Some(native) = context.attached_native_cx() else {
             return;
         };
+        if native.is_cancel_requested() {
+            return;
+        }
         let left = native.budget().remaining(self.node.runtime.now());
         let floors = self
             .node
@@ -4383,6 +4419,29 @@ impl PermittedClosureTraversalSource for CeiledFabricSource<'_, '_> {
 }
 
 impl CeiledFabricSource<'_, '_> {
+    /// Canonical reads in received-pack custody use the same Database probes
+    /// and EOF-only verified-byte allowance as ordinary selected-body reads.
+    fn check_read(&self) -> Result<(), RefusalCode> {
+        if let Some(ceiling) = self.ceiling {
+            ceiling.rearm(self.inner.database_context);
+        }
+        self.inner
+            .session_checkpoint()
+            .map_err(|_| RefusalCode::CancellationInProgress)?;
+        if self.inner.database_read_is_live() {
+            Ok(())
+        } else {
+            Err(RefusalCode::CancellationInProgress)
+        }
+    }
+
+    fn verified_read(&self, bytes: usize) {
+        if let Some(ceiling) = self.ceiling {
+            ceiling.note_read(bytes);
+            ceiling.rearm(self.inner.database_context);
+        }
+    }
+
     /// Client-held delta bases for a thin fetch (frankengit-pazc).
     ///
     /// For each commit this pack sends and each of the client's first
@@ -6031,6 +6090,8 @@ struct GitDaemonSessionDeadlineShared {
     /// Exact expanded bytes of the admitted upload selection. Repeating the
     /// same preparation cannot accumulate another extension.
     selected_upload_bytes: AtomicU64,
+    /// Canonical payload bytes actually verified by this upload, across all read phases.
+    verified_fabric_bytes: AtomicU64,
     /// One finite terminal-write phase, independent of the expired work clock.
     terminal_response: OnceLock<Instant>,
 }
@@ -6044,6 +6105,7 @@ impl GitDaemonSessionDeadline {
             shared: Arc::new(GitDaemonSessionDeadlineShared {
                 admitted_bytes: AtomicU64::new(0),
                 selected_upload_bytes: AtomicU64::new(0),
+                verified_fabric_bytes: AtomicU64::new(0),
                 terminal_response: OnceLock::new(),
             }),
         }
@@ -9617,10 +9679,41 @@ impl OneNode {
         self.session_request_context_with_timeout(deadline.budget())
     }
 
-    /// Upload admission, disclosure and pack reads share the remaining
-    /// transport time, including time already spent reading the greeting.
+    /// The greeting starts both clocks. Only verified fabric reads can earn
+    /// Database time; the outer transport bounds both initial and earned time.
     fn upload_request_context(&self, deadline: &GitDaemonSessionDeadline) -> NodeRequestContext {
-        self.session_request_context_with_timeout(deadline.remaining().unwrap_or_default())
+        let transport = deadline.remaining().unwrap_or_default();
+        let class = self
+            .service_config
+            .runtime_budgets
+            .limits_for(AUTHORITY_CONTEXT_BUDGET_CLASS);
+        let wall = class.timeout.map_or(transport, |timeout| {
+            let verified = deadline
+                .shared
+                .verified_fabric_bytes
+                .load(Ordering::Relaxed);
+            let earned = deadline.scaling.extension(verified);
+            timeout
+                .saturating_add(earned)
+                .saturating_sub(deadline.started.elapsed())
+                .min(transport)
+        });
+        let authority = FsqliteCx::new();
+        let limits = ClassLimits {
+            timeout: Some(wall),
+            ..class
+        };
+        authority.set_native_cx(
+            self.runtime
+                .request_cx_with_budget(limits.at(self.runtime.now())),
+        );
+        let request = NodeRequestContext { authority };
+        // A live session with an expired Database class retains the native
+        // Deadline dimension; only an exhausted outer session owns this stop.
+        if transport.is_zero() {
+            request.cancel();
+        }
+        request
     }
 
     /// Carry a verified request's authority ceiling into awaited database work.
@@ -10754,17 +10847,26 @@ impl OneNode {
         let (limits, write_profile, maximum_object_bytes) =
             self.selected_pack_write_envelope(selected_fetch_write_profile(request));
         let session_is_live = || !deadline.expired();
+        let source = VerifiedFabricPackSource {
+            fabric: &self.fabric,
+            object_format: self.object_format,
+            maximum_object_bytes,
+            database_context,
+            database_exhaustion,
+            session_is_live: Some(&session_is_live),
+        };
+        let ceiling = FabricReadCeiling::for_upload(self, database_context, deadline);
+        let reads = CeiledFabricSource {
+            inner: &source,
+            ceiling: ceiling.as_ref(),
+        };
         let mut load_pattern = |id, maximum: usize| {
-            let source = VerifiedFabricPackSource {
-                fabric: &self.fabric,
-                object_format: self.object_format,
+            let bounded = VerifiedFabricPackSource {
                 maximum_object_bytes: maximum.min(maximum_object_bytes),
-                database_context,
-                database_exhaustion,
-                session_is_live: Some(&session_is_live),
+                ..source
             };
-            source
-                .read_object(&id)
+            bounded
+                .read_object_within(&id, ceiling.as_ref())
                 .map_err(NodePackMaterializationRefusal::from)
         };
         let (keys, held, expanded_bytes) = disclosure.prepare_selection(
@@ -10804,7 +10906,14 @@ impl OneNode {
             })
         });
         if reused.is_none() {
-            self.restore_received_pack_custody(materialized, &keys, &held, &limits, live)?;
+            self.restore_received_pack_custody(
+                materialized,
+                &keys,
+                &held,
+                &limits,
+                Some(&reads),
+                live,
+            )?;
             // Restored thin entries may add delta parents. Rebuild this same
             // disclosure's held-kind proof before freezing the cold selection.
             held_bases = self.received_pack_held_base_proof(
@@ -10819,6 +10928,7 @@ impl OneNode {
             return Err(PackWriteError::from(PackError::DeadlineExceeded).into());
         }
         Ok(PreparedUploadPack {
+            deadline: deadline.clone(),
             basis: materialized.basis().clone(),
             request: request.clone(),
             keys,
@@ -10942,7 +11052,7 @@ impl OneNode {
             session_is_live,
         };
         let ceiling = session_is_live.and_then(|_| {
-            FabricReadCeiling::new(self, database_context, self.git_daemon_session_work_scaling)
+            FabricReadCeiling::for_upload(self, database_context, &prepared.deadline)
         });
         let served = CeiledFabricSource {
             inner: &source,

@@ -21,6 +21,80 @@ fn selected_ids(keys: &[PackOrderKey]) -> BTreeSet<GitOid> {
 }
 
 #[test]
+fn disclosure_credits_actual_verified_bodies_once_and_no_header_or_projection_bytes() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let Fixture {
+            scratch: _scratch,
+            node,
+            ..
+        } = fixture_with_public_body(format, vec![b'x'; 4096]);
+        let deadline = GitDaemonSessionDeadline::new(
+            GitDaemonSessionTimeout::DEFAULT,
+            GitDaemonSessionWorkScaling::DEFAULT,
+        );
+        let context = node.upload_request_context(&deadline);
+        let materialized = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&context))
+            .unwrap();
+        let first = node
+            .prepare_visible_upload_pack(&context, &materialized, &WireLimits::default(), &deadline)
+            .unwrap();
+        let structured: usize = first
+            .objects
+            .values()
+            .filter(|object| object.kind != ObjectType::Blob)
+            .map(|object| object.size)
+            .sum();
+        let blobs: usize = first
+            .objects
+            .values()
+            .filter(|object| object.kind == ObjectType::Blob)
+            .map(|object| object.size)
+            .sum();
+        assert!(structured > 0 && blobs >= 4096);
+        assert_eq!(
+            deadline
+                .shared
+                .verified_fabric_bytes
+                .load(Ordering::Relaxed),
+            structured as u64
+        );
+        let resumed = node
+            .prepare_visible_upload_pack(&context, &materialized, &WireLimits::default(), &deadline)
+            .unwrap();
+        assert!(Arc::ptr_eq(&first.objects, &resumed.objects));
+        assert_eq!(
+            deadline
+                .shared
+                .verified_fabric_bytes
+                .load(Ordering::Relaxed),
+            structured as u64
+        );
+
+        let other = GitDaemonSessionDeadline::new(
+            GitDaemonSessionTimeout::DEFAULT,
+            GitDaemonSessionWorkScaling::DEFAULT,
+        );
+        let other_request = node.upload_request_context(&other);
+        let cached = node
+            .prepare_visible_upload_pack(
+                &other_request,
+                &materialized,
+                &WireLimits::default(),
+                &other,
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(&first.objects, &cached.objects));
+        assert_eq!(
+            other.shared.verified_fabric_bytes.load(Ordering::Relaxed),
+            0
+        );
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
 fn preflight_reports_the_complete_selected_total_before_any_body_read() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let Fixture {
