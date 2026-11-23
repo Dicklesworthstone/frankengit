@@ -547,3 +547,126 @@ fn cancellation_during_resolution_and_replacement_is_a_stop() {
         assert_eq!(run(stop).0, Err(PackError::DeadlineExceeded));
     }
 }
+
+#[test]
+fn ascending_ofs_leaves_do_not_displace_a_still_needed_parent() {
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let (mut objects, mut bodies) = history(format, 64, 1, false);
+        let base = objects[0].offset();
+        for step in 2..=12u8 {
+            let mut body = bodies[0].clone();
+            body.push(step);
+            let offset = 12 + 100 * u64::from(step);
+            objects.push(PackObject::Delta(DeltaObject {
+                offset,
+                id: Some(git_object_id(format, ObjectType::Blob, &body)),
+                base: DeltaBase::Ofs(base),
+                program: append_program(64, step),
+            }));
+            bodies.push(body);
+        }
+        let unique = bodies.iter().map(Vec::len).sum();
+        let bounds = PackLimits {
+            max_cached_bytes: 65,
+            max_total_expanded_bytes: unique,
+            ..PackLimits::default()
+        };
+        let run = |limits: &PackLimits, ascending: bool, cancel: bool| {
+            let mut spill = NoSpill::default();
+            let mut live = || true;
+            let mut resolver = CachedResolver::with_resident_recency(
+                &objects,
+                &(),
+                limits,
+                &mut spill,
+                65,
+                &mut live,
+            )?;
+            let scalar = ScalarResolver::new(&objects, &(), limits, &mut live)?;
+            let mut budget = ResolutionBudget::new();
+            if ascending {
+                resolver.prepare_ascending_ofs_restoration(&mut budget, &mut live)?;
+            }
+            for (index, object) in objects.iter().enumerate() {
+                let value = resolver.resolve_offset_typed_with_budget(
+                    object.offset(),
+                    &mut budget,
+                    &mut || !cancel || index < 5,
+                )?;
+                assert_eq!(
+                    value,
+                    scalar.resolve_offset_typed(object.offset(), &mut live)?
+                );
+                assert_eq!(value.1, bodies[index]);
+                assert_resident_bound(&resolver, objects.len());
+            }
+            assert!(resolver.entries.is_empty());
+            assert_eq!(budget.accounting.expanded, unique);
+            drop(resolver);
+            assert_eq!(spill.calls, 0);
+            Ok::<(), PackError>(())
+        };
+        assert!(matches!(
+            run(&bounds, false, false),
+            Err(PackError::TotalExpandedLimit { .. })
+        ));
+        assert_eq!(run(&bounds, true, false), Ok(()));
+        assert_eq!(run(&bounds, true, true), Err(PackError::DeadlineExceeded));
+        let mut tight = bounds.clone();
+        tight.max_total_expanded_bytes -= 1;
+        assert!(matches!(
+            run(&tight, true, false),
+            Err(PackError::TotalExpandedLimit { .. })
+        ));
+        tight = bounds.clone();
+        tight.max_delta_work = 7;
+        assert!(matches!(
+            run(&tight, true, false),
+            Err(PackError::DeltaWorkLimit { .. })
+        ));
+    }
+}
+
+#[test]
+fn mixed_references_and_out_of_order_queries_keep_general_recency() {
+    for mixed in [false, true] {
+        let (objects, _) = history(ObjectFormat::Sha256, 4, 8, mixed);
+        let limits = PackLimits::default();
+        let mut cold = CachedResolver::with_resident_recency(
+            &objects,
+            &(),
+            &limits,
+            ResidentCache,
+            12,
+            &mut || true,
+        )
+        .unwrap();
+        let mut planning = ResolutionBudget::new();
+        cold.prepare_ascending_ofs_restoration(&mut planning, &mut || true)
+            .unwrap();
+        assert_eq!(cold.ofs_restoration.is_none(), mixed);
+        let mut general = CachedResolver::with_resident_recency(
+            &objects,
+            &(),
+            &limits,
+            ResidentCache,
+            12,
+            &mut || true,
+        )
+        .unwrap();
+        let mut left = ResolutionBudget::new();
+        let mut right = ResolutionBudget::new();
+        // An unannounced skipped/backward lookup invalidates the declared pass.
+        for at in [3, 0, 2, 1, 2, 8] {
+            let offset = objects[at].offset();
+            assert_eq!(
+                cold.resolve_offset_typed_with_budget(offset, &mut left, &mut || true),
+                general.resolve_offset_typed_with_budget(offset, &mut right, &mut || true)
+            );
+            assert!(cold.ofs_restoration.is_none());
+            assert_eq!(left.accounting.expanded, right.accounting.expanded);
+            assert_eq!(left.accounting.work, right.accounting.work);
+            assert_resident_bound(&cold, objects.len());
+        }
+    }
+}

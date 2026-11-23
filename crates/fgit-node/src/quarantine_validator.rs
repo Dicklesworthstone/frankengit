@@ -527,6 +527,7 @@ impl ProductionQuarantineValidator<'_> {
             pack,
             bases,
             &mut ResolutionBudget::new(),
+            false,
             deadline,
             map_pack_error,
         )
@@ -539,6 +540,7 @@ impl ProductionQuarantineValidator<'_> {
         pack: &QuarantinedPack,
         bases: &ExternalBases,
         budget: &mut ResolutionBudget,
+        cold_custody: bool,
         deadline: &mut impl Deadline,
         pack_refusal: fn(PackError) -> RefusalCode,
     ) -> Result<VerifiedPackObjects, RefusalCode> {
@@ -592,6 +594,11 @@ impl ProductionQuarantineValidator<'_> {
                     )
                 }
                 .map_err(pack_refusal)?;
+                if cold_custody && self.recent_resolver_results {
+                    pack_resolver
+                        .prepare_ascending_ofs_restoration(budget, deadline)
+                        .map_err(pack_refusal)?;
+                }
                 for entry in pack.entries() {
                     checkpoint(deadline)?;
                     if ids_at_offset.contains_key(&entry.offset) {

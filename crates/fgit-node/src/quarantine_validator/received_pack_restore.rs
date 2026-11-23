@@ -151,6 +151,7 @@ impl ProductionQuarantineValidator<'_> {
             pack,
             &bases,
             resolution_budget,
+            reservation.is_none(),
             deadline,
             restore_pack_refusal,
         )?;

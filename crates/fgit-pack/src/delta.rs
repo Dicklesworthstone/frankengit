@@ -6,6 +6,7 @@ use crate::{
     Deadline, EntryKind, ObjectId, PackError, PackLimits, checkpoint, object_type_from_base_entry,
 };
 
+mod ofs_restoration;
 #[cfg(test)]
 mod resident_recency_tests;
 mod stream;
@@ -631,6 +632,7 @@ pub struct CachedResolver<'objects, 'lookup, L, S = ResidentCache> {
     resident_bytes: usize,
     spill: S,
     recency: Option<ResidentRecency>,
+    ofs_restoration: Option<ofs_restoration::OfsRestoration>,
 }
 
 struct CacheEntry {
@@ -709,6 +711,7 @@ where
             resident_bytes: 0,
             spill,
             recency: None,
+            ofs_restoration: None,
         })
     }
 
@@ -753,6 +756,7 @@ where
         offset: u64,
         deadline: &mut impl Deadline,
     ) -> Result<Vec<u8>, PackError> {
+        self.ofs_restoration = None;
         let mut accounting = Accounting::default();
         let object = self
             .scalar
@@ -794,9 +798,13 @@ where
             .find_by_offset(offset, &mut budget.accounting, deadline)?
             .ok_or(PackError::MissingDeltaBase)?;
         let object = clone_pack_object(object, deadline)?;
+        let retire = self.begin_ofs_entry(&object);
         let mut stack = Vec::new();
         let resolved =
             self.resolve_object_typed(&object, 0, &mut stack, &mut budget.accounting, deadline)?;
+        if let Some(parent) = retire {
+            self.remove_recent(parent)?;
+        }
         Ok((resolved.object_type, resolved.bytes))
     }
 
@@ -819,6 +827,7 @@ where
         budget: &mut ResolutionBudget,
         deadline: &mut impl Deadline,
     ) -> Result<(ObjectType, Vec<u8>), PackError> {
+        self.ofs_restoration = None;
         let object = self
             .scalar
             .find_by_id(id, &mut budget.accounting, deadline)?
@@ -1179,28 +1188,31 @@ where
         Ok(())
     }
 
-    fn evict_oldest_recent(&mut self) -> Result<(), PackError> {
+    fn remove_recent(&mut self, offset: u64) -> Result<bool, PackError> {
+        let Some(entry) = self.entries.remove(&offset) else {
+            return Ok(false);
+        };
         let recency = self.recency.as_mut().ok_or(PackError::MissingDeltaBase)?;
-        let offset = recency.oldest.ok_or(PackError::MissingDeltaBase)?;
-        let entry = self
-            .entries
-            .remove(&offset)
-            .ok_or(PackError::MissingDeltaBase)?;
         let length = entry.stored.len();
-        // Recency entries are exclusively resident; the logical byte count
-        // therefore also bounds all payload storage retained by this policy.
         self.cached_bytes -= length;
         self.resident_bytes -= length;
-        recency.oldest = entry.newer;
+        if let Some(older) = entry.older {
+            self.entries
+                .get_mut(&older)
+                .ok_or(PackError::MissingDeltaBase)?
+                .newer = entry.newer;
+        } else {
+            recency.oldest = entry.newer;
+        }
         if let Some(newer) = entry.newer {
             self.entries
                 .get_mut(&newer)
                 .ok_or(PackError::MissingDeltaBase)?
-                .older = None;
+                .older = entry.older;
         } else {
-            recency.newest = None;
+            recency.newest = entry.older;
         }
-        Ok(())
+        Ok(true)
     }
 
     fn cache_recent(
@@ -1211,7 +1223,13 @@ where
         deadline: &mut impl Deadline,
     ) -> Result<(), PackError> {
         checkpoint(deadline)?;
-        if self.resident_budget == 0 || bytes.len() > self.resident_budget {
+        if self.resident_budget == 0
+            || bytes.len() > self.resident_budget
+            || self
+                .ofs_restoration
+                .as_ref()
+                .is_some_and(|plan| !plan.last_child.contains_key(&offset))
+        {
             return Ok(());
         }
         if let Some(entry) = self.entries.get_mut(&offset) {
@@ -1225,7 +1243,14 @@ where
         let available_before_insert = self.resident_budget - bytes.len();
         while self.cached_bytes > available_before_insert {
             checkpoint(deadline)?;
-            self.evict_oldest_recent()?;
+            let oldest = self
+                .recency
+                .as_ref()
+                .and_then(|r| r.oldest)
+                .ok_or(PackError::MissingDeltaBase)?;
+            if !self.remove_recent(oldest)? {
+                return Err(PackError::MissingDeltaBase);
+            }
         }
         self.entries
             .try_reserve(1)
