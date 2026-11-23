@@ -788,6 +788,33 @@ fn read_error(error: NodeWorkspaceRefusal) -> ApiError {
 mod tests {
     use super::*;
     #[test]
+    fn only_typed_object_size_refusals_report_a_caller_budget() {
+        use fgit_treefs::ObjectSourceError;
+        let oversized = ObjectSourceError::TooLarge {
+            observed: 22,
+            limit: 1,
+        };
+        let corrupt = ObjectSourceError::IdentityMismatch {
+            requested_hex: "00".repeat(20),
+            observed_hex: "11".repeat(20),
+        };
+        for (object, expected) in [
+            (oversized, Status::TooLarge),
+            (corrupt, Status::Unavailable),
+        ] {
+            assert_eq!(
+                base_error(BaseError::Source(object.clone())).status,
+                expected
+            );
+            let error = SearchError::Source(Box::new(object));
+            assert_eq!(
+                read_error(NodeWorkspaceRefusal::SourceSearch(Box::new(error))).status,
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn current_commit_source_grant_does_not_open_history_or_binary_authority_proofs() {
         for (raw, expected) in [
             (
