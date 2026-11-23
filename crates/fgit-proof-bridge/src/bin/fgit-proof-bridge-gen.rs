@@ -11,14 +11,19 @@
 //! `fgit-schema-gen` uses, because a second vocabulary for the same idea is a
 //! second thing to remember.
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
+
+#[path = "fgit-proof-bridge-gen/race.rs"]
+mod race;
 
 const DEFAULT_GOLDENS: &str = "crates/fgit-reference/tests/goldens";
 const DEFAULT_OUT: &str = "proofs/fg041/generated";
 
 fn usage() -> ExitCode {
     eprintln!("usage: fgit-proof-bridge-gen <generate|check> [goldens-dir] [out-dir]");
+    eprintln!("       fgit-proof-bridge-gen dpor [competing-cas.fgtrace] > Vectors.lean");
     eprintln!("  goldens-dir defaults to {DEFAULT_GOLDENS}");
     eprintln!("  out-dir     defaults to {DEFAULT_OUT}");
     eprintln!("exit 0 clean, 1 stale or missing, 2 usage");
@@ -30,6 +35,32 @@ fn main() -> ExitCode {
     let Some(command) = args.next() else {
         return usage();
     };
+    if command == "dpor" {
+        let path = args
+            .next()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_GOLDENS).join("cas_loss_retry.fgtrace"));
+        if args.next().is_some() {
+            return usage();
+        }
+        let result = std::fs::read(&path)
+            .map_err(|e| format!("{}: {e}", path.display()))
+            .and_then(|bytes| {
+                fgit_reference::trace::decode(&bytes).map_err(|e| format!("invalid trace: {e:?}"))
+            })
+            .and_then(|seed| race::explore(&seed, race::BUDGET))
+            .and_then(|traces| {
+                let mut out = std::io::stdout().lock();
+                out.write_all(fgit_proof_bridge::emit::render_dpor(&traces).as_bytes())
+                    .and_then(|()| out.flush())
+                    .map_err(|e| format!("vector output: {e}"))
+            });
+        if let Err(error) = result {
+            eprintln!("fgit-proof-bridge-gen: {error}");
+            return ExitCode::FAILURE;
+        }
+        return ExitCode::SUCCESS;
+    }
     let goldens = PathBuf::from(args.next().unwrap_or_else(|| DEFAULT_GOLDENS.to_owned()));
     let out = PathBuf::from(args.next().unwrap_or_else(|| DEFAULT_OUT.to_owned()));
     if args.next().is_some() {

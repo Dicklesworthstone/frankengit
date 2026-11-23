@@ -979,6 +979,7 @@ dependencies = [
 name = "fgit-proof-bridge"
 version = "0.0.1"
 dependencies = [
+ "fgit-lab",
  "fgit-reference",
  "fgit-types",
 ]

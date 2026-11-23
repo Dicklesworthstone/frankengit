@@ -6,6 +6,16 @@ Run the local, fail-closed checker with:
 bash proofs/fg041/check.sh
 ```
 
+The proof E2E lane also runs `bash proofs/fg041/check.sh --dpor`.
+It replays the recorded `cas_loss_retry.fgtrace` seed, then lets the
+concurrency lab schedule its two competing staged batches at the common head.
+For each order the reference model executes both conditional updates. Exactly
+one must win, and the losing update must preserve the winner’s head and roots.
+The bridge exports both executions to fresh Lean modules. The pinned kernel
+checks the head generation at every projected step. This covers a single
+two-writer model race. Production storage, native crash recovery, and the
+other schedule spaces have separate verification requirements.
+
 The script refuses a missing or mismatched `leanprover/lean4:v4.32.0`
 toolchain, never asks `elan` to install one, rejects `sorry`/`admit` in the
 artifact, checks every theorem below, and verifies that the same checker

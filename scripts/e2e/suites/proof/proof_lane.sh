@@ -346,6 +346,13 @@ else
   fge_field vectors_gate_exit "$prf_gate_exit"
   fge_assert_eq fg041-vectors-are-current 0 "$prf_gate_exit" \
     'the committed Lean vectors match what the golden corpus renders today'
+
+  prf_dpor_log=$(fge_artifact_path fg041-dpor.log)
+  prf_dpor_exit=0
+  bash "$PRF_CHECK" --dpor >"$prf_dpor_log" 2>&1 || prf_dpor_exit=$?
+  fge_field dpor_replay_exit "$prf_dpor_exit"
+  fge_assert_eq fg041-dpor-refinement 0 "$prf_dpor_exit" \
+    'the kernel replays the reference model for both orders of the competing head updates'
 fi
 
 fge_phase teardown
