@@ -32,11 +32,14 @@ At `52d11579`, one optimized Linux executable delivered the original pack over e
 | --- | ---: | ---: | ---: |
 | Stock raw Git, run 1 | 14.765 | 0.43 | 62,552 |
 | Stock raw Git, run 2 | 15.068 | 0.70 | 62,652 |
-| Native raw Git | 424.296 | 325.26 | 677,840 |
-| Native SSH | 507.575 | 371.12 | 694,392 |
-| Native smart HTTP | 413.118 | 346.36 | 601,284 |
+| Native raw Git at `52d11579` | 424.296 | 325.26 | 677,840 |
+| Native SSH at `52d11579` | 507.575 | 371.12 | 694,392 |
+| Native smart HTTP at `52d11579` | 413.118 | 346.36 | 601,284 |
+| Native raw Git at `42e867e5` | 307.788 | 283.65 | 666,028 |
+| Native SSH at `42e867e5` | 399.964 | 348.15 | 684,304 |
+| Native smart HTTP at `42e867e5` | 343.132 | 303.91 | 676,496 |
 
-The native runs exercised cold service processes on a shared host. For byte equivalence the stock client captured the transmitted pack, whose header, trailer and SHA-256 matched the retained original. Returning those bytes still required verifying expanded objects against canonical storage. [Cold reuse and integrity checks](VERIFIED_RECEIVED_PACK_REUSE.md#disposable-custody-across-service-restarts)
+On the same corpus the later `42e867e5` executable returned the identical original pack and matched the ref and all reachable objects over all three transports. All three strict fsck and drain checks succeeded. The native runs exercised cold service processes on a shared host. Compilation and CPU availability varied, and HTTP peak RSS increased on the later run. For byte equivalence the stock client captured the transmitted pack, whose header, trailer and SHA-256 matched the retained original. Returning those bytes still required verifying expanded objects against canonical storage. [Cold reuse and integrity checks](VERIFIED_RECEIVED_PACK_REUSE.md#disposable-custody-across-service-restarts)
 
 The quarantine validator also hashed the same resolved object twice, then allocated and discarded a blob copy. At `42e867e5` it derives one native identity and parses non-blob structure. Independent expected-ID comparisons and canonical integrity reads remain in place. On 512 original objects sampled by kind and length (91,550,238 bytes), median time for this operation went from 0.275154 to 0.127150 seconds. On all 45,661 original objects, two baseline runs of the same operation took 30.599 and 30.709 seconds. The candidate took 13.655 seconds and derived every stock Git identity. These measurements begin with materialized object bytes. At the test-only descendant `11c65456`, the complete object package passed 89 tests and ignored four. [Native object identification](../crates/fgit-git-object/src/lib.rs)
 
