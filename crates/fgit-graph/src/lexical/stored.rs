@@ -145,8 +145,7 @@ impl PreparedLexicalIndex {
                 return Err(LexicalError::NamespaceMismatch.into());
             }
             omissions::disjoint(&omissions, segment.documents(), live)?;
-            let bytes = segment.encode(live)?;
-            let root = segment.root(live)?;
+            let (bytes, root) = super::encoding::encode_with_root(&segment, live)?;
             bounded_add(&mut total, bytes.len(), MAX_INDEX_BYTES, "index bytes")?;
             refs.push(SegmentRef::new(&segment, root, bytes.len())?);
             payloads.push(Payload {
