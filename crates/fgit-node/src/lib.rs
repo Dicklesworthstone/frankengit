@@ -7739,24 +7739,32 @@ impl OneNode {
     ) -> Result<upload_visibility::VisibleUploadPack, NodeGitDaemonServeRefusal> {
         self.prepare_visible_upload_pack(request, materialized, limits, deadline)
             .inspect_err(|refusal| {
-                let object_bytes = self
-                    .selected_pack_limits
-                    .max_object_bytes
-                    .min(usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX));
-                let line = match refusal {
-                    NodeGitDaemonServeRefusal::Transport(error) => {
-                        upload_refusal::transport_line(error)
-                    }
-                    _ => upload_envelope_error(
-                        refusal,
-                        self.selected_pack_limits.max_total_expanded_bytes,
-                        object_bytes,
-                    ),
-                };
-                if let Some(line) = line {
-                    let _ = emit_terminal_upload_error(writer, line, limits, Some(deadline));
-                }
+                self.report_upload_preflight_refusal(refusal, writer, limits, deadline)
             })
+    }
+
+    fn report_upload_preflight_refusal(
+        &self,
+        refusal: &NodeGitDaemonServeRefusal,
+        writer: &mut impl Write,
+        limits: &WireLimits,
+        deadline: &GitDaemonSessionDeadline,
+    ) {
+        let object_bytes = self
+            .selected_pack_limits
+            .max_object_bytes
+            .min(usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX));
+        let line = match refusal {
+            NodeGitDaemonServeRefusal::Transport(error) => upload_refusal::transport_line(error),
+            _ => upload_envelope_error(
+                refusal,
+                self.selected_pack_limits.max_total_expanded_bytes,
+                object_bytes,
+            ),
+        };
+        if let Some(line) = line {
+            let _ = emit_terminal_upload_error(writer, line, limits, Some(deadline));
+        }
     }
 }
 
