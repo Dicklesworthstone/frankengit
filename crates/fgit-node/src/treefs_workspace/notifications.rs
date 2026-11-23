@@ -148,12 +148,29 @@ pub(super) fn projection_file_gate(path: &Path) -> Arc<FileGate> {
 
 #[cfg(test)]
 pub(super) fn projection_gate_count_under(root: &Path) -> usize {
+    let root = root.canonicalize().unwrap();
     PROJECTION_GATES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .keys()
-        .filter(|path| path.starts_with(root))
+        .filter(|path| path.starts_with(&root))
         .count()
+}
+
+fn prepare_projection_path(path: &Path) -> Result<PathBuf, NotificationReadRefusal> {
+    let parent = path
+        .parent()
+        .ok_or(NotificationReadRefusal::InvalidProjection)?;
+    let file = path
+        .file_name()
+        .ok_or(NotificationReadRefusal::InvalidProjection)?;
+    std::fs::create_dir_all(parent).map_err(|_| NotificationReadRefusal::InvalidProjection)?;
+    // Different configured storage roots can resolve to the same directory.
+    // The projection itself can be absent on first use or during a rebuild.
+    let directory = parent
+        .canonicalize()
+        .map_err(|_| NotificationReadRefusal::InvalidProjection)?;
+    Ok(directory.join(file))
 }
 
 async fn lock_projection_file(
@@ -263,9 +280,6 @@ async fn run_inbox_projection_once(
     snapshot: InboxSnapshot,
     query: InboxQuery,
 ) -> Result<(InboxSyncOutcome, InboxPage), NotificationReadRefusal> {
-    if let Some(parent) = projection_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|_| NotificationReadRefusal::InvalidProjection)?;
-    }
     if !has_valid_sqlite_header_or_empty(projection_path) {
         remove_projection_files(projection_path);
     }
@@ -515,7 +529,9 @@ impl OneNode {
             unread_only,
             include_muted,
         };
-        let projection_path = self.notification_inbox_projection_path(binding.principal, kind);
+        let projection_path = prepare_projection_path(
+            &self.notification_inbox_projection_path(binding.principal, kind),
+        )?;
         let _file_lease = lock_projection_file(&projection_path, request, &cx).await?;
         let snapshot = InboxSnapshot { binding, rows };
         let (sync_outcome, page) =

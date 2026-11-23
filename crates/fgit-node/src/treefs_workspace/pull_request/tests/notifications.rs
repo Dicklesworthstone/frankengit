@@ -457,7 +457,9 @@ fn queued_reader_cancels_while_a_reopened_reader_rebuilds_the_same_file() {
     };
     let original = read(&first, &first.request_context()).unwrap();
     assert_eq!(original.threads.len(), 1);
-    let mut reopened = OneNode::open_existing(scratch.config(GitHashAlgorithm::Sha1)).unwrap();
+    let mut alias = scratch.config(GitHashAlgorithm::Sha1);
+    alias.storage_root = alias.storage_root.join("..").join("node");
+    let mut reopened = OneNode::open_existing(alias).unwrap();
     let head = reopened
         .runtime()
         .block_on(reopened.authenticate_authority_head())
@@ -468,7 +470,8 @@ fn queued_reader_cancels_while_a_reopened_reader_rebuilds_the_same_file() {
 
     let path = first.notification_inbox_projection_path(principal(), NotificationTargetKind::Issue);
     fs::write(&path, b"corrupt projection to rebuild").unwrap();
-    let gate = projection_file_gate(&path);
+    let gate = projection_file_gate(&path.canonicalize().unwrap());
+    assert_eq!(projection_gate_count_under(first.storage_root()), 1);
     let cancelled = first.request_context();
     let rebuilt = std::thread::scope(|threads| {
         // Drop the holder before scoped joins, including on assertion failure.
