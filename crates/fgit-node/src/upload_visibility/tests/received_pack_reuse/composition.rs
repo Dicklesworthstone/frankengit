@@ -181,6 +181,21 @@ fn selected_ids(selection: &PreparedUploadPack) -> BTreeSet<GitOid> {
     selection.keys.iter().map(|key| key.id).collect()
 }
 
+fn assert_written_subset(
+    node: &OneNode,
+    head: &MaterializedAdmission,
+    selection: &PreparedUploadPack,
+) {
+    let payload = materialize(node, head, selection);
+    assert!(payload.receipt().received().is_none());
+    let writer = payload
+        .receipt()
+        .writer()
+        .expect("the selection requires the full writer");
+    assert_eq!(writer.object_count as usize, selection.keys.len());
+    assert_full_pack_selection(node, selection, payload);
+}
+
 fn assert_hybrid_subset(
     node: &OneNode,
     head: &MaterializedAdmission,
@@ -195,6 +210,14 @@ fn assert_hybrid_subset(
     assert!(!receipt.written().profile.thin);
     assert_eq!(receipt.written().object_count as usize, selection.keys.len() - 2);
     assert_eq!(receipt.object_count() as usize, selection.keys.len());
+    assert_full_pack_selection(node, selection, payload);
+}
+
+fn assert_full_pack_selection(
+    node: &OneNode,
+    selection: &PreparedUploadPack,
+    payload: AuthoritySelectedPackPayload,
+) {
     let bytes = payload.into_bytes().unwrap();
     let parsed = read_verified_pack(
         &bytes,

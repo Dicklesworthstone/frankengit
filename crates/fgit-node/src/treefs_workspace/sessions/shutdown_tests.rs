@@ -84,6 +84,7 @@ fn insert_owner(node: &OneNode, byte: u8) -> (WorkspaceId, Arc<AsyncMutex<Sessio
         reference: RefName::try_new(b"refs/heads/main").expect("reference"),
         visibility: RefVisibility::new(),
         clock_floor: Arc::new(AtomicU64::new(0)),
+        edit_profile: candidate::EditProfile::FilesAndSymlinks,
         session: Session::Sha1(Arc::clone(&owner)),
     };
     assert!(

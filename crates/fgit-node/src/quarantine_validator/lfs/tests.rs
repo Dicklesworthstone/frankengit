@@ -96,11 +96,12 @@ impl Fixture {
     }
 
     fn head(&self) -> fgit_types::RepositoryAuthorityHeadId {
-        self.node
+        let head = self
+            .node
             .runtime()
             .block_on(self.node.authenticate_authority_head())
-            .unwrap()
-            .id()
+            .unwrap();
+        fgit_authority::authority_head_identity(&head.body().unwrap()).unwrap()
     }
 }
 
