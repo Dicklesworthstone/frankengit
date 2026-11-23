@@ -47,6 +47,31 @@ fn open_regular(path: &Path) -> Result<(File, u64), StoreRefusal> {
     Ok((file, metadata.len()))
 }
 
+/// Best-effort Linux page-cache advice for an authorized immutable key. A
+/// one-byte range covers only its first page. No body, identity, or error
+/// crosses this boundary. The ordinary verified read still reopens the key.
+#[cfg(target_os = "linux")]
+pub(super) fn advise_first_page(path: &Path) {
+    use rustix::fs::{Advice, fadvise};
+    use std::num::NonZeroU64;
+
+    if let Some(file) = open_for_advice(path) {
+        let _ = fadvise(&file, 0, Some(NonZeroU64::MIN), Advice::WillNeed);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn open_for_advice(path: &Path) -> Option<File> {
+    use rustix::fs::{Mode, OFlags, open};
+
+    if !fs::symlink_metadata(path).ok()?.file_type().is_file() {
+        return None;
+    }
+    let flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK;
+    let file = File::from(open(path, flags, Mode::empty()).ok()?);
+    file.metadata().ok()?.is_file().then_some(file)
+}
+
 pub(super) fn read(path: &Path, maximum: u64) -> Result<Vec<u8>, StoreRefusal> {
     let (mut file, length) = open_regular(path)?;
     read_stream(&mut file, length, maximum)
@@ -256,6 +281,26 @@ mod tests {
         fn drop(&mut self) {
             let _cleanup = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn advisory_open_accepts_only_a_regular_leaf_and_keeps_it_read_only() {
+        use std::io::Write;
+        use std::os::unix::fs::symlink;
+
+        let directory = Directory::new();
+        let file = directory.0.join("immutable");
+        let link = directory.0.join("symlink");
+        fs::write(&file, b"original").unwrap();
+        symlink(&file, &link).unwrap();
+        assert!(open_for_advice(&directory.0.join("missing")).is_none());
+        assert!(open_for_advice(&directory.0).is_none());
+        assert!(open_for_advice(&link).is_none());
+        let mut opened = open_for_advice(&file).unwrap();
+        assert!(opened.write(b"replacement").is_err());
+        advise_first_page(&file);
+        assert_eq!(fs::read(&file).unwrap(), b"original");
     }
 
     #[test]

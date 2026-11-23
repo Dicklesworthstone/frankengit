@@ -16,8 +16,7 @@ struct MemorySource {
     objects: BTreeMap<GitOid, (ObjectType, Vec<u8>)>,
     reads: RefCell<Vec<GitOid>>,
     header_reads: RefCell<Vec<GitOid>>,
-    prioritize_bodies: bool,
-    bodies_after_header: Cell<usize>,
+    advice: Option<RefCell<Vec<Vec<GitOid>>>>,
     polls: Cell<usize>,
     stop_at: Cell<usize>,
 }
@@ -28,8 +27,7 @@ impl MemorySource {
             objects: BTreeMap::new(),
             reads: RefCell::new(Vec::new()),
             header_reads: RefCell::new(Vec::new()),
-            prioritize_bodies: false,
-            bodies_after_header: Cell::new(0),
+            advice: None,
             polls: Cell::new(0),
             stop_at: Cell::new(usize::MAX),
         }
@@ -50,9 +48,14 @@ impl MemorySource {
     }
 }
 impl VisibilitySource for MemorySource {
-    fn prioritize_verified_bodies(&self) -> bool {
-        self.prioritize_bodies
+    fn advise_pending(&self, pending: &mut BTreeMap<GitOid, bool>) {
+        if let Some(advice) = &self.advice {
+            let mut issued = Vec::new();
+            advise_pending_pages(pending, |id| issued.push(id));
+            advice.borrow_mut().push(issued);
+        }
     }
+
     fn format(&self) -> GitHashAlgorithm {
         self.format
     }
@@ -72,10 +75,6 @@ impl VisibilitySource for MemorySource {
         }
     }
     fn load(&self, id: GitOid) -> Result<(ObjectType, Vec<u8>), NodePackMaterializationRefusal> {
-        if !self.header_reads.borrow().is_empty() {
-            self.bodies_after_header
-                .set(self.bodies_after_header.get() + 1);
-        }
         self.reads.borrow_mut().push(id);
         self.objects
             .get(&id)
@@ -125,41 +124,49 @@ fn expect_code<T>(result: Result<T, NodePackMaterializationRefusal>, code: Refus
 }
 
 #[test]
-fn served_discovery_verifies_structure_first_and_still_requires_every_typed_header() {
+fn first_page_advice_preserves_reads_refusals_and_scope_in_native_oid_order() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let mut source = MemorySource::new(format);
         let mut tip = None;
-        let mut leaves = Vec::new();
-        for n in 0..32_u8 {
+        for n in 0..48_u8 {
             let blob = source.put(ObjectType::Blob, vec![n]);
             let tree = source.tree(&[(b"100644", b"file", blob)]);
             tip = Some(source.commit(tree, tip.as_slice()));
-            leaves.push(blob);
         }
         let root = tip.unwrap();
+        let hidden = source.put(ObjectType::Blob, b"unreachable".to_vec());
         let admitted = source.admitted();
         let limits = PackLimits::default();
         let reference = project_visible_graph(&source, &admitted, [root], &limits).unwrap();
-        assert!(source.bodies_after_header.get() > 0);
+        let bodies = source.reads.take();
+        let headers = source.header_reads.take();
+        let polls = source.polls.replace(0);
+        source.advice = Some(RefCell::new(Vec::new()));
+        let actual = project_visible_graph(&source, &admitted, [root], &limits).unwrap();
+        assert_eq!(actual, reference);
+        assert_eq!(source.reads.take(), bodies);
+        assert_eq!(source.header_reads.take(), headers);
+        assert_eq!(source.polls.get(), polls);
+        let batches = source.advice.as_ref().unwrap().take();
+        assert!(batches.iter().all(|batch| batch.len() <= 16));
+        let advised: Vec<_> = batches.into_iter().flatten().collect();
+        let unique: BTreeSet<_> = advised.iter().copied().collect();
+        assert!(!advised.is_empty());
+        assert_eq!(unique.len(), advised.len());
+        assert!(!unique.contains(&hidden));
+        assert!(unique.is_subset(reference.closure.objects()));
 
-        source.prioritize_bodies = true;
-        source.bodies_after_header.set(0);
-        source.header_reads.borrow_mut().clear();
-        source.reads.borrow_mut().clear();
-        let served = project_visible_graph(&source, &admitted, [root], &limits).unwrap();
-        assert_eq!(served, reference);
-        assert_eq!(source.bodies_after_header.get(), 0);
-        leaves.sort();
-        assert_eq!(*source.header_reads.borrow(), leaves);
-        assert_eq!(source.reads.borrow().len(), 64);
-
-        // The final leaf is still indispensable: neither its typed tree
-        // edge nor all preceding verified bodies can replace its header.
-        source.objects.remove(leaves.last().unwrap());
-        let error = project_visible_graph(&source, &admitted, [root], &limits).unwrap_err();
-        source.prioritize_bodies = false;
-        let old = project_visible_graph(&source, &admitted, [root], &limits).unwrap_err();
-        assert_eq!(error.to_string(), old.to_string());
+        // Two independently missing keys still report the first actual
+        // ordered read. Advice neither diagnoses nor hides the later defect.
+        source.objects.remove(&headers[0]);
+        source.objects.remove(headers.last().unwrap());
+        let advised = project_visible_graph(&source, &admitted, [root], &limits).unwrap_err();
+        source.advice = None;
+        let reference = project_visible_graph(&source, &admitted, [root], &limits).unwrap_err();
+        let first: NodePackMaterializationRefusal =
+            PackWriteError::MissingCanonicalObject(headers[0]).into();
+        assert_eq!(advised.to_string(), first.to_string());
+        assert_eq!(reference.to_string(), first.to_string());
     }
 }
 

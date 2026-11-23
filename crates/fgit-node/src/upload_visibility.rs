@@ -568,13 +568,24 @@ const fn disclosure_refusal(code: RefusalCode) -> NodePackMaterializationRefusal
     NodePackMaterializationRefusal::DisclosureGraph(code)
 }
 
+// An eight-object stride bounds the extra opens. Each authorized frontier
+// entry carries one bit until its ordinary native-ID-ordered removal.
+const DISCLOSURE_ADVICE_STRIDE: usize = 8;
+#[cfg(any(target_os = "linux", test))]
+fn advise_pending_pages(pending: &mut BTreeMap<GitOid, bool>, mut advise: impl FnMut(GitOid)) {
+    for (&id, advised) in pending.iter_mut().take(16) {
+        if !*advised {
+            *advised = true;
+            advise(id);
+        }
+    }
+}
+
 /// The production implementation always returns native-verified immutable
 /// bodies. The narrow seam allows budget and read-set assertions in tests.
 trait VisibilitySource {
-    /// A served walk earns Database time from verified bodies, never blob headers.
-    fn prioritize_verified_bodies(&self) -> bool {
-        false
-    }
+    fn advise_pending(&self, _pending: &mut BTreeMap<GitOid, bool>) {}
+
     fn format(&self) -> GitHashAlgorithm;
     fn parse_limits(&self) -> ParseLimits;
     fn checkpoint(&self) -> Result<(), NodePackMaterializationRefusal>;
@@ -619,8 +630,17 @@ impl VisibilitySource for VerifiedFabricPackSource<'_> {
 }
 
 impl VisibilitySource for CeiledFabricSource<'_, '_> {
-    fn prioritize_verified_bodies(&self) -> bool {
-        self.ceiling.is_some()
+    #[cfg(target_os = "linux")]
+    fn advise_pending(&self, pending: &mut BTreeMap<GitOid, bool>) {
+        if self.ceiling.is_some() {
+            advise_pending_pages(pending, |id| {
+                if !self.inner.database_context.is_cancel_requested()
+                    && self.inner.session_is_live.is_none_or(|live| live())
+                {
+                    self.inner.fabric.advise_first_page(id);
+                }
+            });
+        }
     }
 
     fn format(&self) -> GitHashAlgorithm {
@@ -782,7 +802,7 @@ fn walk_within_edge_budget_and_root_blobs(
     source.checkpoint()?;
     let maximum = usize::try_from(limits.max_entries).unwrap_or(usize::MAX);
     let mut required = BTreeMap::<GitOid, Option<ObjectType>>::new();
-    let mut pending = PendingObjects::new(source.prioritize_verified_bodies());
+    let mut pending = BTreeMap::new();
     let mut known = BTreeMap::<GitOid, ObjectType>::new();
     let mut tag_targets = BTreeMap::new();
     let mut objects = BTreeMap::new();
@@ -805,8 +825,11 @@ fn walk_within_edge_budget_and_root_blobs(
     let mut bytes = 0_usize;
     let mut edges_left = edge_budget;
     let parse_limits = source.parse_limits();
-    while let Some(id) = pending.pop_first() {
+    while let Some((id, _)) = pending.pop_first() {
         source.checkpoint()?;
+        if objects.len().is_multiple_of(DISCLOSURE_ADVICE_STRIDE) {
+            source.advise_pending(&mut pending);
+        }
         let remembered = memo.and_then(|memo| memo.objects.get(&id).map(|object| (memo, object)));
         let root_blob = if blob_root_headers && required.get(&id) == Some(&None) {
             let header = source.load_header(id);
@@ -1006,7 +1029,7 @@ fn visit_edges(
     known: &mut BTreeMap<GitOid, ObjectType>,
     tag_targets: &mut BTreeMap<GitOid, GitOid>,
     required: &mut BTreeMap<GitOid, Option<ObjectType>>,
-    pending: &mut PendingObjects,
+    pending: &mut BTreeMap<GitOid, bool>,
 ) -> Result<(), NodePackMaterializationRefusal> {
     if kind == ObjectType::Tag {
         let [(target, _)] = edges else {
@@ -1096,39 +1119,6 @@ fn tree_path_facts(
     Ok((hints, names))
 }
 
-/// Both sets contain only authenticated, reachable IDs. Process structural
-/// bodies before terminal typed headers on a served request: the former
-/// discover the graph and earn finite Database time at verified EOF. A leaf
-/// never discovers another edge and its full header check still precedes
-/// every advertisement. Each set retains native-ID order.
-struct PendingObjects {
-    bodies: BTreeSet<GitOid>,
-    headers: BTreeSet<GitOid>,
-    prioritize_bodies: bool,
-}
-
-impl PendingObjects {
-    fn new(prioritize_bodies: bool) -> Self {
-        Self {
-            bodies: BTreeSet::new(),
-            headers: BTreeSet::new(),
-            prioritize_bodies,
-        }
-    }
-
-    fn insert(&mut self, id: GitOid, expected: Option<ObjectType>) {
-        if self.prioritize_bodies && expected == Some(ObjectType::Blob) {
-            self.headers.insert(id);
-        } else {
-            self.bodies.insert(id);
-        }
-    }
-
-    fn pop_first(&mut self) -> Option<GitOid> {
-        self.bodies.pop_first().or_else(|| self.headers.pop_first())
-    }
-}
-
 fn enqueue(
     format: GitHashAlgorithm,
     admitted: &PermittedObjectClosure,
@@ -1136,7 +1126,7 @@ fn enqueue(
     expected: Option<ObjectType>,
     maximum: usize,
     required: &mut BTreeMap<GitOid, Option<ObjectType>>,
-    pending: &mut PendingObjects,
+    pending: &mut BTreeMap<GitOid, bool>,
 ) -> Result<(), NodePackMaterializationRefusal> {
     if id.is_zero() || id.algorithm() != format {
         return Err(disclosure_refusal(RefusalCode::ObjectHeaderInvalid));
@@ -1150,14 +1140,6 @@ fn enqueue(
         }
         if previous.is_none() {
             *previous = expected;
-            // A ref root can subsequently be reached by a typed tree edge.
-            // Move only a still-pending root; never requeue a completed read.
-            if pending.prioritize_bodies
-                && expected == Some(ObjectType::Blob)
-                && pending.bodies.remove(&id)
-            {
-                pending.headers.insert(id);
-            }
         }
         return Ok(());
     }
@@ -1167,7 +1149,7 @@ fn enqueue(
         return Err(disclosure_refusal(RefusalCode::ResourceBudgetExceeded));
     }
     required.insert(id, expected);
-    pending.insert(id, expected);
+    pending.insert(id, false);
     Ok(())
 }
 

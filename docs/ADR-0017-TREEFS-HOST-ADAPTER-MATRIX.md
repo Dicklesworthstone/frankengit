@@ -251,3 +251,13 @@ Replacing rustix with an admitted FrankenFS descriptor API changes only the
 physical adapter; it does not change canonical repository bytes. Independent
 constitution, target, unsafe/linkage and host tests remain required for
 admission evidence. This paragraph does not assert a new vulnerability audit.
+
+The Linux local object-fabric adapter also uses this exact pinned dependency
+and its existing `fs` feature to request a single page of an authorized,
+pending immutable object with `POSIX_FADV_WILLNEED`. Safe std has no
+equivalent advisory operation. The adapter opens one regular file at a time
+with no-follow and nonblocking flags, retains no descriptor, and returns no
+data, evidence, or status. A missing file, unsupported filesystem, or ignored
+hint is diagnosed only by the ordinary ordered verifier. Other targets use
+the normal verifier directly. Removing the advice preserves its exact
+permissions, identity checks, resource charges, traversal and wire order.
