@@ -530,10 +530,15 @@ impl NodeTreeSource<'_> {
         if !self.selected.closure().objects().contains(&id) {
             return Err(refused("object is outside the authority-selected closure"));
         }
-        let (actual, body) = self
-            .inner
-            .read_object(&id)
-            .map_err(|e| refused(&e.to_string()))?;
+        let (actual, body) = self.inner.read_object(&id).map_err(|error| match error {
+            crate::PackWriteError::Pack(crate::PackError::ObjectSizeLimit { actual, limit }) => {
+                ObjectSourceError::TooLarge {
+                    observed: actual,
+                    limit,
+                }
+            }
+            other => refused(&other.to_string()),
+        })?;
         let expected = match kind {
             GitObjectKind::Blob => ObjectType::Blob,
             GitObjectKind::Tree => ObjectType::Tree,

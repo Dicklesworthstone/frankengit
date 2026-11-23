@@ -146,11 +146,10 @@ def main():
             assert refined["phase"] == "Refined" and refined["answer"]["retrieval"] == second
             status, limited_body = progressive(reader, context_max_source_bytes=1)
             assert status == 200
-            kept, partial = map(json.loads, limited_body.splitlines())
-            assert kept == initial and partial["phase"] == "Refined"
-            assert partial["answer"]["complete"] is False and partial["answer"]["retrieval"] == second
-            # One selected file receives a one-byte share and is oversized.
-            # Across multiple selected files the same total yields no usable share.
+            kept, oversized = map(json.loads, limited_body.splitlines())
+            assert kept == initial and oversized == {"phase": "RefinementFailed", "code": "resource_limit"}, oversized
+            # A single selected file exceeds its one-byte read allowance. For
+            # several selected files the same budget gives a zero-byte share.
             original_hits = current(endpoint, reader, fmt, b"Thing", updated)
             status, exhausted_body = progressive(reader, b"Thing", context_max_source_bytes=1)
             assert status == 200

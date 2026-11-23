@@ -734,6 +734,7 @@ fn base_error(error: BaseError) -> ApiError {
             ApiError::new(Status::Conflict, "symlink_not_followed")
         }
         BaseError::Path(_) => ApiError::bad("invalid_repository_path"),
+        BaseError::Source(fgit_treefs::ObjectSourceError::TooLarge { .. }) => ApiError::too_large(),
         // A missing/corrupt required object is not a nonexistent user path.
         _ => ApiError::unavailable(),
     }
@@ -771,6 +772,11 @@ fn read_error(error: NodeWorkspaceRefusal) -> ApiError {
             | SearchError::InvalidObjectFormat => ApiError::bad("invalid_search_query"),
             SearchError::Cancelled => ApiError::from_status(Status::Timeout, false),
             SearchError::Budget(_) => ApiError::too_large(),
+            SearchError::Source(error)
+                if matches!(*error, fgit_treefs::ObjectSourceError::TooLarge { .. }) =>
+            {
+                ApiError::too_large()
+            }
             SearchError::Base(error) => base_error(*error),
             _ => ApiError::unavailable(),
         },
