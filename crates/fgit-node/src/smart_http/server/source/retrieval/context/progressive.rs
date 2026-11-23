@@ -95,3 +95,59 @@ impl OneNode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn two_record_allowance_charges_every_framing_byte_before_writing() {
+        let first = r#"{"x":1}"#;
+        let last = r#"{"y":2}"#;
+        let two = format!("{INITIAL}{first}{END}{REFINED}{last}{END}");
+        for allowance in [two.len() - 1, two.len()] {
+            let mut bytes = Vec::new();
+            let mut stream = ProgressOutput {
+                writer: &mut bytes,
+                remaining: allowance,
+                initial_sent: false,
+            };
+            assert_eq!(
+                stream.initial(first).unwrap(),
+                last.len() - (two.len() - allowance)
+            );
+            let result = stream.record(REFINED, last);
+            if allowance == two.len() {
+                result.unwrap();
+                assert_eq!(bytes, two.as_bytes());
+            } else {
+                assert_eq!(result.unwrap_err().code, ApiError::too_large().code);
+                assert_eq!(bytes, format!("{INITIAL}{first}{END}").as_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn an_initial_sink_that_cannot_flush_is_terminal() {
+        struct Disconnected(Vec<u8>);
+        impl Write for Disconnected {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                self.0.write(data)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+        }
+        let mut out = Disconnected(Vec::new());
+        let mut stream = ProgressOutput {
+            writer: &mut out,
+            remaining: 1024,
+            initial_sent: false,
+        };
+        assert_eq!(
+            stream.initial("{}").unwrap_err().code,
+            "source_output_failed"
+        );
+        assert!(!stream.initial_sent);
+    }
+}
