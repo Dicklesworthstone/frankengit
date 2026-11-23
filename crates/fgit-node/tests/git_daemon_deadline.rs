@@ -238,11 +238,11 @@ fn write_loose_commit_repository(root: &Path) -> AnyGitOid {
         .expect("fixture commit identity parses")
 }
 
-fn one_node_budget_policy() -> BudgetPolicy {
+fn one_node_budget_policy(timeout: Duration) -> BudgetPolicy {
     BudgetPolicy::finite_defaults()
         .with_class_limits(
             BudgetClass::Database,
-            ClassLimits::finite(DATABASE_CLASS_TIMEOUT, 1_000_000, 50_000_000),
+            ClassLimits::finite(timeout, 1_000_000, 50_000_000),
         )
         .expect("the database class remains finite in every dimension")
 }
@@ -281,8 +281,15 @@ fn read_advertisement_through_flush(stream: &mut TcpStream) -> Vec<u8> {
     }
 }
 
-fn run_one_node_after_advertisement_delay(
-    delay: Duration,
+enum Negotiation {
+    FinishAfter(Duration),
+    WithholdDone,
+}
+
+fn run_one_node_session(
+    database_timeout: Option<Duration>,
+    session_duration: Duration,
+    negotiation: Negotiation,
 ) -> (
     Result<GitDaemonSessionOutcome, NodeGitDaemonServeRefusal>,
     Vec<u8>,
@@ -292,18 +299,18 @@ fn run_one_node_after_advertisement_delay(
     let node_root = scratch.path().join("node");
     let source_root = scratch.path().join("source");
     let wanted = write_loose_commit_repository(&source_root);
-    let session_timeout = GitDaemonSessionTimeout::try_new(ONE_NODE_SESSION_TIMEOUT)
+    let session_timeout = GitDaemonSessionTimeout::try_new(session_duration)
         .expect("the one-node test session deadline is finite and non-zero");
-    let (mut node, _) = OneNode::init(
-        NodeConfig::new(
-            node_root,
-            TenantId::from_bytes([0x51; 16]),
-            RepositoryId::from_bytes([0x52; 16]),
-        )
-        .with_runtime_budgets(one_node_budget_policy())
-        .with_git_daemon_session_timeout(session_timeout),
+    let mut config = NodeConfig::new(
+        node_root,
+        TenantId::from_bytes([0x51; 16]),
+        RepositoryId::from_bytes([0x52; 16]),
     )
-    .expect("the bounded one-node daemon initializes");
+    .with_git_daemon_session_timeout(session_timeout);
+    if let Some(timeout) = database_timeout {
+        config = config.with_runtime_budgets(one_node_budget_policy(timeout));
+    }
+    let (mut node, _) = OneNode::init(config).expect("the bounded one-node daemon initializes");
     // The source import below publishes refs, and a cell nobody brought into
     // service refuses to publish. `frankengit-fg036b`: the lifecycle is
     // operator-driven, so this fixture makes the same decision `fg import`
@@ -335,7 +342,7 @@ fn run_one_node_after_advertisement_delay(
     let started = Instant::now();
     let mut client = TcpStream::connect(address).expect("one-node client connects");
     client
-        .set_read_timeout(Some(ONE_NODE_SESSION_TIMEOUT + Duration::from_secs(5)))
+        .set_read_timeout(Some(session_duration + Duration::from_secs(5)))
         .expect("client read timeout configures");
     client
         .write_all(&one_node_daemon_greeting(&repository_path))
@@ -349,22 +356,22 @@ fn run_one_node_after_advertisement_delay(
         "the phase barrier must be the advertisement for the imported ref"
     );
 
-    thread::sleep(delay);
-    let negotiation = encode_packets(
-        &[
-            Packet::Data(format!("want {wanted}\n").into_bytes()),
-            Packet::Flush,
-            Packet::Data(b"done\n".to_vec()),
-        ],
-        &WireLimits::default(),
-    )
-    .expect("fixed one-node upload-pack negotiation encodes");
+    let mut packets = vec![
+        Packet::Data(format!("want {wanted}\n").into_bytes()),
+        Packet::Flush,
+    ];
+    if let Negotiation::FinishAfter(delay) = negotiation {
+        thread::sleep(delay);
+        packets.push(Packet::Data(b"done\n".to_vec()));
+    }
     client
-        .write_all(&negotiation)
+        .write_all(&encode_packets(&packets, &WireLimits::default()).unwrap())
         .expect("one-node negotiation writes");
-    client
-        .shutdown(Shutdown::Write)
-        .expect("one-node client finishes its request");
+    if matches!(negotiation, Negotiation::FinishAfter(_)) {
+        client
+            .shutdown(Shutdown::Write)
+            .expect("one-node client finishes its request");
+    }
     let mut response_after_advertisement = Vec::new();
     client
         .read_to_end(&mut response_after_advertisement)
@@ -585,8 +592,11 @@ fn completed_negotiation_under_the_same_deadline_profile_emits_its_pack() {
 
 #[test]
 fn one_node_reports_database_budget_expiry_while_the_session_is_live() {
-    let (served, response, total_elapsed) =
-        run_one_node_after_advertisement_delay(EXPIRED_CLASS_WAIT);
+    let (served, response, total_elapsed) = run_one_node_session(
+        Some(DATABASE_CLASS_TIMEOUT),
+        ONE_NODE_SESSION_TIMEOUT,
+        Negotiation::FinishAfter(EXPIRED_CLASS_WAIT),
+    );
 
     assert!(
         total_elapsed < ONE_NODE_SESSION_TIMEOUT,
@@ -620,9 +630,53 @@ fn one_node_reports_database_budget_expiry_while_the_session_is_live() {
 
 #[test]
 fn one_node_under_the_same_class_budget_emits_the_selected_pack() {
-    let (served, response, _) = run_one_node_after_advertisement_delay(Duration::ZERO);
+    let (served, response, _) = run_one_node_session(
+        Some(DATABASE_CLASS_TIMEOUT),
+        ONE_NODE_SESSION_TIMEOUT,
+        Negotiation::FinishAfter(Duration::ZERO),
+    );
 
     assert!(matches!(served, Ok(GitDaemonSessionOutcome::Pack(_))));
+    assert!(response.starts_with(b"0008NAK\nPACK"));
+}
+
+#[test]
+fn explicit_database_policy_cannot_extend_a_shorter_transport_deadline() {
+    let database = Duration::from_secs(60);
+    let session = Duration::from_secs(2);
+    let (served, response, elapsed) =
+        run_one_node_session(Some(database), session, Negotiation::WithholdDone);
+
+    assert!(elapsed >= session && elapsed < database, "{elapsed:?}");
+    assert!(
+        matches!(
+            served,
+            Err(NodeGitDaemonServeRefusal::Transport(ref error))
+                if matches!(error.as_ref(), GitDaemonTransportRefusal::SessionDeadlineExceeded {
+                    operation: "read upload-pack negotiation"
+                })
+        ),
+        "{served:?}"
+    );
+    assert!(!response.windows(4).any(|bytes| bytes == b"PACK"));
+}
+
+#[test]
+fn implicit_database_profile_serves_a_pack_beyond_the_generic_class_timeout() {
+    let generic_timeout = BudgetPolicy::finite_defaults()
+        .limits_for(BudgetClass::Database)
+        .timeout
+        .unwrap();
+    let delay = generic_timeout + Duration::from_secs(1);
+    let (served, response, _) = run_one_node_session(
+        None,
+        delay + Duration::from_secs(15),
+        Negotiation::FinishAfter(delay),
+    );
+    assert!(
+        matches!(served, Ok(GitDaemonSessionOutcome::Pack(_))),
+        "{served:?}"
+    );
     assert!(response.starts_with(b"0008NAK\nPACK"));
 }
 
