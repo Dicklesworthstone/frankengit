@@ -70,6 +70,8 @@ pub mod evidence;
 /// re-check.
 pub mod merge;
 pub mod microbatch;
+#[cfg(test)]
+mod owned_ref_state_tests;
 pub mod policy_bridge;
 mod projection_failure;
 
@@ -1770,6 +1772,27 @@ impl CanonicalRefState {
     }
 
     pub fn apply(&self, effects: &BTreeMap<RefName, RefEffect>) -> Result<Self, RefusalCode> {
+        self.validate_head_effects(effects)?;
+        self.clone().apply_validated(effects)
+    }
+
+    /// Advances an exclusively owned preparation without copying unrelated refs.
+    ///
+    /// The same checks as [`Self::apply`] run before the successor is returned.
+    /// A refused successor is consumed, so partially applied effects cannot
+    /// become visible to another command or escape as a canonical ref state.
+    pub(crate) fn into_applied(
+        self,
+        effects: &BTreeMap<RefName, RefEffect>,
+    ) -> Result<Self, RefusalCode> {
+        self.validate_head_effects(effects)?;
+        self.apply_validated(effects)
+    }
+
+    fn validate_head_effects(
+        &self,
+        effects: &BTreeMap<RefName, RefEffect>,
+    ) -> Result<(), RefusalCode> {
         if let Some(target) = &self.head_target
             && matches!(effects.get(target), Some(RefEffect::Delete))
         {
@@ -1797,28 +1820,31 @@ impl CanonicalRefState {
                 return Err(code);
             }
         }
-        let mut refs = self.refs.clone();
+        Ok(())
+    }
+
+    fn apply_validated(
+        mut self,
+        effects: &BTreeMap<RefName, RefEffect>,
+    ) -> Result<Self, RefusalCode> {
         for (name, effect) in effects {
             match effect {
                 RefEffect::Set(oid) => {
-                    refs.insert(name.clone(), *oid);
+                    self.refs.insert(name.clone(), *oid);
                 }
                 RefEffect::Delete => {
-                    refs.remove(name);
+                    self.refs.remove(name);
                 }
             }
         }
         // Judged on the RESULTING set, so creating `a` in the transaction that
         // deletes `a/b` stays legal, as it is upstream.
         for (name, effect) in effects {
-            if matches!(effect, RefEffect::Set(_)) && ref_namespace_conflict(&refs, name) {
+            if matches!(effect, RefEffect::Set(_)) && ref_namespace_conflict(&self.refs, name) {
                 return Err(RefusalCode::RefNameConflict);
             }
         }
-        Ok(Self {
-            refs,
-            head_target: self.head_target.clone(),
-        })
+        Ok(self)
     }
 }
 
@@ -2297,7 +2323,7 @@ pub fn prepare_canonical_commit_for_layout_reusing_closure(
         return Err(RefusalCode::ConflictingSemanticEffects);
     }
 
-    let next_ref_state = current.apply(&effects.refs)?;
+    let next_ref_state = current.into_applied(&effects.refs)?;
     let ref_root = ref_state_root(root_layout, &next_ref_state)?;
     let empty_inherited = PermittedObjectClosure::default();
     let effective_inherited = if root_layout.commits_authority_object_closure_merkle() {

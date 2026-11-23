@@ -13,6 +13,8 @@ mod continuation;
 mod history_reads;
 #[path = "receive_microbatch/index_race.rs"]
 mod index_race;
+#[path = "receive_microbatch/ref_state.rs"]
+mod ref_state;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
