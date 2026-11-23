@@ -440,3 +440,66 @@ fn expired_ssh_upload_checkpoint_does_not_service_control_or_restart_work() {
         0
     );
 }
+
+#[test]
+fn partial_encrypted_reply_precedes_later_control_and_terminal_packets() {
+    for another_probe in [false, true] {
+        let mut connection = connected(Duration::from_secs(5));
+        let mut state = connection.state.lock().unwrap();
+        state.deadline.started = Instant::now();
+        let mut request = WireWriter::new();
+        request.write_u8(msg::GLOBAL_REQUEST);
+        request.write_utf8("keepalive@openssh.com");
+        request.write_bool(true);
+        let request = request.into_bytes();
+        state
+            .session
+            .handle_incoming_bytes(&connection.peer.outbound.encrypt_packet(&request, &[0; 16]))
+            .unwrap();
+        let reply = state.session.take_outgoing_bytes();
+        // A socket accepted the header and one byte of ciphertext. Begin
+        // precisely where the nonblocking writer would resume in this case.
+        state.stream.write_all(&reply[..5]).unwrap();
+        state.work_output = io::Cursor::new(reply);
+        state.work_output.set_position(5);
+
+        if another_probe {
+            connection.peer.send(&mut connection.client, &request);
+            connection.peer.send(
+                &mut connection.client,
+                &channel_packet(msg::CHANNEL_EOF).into_bytes(),
+            );
+            while !state.session.is_channel_eof_received() {
+                assert!(state.poll_upload_connection());
+            }
+        }
+        state.session.send_channel_eof();
+        state.session.send_channel_exit_and_close(0);
+        state.flush_outgoing().unwrap();
+        let peer = &mut connection.peer;
+        let client = &mut connection.client;
+        assert_eq!(peer.receive(client), [msg::REQUEST_SUCCESS]);
+        if another_probe {
+            assert_eq!(peer.receive(client), [msg::REQUEST_SUCCESS]);
+        }
+        let eof = peer.receive(client);
+        let mut eof = WireReader::new(&eof);
+        assert_eq!(eof.read_u8().unwrap(), msg::CHANNEL_EOF);
+        assert_eq!(eof.read_u32().unwrap(), PEER_CHANNEL);
+        let exit = peer.receive(client);
+        let mut exit = WireReader::new(&exit);
+        assert_eq!(exit.read_u8().unwrap(), msg::CHANNEL_REQUEST);
+        assert_eq!(exit.read_u32().unwrap(), PEER_CHANNEL);
+        assert_eq!(exit.read_utf8().unwrap(), "exit-status");
+        assert!(!exit.read_bool().unwrap());
+        assert_eq!(exit.read_u32().unwrap(), 0);
+        let close = peer.receive(client);
+        let mut close = WireReader::new(&close);
+        assert_eq!(close.read_u8().unwrap(), msg::CHANNEL_CLOSE);
+        assert_eq!(close.read_u32().unwrap(), PEER_CHANNEL);
+        assert_eq!(
+            state.deadline.shared.admitted_bytes.load(Ordering::Relaxed),
+            0
+        );
+    }
+}
