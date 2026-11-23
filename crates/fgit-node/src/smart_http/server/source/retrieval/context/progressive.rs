@@ -49,6 +49,8 @@ impl OneNode {
     /// its original rows and reading selected excerpts. The second NDJSON record
     /// is Refined or RefinementFailed. Invalid Initial requests emit no record.
     /// A sink failure ends delivery. The single output budget covers both rows.
+    /// The caller owns sink liveness. A synchronous write can block beyond the
+    /// retrieval deadline. A returned write or flush error stops the stream.
     /// The return value is the ranked context's completeness flag.
     pub fn write_progressive_source_context(
         &self,

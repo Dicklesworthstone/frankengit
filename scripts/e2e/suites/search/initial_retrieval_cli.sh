@@ -116,10 +116,14 @@ PY
   fge_assert_contains "SEARCH-INITIAL-014$suffix" "$(cat "$WORK/work.json.err")" 'resource_limit' 'budget exhaustion is visible'
   progress_exit=$(search progressive ranked.ndjson)
   progress_refusal=$(search progressive limited-context.ndjson context_max_source_bytes=1)
+  progress_capped=$(search progressive capped.ndjson max_results_per_channel=1 symbol_name_hex=5468696e67 symbol_policy=required)
+  current_refusal=$(search progressive unsupported.ndjson index_source=current-native-v1)
   initial_refusal=$(search progressive early-refusal.ndjson max_work=32 symbol_name_hex=5468696e67 symbol_policy=required)
   fge_assert_exit "SEARCH-PROGRESS-001$suffix" 0 "$progress_exit" 'a bounded progressive query returns a ranked context'
   fge_assert_exit "SEARCH-PROGRESS-002$suffix" 2 "$progress_refusal" 'the source-byte budget refuses the refinement'
   fge_assert_exit "SEARCH-PROGRESS-003$suffix" 2 "$initial_refusal" 'the Initial work budget refuses before publication'
+  fge_assert_exit "SEARCH-PROGRESS-005$suffix" 3 "$progress_capped" 'three budget-limited channels retain the partial-answer exit'
+  fge_assert_exit "SEARCH-PROGRESS-006$suffix" 2 "$current_refusal" 'revalidated current-source candidates cannot enter the exact ranker'
   fge_assert_cmd "SEARCH-PROGRESS-004$suffix" 'the two phases preserve the original answer, labels and anchored ranking across refinement success and failure' \
     python3 - "$WORK" <<'PYTHON'
 import json, sys
@@ -134,7 +138,11 @@ assert initial == {"phase": "Initial", "answer": expected["retrieval"]}
 assert refined == {"phase": "Refined", "answer": expected}
 assert kept == initial
 assert failure == {"phase": "RefinementFailed", "code": "resource_limit"}, failure
-assert records("early-refusal.ndjson") == []
+assert records("early-refusal.ndjson") == records("unsupported.ndjson") == []
+partial, ranked = records("capped.ndjson")
+assert partial["answer"]["complete"] is ranked["answer"]["complete"] is False
+assert ranked["answer"]["retrieval"] == partial["answer"]
+assert partial["answer"]["generation_vector"]["symbols"] is not None
 PYTHON
   fge_run_timeout 180 "search-initial-service-$format" python3 "$E2E_ROOT/helpers/initial_search_maintenance.py" \
     "$FG_BIN" "$WORK/service" "$format" "$run/work/bare" "$tip" "$next_tip" || true
