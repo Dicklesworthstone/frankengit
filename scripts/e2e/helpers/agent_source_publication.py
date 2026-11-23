@@ -1,4 +1,6 @@
 """Real scoped source publication, cross-transport recovery, and original evidence."""
+import base64
+import hashlib
 import http.client
 import json
 from pathlib import Path
@@ -116,6 +118,34 @@ def edit_patch(f, before, after):
     new = oid(f.fmt, 'blob', (after + '\n').encode())
     return (f'diff --git a/lib/run.txt b/lib/run.txt\nindex {old}..{new} 100755\n'
             f'--- a/lib/run.txt\n+++ b/lib/run.txt\n@@ -1 +1 @@\n-{before}\n+{after}\n').encode()
+
+
+def large_publication(f):
+    path = b'lib/large.txt'
+    reader = credential(f, 'candidate-reader', candidate_only=True)
+    writer = credential(f, 'large-publisher', paths=(path,))
+    # The compressed bundle as well as the incoming text must exceed 256 KiB.
+    data = base64.b64encode(hashlib.shake_256(b'large sponsored source').digest(384 * 1024))
+    lines = [data[i:i + 128] + b'\n' for i in range(0, len(data), 128)]
+    patch = (b'diff --git a/lib/large.txt b/lib/large.txt\nnew file mode 100644\n'
+             b'--- /dev/null\n+++ b/lib/large.txt\n' + f'@@ -0,0 +1,{len(lines)} @@\n'.encode()
+             + b''.join(b'+' + line for line in lines))
+    files = {**f.files, path: (b'100644', b''.join(lines))}
+    tree = complete_tree(f.fmt, files, lambda kind, body: oid(f.fmt, kind, body))
+    with HTTP(f, 'large-publication') as server:
+        prepared, bundle = server.request('prepare', dict(f.form(), expected_result_tree=tree),
+                                          patch, token=reader['token'])
+        assert prepared['root_tree'] == tree and len(bundle) > 256 * 1024
+        candidate = prepared['candidate_commit']
+        apply(server, reader, 'candidate-only', f.base, candidate, bundle, status=403)
+        result = apply(server, writer, 'large-publication', f.base, candidate, bundle)
+        assert result['outcome'] == 'committed'
+    refs = json.loads(f.command('read-published-large-ref', [
+        'refs', *f.scope, '--trusted-local', '--object-format', f.fmt]))
+    tips = {row['reference_hex']: row['tip'] for row in refs['references']}
+    assert tips[REF.encode().hex()] == candidate
+    record(f, 'large-sponsored-upload-publishes-exact-tree', patch_bytes=len(patch),
+           bundle_bytes=len(bundle))
 
 
 def campaign(f):
@@ -274,4 +304,5 @@ if __name__ == '__main__':
     for fmt in ['sha1', 'sha256']:
         campaign(Fixture(fg, root, fmt))
         task_branch_campaign(Fixture(fg, root / 'task-branches', fmt))
+        large_publication(Fixture(fg, root / 'large-publication', fmt))
     (root / 'results.json').write_text(json.dumps(RESULTS, indent=2) + '\n')
