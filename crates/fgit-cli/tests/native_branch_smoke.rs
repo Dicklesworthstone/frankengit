@@ -50,6 +50,7 @@ fn native_default_branch_cli_policy_and_recovery_in_both_hash_formats() {
         .join("../../scripts/e2e/default_branch_smoke.py");
     let output = std::process::Command::new("python3")
         .arg(script)
+        .arg("--fg")
         .arg(env!("CARGO_BIN_EXE_fg"))
         .output()
         .expect("launch default-branch campaign");
@@ -60,7 +61,11 @@ fn native_default_branch_cli_policy_and_recovery_in_both_hash_formats() {
         String::from_utf8_lossy(&output.stderr)
     );
     let report = String::from_utf8(output.stdout).unwrap();
-    assert!(report.contains("DEFAULT_BRANCH format=sha1 layout=legacy passed"));
-    assert!(report.contains("DEFAULT_BRANCH format=sha256 layout=ref-merkle-v2 passed"));
+    for format in ["sha1", "sha256"] {
+        for layout in ["legacy", "ref-merkle-v2"] {
+            let expected = format!("DEFAULT_BRANCH format={format} layout={layout} passed");
+            assert!(report.contains(&expected), "missing {expected}: {report}");
+        }
+    }
     print!("{report}");
 }

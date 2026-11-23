@@ -13,9 +13,9 @@
 //! already refuse.
 
 use fgit_codec::{
-    CODEC_MINOR, CanonicalBody, CodecRefusal, DecodeLimits, RepositoryIncarnationConfigurationBody,
-    RepositoryIncarnationConfigurationBodyV2_1, RepositoryIncarnationConfigurationBodyV2_2,
-    decode_body, encode_body, read_frame_header,
+    CODEC_MINOR, CanonicalBody, CodecRefusal, DecodeLimits, RepositoryConfigurationBody,
+    RepositoryIncarnationConfigurationBody, RepositoryIncarnationConfigurationBodyV2_1,
+    RepositoryIncarnationConfigurationBodyV2_2, decode_body, encode_body, read_frame_header,
 };
 use fgit_crypto::IdentityDomain;
 use fgit_types::{
@@ -235,7 +235,36 @@ fn identified_configuration(
     requested_root: &Digest,
 ) -> Result<RepositoryIncarnationConfigurationEvidence, OutcomeFailure> {
     let evidence = decode_repository_incarnation_configuration_evidence(bytes)?;
-    let found = evidence.canonical_identity()?;
+    require_selected_identity(evidence.canonical_identity()?, requested_root)?;
+    Ok(evidence)
+}
+
+/// Select only the layout shared by historical and incarnation-aware configurations.
+/// A missing slot stays distinct until the verifier or proof producer applies its policy.
+pub(super) fn selected_root_layout(
+    read: ImmutableRead,
+    requested_root: &Digest,
+) -> Result<Option<RootLayoutVersion>, OutcomeFailure> {
+    let ImmutableRead::Present(bytes) = read else {
+        return Ok(None);
+    };
+    let (header, _) = read_frame_header(&bytes, DecodeLimits::DEFAULT)?;
+    let layout = if header.schema.major() == RepositoryConfigurationBody::SCHEMA_MAJOR {
+        let body: RepositoryConfigurationBody = decode_body(&bytes, DecodeLimits::DEFAULT)?;
+        require_selected_identity(configuration_identity(&body)?, requested_root)?;
+        body.root_layout
+    } else {
+        identified_configuration(&bytes, requested_root)?
+            .normalized()
+            .root_layout
+    };
+    Ok(Some(layout))
+}
+
+fn require_selected_identity(
+    found: InternalObjectId,
+    requested_root: &Digest,
+) -> Result<(), OutcomeFailure> {
     let requested = InternalObjectId::new(
         requested_root.algorithm(),
         IdentityDomain::RepositoryConfiguration.domain_tag(),
@@ -248,7 +277,7 @@ fn identified_configuration(
             identities: Box::new(IdentityDisagreement { requested, found }),
         });
     }
-    Ok(evidence)
+    Ok(())
 }
 
 fn decode_repository_incarnation_configuration_evidence(

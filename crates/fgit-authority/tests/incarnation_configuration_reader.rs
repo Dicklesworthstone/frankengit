@@ -9,6 +9,7 @@ use fgit_authority::{
     AuthorityStore, MemoryAuthorityStore, OutcomeFailure, RepositoryIncarnationConfiguration,
     RepositoryIncarnationConfigurationEvidence, StoreInstanceId, body_key, canonical_body_id,
     read_repository_incarnation_configuration, read_repository_incarnation_configuration_evidence,
+    root_layout_for_proof, root_layout_for_verification,
     stage_latest_repository_incarnation_configuration, stage_repository_incarnation_configuration,
     stage_revocation_aware_repository_incarnation_configuration,
 };
@@ -91,13 +92,13 @@ impl CanonicalBody for UnknownV2ObjectFormatConfiguration {
 
 /// A framed schema-2.3 body is deliberately not a compatibility fallback. The
 /// production union implements exactly 2.0, 2.1, and 2.2.
-struct FutureV2Configuration;
+struct FutureConfiguration<const MAJOR: u16, const MINOR: u16>;
 
-impl CanonicalBody for FutureV2Configuration {
+impl<const MAJOR: u16, const MINOR: u16> CanonicalBody for FutureConfiguration<MAJOR, MINOR> {
     const DOMAIN: DomainTag = DomainTag::from_static("frankengit/repository-configuration/v1");
     const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("repository-configuration");
-    const SCHEMA_MAJOR: u16 = 2;
-    const SCHEMA_MINOR: u16 = 3;
+    const SCHEMA_MAJOR: u16 = MAJOR;
+    const SCHEMA_MINOR: u16 = MINOR;
 
     fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
         out.write_scalar(RootLayoutVersion::RefStateMerkleV1.code_point());
@@ -167,7 +168,7 @@ fn production_reader_refuses_unknown_v2_object_format_with_a_known_twin() {
 #[test]
 fn production_reader_refuses_an_unknown_v2_minor_without_fallback() {
     let backing = store();
-    let future = FutureV2Configuration;
+    let future = FutureConfiguration::<2, 3>;
     let key = body_key(IdentityDomain::RepositoryConfiguration, &future)
         .expect("the future frame still occupies the configuration identity domain");
     backing
@@ -194,6 +195,86 @@ fn production_reader_refuses_an_unknown_v2_minor_without_fallback() {
             }
         ))
     ));
+    for result in [
+        root_layout_for_verification(&backing, &future_root),
+        root_layout_for_proof(&backing, &future_root),
+    ] {
+        assert!(matches!(
+            result,
+            Err(OutcomeFailure::Codec(
+                CodecRefusal::SchemaMinorUnsupported {
+                    observed: 3,
+                    supported: 2,
+                    ..
+                }
+            ))
+        ));
+    }
+}
+
+fn store_at_selected_key<B: CanonicalBody>(
+    backing: &MemoryAuthorityStore,
+    selected: &B,
+    stored: &B,
+) -> Digest {
+    let domain = IdentityDomain::RepositoryConfiguration;
+    let key = body_key(domain, selected).unwrap();
+    let id = canonical_body_id(domain, CANONICAL_CODEC_VERSION, selected).unwrap();
+    backing
+        .put_if_absent(&key, &encode_body(stored).unwrap())
+        .unwrap();
+    Digest::new(id.algorithm(), *id.digest())
+}
+
+#[test]
+fn a_head_cannot_select_a_layout_through_a_wrong_slot() {
+    let backing = store();
+    let current = known_configuration();
+    let legacy = fgit_codec::RepositoryConfigurationBody {
+        root_layout: current.root_layout,
+        object_format: current.object_format,
+        hidden_ref_rules: Vec::new(),
+    };
+    let current_alias = RepositoryIncarnationConfigurationBody {
+        root_layout: RootLayoutVersion::LegacyWholeBody,
+        ..current
+    };
+    let legacy_alias = fgit_codec::RepositoryConfigurationBody {
+        hidden_ref_rules: vec![b"refs/private/".to_vec()],
+        ..legacy.clone()
+    };
+    for root in [
+        store_at_selected_key(&backing, &current, &current_alias),
+        store_at_selected_key(&backing, &legacy, &legacy_alias),
+    ] {
+        for result in [
+            root_layout_for_verification(&backing, &root),
+            root_layout_for_proof(&backing, &root),
+        ] {
+            assert!(matches!(
+                result,
+                Err(OutcomeFailure::BodyIdentityMismatch { .. })
+            ));
+        }
+    }
+}
+
+#[test]
+fn both_layout_readers_refuse_a_future_configuration_major() {
+    let backing = store();
+    let future = FutureConfiguration::<3, 0>;
+    let root = store_at_selected_key(&backing, &future, &future);
+    for result in [
+        root_layout_for_verification(&backing, &root),
+        root_layout_for_proof(&backing, &root),
+    ] {
+        assert!(matches!(
+            result,
+            Err(OutcomeFailure::Codec(
+                CodecRefusal::SchemaMajorUnsupported { observed: 3, .. }
+            ))
+        ));
+    }
 }
 
 #[test]
@@ -240,4 +321,14 @@ fn exact_evidence_reader_preserves_every_supported_v2_minor() {
         read_repository_incarnation_configuration(&backing, &v2_two_root)
             .expect("the normalized reader agrees"),
     );
+    for root in [historical_root, v2_one_root, v2_two_root] {
+        assert_eq!(
+            root_layout_for_verification(&backing, &root).unwrap(),
+            RootLayoutVersion::RefStateMerkleV1
+        );
+        assert_eq!(
+            root_layout_for_proof(&backing, &root).unwrap(),
+            RootLayoutVersion::RefStateMerkleV1
+        );
+    }
 }

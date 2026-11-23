@@ -855,6 +855,31 @@ fn the_asymmetry_holds_on_the_production_surface_too() {
 }
 
 #[test]
+fn a_current_incarnation_configuration_selects_the_same_layout_for_async_verification_and_proofs() {
+    let backing = store();
+    let body = fgit_codec::RepositoryIncarnationConfigurationBodyV2_2 {
+        root_layout: RootLayoutVersion::RefStateMerkleV2,
+        object_format: fgit_types::GitHashAlgorithm::Sha256,
+        repository_incarnation_id: fgit_types::RepositoryIncarnationId::from_bytes([0x71; 16]),
+        policy_root: None,
+        capability_revocation_root: None,
+    };
+    let root = fgit_authority::stage_revocation_aware_repository_incarnation_configuration(
+        &backing, &body,
+    )
+    .unwrap();
+    let view = AsyncView(backing);
+    assert_eq!(
+        poll_ready(root_layout_for_verification_async(&view, &(), &root)).unwrap(),
+        body.root_layout
+    );
+    assert_eq!(
+        poll_ready(root_layout_for_proof_async(&view, &(), &root)).unwrap(),
+        body.root_layout
+    );
+}
+
+#[test]
 fn both_surfaces_emit_the_same_absence_proof_and_refuse_together() {
     // frankengit-56i4. A serving node runs on `AsyncAuthorityStore`, so an
     // absence proof that only the synchronous surface could emit would be a

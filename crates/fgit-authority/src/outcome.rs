@@ -1302,8 +1302,9 @@ where
 ///
 /// A `configuration_root` absent from the store yields
 /// [`RootLayoutVersion::LegacyWholeBody`], because a head that predates this
-/// vocabulary carries that layout. A *present* body must decode under this
-/// exact configuration schema; treating a version-skewed body as absent would
+/// vocabulary carries that layout. A present body must decode under a supported
+/// configuration schema and re-identify to the selected root. Treating a
+/// version-skewed body as absent would
 /// silently replace the layout its authenticated head selected.
 ///
 /// Note what is NOT defaulted: a body that decodes but names a layout version
@@ -1313,8 +1314,8 @@ where
 ///
 /// # Errors
 ///
-/// Whatever the store refuses, and [`OutcomeFailure::Codec`] for a body that
-/// decodes into an unknown layout version.
+/// Propagates store and codec failures. A body whose identity differs from
+/// the selected root returns [`OutcomeFailure::BodyIdentityMismatch`].
 pub fn root_layout_for_verification<S>(
     store: &S,
     configuration_root: &Digest,
@@ -1323,14 +1324,11 @@ where
     S: AuthorityStore + ?Sized,
 {
     let key = configuration_key(configuration_root)?;
-    match store.read_immutable(&key)? {
-        ImmutableRead::Absent => Ok(RootLayoutVersion::LegacyWholeBody),
-        ImmutableRead::Present(bytes) => Ok(decode_body::<RepositoryConfigurationBody>(
-            &bytes,
-            DecodeLimits::DEFAULT,
-        )?
-        .root_layout),
-    }
+    let layout = crate::repository_configuration::selected_root_layout(
+        store.read_immutable(&key)?,
+        configuration_root,
+    )?;
+    Ok(layout.unwrap_or(RootLayoutVersion::LegacyWholeBody))
 }
 
 /// The layout a head selects, for **proof generation**.
@@ -1342,9 +1340,8 @@ where
 ///
 /// # Errors
 ///
-/// [`OutcomeFailure::ConfigurationUnresolvable`] when the root names no stored
-/// body, and [`OutcomeFailure::Codec`] when a present body cannot decode under
-/// this build's exact schema.
+/// Returns [`OutcomeFailure::ConfigurationUnresolvable`] for an absent body.
+/// A present body must decode and re-identify to the selected root.
 pub fn root_layout_for_proof<S>(
     store: &S,
     configuration_root: &Digest,
@@ -1352,7 +1349,12 @@ pub fn root_layout_for_proof<S>(
 where
     S: AuthorityStore + ?Sized,
 {
-    Ok(read_repository_configuration(store, configuration_root)?.root_layout)
+    let key = configuration_key(configuration_root)?;
+    crate::repository_configuration::selected_root_layout(
+        store.read_immutable(&key)?,
+        configuration_root,
+    )?
+    .ok_or(OutcomeFailure::ConfigurationUnresolvable)
 }
 
 /// Reads the exact canonical repository configuration named by an authority
@@ -1518,13 +1520,12 @@ where
 /// The layout a head selects, for verification, on the production surface.
 ///
 /// The asynchronous twin of [`root_layout_for_verification`]. An absent root
-/// is legacy for verification; every present body must decode under the exact
-/// current schema.
+/// is legacy for verification. Every present body must match the selected root
+/// and a supported configuration schema.
 ///
 /// # Errors
 ///
-/// Whatever the store refuses, and [`OutcomeFailure::Codec`] for an unknown
-/// layout version.
+/// Propagates the same storage, codec and identity failures as the synchronous reader.
 pub async fn root_layout_for_verification_async<S>(
     store: &S,
     cx: &S::Context,
@@ -1534,14 +1535,11 @@ where
     S: AsyncAuthorityStore + ?Sized,
 {
     let key = configuration_key(configuration_root)?;
-    match store.read_immutable(cx, &key).await? {
-        ImmutableRead::Absent => Ok(RootLayoutVersion::LegacyWholeBody),
-        ImmutableRead::Present(bytes) => Ok(decode_body::<RepositoryConfigurationBody>(
-            &bytes,
-            DecodeLimits::DEFAULT,
-        )?
-        .root_layout),
-    }
+    let layout = crate::repository_configuration::selected_root_layout(
+        store.read_immutable(cx, &key).await?,
+        configuration_root,
+    )?;
+    Ok(layout.unwrap_or(RootLayoutVersion::LegacyWholeBody))
 }
 
 /// The layout a head selects, for proof generation, on the production surface.
@@ -1552,9 +1550,8 @@ where
 ///
 /// # Errors
 ///
-/// [`OutcomeFailure::ConfigurationUnresolvable`] when the root names no stored
-/// body, and [`OutcomeFailure::Codec`] when a present body cannot decode under
-/// this build's exact schema.
+/// Returns [`OutcomeFailure::ConfigurationUnresolvable`] for an absent body.
+/// A present body must decode and re-identify to the selected root.
 pub async fn root_layout_for_proof_async<S>(
     store: &S,
     cx: &S::Context,
@@ -1563,11 +1560,12 @@ pub async fn root_layout_for_proof_async<S>(
 where
     S: AsyncAuthorityStore + ?Sized,
 {
-    Ok(
-        read_repository_configuration_async(store, cx, configuration_root)
-            .await?
-            .root_layout,
-    )
+    let key = configuration_key(configuration_root)?;
+    crate::repository_configuration::selected_root_layout(
+        store.read_immutable(cx, &key).await?,
+        configuration_root,
+    )?
+    .ok_or(OutcomeFailure::ConfigurationUnresolvable)
 }
 
 /// The production twin of [`read_repository_configuration`].
