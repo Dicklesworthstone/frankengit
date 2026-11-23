@@ -91,6 +91,38 @@ fn observed(root: &Path) -> MultiHeadSnapshot {
 }
 
 #[test]
+fn unknown_engine_companion_refuses_before_visibility_and_the_original_restore_can_resume() {
+    let scratch = Scratch::new();
+    let source = source();
+    let (archive, pin) = scratch.archive(&source);
+    let root = scratch.0.join("restore");
+    let quarantine = root.join(".authority-restore-quarantine");
+    let unknown = quarantine.join("authority.fsqlite-future-format");
+    let error = execute_with(&archive, &root, pin, target(), false, |stage| {
+        if stage == Stage::Reopened {
+            fs::write(&unknown, b"original evidence").unwrap();
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    assert!(error.contains("authority.fsqlite-future-format"), "{error}");
+    assert!(!root.join("authority.fsqlite").exists());
+    assert!(!root.join("authority.fsqlite-wal").exists());
+    assert!(quarantine.join("authority.fsqlite").is_file());
+    assert_eq!(fs::read(&unknown).unwrap(), b"original evidence");
+
+    // The exact same archive, pin, destination and intent remain usable.
+    fs::remove_file(&unknown).unwrap();
+    let receipt = execute(&archive, &root, pin, target(), true).unwrap();
+    assert!(receipt.contains("\"already_published\":false"));
+    let restored = observed(&root);
+    assert_eq!(restored.bodies, source.bodies);
+    assert_eq!(restored.heads.len(), source.heads.len());
+    assert_eq!(restored.issuance.len(), source.issuance.len());
+    assert!(!quarantine.exists());
+}
+
+#[test]
 fn every_restore_phase_resumes_from_archive_alone_without_minting_again() {
     for stopped in [
         Stage::Intent,

@@ -178,13 +178,34 @@ fn no_replace_publication_preserves_a_racing_destination_and_private_image() {
 }
 
 #[test]
+fn public_engine_local_file_prevents_the_wal_move_until_the_path_is_clear() {
+    let scratch = Scratch::new();
+    let custody = scratch.reserve();
+    let quarantine = opaque_image(&custody, true);
+    let foreign = scratch.root().join("authority.fsqlite-wal-fec.lock");
+    fs::write(&foreign, b"another namespace").unwrap();
+    assert!(custody.publish(|| Ok(())).is_err());
+    assert!(custody.quarantine().is_err());
+    assert!(!custody.published().unwrap());
+    assert!(!scratch.root().join(WAL).exists());
+    assert!(quarantine.join(WAL).is_file());
+    assert_eq!(fs::read(&foreign).unwrap(), b"another namespace");
+    fs::remove_file(foreign).unwrap();
+    assert_eq!(custody.quarantine().unwrap(), quarantine);
+    custody.publish(|| Ok(())).unwrap();
+    custody.cleanup().unwrap();
+}
+
+#[test]
 fn cleanup_never_erases_unknown_files_and_missing_both_images_cannot_reinitialize() {
     let scratch = Scratch::new();
     let custody = scratch.reserve();
     let quarantine = opaque_image(&custody, false);
     custody.publish(|| Ok(())).unwrap();
     fs::write(quarantine.join("unrecognized-evidence"), b"retain").unwrap();
+    fs::write(quarantine.join(SHM), b"known sibling").unwrap();
     assert!(custody.cleanup().is_err());
+    assert_eq!(fs::read(quarantine.join(SHM)).unwrap(), b"known sibling");
     assert_eq!(
         fs::read(quarantine.join("unrecognized-evidence")).unwrap(),
         b"retain"

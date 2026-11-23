@@ -170,6 +170,8 @@ It never becomes an independent repository truth source. A successful SQL commit
 - Backoff is bounded, cancellation-aware, seeded/receipted where jitter is used, and stops before the parent deadline. Exhaustion returns a stable refusal with attempts, elapsed budget, last error class, and remediation.
 - The current engine serializes part of commit validation/write/publication through a commit guard. FrankenGit may exploit parallel preparation and readers, but it does not claim lock-free or unconstrained multiwriter commit.
 
+**All-heads authority backup and restore.** The archive carries the logical authority image. During restore the closed database and its WAL recovery files move to the destination. The database link makes the restored image visible. Certificates, namespace records, shared memory and locks stay at their original location until the destination reopens and verifies the full image. In fsqlite 0.4.10, setting `raptorq_repair_symbols` persists the setting in `-wal-fec` and creates a separate `-wal-fec.lock` for the local inode. Only the former travels with the WAL. The complete admitted filenames for this private directory are defined in [the authority adapter](../crates/fgit-authority-fsqlite/src/companions.rs). Unrecognized files and non-regular entries retain the quarantine for inspection. The dependency refresh runs the `authority-companions` verification lane against the pinned engine and restore command.
+
 ### 3.5 Declared concurrency envelope
 
 The admitted caller profile publishes an explicit support matrix for:
