@@ -48,15 +48,18 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
     if arguments.first().is_some_and(|arg| arg == "--symbols") {
         return symbols::run(&arguments[1..]);
     }
-    if let Some(mode) = arguments
-        .first()
-        .filter(|arg| matches!(arg.as_str(), "--initial" | "--context"))
-    {
-        return initial::run(&arguments[1..], mode == "--context");
+    let retrieval = match arguments.first().map(String::as_str) {
+        Some("--initial") => Some(initial::Mode::Initial),
+        Some("--context") => Some(initial::Mode::Context),
+        Some("--progressive") => Some(initial::Mode::Progressive),
+        _ => None,
+    };
+    if let Some(mode) = retrieval {
+        return initial::run(&arguments[1..], mode);
     }
     if arguments == ["--help"] {
         println!(
-            "{USAGE}\nFor persisted lexical search: fg search --indexed-current --help\nFor ranked any-term search: fg search --ranked --indexed-current --help\nFor Rust declarations: fg search --symbols --help\nFor byte regex: fg search --regex --help\nFor joined retrieval or context packets: fg search --initial --help"
+            "{USAGE}\nFor persisted lexical search: fg search --indexed-current --help\nFor ranked any-term search: fg search --ranked --indexed-current --help\nFor Rust declarations: fg search --symbols --help\nFor byte regex: fg search --regex --help\nFor joined, progressive or context retrieval: fg search --initial --help"
         );
         return Ok(0);
     }

@@ -114,6 +114,28 @@ PY
     python3 "$E2E_ROOT/helpers/initial_search_labels.py" "$WORK" "$WORK/src" "$format" "$tip"
   fge_assert_exit "SEARCH-INITIAL-013$suffix" 2 "$work_exit" 'the same three-channel request refuses an insufficient work budget'
   fge_assert_contains "SEARCH-INITIAL-014$suffix" "$(cat "$WORK/work.json.err")" 'resource_limit' 'budget exhaustion is visible'
+  progress_exit=$(search progressive ranked.ndjson)
+  progress_refusal=$(search progressive limited-context.ndjson context_max_source_bytes=1)
+  initial_refusal=$(search progressive early-refusal.ndjson max_work=32 symbol_name_hex=5468696e67 symbol_policy=required)
+  fge_assert_exit "SEARCH-PROGRESS-001$suffix" 0 "$progress_exit" 'a bounded progressive query returns a ranked context'
+  fge_assert_exit "SEARCH-PROGRESS-002$suffix" 2 "$progress_refusal" 'the source-byte budget refuses the refinement'
+  fge_assert_exit "SEARCH-PROGRESS-003$suffix" 2 "$initial_refusal" 'the Initial work budget refuses before publication'
+  fge_assert_cmd "SEARCH-PROGRESS-004$suffix" 'the two phases preserve the original answer, labels and anchored ranking across refinement success and failure' \
+    python3 - "$WORK" <<'PYTHON'
+import json, sys
+from pathlib import Path
+work = Path(sys.argv[1])
+def records(name):
+    return [json.loads(line) for line in (work / name).read_bytes().splitlines()]
+initial, refined = records("ranked.ndjson")
+kept, failure = records("limited-context.ndjson")
+expected = json.loads((work / "context.json").read_bytes())
+assert initial == {"phase": "Initial", "answer": expected["retrieval"]}
+assert refined == {"phase": "Refined", "answer": expected}
+assert kept == initial
+assert failure == {"phase": "RefinementFailed", "code": "resource_limit"}, failure
+assert records("early-refusal.ndjson") == []
+PYTHON
   fge_run_timeout 180 "search-initial-service-$format" python3 "$E2E_ROOT/helpers/initial_search_maintenance.py" \
     "$FG_BIN" "$WORK/service" "$format" "$run/work/bare" "$tip" "$next_tip" || true
   fge_assert_exit "SEARCH-INITIAL-015$suffix" 0 "$FGE_LAST_EXIT" \

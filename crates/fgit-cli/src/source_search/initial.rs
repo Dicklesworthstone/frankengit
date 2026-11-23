@@ -8,7 +8,7 @@ use fgit_types::{GitHashAlgorithm, HeadGeneration, RepositoryId, TenantId};
 const MAX_FIELDS: usize = 198;
 const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 const USAGE: &str =
-    "usage: fg search (--initial | --context) <storage-root> <tenant-id> <repository-id>
+    "usage: fg search (--initial | --context | --progressive) <storage-root> <tenant-id> <repository-id>
   --trusted-local [--object-format sha1|sha256] <field>=<value>...
 
 Fields use the HTTP search-initial/context-initial grammar exactly, for example
@@ -22,9 +22,21 @@ Without index_source, index source positions must match the exact current head.
 Repeat term_hex, path_prefix_hex and symbol_kind for several values. The node
 supplies object_format. Requires built lexical (and, for symbols, symbol)
 indexes; nothing is built or refreshed and no repository state changes.
+--progressive flushes the exact Initial answer and then emits a ranked context or
+a RefinementFailed record as NDJSON. Both records share the original read and budget.
 Exit 0: complete answer; 3: an explicitly truncated channel; 2: refusal.";
 
-pub(super) fn run(arguments: &[String], context: bool) -> Result<u8, String> {
+#[derive(Clone, Copy)]
+pub(super) enum Mode {
+    Initial,
+    Context,
+    Progressive,
+}
+enum Output {
+    Document(String),
+    Streamed(bool),
+}
+pub(super) fn run(arguments: &[String], mode: Mode) -> Result<u8, String> {
     if arguments == ["--help"] {
         write_report(&mut std::io::stdout().lock(), USAGE)?;
         return Ok(0);
@@ -73,20 +85,34 @@ pub(super) fn run(arguments: &[String], context: bool) -> Result<u8, String> {
         .bring_into_service(HeadGeneration::FIRST)
         .map_err(|error| error.to_string())
         .and_then(|()| {
-            fgit_node::source_retrieval_json(
-                &node,
-                &fgit_node::source_retrieval::authorization::SourceReadContext::trusted_local_cli(
+            let read =
+                fgit_node::source_retrieval::authorization::SourceReadContext::trusted_local_cli(
                     &node,
-                ),
-                fields,
-                context,
-                MAX_OUTPUT_BYTES,
-            )
+                );
+            match mode {
+                Mode::Progressive => node
+                    .write_progressive_source_context(
+                        &read,
+                        fields,
+                        MAX_OUTPUT_BYTES,
+                        &mut std::io::stdout().lock(),
+                    )
+                    .map(Output::Streamed),
+                Mode::Initial | Mode::Context => fgit_node::source_retrieval_json(
+                    &node,
+                    &read,
+                    fields,
+                    matches!(mode, Mode::Context),
+                    MAX_OUTPUT_BYTES,
+                )
+                .map(Output::Document),
+            }
             .map_err(|code| format!("retrieval refused: {code}"))
         });
     let cleanup = node.shutdown().err().map(|error| error.to_string());
     let document = match (operation, cleanup) {
-        (Ok(document), None) => document,
+        (Ok(Output::Document(document)), None) => document,
+        (Ok(Output::Streamed(complete)), None) => return Ok(if complete { 0 } else { 3 }),
         (Err(error), None) => return Err(error),
         (Ok(_), Some(error)) => return Err(format!("retrieval node shutdown failed: {error}")),
         (Err(error), Some(cleanup)) => {
@@ -143,13 +169,13 @@ mod tests {
             vec!["--trusted-local", "--object-format", "sha512"],
             vec!["--trusted-local", "--trusted-local"],
         ] {
-            let error = run(&args(&extra), false).unwrap_err();
+            let error = run(&args(&extra), Mode::Initial).unwrap_err();
             assert!(!error.contains("nonexistent"), "{extra:?}: {error}");
         }
         let mut huge = args(&["--trusted-local"]);
         huge.extend((0..=MAX_FIELDS).map(|n| format!("term_hex={n:02x}")));
-        assert!(run(&huge, true).is_err());
-        assert!(run(&["--help".into()], false).is_ok());
+        assert!(run(&huge, Mode::Context).is_err());
+        assert!(run(&["--help".into()], Mode::Initial).is_ok());
     }
 
     #[test]
@@ -157,7 +183,7 @@ mod tests {
         // The permitted twin gets past argument checks and fails only at storage.
         let error = run(
             &args(&["--trusted-local", "ref=refs/heads/main", "term_hex=74"]),
-            false,
+            Mode::Initial,
         )
         .unwrap_err();
         assert!(!error.contains("expected <field>=<value>"), "{error}");

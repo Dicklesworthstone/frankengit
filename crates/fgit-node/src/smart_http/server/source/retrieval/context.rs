@@ -15,6 +15,7 @@ use crate::source_retrieval::context::{
     ContextLimits, InitialContext, PROFILE as CONTEXT_PROFILE, REVALIDATED_PROFILE,
     RevalidatedInitialContext,
 };
+mod progressive;
 mod view;
 use view::ContextView;
 
@@ -135,6 +136,16 @@ pub(super) fn run(
     command: &ContextCommand,
     maximum: usize,
 ) -> Result<String, ApiError> {
+    run_context(node, read, command, maximum, None).map(|(document, _)| document)
+}
+
+fn run_context(
+    node: &OneNode,
+    read: &SourceReadContext,
+    command: &ContextCommand,
+    mut maximum: usize,
+    progress: Option<&mut progressive::ProgressOutput<'_>>,
+) -> Result<(String, bool), ApiError> {
     read.check_node(node)
         .map_err(|_| ApiError::new(Status::Forbidden, "source_read_context_mismatch"))?;
     let deadline = GitDaemonSessionDeadline::new(
@@ -182,26 +193,43 @@ pub(super) fn run(
             None,
             maximum,
             &mut live,
-        );
+        )
+        .map(|document| (document, context.complete()));
     }
+    let report = drive_request_while(
+        node,
+        &request,
+        node.search_source_initial_local_in(
+            &request,
+            read,
+            &command.initial.selection.reference,
+            command.initial.selection.expected_head,
+            command.initial.selection.expected_commit,
+            &command.initial.checkpoints,
+            &command.initial.query,
+            command.initial.limits,
+        ),
+        &mut live,
+    )
+    .map_err(failure)?;
+    if let Some(progress) = progress {
+        let document = super::render(
+            node,
+            read,
+            &command.initial,
+            &report,
+            report.authorization(),
+            maximum,
+            &mut live,
+        )?;
+        maximum = progress.initial(&document)?;
+    }
+    // The same request, deadline and labeled report span both phases. A moved
+    // source or an expired read grant refuses hydration of the captured rows.
     let (context, ranking) = drive_request_while(
         node,
         &request,
         async {
-            let report = node
-                .search_source_initial_local_in(
-                    &request,
-                    read,
-                    &command.initial.selection.reference,
-                    command.initial.selection.expected_head,
-                    command.initial.selection.expected_commit,
-                    &command.initial.checkpoints,
-                    &command.initial.query,
-                    command.initial.limits,
-                )
-                .await?;
-            // One request and deadline span retrieval AND hydration. A source move
-            // between them refuses; no new allowance or alternative source is tried.
             if command.ranked {
                 let selected = node
                     .hydrate_source_initial_ranked_local_in(&request, read, report, command.limits)
@@ -226,6 +254,7 @@ pub(super) fn run(
         maximum,
         &mut live,
     )
+    .map(|document| (document, context.complete()))
 }
 fn append_hex(
     out: &mut String,

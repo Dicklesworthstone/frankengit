@@ -325,16 +325,11 @@ pub(super) fn execute(
 pub fn source_retrieval_json(
     node: &OneNode,
     read: &SourceReadContext,
-    mut fields: Vec<(String, String)>,
+    fields: Vec<(String, String)>,
     hydrate: bool,
     maximum: usize,
 ) -> Result<String, &'static str> {
-    read.check_node(node)
-        .map_err(|_| "source_read_context_mismatch")?;
-    if fields.iter().any(|(name, _)| name == "object_format") {
-        return Err("unknown_initial_field");
-    }
-    fields.push(("object_format".into(), node.object_format.as_str().into()));
+    let fields = source_fields(node, read, fields)?;
     let result = if hydrate {
         context::command_fields(fields, node.object_format)
             .and_then(|command| context::run(node, read, &command, maximum))
@@ -343,6 +338,20 @@ pub fn source_retrieval_json(
             .and_then(|command| run(node, read, &command, maximum))
     };
     result.map_err(|error| error.code)
+}
+
+fn source_fields(
+    node: &OneNode,
+    read: &SourceReadContext,
+    mut fields: Vec<(String, String)>,
+) -> Result<Vec<(String, String)>, &'static str> {
+    read.check_node(node)
+        .map_err(|_| "source_read_context_mismatch")?;
+    if fields.iter().any(|(name, _)| name == "object_format") {
+        return Err("unknown_initial_field");
+    }
+    fields.push(("object_format".into(), node.object_format.as_str().into()));
+    Ok(fields)
 }
 
 fn run(
