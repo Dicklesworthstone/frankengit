@@ -20,6 +20,7 @@ mod replay;
 mod request;
 mod retrieval;
 pub use indexed::source_index_json;
+pub(super) use retrieval::progressive_http::send as send_progressive;
 pub use retrieval::{source_agent_context_json, source_retrieval_json};
 pub(super) mod review;
 mod symbols;
@@ -113,6 +114,9 @@ impl<'a> Request<'a> {
     }
     /// Archive intake, collection and delivery share the connection's original
     /// lifetime. No later phase may mint a fresh budget for this complete read.
+    pub(super) fn is_progressive(&self) -> bool {
+        matches!(&self.0, RequestKind::Retrieval(request) if request.is_progressive())
+    }
     pub(super) fn is_archive(&self) -> bool {
         matches!(
             &self.0,
@@ -401,6 +405,15 @@ fn archive_request_context(
     )
 }
 
+fn retrieval_read(
+    node: &OneNode,
+    grant: Option<&HttpReadGrant>,
+) -> Result<crate::source_retrieval::authorization::SourceReadContext, ApiError> {
+    Ok(grant
+        .ok_or_else(|| ApiError::new(Status::Forbidden, "source_read_grant_required"))?
+        .context(node))
+}
+
 pub(super) fn execute(
     node: &OneNode,
     request: &Request<'_>,
@@ -419,9 +432,7 @@ pub(super) fn execute(
                 .map(|reply| Reply(ReplyBody::VerifiedBlob(reply)));
         }
         RequestKind::Retrieval(request) => {
-            let read = read_grant
-                .ok_or_else(|| ApiError::new(Status::Forbidden, "source_read_grant_required"))?
-                .context(node);
+            let read = retrieval_read(node, read_grant)?;
             return retrieval::execute(
                 node,
                 request,

@@ -26,35 +26,44 @@ mod view;
 pub use agent::source_agent_context_json;
 use view::InitialView;
 
+pub(super) mod progressive_http;
+
+#[derive(Debug, Eq, PartialEq)]
+enum RetrievalKind {
+    Initial,
+    Context,
+    Agent,
+    Progressive,
+}
+
 #[derive(Debug)]
 pub(super) struct Request<'a> {
     pub repository_route: &'a str,
-    hydrate: bool,
-    agent: bool,
+    kind: RetrievalKind,
 }
 impl<'a> Request<'a> {
+    pub(super) fn is_progressive(&self) -> bool {
+        self.kind == RetrievalKind::Progressive
+    }
+
     pub(super) fn parse(head: &Envelope<'a>) -> Result<Option<Self>, ApiError> {
-        if let Some(repository_route) = read_route(head, "/api/v1/source/agent-context")? {
-            return Ok(Some(Self {
-                repository_route,
-                hydrate: true,
-                agent: true,
-            }));
+        for (path, kind) in [
+            ("/api/v1/source/agent-context", RetrievalKind::Agent),
+            ("/api/v1/source/context-initial", RetrievalKind::Context),
+            ("/api/v1/source/search-initial", RetrievalKind::Initial),
+            (
+                "/api/v1/source/search-progressive",
+                RetrievalKind::Progressive,
+            ),
+        ] {
+            if let Some(repository_route) = read_route(head, path)? {
+                return Ok(Some(Self {
+                    repository_route,
+                    kind,
+                }));
+            }
         }
-        if let Some(repository_route) = read_route(head, "/api/v1/source/context-initial")? {
-            return Ok(Some(Self {
-                repository_route,
-                hydrate: true,
-                agent: false,
-            }));
-        }
-        read_route(head, "/api/v1/source/search-initial").map(|route| {
-            route.map(|repository_route| Self {
-                repository_route,
-                hydrate: false,
-                agent: false,
-            })
-        })
+        Ok(None)
     }
 }
 
@@ -293,10 +302,13 @@ pub(super) fn execute(
     if session.authenticated_session().is_none() {
         return Err(ApiError::new(Status::Unauthorized, "unauthorized"));
     }
-    if request.agent {
+    if request.is_progressive() {
+        return Err(ApiError::bad("streaming_response_required"));
+    }
+    if request.kind == RetrievalKind::Agent {
         return agent::execute(node, read, framing, reader, http, maximum);
     }
-    if request.hydrate {
+    if request.kind == RetrievalKind::Context {
         return context::execute(node, session, read, framing, reader, http, maximum);
     }
     let command = command(&read_form(reader, framing, http)?, node.object_format)?;

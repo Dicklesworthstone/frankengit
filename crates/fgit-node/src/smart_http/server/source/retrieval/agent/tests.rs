@@ -68,7 +68,7 @@ fn agent_route_is_a_source_read_and_preserves_framing_and_method_rules() {
         .unwrap()
         .unwrap();
     let request = super::super::Request::parse(&envelope).unwrap().unwrap();
-    assert!(request.agent);
+    assert_eq!(request.kind, super::super::RetrievalKind::Agent);
     assert_eq!(request.repository_route, "/r.git");
     assert!(
         !super::super::super::Request::parse(&envelope)

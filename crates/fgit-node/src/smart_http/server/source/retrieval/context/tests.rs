@@ -92,7 +92,11 @@ fn source_gateway_recognizes_context_as_a_read_and_preserves_envelope_refusals()
             .unwrap()
             .unwrap();
         let request = super::super::Request::parse(&head).unwrap().unwrap();
-        assert_eq!(request.hydrate, operation == "context-initial");
+        assert_eq!(
+            request.kind == super::super::RetrievalKind::Context,
+            operation == "context-initial"
+        );
+        assert_eq!(request.is_progressive(), operation == "search-progressive");
         assert_eq!(request.repository_route, "/r.git");
         assert!(
             !super::super::super::Request::parse(&head)

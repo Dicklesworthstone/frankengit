@@ -59,42 +59,69 @@ impl OneNode {
         maximum: usize,
         writer: &mut impl Write,
     ) -> Result<bool, &'static str> {
-        let mut fields = super::super::source_fields(self, read, fields)?;
-        if !fields.iter().any(|(key, _)| key == "context_selection") {
-            fields.push(("context_selection".into(), ranked::PROFILE.into()));
+        let fields = super::super::source_fields(self, read, fields)?;
+        let deadline = super::GitDaemonSessionDeadline::new(
+            self.git_daemon_session_timeout,
+            super::GitDaemonSessionWorkScaling::FLAT,
+        );
+        match deliver(self, read, fields, maximum, writer, &deadline).map_err(|error| error.code)? {
+            Delivery::Refined(complete) => Ok(complete),
+            Delivery::RefinementFailed(error) => Err(error.code),
         }
-        let command = command_fields(fields, self.object_format).map_err(|error| error.code)?;
-        if !command.ranked {
-            return Err("unsupported_context_selection");
+    }
+}
+
+pub(in super::super) enum Delivery {
+    Refined(bool),
+    RefinementFailed(ApiError),
+}
+
+pub(in super::super) fn deliver(
+    node: &OneNode,
+    read: &SourceReadContext,
+    mut fields: Vec<(String, String)>,
+    maximum: usize,
+    writer: &mut impl Write,
+    deadline: &super::GitDaemonSessionDeadline,
+) -> Result<Delivery, ApiError> {
+    if !fields.iter().any(|(key, _)| key == "context_selection") {
+        fields.push(("context_selection".into(), ranked::PROFILE.into()));
+    }
+    let command = command_fields(fields, node.object_format)?;
+    if !command.ranked {
+        return Err(ApiError::bad("unsupported_context_selection"));
+    }
+    let initial_maximum = maximum
+        .checked_sub(INITIAL.len() + END.len() + FAILED.len() + ERROR_RESERVE + END.len())
+        .ok_or_else(ApiError::too_large)?;
+    let mut stream = ProgressOutput {
+        writer,
+        remaining: maximum,
+        initial_sent: false,
+    };
+    match run_context(
+        node,
+        read,
+        &command,
+        initial_maximum,
+        Some(&mut stream),
+        deadline,
+    ) {
+        Ok((document, complete)) => {
+            stream.record(REFINED, &document)?;
+            Ok(Delivery::Refined(complete))
         }
-        let initial_maximum = maximum
-            .checked_sub(INITIAL.len() + END.len() + FAILED.len() + ERROR_RESERVE + END.len())
-            .ok_or_else(|| ApiError::too_large().code)?;
-        let mut stream = ProgressOutput {
-            writer,
-            remaining: maximum,
-            initial_sent: false,
-        };
-        match run_context(self, read, &command, initial_maximum, Some(&mut stream)) {
-            Ok((document, complete)) => {
-                stream
-                    .record(REFINED, &document)
-                    .map_err(|error| error.code)?;
-                Ok(complete)
-            }
-            Err(error) => {
-                if stream.initial_sent {
-                    let code = quote(error.code);
-                    let code = if code.len() <= ERROR_RESERVE {
-                        &code
-                    } else {
-                        r#""refinement_failed""#
-                    };
-                    stream.record(FAILED, code).map_err(|error| error.code)?;
-                }
-                Err(error.code)
-            }
+        Err(error) if stream.initial_sent => {
+            let code = quote(error.code);
+            let code = if code.len() <= ERROR_RESERVE {
+                &code
+            } else {
+                r#""refinement_failed""#
+            };
+            stream.record(FAILED, code)?;
+            Ok(Delivery::RefinementFailed(error))
         }
+        Err(error) => Err(error),
     }
 }
 

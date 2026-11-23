@@ -15,7 +15,7 @@ use crate::source_retrieval::context::{
     ContextLimits, InitialContext, PROFILE as CONTEXT_PROFILE, REVALIDATED_PROFILE,
     RevalidatedInitialContext,
 };
-mod progressive;
+pub(super) mod progressive;
 mod view;
 use view::ContextView;
 
@@ -136,7 +136,11 @@ pub(super) fn run(
     command: &ContextCommand,
     maximum: usize,
 ) -> Result<String, ApiError> {
-    run_context(node, read, command, maximum, None).map(|(document, _)| document)
+    let deadline = GitDaemonSessionDeadline::new(
+        node.git_daemon_session_timeout,
+        GitDaemonSessionWorkScaling::FLAT,
+    );
+    run_context(node, read, command, maximum, None, &deadline).map(|(document, _)| document)
 }
 
 fn run_context(
@@ -145,14 +149,11 @@ fn run_context(
     command: &ContextCommand,
     mut maximum: usize,
     progress: Option<&mut progressive::ProgressOutput<'_>>,
+    deadline: &GitDaemonSessionDeadline,
 ) -> Result<(String, bool), ApiError> {
     read.check_node(node)
         .map_err(|_| ApiError::new(Status::Forbidden, "source_read_context_mismatch"))?;
-    let deadline = GitDaemonSessionDeadline::new(
-        node.git_daemon_session_timeout,
-        GitDaemonSessionWorkScaling::FLAT,
-    );
-    let request = read.request_context(node, &deadline);
+    let request = read.request_context(node, deadline);
     let mut live = || !deadline.expired() && read.is_live();
     if command.initial.index_source == IndexSource::Current {
         if command.ranked {

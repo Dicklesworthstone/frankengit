@@ -60,15 +60,23 @@ def listening(binary, scope, work, fmt, mode, credentials):
         assert not (work / name / "run.lock").exists()
 
 
-def query(endpoint, token, fmt, word):
+def query(endpoint, token, fmt, word, *, route="search-initial", **limits):
     body = urlencode({"ref": "refs/heads/main", "object_format": fmt, "term_hex": word.hex(),
-                      "symbol_name_hex": word.hex(), "symbol_policy": "required"})
+                      "symbol_name_hex": word.hex(), "symbol_policy": "required", **limits})
     connection = http.client.HTTPConnection(endpoint.hostname, endpoint.port, timeout=10)
     try:
-        connection.request("POST", endpoint.path + "/api/v1/source/search-initial", body,
+        connection.request("POST", endpoint.path + "/api/v1/source/" + route, body,
                            {"Authorization": "Bearer " + token, "User-Agent": AGENT,
                             "Content-Type": "application/x-www-form-urlencoded"})
         response = connection.getresponse()
+        if route == "search-progressive" and response.status == 200:
+            assert response.getheader("Content-Type") == "application/x-ndjson"
+            assert response.getheader("Connection").lower() == "close"
+            assert response.getheader("Cache-Control") == "no-store"
+            assert response.getheader("Vary") == "Authorization"
+            first, terminal, end = response.readline(), response.readline(), response.readline()
+            assert first.endswith(b"\n") and terminal.endswith(b"\n") and end == b""
+            return response.status, first + terminal
         return response.status, response.read()
     finally:
         connection.close()
@@ -129,11 +137,27 @@ def main():
             status, denied = query(endpoint, restricted, fmt, b"NextThing")
             assert status == 403 and b"authorization_label" not in denied
             second = current(endpoint, reader, fmt, b"NextThing", updated)
+            def progressive(token, **limits):
+                return query(endpoint, token, fmt, b"NextThing", route="search-progressive", **limits)
+            status, ranked_body = progressive(reader)
+            assert status == 200, (status, ranked_body)
+            initial, refined = map(json.loads, ranked_body.splitlines())
+            assert initial == {"phase": "Initial", "answer": second}
+            assert refined["phase"] == "Refined" and refined["answer"]["retrieval"] == second
+            status, limited_body = progressive(reader, context_max_source_bytes=1)
+            assert status == 200
+            kept, failed = map(json.loads, limited_body.splitlines())
+            assert kept == initial and failed == {"phase": "RefinementFailed", "code": "resource_limit"}
+            denied_status, denied_body = progressive(restricted)
+            early_status, early_body = progressive(reader, max_work=32)
+            assert denied_status == 403 and early_status == 413
+            for refused in (denied_body, early_body):
+                assert b'"phase"' not in refused and b'authorization_label' not in refused
         assert first["snapshot_token"] != second["snapshot_token"]
         assert first["content"]["index_token"] != second["content"]["index_token"]
         assert first["symbols"]["result"]["index_token"] != second["symbols"]["result"]["index_token"]
     print(json.dumps({"format": fmt, "initial_tip": original, "resumed_tip": updated,
-                      "reader": 200, "restricted_reader": status, "controllers_drained": 2}))
+                      "reader": 200, "restricted_reader": denied_status, "progressive": ["Initial", "Refined", "RefinementFailed"], "controllers_drained": 2}))
 
 
 if __name__ == "__main__":

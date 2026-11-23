@@ -1644,7 +1644,7 @@ fn serve_connection_with_routes(
             native_mutation = request.is_mutation();
             // A complete archive may spend most of its lifetime collecting
             // source. Starting its binary response cannot renew that budget.
-            if request.is_archive() {
+            if request.is_archive() || request.is_progressive() {
                 writer.preserve_request_deadline = true;
             }
         }
@@ -1927,25 +1927,44 @@ fn serve_connection_with_routes(
                     .send(&mut writer, version)
                     .map_err(|_| Status::Unavailable)?;
             } else if let Some(request) = &source_request {
-                let reply = source::execute(
-                    &node,
-                    request,
-                    &session,
-                    source_read_grant.as_ref(),
-                    writer.agent.as_ref(),
-                    envelope.body,
-                    &mut body,
-                    profile.http,
-                    profile.maximum_response_bytes,
-                    &admission_deadline,
-                )
-                .map_err(|error| {
-                    api_error = Some(error);
-                    error.status
-                })?;
-                reply
-                    .send(&mut writer, version)
-                    .map_err(|_| Status::Unavailable)?;
+                if request.is_progressive() {
+                    source::send_progressive(
+                        &node,
+                        &session,
+                        source_read_grant.as_ref(),
+                        envelope.body,
+                        &mut body,
+                        profile.http,
+                        profile.maximum_response_bytes,
+                        &admission_deadline,
+                        &mut writer,
+                        version,
+                    )
+                    .map_err(|error| {
+                        api_error = Some(error);
+                        error.status
+                    })?;
+                } else {
+                    let reply = source::execute(
+                        &node,
+                        request,
+                        &session,
+                        source_read_grant.as_ref(),
+                        writer.agent.as_ref(),
+                        envelope.body,
+                        &mut body,
+                        profile.http,
+                        profile.maximum_response_bytes,
+                        &admission_deadline,
+                    )
+                    .map_err(|error| {
+                        api_error = Some(error);
+                        error.status
+                    })?;
+                    reply
+                        .send(&mut writer, version)
+                        .map_err(|_| Status::Unavailable)?;
+                }
             } else if let Some(request) = &pull_request {
                 let reply = pulls::execute(
                     &node,
