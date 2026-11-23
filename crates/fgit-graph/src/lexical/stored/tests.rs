@@ -250,8 +250,8 @@ fn source(format: GitHashAlgorithm, revision: u8) -> LexicalSource {
         tree: git_object_id(format, GitObjectKind::Tree, &[revision]),
     }
 }
-fn prepared(format: GitHashAlgorithm, revision: u8, words: &[&[u8]]) -> PreparedLexicalIndex {
-    let segments = words
+fn segments(format: GitHashAlgorithm, revision: u8, words: &[&[u8]]) -> Vec<LexicalSegment> {
+    words
         .iter()
         .enumerate()
         .map(|(i, body)| {
@@ -268,8 +268,64 @@ fn prepared(format: GitHashAlgorithm, revision: u8, words: &[&[u8]]) -> Prepared
             )
             .unwrap()
         })
-        .collect();
-    PreparedLexicalIndex::new(source(format, revision), segments, 2, &mut || true).unwrap()
+        .collect()
+}
+fn prepared(format: GitHashAlgorithm, revision: u8, words: &[&[u8]]) -> PreparedLexicalIndex {
+    PreparedLexicalIndex::new(
+        source(format, revision),
+        segments(format, revision, words),
+        2,
+        &mut || true,
+    )
+    .unwrap()
+}
+
+#[test]
+fn persisted_segments_match_independent_frames_and_roots() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let input = segments(format, 1, &[b"alpha beta", b"alpha alpha"]);
+        let expected: Vec<_> = input
+            .iter()
+            .map(|segment| {
+                (
+                    segment.encode(&mut || true).unwrap(),
+                    segment.root(&mut || true).unwrap(),
+                )
+            })
+            .collect();
+        let result = PreparedLexicalIndex::new(source(format, 1), input, 0, &mut || true).unwrap();
+        assert_eq!(result.segments.len(), expected.len());
+        for (payload, (bytes, root)) in result.segments.iter().zip(expected) {
+            assert_eq!(payload.bytes, bytes);
+            assert_eq!(payload.root, root);
+        }
+    }
+}
+
+#[test]
+fn encoding_a_persisted_segment_checks_size_and_observes_late_cancellation() {
+    let mut input = segments(GitHashAlgorithm::Sha256, 1, &[b"alpha beta"]);
+    let segment = &mut input[0];
+    let mut encode_checks = 0;
+    segment
+        .encode(&mut || {
+            encode_checks += 1;
+            true
+        })
+        .unwrap();
+    let mut checks = 0;
+    assert!(matches!(
+        super::super::encoding::encode_with_root(segment, &mut || {
+            checks += 1;
+            checks <= encode_checks
+        }),
+        Err(LexicalError::Cancelled)
+    ));
+    segment.documents[0].path = vec![b'a'; MAX_SEGMENT_BYTES];
+    assert!(matches!(
+        super::super::encoding::encode_with_root(segment, &mut || true),
+        Err(LexicalError::Limit("segment bytes"))
+    ));
 }
 fn index(store: &Store, format: GitHashAlgorithm) -> LexicalIndexStore<'_, Store> {
     LexicalIndexStore::new(

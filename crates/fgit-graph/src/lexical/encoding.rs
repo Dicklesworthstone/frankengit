@@ -8,7 +8,7 @@ use super::{
 };
 use fgit_codec::{
     CanonicalBody, CodecRefusal, CryptoBodyIdentity, DecodeLimits, Decoder, Encoder, body_id,
-    decode_body, encode_body,
+    body_id_of_frame_as, decode_body, encode_body,
 };
 use fgit_types::{DomainTag, GitOidSha1, GitOidSha256, SchemaFamily};
 
@@ -160,6 +160,18 @@ pub(super) fn encode(
     check(live)?;
     Ok(bytes)
 }
+
+/// A stored segment commits to the canonical payload of the frame it publishes.
+pub(super) fn encode_with_root(
+    segment: &LexicalSegment,
+    live: &mut impl FnMut() -> bool,
+) -> Result<(Vec<u8>, Digest), LexicalError> {
+    let bytes = encode(segment, live)?;
+    let id = body_id_of_frame_as::<SegmentFrame, _>(&CryptoBodyIdentity, &bytes, decode_limits())?;
+    check(live)?;
+    Ok((bytes, Digest::new(id.algorithm(), *id.digest())))
+}
+
 pub(super) fn root(
     segment: &LexicalSegment,
     live: &mut impl FnMut() -> bool,
