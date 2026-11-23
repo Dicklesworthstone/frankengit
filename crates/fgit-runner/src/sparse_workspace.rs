@@ -1226,6 +1226,23 @@ mod lease_tests {
 
     #[test]
     fn duplicated_description_cannot_extend_a_released_workspace_lease() {
+        use std::os::fd::AsFd;
+        use std::process::{Command, Stdio};
+
+        const OWNER_PID: &str = "FGIT_TEST_SPARSE_LEASE_ACQUIRING_PID";
+        const DROPPED: &str = "child dropped the duplicate lease";
+        if let Some(pid) = std::env::var_os(OWNER_PID) {
+            let owner = pid.to_str().unwrap().parse().unwrap();
+            assert_ne!(owner, std::process::id());
+            // The child received the same open file description on stdin. Its
+            // guard carries the original PID, just as it would across a fork.
+            drop(WorkspaceRoot {
+                file: File::from(std::io::stdin().as_fd().try_clone_to_owned().unwrap()),
+                owner: Some(owner),
+            });
+            println!("{DROPPED}");
+            return;
+        }
         let dir = std::env::temp_dir().join(format!(
             "fg-workspace-root-{}-{}",
             std::process::id(),
@@ -1241,6 +1258,18 @@ mod lease_tests {
         // A duplicate holds the same kernel open file description as an fd
         // inherited across fork. Keep it alive even beyond the contention grace.
         let alias = owner.file.try_clone().unwrap();
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "sparse_workspace::lease_tests::duplicated_description_cannot_extend_a_released_workspace_lease",
+                "--nocapture",
+            ])
+            .env(OWNER_PID, std::process::id().to_string())
+            .stdin(Stdio::from(alias.try_clone().unwrap()))
+            .output()
+            .unwrap();
+        assert!(child.status.success(), "{child:?}");
+        assert!(String::from_utf8(child.stdout).unwrap().contains(DROPPED));
         let mut next = open_root();
         assert_eq!(next.lock(), Err(HostRefusal::LeaseBusy));
         drop(owner);
