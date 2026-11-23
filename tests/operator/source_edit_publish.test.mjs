@@ -8,6 +8,7 @@ import { saveSourceEdit, loadSourceEdit, stageSourceApply, dispatchSourceApply, 
   readSourceRecord } from '../../scripts/operator/source_edit_publish.mjs';
 import { peer, TOKEN, PRINCIPAL } from './source_edit_fixture.mjs';
 const sequence = '18446744073709551615';
+const AGENT_TOKEN = 'fgagent_' + 'a'.repeat(64), ROTATED_AGENT_TOKEN = 'fgagent_' + 'b'.repeat(64);
 async function fixture(t, format = 'sha1') {
   const p = await peer(t, format), dir = await mkdtemp(join(tmpdir(), 'fg-source-apply-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -196,4 +197,101 @@ test('pre-cancelled dispatch has no marker while cancellation after transmission
   await assert.rejects(dispatchSourceApply(f.journal, f.staged.request_sha256, TOKEN, { signal: stop.signal }), e => !!e.retained_request);
   assert.equal((await inspectSourceApply(f.journal, f.staged.request_sha256)).state, 'outcome_unknown');
   await assert.rejects(dispatchSourceApply(f.journal, f.staged.request_sha256, TOKEN));
+});
+
+// These peers exercise the operator's custody and response validation. Native
+// grant/path enforcement belongs to the separate agent source publication lane.
+for (const format of ['sha1', 'sha256']) test(format + ': sponsored source publication keeps the exact staged principal, candidate and original key', async t => {
+  const f = await fixture(t, format);
+  const result = await dispatchSourceApply(f.journal, f.staged.request_sha256, AGENT_TOKEN);
+  assert.equal(result.decision.outcome, 'committed');
+  assert.equal(result.decision.decision_sequence, sequence);
+  assert.equal(result.submission_retried, false);
+  const calls = f.calls.filter(call => call.operation === 'apply');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].headers.authorization, 'Bearer ' + AGENT_TOKEN);
+  assert.equal(calls[0].headers['idempotency-key'], f.staged.key);
+  const request = await readFile(join(f.journal, 'request.json'));
+  assert.equal(hash(request), f.staged.request_sha256);
+  assert.equal(JSON.parse(request).principal_id, PRINCIPAL);
+  assert.equal(JSON.parse(request).upload_sha256, hash(calls[0].body));
+  for (const name of ['request.json', 'terminal.json', 'dispatch/started.json']) {
+    assert.equal((await readFile(join(f.journal, name), 'utf8')).includes(AGENT_TOKEN), false);
+  }
+  const before = f.calls.length;
+  assert.deepEqual((await recoverSourceApply(f.journal, f.staged.request_sha256, ROTATED_AGENT_TOKEN)).decision, result.decision);
+  assert.equal(f.calls.length, before);
+});
+test('sponsored lost acknowledgement recovers with a rotated credential and retains original full-width provenance', async t => {
+  const f = await fixture(t);
+  const witness = { state: 'recorded', principal_id: PRINCIPAL, authentication: 'agent_credential',
+    agent_provenance: { agent: PRINCIPAL, sponsor: '5'.repeat(32), sponsor_kind: 'human', credential_id: '6'.repeat(64),
+      grant_root: { algorithm: 2, hex: '7'.repeat(64) }, run_commitment: '8'.repeat(64),
+      authenticated_at: '9007199254740993', expires_at: sequence } };
+  const observed = { ...f.outcome, principal_provenance: witness, provenance_error: null };
+  f.control.handler = (_req, res, call) => {
+    assert.equal(call.headers['idempotency-key'], f.staged.key);
+    if (call.operation === 'apply') {
+      assert.equal(call.headers.authorization, 'Bearer ' + AGENT_TOKEN);
+      res.destroy(); return;
+    }
+    assert.equal(call.operation, 'outcomes'); assert.equal(call.body.length, 0);
+    if (call.headers.authorization === 'Bearer ' + AGENT_TOKEN) {
+      res.writeHead(403, { 'Content-Type': 'application/json' }); res.end('{}'); return;
+    }
+    assert.equal(call.headers.authorization, 'Bearer ' + ROTATED_AGENT_TOKEN);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(observed).replace(/"(decision_sequence|authenticated_at|expires_at)":"([0-9]+)"/g, '"$1":$2'));
+  };
+  await assert.rejects(dispatchSourceApply(f.journal, f.staged.request_sha256, AGENT_TOKEN), error => !!error.retained_request);
+  await assert.rejects(recoverSourceApply(f.journal, f.staged.request_sha256, AGENT_TOKEN), error => error.status === 403);
+  assert.equal((await inspectSourceApply(f.journal, f.staged.request_sha256)).state, 'outcome_unknown');
+  const recovered = await recoverSourceApply(f.journal, f.staged.request_sha256, ROTATED_AGENT_TOKEN);
+  assert.equal(recovered.decision.outcome, 'committed');
+  assert.equal(recovered.submission_retried, false);
+  const retained = JSON.parse(await readFile(join(f.journal, 'transaction.json')));
+  assert.deepEqual(retained.observation.principal_provenance, witness);
+  assert.equal(retained.observation.transaction.tx_id, recovered.decision.tx_id);
+  const reopened = await inspectSourceApply(f.journal, f.staged.request_sha256);
+  assert.deepEqual(reopened.decision, recovered.decision);
+  assert.equal(f.calls.filter(call => call.operation === 'apply').length, 1);
+  for (const token of [AGENT_TOKEN, ROTATED_AGENT_TOKEN]) assert.equal(JSON.stringify(retained).includes(token), false);
+});
+test('a sponsored principal mismatch cannot settle the staged agent request or switch recovery to its sponsor', async t => {
+  const f = await fixture(t), sponsor = '5'.repeat(32);
+  f.control.handler = (_req, res, call) => f.send(res, { ...(call.operation === 'apply' ? f.publication : f.outcome), principal_id: sponsor });
+  await assert.rejects(dispatchSourceApply(f.journal, f.staged.request_sha256, AGENT_TOKEN), error => !!error.retained_request);
+  await assert.rejects(recoverSourceApply(f.journal, f.staged.request_sha256, ROTATED_AGENT_TOKEN), /scope_or_semantics_changed/);
+  assert.equal((await inspectSourceApply(f.journal, f.staged.request_sha256)).state, 'outcome_unknown');
+  await assert.rejects(dispatchSourceApply(f.journal, f.staged.request_sha256, AGENT_TOKEN), /already_dispatched/);
+  assert.equal(f.calls.filter(call => call.operation === 'apply').length, 1);
+});
+test('sponsored scope refusal is not a terminal outcome and missing recovery never permits resend', async t => {
+  const f = await fixture(t);
+  f.control.handler = (_req, res, call) => {
+    if (call.operation === 'apply') { res.writeHead(403, { 'Content-Type': 'application/json' }); res.end('{}'); return; }
+    f.send(res, { ...f.outcome, state: 'key_not_observed', terminal: false, transaction: null, decision: null });
+  };
+  await assert.rejects(dispatchSourceApply(f.journal, f.staged.request_sha256, AGENT_TOKEN), error => error.status === 403 && !!error.retained_request);
+  const result = await recoverSourceApply(f.journal, f.staged.request_sha256, ROTATED_AGENT_TOKEN);
+  assert.equal(result.state, 'key_not_observed'); assert.equal(result.absence_proves_non_commit, false);
+  await assert.rejects(dispatchSourceApply(f.journal, f.staged.request_sha256, AGENT_TOKEN), /already_dispatched/);
+  assert.equal(f.calls.filter(call => call.operation === 'apply').length, 1);
+});
+test('sponsored native policy refusal remains a stable canonical terminal', async t => {
+  const f = await fixture(t);
+  f.control.handler = (_req, res) => f.send(res, { ...f.publication, outcome: 'refused', refusal_code: 'Protected', decision_record: 'refusal-record' }, 409);
+  const refused = await dispatchSourceApply(f.journal, f.staged.request_sha256, AGENT_TOKEN);
+  assert.equal(refused.decision.outcome, 'refused'); assert.equal(refused.decision.refusal_code, 'Protected');
+  const before = f.calls.length;
+  assert.deepEqual((await recoverSourceApply(f.journal, f.staged.request_sha256, ROTATED_AGENT_TOKEN)).decision, refused.decision);
+  assert.equal(f.calls.length, before);
+});
+test('malformed sponsored credentials fail before claiming a dispatch or opening a socket', async t => {
+  const f = await fixture(t), before = f.calls.length;
+  for (const credential of ['fgagent_', 'fgagent_' + 'A'.repeat(64), 'fgagent_' + 'a'.repeat(63), AGENT_TOKEN + '\n', 'Bearer ' + AGENT_TOKEN, AGENT_TOKEN + 'x']) {
+    await assert.rejects(dispatchSourceApply(f.journal, f.staged.request_sha256, credential), /source_edit_credential/);
+    assert.equal((await readdir(f.journal)).includes('dispatch'), false);
+  }
+  assert.equal(f.calls.length, before);
 });

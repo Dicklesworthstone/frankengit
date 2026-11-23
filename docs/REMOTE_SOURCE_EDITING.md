@@ -257,6 +257,40 @@ key. A crash, timeout, cancellation, HTTP error or incomplete/invalid response
 never removes this marker. No `force`, resend, reset, new-key retry, latest-base
 selection or implicit approval is provided.
 
+### Sponsored agent publication and recovery
+
+The same commands accept canonical `fgagent_` credentials. Each operation
+still needs its own native grant:
+
+| Command | Sponsored grant |
+| --- | --- |
+| `prepare`, `prepare-verified` | `source-candidates` |
+| `apply` | `source-publish` |
+| `recover` | `outcomes-read` |
+
+For `stage --principal`, retain the **agent's principal ID**, not its sponsor.
+The client validates credential syntax; the native service checks the current
+canonical grant, repository/incarnation, expiry, revocation and deployment
+switches. Publication also checks the issued ref and path ceilings against the
+actual candidate and applies ordinary branch protection. Candidate permission
+does not grant publication or recovery. A `source-publish` credential can apply
+an independently prepared candidate without acquiring source-reading permission.
+
+The request journal, original key, selected branch/base/candidate and one-shot
+dispatch ownership are identical for both credential families. Bearers remain
+only request inputs and are not written into the journal. A new live
+`outcomes-read` credential for the same agent can recover a lost publication
+reply without resending the bundle. It cannot change the original principal to
+the sponsor or a different agent. Server authentication/scope failures remain
+unresolved, while a complete canonical policy refusal is terminal.
+
+Outcome parsing preserves native full-width decision and agent-witness
+counters. When the first sealed observation includes original principal
+provenance, the existing `transaction.json` retains that validated original
+agent/sponsor/credential witness. Credential rotation never supplies replacement
+attribution. Local custody and response validation do not replace native
+authorization or prove a new whole-agent runtime.
+
 A complete source-publication receipt must match status, namespace, principal,
 reference, parent and candidate. Native u64 decision sequences retain all bits.
 A matching committed/refused terminal is stored create-only; cancellation racing

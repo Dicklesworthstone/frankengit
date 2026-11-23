@@ -130,3 +130,58 @@ test('certificate-verified HTTPS preparation succeeds only with the explicit pri
   const refused = await run(f.prepare); assert.equal(refused.code, 2); await assert.rejects(access(f.files.candidate));
   const allowed = await run([...f.prepare, '--ca-file', certPath]); assert.equal(allowed.code, 0, allowed.err);
 });
+
+for (const format of ['sha1', 'sha256']) test(format + ': executable uses sponsored candidates and publication grants without persisting the bearer', async t => {
+  const f = await local(t, format), credential = 'fgagent_' + 'a'.repeat(64);
+  await writeFile(f.files.token, credential + '\n', { mode: 0o600 });
+  f.control.handler = (_req, res, call) => {
+    assert.equal(call.headers.authorization, 'Bearer ' + credential);
+    if (call.operation === 'prepare') {
+      const prepared = f.frame(); res.writeHead(200, { 'Content-Type': prepared.type }); res.end(prepared.bytes);
+    } else f.send(res, call.operation === 'inspect' ? f.inspection : f.terminal());
+  };
+  const { receipt, publicationArgs } = await f.stage();
+  const result = await run(['apply', ...publicationArgs, '--token-file', f.files.token]);
+  assert.equal(result.code, 0, result.err);
+  assert.equal(JSON.parse(result.out).decision.outcome, 'committed');
+  assert.deepEqual(f.calls.map(call => call.operation), ['prepare', 'inspect', 'apply']);
+  assert.equal(f.calls.at(-1).headers['idempotency-key'], receipt.key);
+  assert.equal(result.out.includes(credential), false); assert.equal(result.err.includes(credential), false);
+  const request = JSON.parse(await readFile(join(f.files.journal, 'request.json')));
+  assert.equal(request.principal_id, PRINCIPAL);
+  assert.equal(JSON.stringify(request).includes(credential), false);
+  await rm(f.files.token);
+  const status = await run(['status', ...publicationArgs]);
+  assert.equal(status.code, 0, status.err);
+  assert.equal(JSON.parse(status.out).decision.outcome, 'committed');
+  assert.equal(f.calls.length, 3);
+});
+test('a fresh executable recovers a sponsored lost reply with a rotated token and never uploads again', async t => {
+  const f = await local(t), { receipt, publicationArgs } = await f.stage();
+  const original = 'fgagent_' + 'a'.repeat(64), rotated = 'fgagent_' + 'b'.repeat(64);
+  await writeFile(f.files.token, original, { mode: 0o600 });
+  f.control.handler = (_req, res, call) => {
+    assert.equal(call.headers['idempotency-key'], receipt.key);
+    if (call.operation === 'apply') {
+      assert.equal(call.headers.authorization, 'Bearer ' + original); res.destroy(); return;
+    }
+    assert.equal(call.operation, 'outcomes'); assert.equal(call.body.length, 0);
+    assert.equal(call.headers.authorization, 'Bearer ' + rotated);
+    f.send(res, f.outcome());
+  };
+  const applied = await run(['apply', ...publicationArgs, '--token-file', f.files.token]);
+  assert.equal(applied.code, 3, applied.err);
+  assert.equal(JSON.parse(applied.err).retained_request.key, receipt.key);
+  await writeFile(f.files.token, rotated, { mode: 0o600 });
+  const retry = await run(['apply', ...publicationArgs, '--token-file', f.files.token]);
+  assert.equal(retry.code, 2, retry.err);
+  const recovered = await run(['recover', ...publicationArgs, '--token-file', f.files.token]);
+  assert.equal(recovered.code, 0, recovered.err);
+  assert.equal(JSON.parse(recovered.out).decision.outcome, 'committed');
+  assert.equal(JSON.parse(recovered.out).key, receipt.key);
+  assert.equal(f.calls.filter(call => call.operation === 'apply').length, 1);
+  assert.equal(f.calls.filter(call => call.operation === 'outcomes').length, 1);
+  for (const result of [applied, retry, recovered]) for (const token of [original, rotated]) {
+    assert.equal(result.out.includes(token), false); assert.equal(result.err.includes(token), false);
+  }
+});

@@ -5,7 +5,8 @@ import { constants } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { absolute, contains, directory, readPrivate, writeNew, syncDirectory } from './workflow_watch_io.mjs';
-import { validateOutcomeReply } from './transaction_outcome.mjs';
+import { parseOutcomeJson, validateOutcomeReply } from './transaction_outcome.mjs';
+import { isCredentialToken } from './credential_token.mjs';
 import { validateSourceEdit, editCoordinates, canonical, identity, oid, CAPTURE_LIMIT, BUNDLE_LIMIT } from './source_edit_candidate.mjs';
 import { validateSourceEditEvidence, SOURCE_PACKAGE_BYTES, SOURCE_EXPECTED_BYTES, SOURCE_EVIDENCE_PROFILE, SOURCE_CREATION_EVIDENCE_PROFILE, SOURCE_RESULT_EVIDENCE_PROFILE } from './source_edit_from_package.mjs';
 import { hash, fields, fail, parse, clock, upload, exchange, integer } from './source_edit_wire.mjs';
@@ -282,7 +283,7 @@ async function syncCandidate(s) {
 }
 export async function dispatchSourceApply(path, requestHash, credential, options = {}) {
   const time = clock(options);
-  if (typeof credential !== 'string' || !/^[0-9a-f]{64}$/.test(credential)) fail('source_edit_credential');
+  if (!isCredentialToken(credential)) fail('source_edit_credential');
   const s = await state(path, requestHash, time.check);
   if (s.terminal) return settle(s, s.terminal.value.decision);
   if (s.dispatched) fail('source_edit_already_dispatched');
@@ -309,7 +310,9 @@ export async function recoverSourceApply(path, requestHash, credential, options 
   // Nothing about a missing outcome authorizes resubmission. This route has no
   // bundle or mutation payload, even with a rotated recovery-only credential.
   const response = await exchange(s.request.endpoint, credential, 'outcomes', null, time, Math.min(16384, time.maxWireBytes), s.request.key);
-  const observed = validateOutcomeReply(parse(response.bytes, 16384), scopeOf(s.request), s.observed?.value.observation ?? null);
+  // Preserve the native u64 sequence and original agent witness counters;
+  // the recovery credential never substitutes its own attribution.
+  const observed = validateOutcomeReply(parseOutcomeJson(response.bytes), scopeOf(s.request), s.observed?.value.observation ?? null);
   if (observed.transaction) {
     const value = { schema: `${SCHEMA}/transaction`, request_sha256: requestHash, observation: observed };
     try { await putRecord(join(path, 'transaction.json'), value); }
