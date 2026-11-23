@@ -117,13 +117,13 @@ PY
   progress_exit=$(search progressive ranked.ndjson)
   progress_refusal=$(search progressive limited-context.ndjson context_max_source_bytes=1)
   progress_capped=$(search progressive capped.ndjson max_results_per_channel=1 symbol_name_hex=5468696e67 symbol_policy=required)
-  current_refusal=$(search progressive unsupported.ndjson index_source=current-native-v1)
+  current_exit=$(search progressive current.ndjson index_source=current-native-v1)
   initial_refusal=$(search progressive early-refusal.ndjson max_work=32 symbol_name_hex=5468696e67 symbol_policy=required)
   fge_assert_exit "SEARCH-PROGRESS-001$suffix" 0 "$progress_exit" 'a bounded progressive query returns a ranked context'
   fge_assert_exit "SEARCH-PROGRESS-002$suffix" 2 "$progress_refusal" 'the source-byte budget refuses the refinement'
   fge_assert_exit "SEARCH-PROGRESS-003$suffix" 2 "$initial_refusal" 'the Initial work budget refuses before publication'
   fge_assert_exit "SEARCH-PROGRESS-005$suffix" 3 "$progress_capped" 'three budget-limited channels retain the partial-answer exit'
-  fge_assert_exit "SEARCH-PROGRESS-006$suffix" 2 "$current_refusal" 'revalidated current-source candidates cannot enter the exact ranker'
+  fge_assert_exit "SEARCH-PROGRESS-006$suffix" 0 "$current_exit" 'current native source supports the same bounded progressive ranker'
   fge_assert_cmd "SEARCH-PROGRESS-004$suffix" 'the two phases preserve the original answer, labels and anchored ranking across refinement success and failure' \
     python3 - "$WORK" <<'PYTHON'
 import json, sys
@@ -138,11 +138,54 @@ assert initial == {"phase": "Initial", "answer": expected["retrieval"]}
 assert refined == {"phase": "Refined", "answer": expected}
 assert kept == initial
 assert failure == {"phase": "RefinementFailed", "code": "resource_limit"}, failure
-assert records("early-refusal.ndjson") == records("unsupported.ndjson") == []
+assert records("early-refusal.ndjson") == []
+current, current_ranked = records("current.ndjson")
+assert current["phase"] == "Initial" and current_ranked["phase"] == "Refined"
+assert current_ranked["answer"]["retrieval"] == current["answer"]
+assert current_ranked["answer"]["selection"] == "context-weighted-rrf-q16-v1"
+assert current["answer"]["generation_vector"] == initial["answer"]["generation_vector"]
 partial, ranked = records("capped.ndjson")
 assert partial["answer"]["complete"] is ranked["answer"]["complete"] is False
 assert ranked["answer"]["retrieval"] == partial["answer"]
 assert partial["answer"]["generation_vector"]["symbols"] is not None
+PYTHON
+  # A real issue write advances repository authority without changing source.
+  # Reuse the original immutable indexes through every trusted-local read mode.
+  metadata_exit=0
+  "$FG_BIN" issue open "$NODE" "$TENANT" "$REPOSITORY" 1 --trusted-local \
+    --principal "$PRINCIPAL" --idempotency-key initial-retrieval-metadata \
+    --object-format "$format" --expected-version 0 --title 'Metadata only' --body '' \
+    >"$WORK/metadata.out" 2>"$WORK/metadata.err" || metadata_exit=$?
+  fge_assert_exit "SEARCH-PROGRESS-007$suffix" 0 "$metadata_exit" 'issue publication advances metadata without rebuilding either index'
+  metadata_initial=$(search initial metadata-initial.json index_source=current-native-v1 symbol_name_hex=5468696e67 symbol_policy=required)
+  metadata_ranked=$(search context metadata-context.json index_source=current-native-v1 context_selection=context-weighted-rrf-q16-v1 symbol_name_hex=5468696e67 symbol_policy=required)
+  metadata_progressive=$(search progressive metadata.ndjson index_source=current-native-v1 symbol_name_hex=5468696e67 symbol_policy=required)
+  metadata_strict=$(search context metadata-strict.json context_selection=context-weighted-rrf-q16-v1)
+  fge_assert_exit "SEARCH-PROGRESS-008$suffix" 0 "$metadata_initial" 'current Initial remains available after a metadata-only write'
+  fge_assert_exit "SEARCH-PROGRESS-009$suffix" 0 "$metadata_ranked" 'current ranked context retains source and index provenance after a metadata-only write'
+  fge_assert_exit "SEARCH-PROGRESS-010$suffix" 0 "$metadata_progressive" 'both progressive phases preserve the selected current source'
+  fge_assert_exit "SEARCH-PROGRESS-011$suffix" 2 "$metadata_strict" 'the strict ranked profile retains its exact-head refusal'
+  fge_assert_cmd "SEARCH-PROGRESS-012$suffix" 'current ranked and progressive answers retain immutable generations and the original Initial labels' \
+    python3 - "$WORK" <<'PYTHON'
+import json, sys
+from pathlib import Path
+work = Path(sys.argv[1])
+old = json.loads((work / "initial.json").read_bytes())
+initial = json.loads((work / "metadata-initial.json").read_bytes())
+context = json.loads((work / "metadata-context.json").read_bytes())
+phases = [json.loads(line) for line in (work / "metadata.ndjson").read_bytes().splitlines()]
+assert phases == [{"phase": "Initial", "answer": initial}, {"phase": "Refined", "answer": context}]
+assert context["retrieval"] == initial
+assert context["selection"] == "context-weighted-rrf-q16-v1"
+assert initial["snapshot_token"] != old["snapshot_token"]
+assert initial["generation_vector"] == old["generation_vector"]
+assert initial["source_commit"] == old["source_commit"]
+assert initial["root_tree"] == old["root_tree"]
+for channel in ("lexical", "symbols"):
+    source = initial["index_sources"][channel]
+    assert source["snapshot_token"] == old["snapshot_token"]
+    assert source["source_commit"] == initial["source_commit"]
+assert (work / "metadata-strict.json").read_bytes() == b""
 PYTHON
   fge_run_timeout 180 "search-initial-service-$format" python3 "$E2E_ROOT/helpers/initial_search_maintenance.py" \
     "$FG_BIN" "$WORK/service" "$format" "$run/work/bare" "$tip" "$next_tip" || true

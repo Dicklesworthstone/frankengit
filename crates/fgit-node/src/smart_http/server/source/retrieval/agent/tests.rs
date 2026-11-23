@@ -134,6 +134,6 @@ fn agent_context_index_mode_is_explicit_and_retains_the_closed_grammar() {
         .err()
         .unwrap()
         .code,
-        "unsupported_context_selection"
+        "unsupported_agent_context_selection"
     );
 }

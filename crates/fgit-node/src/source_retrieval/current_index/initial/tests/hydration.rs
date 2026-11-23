@@ -3,6 +3,7 @@ use super::*;
 use crate::NodeWorkspaceRefusal;
 use crate::source_retrieval::context::{ContextChannel, ContextLimits, RevalidatedInitialContext};
 
+mod ranked;
 mod visibility;
 
 const SOURCE: &[u8] = b"pub fn Thing() {}\n";

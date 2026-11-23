@@ -3,15 +3,11 @@
 use super::*;
 
 fn fixture(format: GitHashAlgorithm) -> Fixture {
-    super::super::fixture_with_configuration(
-        format,
-        b"current public content".to_vec(),
-        |config| {
-            config
-                .with_upload_pack_ref_in_want(true)
-                .with_upload_pack_object_info(true)
-        },
-    )
+    super::super::fixture_with_configuration(format, b"current public content".to_vec(), |config| {
+        config
+            .with_upload_pack_ref_in_want(true)
+            .with_upload_pack_object_info(true)
+    })
 }
 
 #[test]

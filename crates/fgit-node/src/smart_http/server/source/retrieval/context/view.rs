@@ -22,12 +22,6 @@ impl<'a> ContextView<'a> {
             Self::Current(_) => REVALIDATED_PROFILE,
         }
     }
-    pub(super) fn exact(self) -> Option<&'a InitialContext> {
-        match self {
-            Self::Exact(context) => Some(context),
-            Self::Current(_) => None,
-        }
-    }
     pub(super) fn retrieval(self) -> InitialView<'a> {
         match self {
             Self::Exact(context) => InitialView::Exact(context.retrieval()),

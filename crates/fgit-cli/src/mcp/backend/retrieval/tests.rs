@@ -648,6 +648,17 @@ fn explicit_index_source_maps_to_native_mode_without_widening_the_grammar() {
                 .contains(&("index_source".into(), "current-native-v1".into()))
         );
     }
+    for selection in ["raw-path-prefix", "context-weighted-rrf-q16-v1"] {
+        let mut context = request.clone();
+        context.insert("context_selection".into(), text(selection));
+        let mapped = fields(&context, true).unwrap();
+        assert!(mapped.contains(&("index_source".into(), "current-native-v1".into())));
+        assert!(mapped.contains(&("context_selection".into(), selection.into())));
+        assert_eq!(
+            fields(&context, false).unwrap_err().code,
+            "unknown_argument"
+        );
+    }
     for mode in ["", "exact", "strict", "revalidated", "current-native-v2"] {
         request.insert("index_source".into(), text(mode));
         assert_eq!(

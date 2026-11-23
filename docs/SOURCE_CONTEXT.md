@@ -76,9 +76,10 @@ the labels without treating them as reusable access credentials.
 ### Reuse after metadata-only changes
 
 `index_source=current-native-v1` explicitly selects current-source revalidation
-for `search-initial` and `context-initial`. It is also available as the same JSON
+for `search-initial`, `context-initial` and `search-progressive`. It is also available as the same JSON
 argument in `frankengit_source_initial` and `frankengit_source_context`, and as a
-`field=value` argument to `fg search --initial` or `fg search --context`.
+`field=value` argument to `fg search --initial`, `fg search --context` or
+`fg search --progressive`.
 
 The current visible native commit and tree must still match the original index
 source. A metadata-only head movement can then reuse those immutable generations.
@@ -100,10 +101,17 @@ additional lineage metadata is reserved against the retained original
 `max_result_bytes` before source I/O; source/excerpt ceilings and the original
 request deadline remain in force.
 
-This mode supports `raw-path-prefix` context selection. Combining it with the
-ranked selection profile refuses with `unsupported_context_selection`. The
-existing ranked path keeps its strict source contract. For a real Agent Protocol
-packet with the same explicit reuse mode, see
+Both source modes support the default `raw-path-prefix` selection and the
+explicit `context-weighted-rrf-q16-v1` ranked selection. Ranked current-source
+hydration uses `hydrate_source_initial_revalidated_ranked_local_in` and returns
+`ranked::RevalidatedRankedContext`, containing a `RevalidatedInitialContext` and
+the same `ContextRanking` receipt used by the strict profile. It ranks only the
+rows of its original revalidated Initial report, preserves every index source
+and row label, and retains the current head and native commit pins during
+hydration. Selecting ranking does not change the revalidated wire profile or
+the original retrieval embedded in it.
+
+For a real Agent Protocol packet with the same explicit reuse mode, see
 [agent context](AGENT_CONTEXT_COMMAND.md#read-after-unrelated-metadata-changes).
 
 ### Request and result
@@ -186,7 +194,10 @@ context_selection=context-weighted-rrf-q16-v1
 ```
 
 The native method returns a `RankedContext` containing the unchanged source
-context and a `ContextRanking`. The existing native method and omitted or
+context and a `ContextRanking`. For a `RevalidatedInitialReport`, use
+`hydrate_source_initial_revalidated_ranked_local_in` to receive its distinct
+`RevalidatedRankedContext` without changing the report's provenance. The
+unranked native methods and omitted or
 explicit `context_selection=raw-path-prefix` keep alphabetical selection and
 the same selection behavior. `search-initial` remains index-only and rejects this field.
 Unknown profiles, duplicate selectors and caller-supplied weights are refused.
@@ -278,7 +289,10 @@ complete, truncated, ranked, raw-path and refusal cases through the binary.
 
 Use `fg search --progressive` for a trusted-local read, or send an authenticated
 form to `POST {repository-route}/api/v1/source/search-progressive`. Both take
-the exact-generation context fields and select `context-weighted-rrf-q16-v1`.
+the shared context fields and select `context-weighted-rrf-q16-v1`. Omit
+`index_source` for the strict authority-head contract, or set
+`index_source=current-native-v1` to reuse unchanged native source after an
+unrelated metadata update while retaining original index generations.
 For example, to search the indexed SHA-256 branch for `Thing`, run
 
 ```sh
@@ -293,6 +307,14 @@ The service flushes this record before reading the selected source files. A
 rows. A `RefinementFailed` record carries the refusal code. In that case the
 Initial answer is still usable. EOF after just one record means delivery ended
 before the client received the refinement outcome.
+
+In current-source mode, Initial includes `current_source`, separate
+`index_sources` and the revalidated authorization labels. The service selects
+that source once, flushes this original document, then moves the same owned
+report into ranked hydration. An authority or native-source movement, expired
+read grant, cancellation or budget failure after the flush produces
+`RefinementFailed`; it never retries retrieval, selects a new source or rewrites
+Initial. On success, Refined retains that Initial document as its `retrieval`.
 
 HTTP requires the source-read grant. A failure before Initial uses its ordinary
 HTTP status. Once Initial starts a successful `application/x-ndjson` response,

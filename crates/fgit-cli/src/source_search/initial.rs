@@ -17,7 +17,8 @@ Fields use the HTTP search-initial/context-initial grammar exactly, for example
   max_results_per_channel=20 context_selection=context-weighted-rrf-q16-v1
 Use index_source=current-native-v1 to reuse original index generations after
 metadata-only changes, revalidating the current visible native commit and tree.
-This mode uses raw-path-prefix context selection; ranked selection is separate.
+It supports raw or ranked context and progressive output, preserving the original
+index generations and pinning both phases to the one selected current source.
 Without index_source, index source positions must match the exact current head.
 Repeat term_hex, path_prefix_hex and symbol_kind for several values. The node
 supplies object_format. Requires built lexical (and, for symbols, symbol)

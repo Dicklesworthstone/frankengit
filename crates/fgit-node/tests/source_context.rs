@@ -398,6 +398,9 @@ mod http;
 #[path = "source_context/ranking.rs"]
 mod ranking;
 
+#[path = "source_context/revalidated_ranked.rs"]
+mod revalidated_ranked;
+
 #[test]
 fn hydration_rejects_a_different_host_context_and_keeps_the_original_permitted() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
