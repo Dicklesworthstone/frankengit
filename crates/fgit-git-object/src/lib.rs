@@ -704,17 +704,47 @@ pub fn parse_object_body(
     profile: AcceptanceProfile,
     limits: &ParseLimits,
 ) -> Result<ParsedObject, ObjectError> {
+    match parse_structure(object_type, body, profile, limits)? {
+        Some(parsed) => Ok(parsed),
+        None => copy_bytes(body).map(ParsedObject::Blob),
+    }
+}
+
+/// Derives the native identity of resolved bytes and parses their structure.
+/// A blob has no structural fields, so callers retaining the original body
+/// receive its identity without allocating another copy of the payload.
+pub fn identify_object_body(
+    format: NativeGitHashAlgorithm,
+    object_type: ObjectType,
+    body: &[u8],
+    profile: AcceptanceProfile,
+    limits: &ParseLimits,
+) -> Result<(AnyGitOid, Option<ParsedObject>), ObjectError> {
+    let parsed = parse_structure(object_type, body, profile, limits)?;
+    Ok((
+        fgit_crypto::git_object_id(format, object_type, body),
+        parsed,
+    ))
+}
+
+fn parse_structure(
+    object_type: ObjectType,
+    body: &[u8],
+    profile: AcceptanceProfile,
+    limits: &ParseLimits,
+) -> Result<Option<ParsedObject>, ObjectError> {
     if body.len() > limits.max_object_bytes {
         return Err(ObjectError::ObjectTooLarge {
             limit: limits.max_object_bytes,
         });
     }
-    match object_type {
-        ObjectType::Blob => copy_bytes(body).map(ParsedObject::Blob),
-        ObjectType::Tree => parse_tree(body, profile, limits).map(ParsedObject::Tree),
-        ObjectType::Commit => parse_commit(body, profile, limits).map(ParsedObject::Commit),
-        ObjectType::Tag => parse_tag(body, profile, limits).map(ParsedObject::Tag),
-    }
+    let parsed = match object_type {
+        ObjectType::Blob => return Ok(None),
+        ObjectType::Tree => ParsedObject::Tree(parse_tree(body, profile, limits)?),
+        ObjectType::Commit => ParsedObject::Commit(parse_commit(body, profile, limits)?),
+        ObjectType::Tag => ParsedObject::Tag(parse_tag(body, profile, limits)?),
+    };
+    Ok(Some(parsed))
 }
 
 /// Emits a parsed object body. Imported commit/tag bytes are never normalized.

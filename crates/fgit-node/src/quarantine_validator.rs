@@ -482,21 +482,14 @@ impl ProductionQuarantineValidator<'_> {
         object_type: ObjectType,
         body: Vec<u8>,
     ) -> Result<(GitOid, VerifiedObject), RefusalCode> {
-        let id = fgit_crypto::git_object_id(
-            self.node.object_format,
-            crypto_object_kind(object_type),
-            &body,
-        );
-        let parsed = verify_native_object(
+        let (id, parsed) = fgit_git_object::identify_object_body(
             self.node.object_format,
             object_type,
             &body,
-            &id,
             AcceptanceProfile::GitCompatibleImport,
             &self.parse_limits,
         )
-        .map_err(map_pack_error)?;
-        let parsed = (!matches!(parsed, ParsedObject::Blob(_))).then_some(parsed);
+        .map_err(|error| map_pack_error(PackError::ObjectParse(error)))?;
         Ok((
             id,
             VerifiedObject {
