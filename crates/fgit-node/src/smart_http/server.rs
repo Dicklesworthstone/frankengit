@@ -1242,13 +1242,47 @@ impl Write for ResponseWriter<'_> {
     }
 }
 
-fn write_error(writer: &mut impl Write, version: HttpVersion, status: Status) -> io::Result<()> {
+#[derive(Clone, Copy)]
+enum UploadUnavailable {
+    Repository,
+    SessionDeadline,
+}
+
+impl UploadUnavailable {
+    fn from_refusal(error: &NodeSmartHttpRefusal) -> Self {
+        if let NodeSmartHttpRefusal::Serve(serve) = error
+            && let crate::NodeGitDaemonServeRefusal::Transport(transport) = serve.as_ref()
+            && matches!(
+                transport.as_ref(),
+                crate::GitDaemonTransportRefusal::SessionDeadlineExceeded { .. }
+            )
+        {
+            return Self::SessionDeadline;
+        }
+        Self::Repository
+    }
+}
+
+fn write_error(
+    writer: &mut impl Write,
+    version: HttpVersion,
+    status: Status,
+    upload: Option<UploadUnavailable>,
+) -> io::Result<()> {
     let version = match version {
         HttpVersion::Http10 => "HTTP/1.0",
         HttpVersion::Http11 => "HTTP/1.1",
     };
     let body = if status == Status::Unavailable {
-        "repository operation unavailable; a push may already be committed; retry with the same Idempotency-Key\n"
+        match upload {
+            Some(UploadUnavailable::SessionDeadline) => {
+                "upload-pack session deadline exceeded; the operator can raise --session-timeout-secs\n"
+            }
+            Some(UploadUnavailable::Repository) => "repository read unavailable; retry the fetch\n",
+            None => {
+                "repository operation unavailable; a push may already be committed; retry with the same Idempotency-Key\n"
+            }
+        }
     } else if status == Status::CrossSite {
         "cross-site request refused: its Origin (or Sec-Fetch-Site) is not this server; nothing was changed\n"
     } else {
@@ -1410,6 +1444,7 @@ fn serve_connection_with_routes(
     let mut api_error = None;
     let mut recovery = false;
     let mut recovery_error = None;
+    let mut upload_unavailable = None;
     let served = (|| -> Result<(), Status> {
         let limits = routes.map_or(ingress.http, routing::Profiles::http_limits);
         let bytes = read_head(&mut reader, limits)?;
@@ -1677,6 +1712,12 @@ fn serve_connection_with_routes(
         } else {
             None
         };
+        if git_request
+            .as_ref()
+            .is_some_and(|request| request.operation.service() == Service::UploadPack)
+        {
+            upload_unavailable = Some(UploadUnavailable::Repository);
+        }
         let mut source_read_grant = None;
         let session = if let Some(request) = &default_branch_request {
             default_branch::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
@@ -2031,7 +2072,12 @@ fn serve_connection_with_routes(
                         eprintln!("Smart HTTP receive ended without a reported outcome: {error}");
                     }
                 }
-                git_result.map_err(Status::from)?;
+                git_result.map_err(|error| {
+                    if upload_unavailable.is_some() {
+                        upload_unavailable = Some(UploadUnavailable::from_refusal(&error));
+                    }
+                    Status::from(error)
+                })?;
             }
             writer.flush().map_err(|_| Status::Unavailable)
         })();
@@ -2077,7 +2123,7 @@ fn serve_connection_with_routes(
                     let _ = error.send(&mut writer, version);
                 }
             } else {
-                let _ = write_error(&mut writer, version, status);
+                let _ = write_error(&mut writer, version, status, upload_unavailable);
             }
         }
     }
@@ -2110,6 +2156,7 @@ mod tests {
     mod issue_search;
     mod pull_search;
     mod queue_preparation;
+    mod upload_unavailable;
 
     #[test]
     fn review_byte_line_counts_preserve_empty_final_and_binary_fragments() {
@@ -2321,7 +2368,7 @@ mod tests {
         ] {
             for status in [Status::Unauthorized, Status::Forbidden, Status::Unavailable] {
                 let mut response = Vec::new();
-                write_error(&mut response, version, status).unwrap();
+                write_error(&mut response, version, status, None).unwrap();
                 let response = String::from_utf8(response).unwrap();
                 let (headers, body) = response.split_once("\r\n\r\n").unwrap();
                 assert!(headers.starts_with(&format!("{prefix} {}", status.line())));
@@ -2451,7 +2498,13 @@ mod tests {
     #[test]
     fn final_refusal_is_self_delimiting_and_contains_no_request_text() {
         let mut response = Vec::new();
-        write_error(&mut response, HttpVersion::Http11, Status::Unauthorized).unwrap();
+        write_error(
+            &mut response,
+            HttpVersion::Http11,
+            Status::Unauthorized,
+            None,
+        )
+        .unwrap();
         let response = String::from_utf8(response).unwrap();
         let (head, body) = response.split_once("\r\n\r\n").unwrap();
         assert!(head.starts_with("HTTP/1.1 401"));
@@ -2758,7 +2811,7 @@ mod tests {
     #[test]
     fn cross_site_refusal_is_a_typed_self_delimiting_403() {
         let mut response = Vec::new();
-        write_error(&mut response, HttpVersion::Http11, Status::CrossSite).unwrap();
+        write_error(&mut response, HttpVersion::Http11, Status::CrossSite, None).unwrap();
         let response = String::from_utf8(response).unwrap();
         let (head, body) = response.split_once("\r\n\r\n").unwrap();
         assert!(head.starts_with("HTTP/1.1 403 Forbidden\r\n"));
