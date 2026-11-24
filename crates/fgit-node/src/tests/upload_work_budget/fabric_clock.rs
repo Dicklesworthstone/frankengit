@@ -39,6 +39,12 @@ fn verified_fabric_credit_cannot_exceed_the_original_transport_allowance() {
     // A real selected-work allowance can raise the outer ceiling. Database
     // credit is still capped there, including in a newly minted read phase.
     assert!(session.note_selected_upload_work(10_000));
+    // An independent upper bound projects the wall deadline using the
+    // opposite sample order, allowing preemption in either measurement.
+    let wall_lower = Instant::now();
+    let native_upper = node.runtime.now();
+    let remaining_cap = (session.started + session.budget()).saturating_duration_since(wall_lower);
+    let absolute_cap = before.with_timeout(native_upper, remaining_cap).deadline;
     ceiling.rearm(request.authority());
     assert_eq!(session.budget(), Duration::from_secs(20));
     assert_eq!(
@@ -48,6 +54,7 @@ fn verified_fabric_credit_cannot_exceed_the_original_transport_allowance() {
     let left = wall_time(&node, request.authority());
     assert!(left > Duration::from_secs(15) && left <= Duration::from_secs(20));
     let after = request.authority().attached_native_cx().unwrap().budget();
+    assert!(after.deadline <= absolute_cap);
     assert_eq!(after.poll_quota, before.poll_quota);
     assert_eq!(after.cost_quota, before.cost_quota);
     assert_eq!(after.priority, before.priority);

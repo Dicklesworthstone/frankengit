@@ -4321,8 +4321,11 @@ impl<'n> FabricReadCeiling<'n> {
         scaling: GitDaemonSessionWorkScaling,
     ) -> Option<Self> {
         let native = context.attached_native_cx()?;
-        let left = native.budget().remaining(node.runtime.now()).deadline?;
-        let base = Instant::now().checked_add(left)?;
+        // Sample the destination clock first. A scheduling delay between
+        // clocks may shorten this projection but cannot add work time.
+        let wall_now = Instant::now();
+        let left = native.budget().remaining_time(node.runtime.now())?;
+        let base = wall_now.checked_add(left)?;
         Some(Self {
             node,
             scaling,
@@ -4350,17 +4353,18 @@ impl<'n> FabricReadCeiling<'n> {
 
     // A read can complete after its deadline, before a checkpoint has
     // published cancellation. Sampling the native budget consumes no quota.
-    fn live_budget(&self, context: &FsqliteCx) -> Option<asupersync::Budget> {
+    fn live_budget(&self, context: &FsqliteCx) -> Option<(asupersync::Budget, asupersync::Time)> {
         let native = context.attached_native_cx()?;
         let budget = native.budget();
+        let native_now = self.node.runtime.now();
         if context.is_cancel_requested()
             || native.is_cancel_requested()
             || budget.is_exhausted()
-            || budget.is_past_deadline(self.node.runtime.now())
+            || budget.is_past_deadline(native_now)
         {
             return None;
         }
-        Some(budget)
+        Some((budget, native_now))
     }
 
     fn note_read(&self, context: &FsqliteCx, bytes: usize) {
@@ -4399,25 +4403,22 @@ impl<'n> FabricReadCeiling<'n> {
         {
             earned = earned.min(outer);
         }
-        let now = Instant::now();
-        if earned <= self.armed.get() || earned <= now {
+        if earned <= self.armed.get() {
             return;
         }
-        let Some(budget) = self.live_budget(context) else {
+        let Some((budget, native_now)) = self.live_budget(context) else {
             return;
         };
-        let left = budget.remaining(self.node.runtime.now());
-        let limits = ClassLimits {
-            timeout: Some(earned - now),
-            poll_quota: left.polls.unwrap_or(u32::MAX),
-            cost_quota: left.cost,
-            priority: budget.priority,
+        // Project into native time from the same tick that checked the
+        // original budget. Sampling wall time second keeps the result inside
+        // the earned ceiling even if this thread is descheduled.
+        let Some(left) = earned.checked_duration_since(Instant::now()) else {
+            return;
         };
-        context.set_native_cx(
-            self.node
-                .runtime
-                .request_cx_with_budget(limits.at(self.node.runtime.now())),
-        );
+        let extended = budget.with_timeout(native_now, left);
+        if extended.deadline > budget.deadline {
+            context.set_native_cx(self.node.runtime.request_cx_with_budget(extended));
+        }
         self.armed.set(earned);
     }
 }
