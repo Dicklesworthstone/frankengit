@@ -150,6 +150,14 @@ def lifecycle(campaign, fmt):
         assert status == 200 and former["source_current"] is False, former
         assert former["source_tip"] == f.tips[0] and int(former["pull_request_version"]) == 1, former
         assert former["complete"] and former["checks"] == [], former
+        stale_detail = json.loads(campaign.invoke("stale-pr-with-checks", [
+            "pr", "show", *f.scope, 1, "--trusted-local", "--checks", "--object-format", fmt,
+            "--expected-head", former["snapshot_token"]]))
+        stale_page = stale_detail["workflow_checks"]
+        assert stale_detail["source_head"] == stale_page["source_head"] == former["source_head"]
+        assert stale_detail["pull_request"]["version"] == int(stale_page["pull_request_version"]) == 1
+        assert stale_page["source_tip"] == former["source_tip"] and not stale_page["source_current"]
+        assert stale_page["complete"] and stale_page["checks"] == []
         updated = json.loads(campaign.invoke("refresh-existing-pull", [
             "pr", "update", *f.scope, 1, "--trusted-local", "--principal", PRINCIPAL,
             "--idempotency-key", "refresh-pushed-subject", "--expected-version", 1,
@@ -163,6 +171,10 @@ def lifecycle(campaign, fmt):
         empty = json.loads(body)
         assert status == 200 and empty["source_current"] and empty["source_tip"] == tip, empty
         assert int(empty["pull_request_version"]) == 2 and empty["complete"] and empty["checks"] == [], empty
+        detail_args = ["pr", "show", *f.scope, 1, "--trusted-local", "--checks", "--object-format", fmt]
+        historical = json.loads(campaign.invoke("prior-pr-with-checks", [
+            *detail_args, "--expected-head", former["snapshot_token"]]))
+        assert historical == stale_detail, historical
         queue(f, "enqueue", 0, "enqueue-pushed-tip", ["--priority", 0], True)
         stale = queue(f, "land", 1, "prior-success-cannot-land", ["--expected-policy-epoch", epoch], False)
         assert refs(f)[TARGET] == f.base
@@ -192,6 +204,16 @@ def lifecycle(campaign, fmt):
         assert checks["source_head"] == pull["source_head"] and checks["node_closed"], checks
         assert int(checks["pull_request_version"]) == 3 and checks["source_current"], checks
         assert checks["source_tip"] == tip and checks["complete"] and checks["checks"] == [checked], checks
+        joined = json.loads(campaign.invoke("merged-pr-with-checks", detail_args))
+        joined_page = joined.pop("workflow_checks")
+        assert joined == pull and joined_page["checks"] == [checked], joined
+        fields = ("found", "source_head", "snapshot_token", "pull_request_version", "source_ref_hex",
+                  "target_ref_hex", "source_tip", "target_tip", "source_current", "next_after",
+                  "complete", "checks")
+        assert joined_page == {field: checks[field] for field in fields}, joined_page
+        missing = json.loads(campaign.invoke("absent-pr-with-checks", [
+            "pr", "show", *f.scope, 99, "--trusted-local", "--checks", "--object-format", fmt], code=4))
+        assert not missing["found"] and missing["pull_request"] is None and missing["workflow_checks"] is None
         drained, _ = server.stop()
         assert not drained["requires_reconciliation"] and not drained["execution_retried"], drained
     campaign.record(fmt, "stock-push-http-check-protected-fast-forward", source=tip,

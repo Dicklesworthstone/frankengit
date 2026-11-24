@@ -123,6 +123,7 @@ pub(super) fn read_receipt(
     read: &ReadOptions,
     source_head: RepositoryAuthorityHeadId,
     next_after: Option<u64>,
+    checks_page: Option<&fgit_node::PullRequestChecksPage>,
     rows: &[Row<'_>],
 ) -> Result<(String, u8), String> {
     // Never disclose a response that contradicts the requested pinned window.
@@ -154,17 +155,65 @@ pub(super) fn read_receipt(
         quote(&head_token(source_head))
     );
     match read.selection {
-        Selection::Show(number) => {
+        Selection::Show { number, checks } => {
             // A next-number result must not turn a hidden/absent exact lookup
             // into an accidental disclosure of a different PR.
             let row = rows.first().filter(|view| view.number == number);
+            // A visibility change between the two reads withholds the entire detail.
+            let row = row.filter(|_| !checks || checks_page.is_some());
+            let workflow_checks = if checks {
+                match (row, checks_page) {
+                    (Some(row), Some(page)) => {
+                        let (source, target, source_tip, target_tip) = match &row.event.payload {
+                            ForgeEventPayload::PullRequestChangedNative(change) => {
+                                let data = &change.data;
+                                (
+                                    &data.source_ref,
+                                    &data.target_ref,
+                                    data.source_tip,
+                                    data.target_tip,
+                                )
+                            }
+                            ForgeEventPayload::MergeCommittedNative(merge) => (
+                                &merge.source_ref,
+                                &merge.target_ref,
+                                merge.source_tip,
+                                merge.target_tip_before,
+                            ),
+                            _ => return Err("workflow checks require a native PR subject".into()),
+                        };
+                        if page.pull_request_version != row.event.version
+                            || &page.source_ref != source
+                            || &page.target_ref != target
+                            || page.source_tip != source_tip
+                            || page.target_tip != target_tip
+                        {
+                            return Err(
+                                "workflow checks disagree with the selected PR subject".into()
+                            );
+                        }
+                        let fields = super::checks::page_fields(
+                            page,
+                            options.format,
+                            number,
+                            None,
+                            super::checks::DEFAULT_LIMIT,
+                            Some(source_head),
+                        )?;
+                        format!(",\"workflow_checks\":{{{fields}}}")
+                    }
+                    _ => ",\"workflow_checks\":null".to_owned(),
+                }
+            } else {
+                String::new()
+            };
             let body = row
                 .map(render_view)
                 .transpose()?
                 .unwrap_or_else(|| "null".to_owned());
             Ok((
                 format!(
-                    "{{\"type\":\"pull_request\",{header},\"requested_number\":{},\"found\":{},\"pull_request\":{body}}}",
+                    "{{\"type\":\"pull_request\",{header},\"requested_number\":{},\"found\":{},\"pull_request\":{body}{workflow_checks}}}",
                     number.get(),
                     row.is_some()
                 ),

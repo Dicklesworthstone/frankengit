@@ -25,6 +25,13 @@ the exact executed commit.
   [--after ID --expected-head TOKEN]`. Exit 0 returns a complete JSON response,
   4 means the PR is absent/hidden, and 2 means invalid input or a read/cleanup
   failure. `complete` indicates whether more observation pages remain.
+- `fg pr show <storage-root> <tenant-id> <repository-id> <number> --trusted-local
+  --checks` returns PR metadata and the first 20 workflow observations at the same
+  authenticated head. The `workflow_checks` object carries the selected PR
+  version, source and target coordinates, `source_current`, check rows and
+  continuation. For additional rows, pass its `next_after` and `snapshot_token`
+  to `fg pr checks`. An absent or hidden PR returns exit 4 with both
+  `pull_request` and `workflow_checks` set to null.
 - MCP: `frankengit_pull_checks`, enabled by the existing pulls read grant.
   `number` is an exact positive decimal string. `limit` is a JSON integer from
   1–20 (default 5); `after` and `expected_head` have the HTTP semantics. Sponsored
