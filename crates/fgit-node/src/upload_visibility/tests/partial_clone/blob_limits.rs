@@ -14,7 +14,8 @@ fn reopen_with_object_limit(config: &NodeConfig, limit: usize) -> OneNode {
 
 fn assert_body_limit(
     result: &Result<GitDaemonSessionOutcome, NodeGitDaemonServeRefusal>,
-    response: &[u8],
+    allowed: &[u8],
+    refused: &[u8],
     version: u8,
 ) {
     assert!(
@@ -31,20 +32,12 @@ fn assert_body_limit(
         ),
         "v{version}: {result:?}"
     );
-    assert!(
-        !response.windows(4).any(|bytes| bytes == b"PACK"),
-        "over-limit selected bodies never emit pack bytes"
+    assert_selected_refusal_after_advertisement(
+        allowed,
+        refused,
+        version,
+        "ERR Pack(ObjectSizeLimit { actual: 4096, limit: 4095 })\n",
     );
-    assert!(
-        !response.windows(4).any(|bytes| bytes == b"ERR "),
-        "the failure belongs to pack selection, after advertisement"
-    );
-    if version == 2 {
-        let text = String::from_utf8_lossy(response);
-        assert!(text.contains("version 2"), "{text}");
-        assert!(text.contains("4096"), "typed size refusal: {text}");
-        assert!(text.contains("4095"), "typed size refusal: {text}");
-    }
 }
 
 #[test]
@@ -122,7 +115,7 @@ fn oversized_unselected_blobs_allow_advertisement_filters_and_noop_fetches() {
             // blob:none; explicit wants override the filter.
             let common_body = b"common ancestor body";
             let common = git_object_id(format, GitObjectKind::Blob, common_body);
-            let (returned, result, response) = exchange_filtered(
+            let (returned, result, allowed) = exchange_filtered(
                 node,
                 version,
                 &[common],
@@ -136,7 +129,7 @@ fn oversized_unselected_blobs_allow_advertisement_filters_and_noop_fetches() {
                 "small lazy {format:?} v{version}: {result:?}"
             );
             assert_eq!(
-                bodies(&response, version, format),
+                bodies(&allowed, version, format),
                 BTreeSet::from([common_body.to_vec()])
             );
 
@@ -145,7 +138,7 @@ fn oversized_unselected_blobs_allow_advertisement_filters_and_noop_fetches() {
                 let (returned, result, response) =
                     exchange_filtered(node, version, &[wanted], None, filter, false);
                 node = returned;
-                assert_body_limit(&result, &response, version);
+                assert_body_limit(&result, &allowed, &response, version);
             }
 
             // Metadata allowances never expose retained deleted-branch data.
