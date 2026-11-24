@@ -1502,7 +1502,32 @@ fn a_kill_around_the_atomic_publication_leaves_head_and_outcomes_agreeing() {
 
 #[test]
 fn a_duplicate_outcome_is_cached_only_if_all_its_bytes_commit() {
-    let scratch = Scratch::new("atomic-publish-duplicate-outcomes");
+    publish_duplicate_outcomes("atomic-publish-duplicate-outcomes", 2, 3, true);
+}
+
+#[test]
+fn the_immutable_batch_cache_limits_do_not_refuse_larger_atomic_publications() {
+    use fgit_authority::{MAX_IMMUTABLE_BATCH_BYTES, MAX_IMMUTABLE_BATCH_ITEMS};
+
+    publish_duplicate_outcomes("publish-at-cache-count", MAX_IMMUTABLE_BATCH_ITEMS, 1, true);
+    publish_duplicate_outcomes(
+        "publish-above-cache-count",
+        MAX_IMMUTABLE_BATCH_ITEMS + 1,
+        1,
+        false,
+    );
+    // The two keys take this pair over the byte budget even though the
+    // combined values alone fit exactly.
+    publish_duplicate_outcomes(
+        "publish-above-cache-bytes",
+        2,
+        MAX_IMMUTABLE_BATCH_BYTES / 2,
+        false,
+    );
+}
+
+fn publish_duplicate_outcomes(label: &str, count: usize, body_bytes: usize, expect_cached: bool) {
+    let scratch = Scratch::new(label);
     let node = node();
     let key = head_key();
     let genesis = genesis_head_body();
@@ -1538,10 +1563,9 @@ fn a_duplicate_outcome_is_cached_only_if_all_its_bytes_commit() {
     };
     // A conflicting second entry must roll back the first insertion, including
     // any in-process copy. The storage primitive accepts opaque outcome bytes.
-    let mut entries = [
-        (outcome_key.clone(), b"one".to_vec()),
-        (outcome_key.clone(), b"two".to_vec()),
-    ];
+    let value = vec![1; body_bytes];
+    let mut entries = vec![(outcome_key.clone(), value.clone()); count];
+    entries[1].1[0] = 2;
     assert!(matches!(
         publish(&entries),
         Err(EngineError::Contract(
@@ -1551,16 +1575,16 @@ fn a_duplicate_outcome_is_cached_only_if_all_its_bytes_commit() {
     assert_eq!(store.token(&key), token);
     assert_eq!(store.read_body(&outcome_key), Ok(ImmutableRead::Absent));
 
-    entries[1].1 = entries[0].1.clone();
+    entries[1].1[0] = 1;
     assert!(matches!(publish(&entries), Ok(CasOutcome::Committed(_))));
     let before = store.store.body_cache_stats();
     assert_eq!(
         store.read_body(&outcome_key),
-        Ok(ImmutableRead::Present(b"one".to_vec()))
+        Ok(ImmutableRead::Present(value))
     );
     let after = store.store.body_cache_stats();
-    assert_eq!(after.hits, before.hits + 1);
-    assert_eq!(after.misses, before.misses);
+    assert_eq!(after.hits - before.hits, u64::from(expect_cached));
+    assert_eq!(after.misses - before.misses, u64::from(!expect_cached));
 }
 
 #[test]

@@ -1155,8 +1155,12 @@ impl FsqliteAuthorityStore {
                 // together. Admission immediately reads the entries back to
                 // reconcile each decision; the ordinary body cache can serve
                 // those reads only after the transaction has succeeded.
-                for (outcome_key, bytes) in outcomes {
-                    self.bodies.insert(outcome_key.as_bytes(), bytes);
+                // Larger primitive calls still publish, without unbounded
+                // cache work between COMMIT and its acknowledgement.
+                if fgit_authority::validate_immutable_batch(outcomes, self.limits).is_ok() {
+                    for (outcome_key, bytes) in outcomes {
+                        self.bodies.insert(outcome_key.as_bytes(), bytes);
+                    }
                 }
                 Ok(outcome)
             }
