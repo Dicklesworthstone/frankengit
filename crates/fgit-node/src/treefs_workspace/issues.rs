@@ -1,5 +1,6 @@
 //! Durable repository issues on the node's real authority. Local authenticated
-//! commands share metadata publication with PRs; reads never trust a cache.
+//! commands share metadata publication with PRs; cached coordinates never
+//! replace authenticated authority, disclosure policy, or selected payloads.
 #[path = "metadata_snapshot.rs"]
 pub(super) mod snapshots;
 
@@ -238,16 +239,25 @@ impl OneNode {
             &|| !super::workspace_request_live(request),
         )
         .await?;
-        issues::read_page_at(
+        let cache = self.aggregate_history_index_cache();
+        let kind = crate::aggregate_history::HistoryKind::Issues;
+        let previous = cache.lookup(self, kind, selected.id());
+        let (page, index) = issues::read_page_indexed_at(
             &self.authority,
             request.authority(),
             &selected,
             after,
             limit,
+            previous.as_deref(),
+            cache.index_budget(self),
             &|| !super::workspace_request_live(request),
         )
         .await
-        .map_err(|source| IssueReadRefusal::Admission(Box::new(source)))
+        .map_err(|source| IssueReadRefusal::Admission(Box::new(source)))?;
+        if let Some(index) = index {
+            cache.insert(self, kind, index);
+        }
+        Ok(page)
     }
 
     /// Page exact action/comment history and its accompanying issue snapshot
@@ -275,17 +285,26 @@ impl OneNode {
             &|| !super::workspace_request_live(request),
         )
         .await?;
-        issues::read_history_at(
+        let cache = self.aggregate_history_index_cache();
+        let kind = crate::aggregate_history::HistoryKind::Issues;
+        let previous = cache.lookup(self, kind, selected.id());
+        let (page, index) = issues::read_history_indexed_at(
             &self.authority,
             request.authority(),
             &selected,
             number,
             after_version,
             limit,
+            previous.as_deref(),
+            cache.index_budget(self),
             &|| !super::workspace_request_live(request),
         )
         .await
-        .map_err(|source| IssueReadRefusal::Admission(Box::new(source)))
+        .map_err(|source| IssueReadRefusal::Admission(Box::new(source)))?;
+        if let Some(index) = index {
+            cache.insert(self, kind, index);
+        }
+        Ok(page)
     }
 }
 const fn validate_page(

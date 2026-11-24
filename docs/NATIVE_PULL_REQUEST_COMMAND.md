@@ -128,6 +128,10 @@ A merge-only stream is labelled `merge_receipt` with null metadata/opener;
 no opening or review history is fabricated. Current metadata actors are not
 mislabelled as the merge principal. PR text remains untrusted data, not safe HTML.
 
+Repeated native reads can reuse [verified aggregate-history coordinates](VERIFIED_AGGREGATE_HISTORY_READS.md)
+at the same authenticated head. Current visibility and labels are reevaluated,
+and selected payloads are reread; the cache does not retain rendered PR rows.
+
 ## Outcomes, recovery and output
 
 | Exit | Meaning |

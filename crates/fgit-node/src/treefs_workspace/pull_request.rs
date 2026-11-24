@@ -189,7 +189,10 @@ impl OneNode {
                     && !current.hidden_refs.hides(reference.as_bytes())
             })
         };
-        pull_request::read_page_filtered_at(
+        let cache = self.aggregate_history_index_cache();
+        let kind = crate::aggregate_history::HistoryKind::PullRequests;
+        let previous = cache.lookup(self, kind, selected.id());
+        let (page, index) = pull_request::read_page_filtered_indexed_at(
             &self.authority,
             request.authority(),
             &selected,
@@ -197,10 +200,16 @@ impl OneNode {
             limit,
             labels,
             &visible,
+            previous.as_deref(),
+            cache.index_budget(self),
             &|| !super::workspace_request_live(request),
         )
         .await
-        .map_err(|error| PullRequestReadRefusal::Admission(Box::new(error)))
+        .map_err(|error| PullRequestReadRefusal::Admission(Box::new(error)))?;
+        if let Some(index) = index {
+            cache.insert(self, kind, index);
+        }
+        Ok(page)
     }
 }
 
