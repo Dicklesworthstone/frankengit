@@ -217,6 +217,7 @@ pub use smart_http::{
 };
 pub use termination::TerminationSignals;
 mod ancestry_metadata;
+mod event_history;
 mod quarantine_validator;
 mod receive_refusal;
 mod receive_staging;
@@ -8067,6 +8068,9 @@ pub struct NodeConfig {
     /// Bounded verified commit metadata reused by merge preparation. Every
     /// consumer still checks its current selected closure and logical budget.
     ancestry_metadata_cache: Arc<ancestry_metadata::AncestryMetadataCache>,
+    /// Disposable event-history index. Readers still authenticate their own
+    /// exact head, disclosure policy, grants, and selected event payloads.
+    event_history_index_cache: Arc<event_history::EventHistoryIndexCache>,
     /// Verified historical closure prefix, shared across service children but
     /// revalidated against each request's exact authority basis before reuse.
     admission_closure_cache: Arc<closure_selection::AdmissionClosureCache>,
@@ -8184,6 +8188,9 @@ impl NodeConfig {
             )),
             ancestry_metadata_cache: Arc::new(ancestry_metadata::AncestryMetadataCache::new(
                 DEFAULT_ANCESTRY_METADATA_CACHE_BYTES,
+            )),
+            event_history_index_cache: Arc::new(event_history::EventHistoryIndexCache::new(
+                event_history::DEFAULT_CACHE_BYTES,
             )),
             admission_closure_cache: Arc::new(closure_selection::AdmissionClosureCache::default()),
             upload_visibility_cache: Arc::default(),
@@ -8755,6 +8762,26 @@ impl NodeConfig {
     #[must_use]
     pub fn ancestry_metadata_cache_bytes(&self) -> usize {
         self.ancestry_metadata_cache.max_bytes()
+    }
+
+    /// Selects the retained verified event-history metadata allowance.
+    ///
+    /// The default is 16 MiB; zero disables retention. Service children share
+    /// at most one exact-head index. Initial reads construct it from verified
+    /// history, while cold resumed reads retain the bounded suffix reader.
+    /// Payloads and disclosure decisions are never cached. This allowance is
+    /// additional to per-request history and event-byte limits.
+    #[must_use]
+    pub fn with_event_history_index_cache_bytes(mut self, max_bytes: usize) -> Self {
+        self.event_history_index_cache =
+            Arc::new(event_history::EventHistoryIndexCache::new(max_bytes));
+        self
+    }
+
+    /// Byte ceiling for the retained verified event-history index.
+    #[must_use]
+    pub fn event_history_index_cache_bytes(&self) -> usize {
+        self.event_history_index_cache.max_bytes()
     }
 
     /// The byte ceiling for verified received-pack representations.
@@ -9488,6 +9515,10 @@ impl OneNode {
 
     pub(crate) fn ancestry_metadata_cache(&self) -> &ancestry_metadata::AncestryMetadataCache {
         &self.service_config.ancestry_metadata_cache
+    }
+
+    pub(crate) fn event_history_index_cache(&self) -> &event_history::EventHistoryIndexCache {
+        &self.service_config.event_history_index_cache
     }
 
     pub(crate) fn received_pack_cache(&self) -> &received_pack::ReceivedPackCache {

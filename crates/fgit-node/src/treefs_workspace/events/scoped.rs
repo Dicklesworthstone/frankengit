@@ -1,9 +1,7 @@
 //! Disclosure projection shared by HTTP and MCP. Neither cursors nor event
 //! bytes confer permission. Callers supply independently authenticated grants.
 
-use super::{
-    ForgeEventCursor, ForgeEventPage, ForgeEventReadRefusal, feed, workspace_request_live,
-};
+use super::{ForgeEventCursor, ForgeEventPage, ForgeEventReadRefusal, workspace_request_live};
 use crate::{NodeRequestContext, OneNode};
 use fgit_codec::encode_body;
 use fgit_forge::event::ForgeEventPayload;
@@ -294,8 +292,9 @@ impl OneNode {
     /// never request fields. Source/receive/write grants do not imply either.
     /// `limit` bounds canonical events examined, not the number disclosed: an
     /// empty page can have `next_after`. Persist `resume_after` even at EOF.
-    /// This reuses the existing bounded history replay; no O(limit) indexed
-    /// lookup, long-poll, delivery acknowledgement or publication is claimed.
+    /// At an already verified exact head, bounded metadata permits seeking to
+    /// the cursor without replaying history. Cold reads retain bounded replay;
+    /// long-poll, delivery acknowledgement and publication are not provided.
     pub async fn read_scoped_forge_events_in(
         &self,
         request: &NodeRequestContext,
@@ -328,7 +327,9 @@ impl OneNode {
     /// policy. At most `limit` selected event subjects require additional
     /// canonical metadata reader calls; each reader retains its existing
     /// replay, byte, deadline and cancellation limits.
-    /// This does not provide indexed O(limit) access or a complete forge export.
+    /// The shared event index accelerates history selection only; additional
+    /// disclosure checks keep their own canonical readers and work bounds.
+    /// This is not a complete forge export.
     pub async fn read_profiled_forge_events_in(
         &self,
         request: &NodeRequestContext,
@@ -355,16 +356,9 @@ impl OneNode {
         // Events and hidden-ref policy share ONE authenticated head, without
         // reconstructing source objects, refs, outbox or outcome projections.
         // A separate policy head read would introduce a disclosure TOCTOU race.
-        let page = feed::read_page_at(
-            &self.authority,
-            request.authority(),
-            &selected.basis,
-            cursor,
-            limit,
-            &|| !workspace_request_live(request),
-        )
-        .await
-        .map_err(|error| ForgeEventReadRefusal::Admission(Box::new(error)))?;
+        let page = self
+            .read_canonical_event_page_in(request, &selected.basis, cursor, limit)
+            .await?;
         let mut result = ScopedForgeEventPage {
             tenant: self.tenant_id,
             repository: self.repository_id,

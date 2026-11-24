@@ -146,7 +146,10 @@ pub(super) struct Fixture {
 }
 impl Fixture {
     pub(super) fn new() -> Self {
-        let backend = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0xfeed));
+        Self::with_instance(StoreInstanceId::from_raw(0xfeed))
+    }
+    pub(super) fn with_instance(instance: StoreInstanceId) -> Self {
+        let backend = MemoryAuthorityStore::new(instance);
         let key = HeadKey::new(b"forge-event-seek-test".to_vec()).unwrap();
         let genesis = RepositoryAuthorityHeadBody {
             repository_id: RepositoryId::from_bytes([0xb7; 16]),
@@ -182,6 +185,12 @@ impl Fixture {
     // One length per committed RCR. An empty slice is a refusal-only batch;
     // a zero length is a committed RCR carrying a verified empty event batch.
     pub(super) fn append(&mut self, counts: &[usize]) {
+        self.append_profile(counts, false);
+    }
+    pub(super) fn append_reference_empty(&mut self, count: usize) {
+        self.append_profile(&vec![0; count], true);
+    }
+    fn append_profile(&mut self, counts: &[usize], reference_empty: bool) {
         let HeadRead::Present(receipt) = self.store.backend.read_head(&self.key).unwrap() else {
             panic!("fixture head absent")
         };
@@ -212,18 +221,21 @@ impl Fixture {
                     .unwrap()
                 })
                 .collect();
-            let batch = ForgeEventBatch { events };
-            let root = storage::root(&batch).unwrap();
+            let (root, frame) = if reference_empty {
+                assert_eq!(count, 0);
+                let batch = crate::evidence::ForgeEventBatch::empty().unwrap();
+                (storage::root(&batch).unwrap(), encode_body(&batch).unwrap())
+            } else {
+                let batch = ForgeEventBatch { events };
+                (storage::root(&batch).unwrap(), encode_body(&batch).unwrap())
+            };
             let key = storage::body_key(
                 storage::EVENT_NAMESPACE,
                 self.basis.body().repository_id,
                 root,
             )
             .unwrap();
-            self.store
-                .backend
-                .put_if_absent(&key, &encode_body(&batch).unwrap())
-                .unwrap();
+            self.store.backend.put_if_absent(&key, &frame).unwrap();
             plan.commit(RepositoryCommitRecord {
                 repository_id: self.basis.body().repository_id,
                 repository_sequence: RepositorySequence::FIRST,

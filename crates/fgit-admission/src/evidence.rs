@@ -148,10 +148,18 @@ pub struct ForgeEventBatch {
 }
 
 impl ForgeEventBatch {
+    /// The canonical empty forge partition used by ref-only transactions.
+    pub(crate) fn empty() -> Result<Self, CodecRefusal> {
+        Ok(Self {
+            effect_bytes: canonical_forge_effect_bytes(
+                &fgit_reference::effect::NetEffects::default(),
+            )?,
+        })
+    }
+
     /// Reports whether this evidence records the canonical empty forge partition.
     pub fn is_empty(&self) -> Result<bool, CodecRefusal> {
-        Ok(self.effect_bytes
-            == canonical_forge_effect_bytes(&fgit_reference::effect::NetEffects::default())?)
+        Ok(self.effect_bytes == Self::empty()?.effect_bytes)
     }
 }
 

@@ -178,12 +178,16 @@ that boundary has native unit cases and still needs a real-binary PR campaign.
 Owning bead: `frankengit-root-doctrine-x2mv.4.35`; plan §§24 and 31.
 The shared node read uses one authenticated head for configuration, disclosure
 policy and event history, without materializing unrelated source/outbox state.
-Recent-cursor reads walk only the verified decision suffix through that cursor;
-initial reads and old-cursor backfills can still be **O(history)**. See
+Recent-cursor cache misses walk only the verified decision suffix through that
+cursor. At a retained exact head, the shared verified metadata index seeks to
+the cursor and rereads the required nonempty event batches. Cold initial reads
+and uncached old-cursor backfills can still be **O(history)**. See
 [the cursor-read contract](FORGE_EVENT_CURSOR_READS.md) for required-body checks,
 work bounds and explicit non-claims. No second event database or canonical
-schema is added. Indexed O(limit) lookup and optional long-poll remain
-outstanding. These changes do not close the bead.
+schema is added. The warm event-batch bound does not include V2's separate
+canonical visibility readers. Persistent indexing, incremental maintenance
+across head changes and optional long-poll remain outstanding. These changes
+do not close the bead.
 
 Authored tests cover exact cursors, independent grants, hidden-ref filtering, filtering before
 encoding, empty-page progression, byte-budget continuation, cancellation,

@@ -6,8 +6,10 @@ pub use scoped::{ForgeEventDisclosureProfile, ForgeEventReadGrants};
 use super::workspace_request_live;
 use crate::{AdmissionMaterializationRefusal, NodeRequestContext, OneNode};
 use fgit_admission::merge::native::feed::{self, ForgeEventCursor, ForgeEventPage};
+use fgit_chronicle::PublicationBasis;
 use fgit_types::RepositoryAuthorityHeadId;
 use fgit_types::cell::CellRefusal;
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub enum ForgeEventReadRefusal {
@@ -54,13 +56,87 @@ impl OneNode {
             })
             .transpose()?;
         let selected = self.event_read_basis_in(request, expected_head).await?;
+        self.read_canonical_event_page_in(request, &selected.basis, after, limit)
+            .await
+    }
+
+    /// Shared by local and authenticated disclosure surfaces. A cache hit is
+    /// usable only after the caller selects its own authenticated basis. The
+    /// cache contains no event bytes or grants, and selected payloads are
+    /// verified again by the admission reader on every request.
+    async fn read_canonical_event_page_in(
+        &self,
+        request: &NodeRequestContext,
+        basis: &PublicationBasis,
+        after: Option<ForgeEventCursor>,
+        limit: u16,
+    ) -> Result<ForgeEventPage, ForgeEventReadRefusal> {
+        let cancelled = || !workspace_request_live(request);
+        if cancelled() {
+            return Err(ForgeEventReadRefusal::Cancelled);
+        }
+        let cache = self.event_history_index_cache();
+        if let Some(index) = cache.lookup(self, basis.id()) {
+            return index
+                .read_page_at(
+                    &self.authority,
+                    request.authority(),
+                    basis,
+                    after,
+                    limit,
+                    &cancelled,
+                )
+                .await
+                .map_err(|error| ForgeEventReadRefusal::Admission(Box::new(error)));
+        }
+        // A cold resumed cursor must not pay for an unrelated history prefix
+        // merely to populate optional acceleration state. Initial reads already
+        // verify the whole history and may retain its bounded metadata.
+        let budget = cache.index_budget(self);
+        if after.is_none()
+            && budget != 0
+            && feed::VerifiedEventIndex::fits_retention_budget(basis, budget)
+        {
+            if let Ok(index) = feed::VerifiedEventIndex::build_at(
+                &self.authority,
+                request.authority(),
+                basis,
+                budget,
+                &cancelled,
+            )
+            .await
+            {
+                let index = Arc::new(index);
+                let page = index
+                    .read_page_at(
+                        &self.authority,
+                        request.authority(),
+                        basis,
+                        after,
+                        limit,
+                        &cancelled,
+                    )
+                    .await
+                    .map_err(|error| ForgeEventReadRefusal::Admission(Box::new(error)))?;
+                if !cancelled() {
+                    cache.insert(self, index);
+                    return Ok(page);
+                }
+            }
+            if cancelled() {
+                return Err(ForgeEventReadRefusal::Cancelled);
+            }
+            // Disabled/oversized or unavailable optional metadata never grants
+            // success. Re-enter the unchanged canonical reader with the same
+            // remaining request budget; it must establish the requested page.
+        }
         feed::read_page_at(
             &self.authority,
             request.authority(),
-            &selected.basis,
+            basis,
             after,
             limit,
-            &|| !workspace_request_live(request),
+            &cancelled,
         )
         .await
         .map_err(|error| ForgeEventReadRefusal::Admission(Box::new(error)))
@@ -69,6 +145,8 @@ impl OneNode {
 
 #[cfg(test)]
 mod tests {
+    mod cache;
+
     use super::*;
     use crate::{LoopbackReceiveSession, NodeConfig};
     use fgit_admission::AdmissionLimits;

@@ -52,13 +52,61 @@ This is not a weakening of source publication or an alternative admission path.
 
 Together the two changes bound recent polling by its decision suffix plus
 configuration/policy reads, rather than adding a complete source/outbox replay.
-Initial reads and old-cursor backfills can still be O(history); there is no
-indexed O(limit) claim, long-poll or new canonical format. Cold node opening may
-have other initialization costs. The bead remains open until indexed lookup,
-real-binary execution and independent verification satisfy its acceptance.
+Cold initial reads and uncached old-cursor backfills can still be O(history).
+The disposable index below accelerates repeated reads of one already-verified
+head. There is no long-poll or new canonical format. Cold node opening may have
+other initialization costs. The bead remains open until its complete bounded
+lookup, real-binary execution and independent verification acceptance is met.
 
 Ten additional authored tests cover exact I/O selection, head pins, independent
 repository/incarnation/format bindings, missing/corrupt/replayed configuration
 and policy, cancellation at each I/O boundary, forged receipts, historical
 configuration, and raw/scoped parity on reopened native SHA-1/SHA-256 nodes.
 They have not been run in the toolchain-less editing environment.
+
+## Reusing verified history metadata
+
+The shared node reader used by CLI, HTTP and MCP can retain a
+`VerifiedEventIndex` after a successful initial page. Construction uses the
+existing authenticated history walk. Its private rows contain committed
+repository sequences, transaction identities, policy epochs and event roots;
+they contain no event text, credentials, hidden-ref rules or rendered pages.
+
+Both canonical empty-event schemas are recognized by their exact commitments,
+and each referenced empty body is verified once during construction. Empty
+records are omitted from the searchable rows. A warm page binary-searches the
+cursor and reads only its event batch plus the nonempty batches needed for the
+page and lookahead. Both paths use the same payload reader, preserving content
+commitments, cursor offsets, EOF verification, byte ceilings and cancellation.
+The bound concerns event-batch reads, not measured latency or throughput.
+
+`NodeConfig::with_event_history_index_cache_bytes` sets the retention allowance,
+16 MiB by default; zero disables it. At most one exact-head index is retained,
+shared with service children opened from cloned configuration. Scope includes
+storage root, store instance, tenant, repository, incarnation and hash format.
+Index capacity and scope overhead are charged. An active reader may retain its
+immutable index after eviction; this is a custody allowance, not an RSS limit.
+No cache lock spans storage I/O.
+
+Every request authenticates its head and configuration, resolves hidden-ref
+policy at that same head, and applies its own grants before disclosure. Missing
+policy cannot fall back to an earlier successful read. Selected event bodies
+are reread, including the cursor body at EOF, so cached coordinates cannot
+conceal missing or corrupt selected payloads.
+
+A changed head or scope misses. An initial read may rebuild; a cold resumed
+cursor uses the existing suffix reader without populating optional metadata.
+A conservative sequence-based preflight skips builds that cannot be guaranteed
+to fit, before any history I/O. Other construction failures never supply a
+page: fallback uses canonical reading with the same remaining request budget,
+which may already have been partially consumed. Cancellation retains no partial
+index. Fresh processes rebuild from canonical history; cursors do not depend
+on cache lifetime.
+
+Reference tests in `feed/history_tests/index.rs` compare full pages to canonical
+replay and count actual store reads across history lengths, both empty schemas,
+corruption, cancellation, stale bindings and memory bounds. Native tests in
+`events/tests/cache.rs` cover both hash domains, reopen, discarded caches,
+changed heads and per-request grants. These are authored tests, not a passing
+execution claim. Persistent indexing, incremental maintenance across changed
+heads and the full Bead acceptance remain open.

@@ -12,7 +12,9 @@ use fgit_types::{
 };
 
 mod history;
+mod index;
 mod selected;
+pub use index::VerifiedEventIndex;
 pub(super) use selected::{SelectedForgeEvent, SelectedHistoryLimits, read_selected_at};
 
 const MAX_PAGE: u16 = 100;
@@ -57,6 +59,27 @@ struct Record {
     policy_epoch: PolicyEpoch,
     principal_snapshot_id: PrincipalSnapshotId,
     event_root: Digest,
+}
+
+/// The page reader does not need the principal snapshot used by aggregate
+/// replay. Keep the retained index limited to the actual page coordinates.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PageRecord {
+    sequence: u64,
+    tx_id: TxId,
+    policy_epoch: PolicyEpoch,
+    event_root: Digest,
+}
+
+impl From<Record> for PageRecord {
+    fn from(record: Record) -> Self {
+        Self {
+            sequence: record.sequence,
+            tx_id: record.tx_id,
+            policy_epoch: record.policy_epoch,
+            event_root: record.event_root,
+        }
+    }
 }
 
 fn checkpoint(cancelled: &impl Fn() -> bool) -> Result<(), AdmissionError> {
@@ -112,9 +135,37 @@ where
     if after.is_some_and(|cursor| cursor.repository_sequence == 0) {
         return Err(unavailable(RefusalCode::EvidenceInvalid));
     }
-    let repository = basis.body().repository_id;
     let records =
         history::read_records(store, cx, basis, after, history::Limits::DEFAULT, cancelled).await?;
+    read_records_page(
+        store,
+        cx,
+        basis,
+        records.into_iter().map(PageRecord::from),
+        after,
+        limit,
+        cancelled,
+    )
+    .await
+}
+
+/// Both history replay and the verified index use the same payload reader.
+/// Cached descriptors never replace validation of the selected event bytes.
+async fn read_records_page<S, C, R>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    records: R,
+    after: Option<ForgeEventCursor>,
+    limit: usize,
+    cancelled: &C,
+) -> Result<ForgeEventPage, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+    R: Iterator<Item = PageRecord>,
+{
+    let repository = basis.body().repository_id;
     let mut cursor_seen = after.is_none();
     let mut output = Vec::with_capacity(limit);
     let mut page_bytes = 0usize;
