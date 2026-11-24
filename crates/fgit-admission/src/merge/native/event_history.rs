@@ -16,6 +16,9 @@ use fgit_types::{Digest, HeadGeneration, RefusalCode, RepositoryId};
 use super::{delivery, storage, unavailable};
 use crate::AdmissionError;
 
+mod index;
+pub use index::VerifiedAggregateHistory;
+
 const MAX_HISTORY_STEPS: usize = 4096;
 const MAX_HISTORY_DECISIONS: usize = 65_536;
 
@@ -78,6 +81,39 @@ where
     C: Fn() -> bool + Sync,
     F: FnMut(&ForgeEvent, usize) -> Result<(), AdmissionError> + Send,
 {
+    visit_selected_indexed_at(
+        store, cx, basis, forge, outbox, selected, limits, None, 0, visitor, cancelled,
+    )
+    .await
+    .map(|(summary, _)| summary)
+}
+
+/// Reuse verified selected-history coordinates at the exact same authority head.
+///
+/// A cold read performs the complete ordinary replay once. Optional coordinates
+/// are collected during that replay, and are returned only after all active
+/// payloads and any required predecessor history have passed verification.
+/// Retention exhaustion disables the optional result, not the canonical read.
+/// A warm read rereads every selected payload and retains the caller's index;
+/// it returns `None` in the second tuple position. This never authorizes access.
+pub(super) async fn visit_selected_indexed_at<S, C, F>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    forge: &CanonicalForgePositionState,
+    outbox: &CanonicalOutboxState,
+    selected: &BTreeMap<AggregateId, ForgePositionStateEntry>,
+    limits: HistoryReadLimits,
+    prior: Option<&VerifiedAggregateHistory>,
+    max_retained_bytes: usize,
+    visitor: &mut F,
+    cancelled: &C,
+) -> Result<(HistoryReadSummary, Option<VerifiedAggregateHistory>), AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+    F: FnMut(&ForgeEvent, usize) -> Result<(), AdmissionError> + Send,
+{
     limits.validate()?;
     checkpoint(cancelled)?;
     let repository = basis.body().repository_id;
@@ -101,9 +137,21 @@ where
             .or_default()
             .push(position);
     }
-    let mut replay = ReplayEvents::new(forge, selected, limits, visitor);
+    let reusable = prior.filter(|index| {
+        max_retained_bytes != 0
+            && index.retained_bytes() <= max_retained_bytes
+            && index.covers(store, basis, selected)
+    });
+    let retained = if reusable.is_none() {
+        index::Builder::new(
+            store, basis, selected, limits.events, max_retained_bytes, cancelled,
+        )?
+    } else {
+        None
+    };
+    let mut replay = ReplayEvents::new(forge, selected, limits, visitor, retained);
     if selected.is_empty() {
-        return Ok(replay.summary());
+        return Ok((replay.summary(), None));
     }
     // A shared frontier batch is read and charged once, then every selected
     // range is authenticated before its version becomes a completeness bound.
@@ -125,6 +173,13 @@ where
             .map_err(|_| unavailable(RefusalCode::ResourceBudgetExceeded))?;
         charge(total, version, limits.events)
     })?;
+    if let Some(index) = reusable {
+        index
+            .visit_remaining(store, cx, repository, &mut replay, expected_events, cancelled)
+            .await?;
+        checkpoint(cancelled)?;
+        return Ok((replay.summary(), None));
+    }
     for entry in outbox.entries() {
         replay
             .read_root(
@@ -254,7 +309,12 @@ where
         }
     }
     checkpoint(cancelled)?;
-    Ok(replay.summary())
+    let summary = replay.summary();
+    let retained = replay
+        .retained
+        .map(|builder| builder.finish(expected_events, cancelled))
+        .transpose()?;
+    Ok((summary, retained))
 }
 
 struct ReplayEvents<'a, F> {
@@ -267,6 +327,7 @@ struct ReplayEvents<'a, F> {
     empty_batches: BTreeSet<Digest>,
     scanned_events: usize,
     scanned_bytes: usize,
+    retained: Option<index::Builder>,
 }
 
 impl<'a, F: FnMut(&ForgeEvent, usize) -> Result<(), AdmissionError> + Send> ReplayEvents<'a, F> {
@@ -275,6 +336,7 @@ impl<'a, F: FnMut(&ForgeEvent, usize) -> Result<(), AdmissionError> + Send> Repl
         selected: &'a BTreeMap<AggregateId, ForgePositionStateEntry>,
         limits: HistoryReadLimits,
         visitor: &'a mut F,
+        retained: Option<index::Builder>,
     ) -> Self {
         Self {
             forge,
@@ -286,6 +348,7 @@ impl<'a, F: FnMut(&ForgeEvent, usize) -> Result<(), AdmissionError> + Send> Repl
             empty_batches: BTreeSet::new(),
             scanned_events: 0,
             scanned_bytes: 0,
+            retained,
         }
     }
 
@@ -349,6 +412,9 @@ impl<'a, F: FnMut(&ForgeEvent, usize) -> Result<(), AdmissionError> + Send> Repl
                 .len();
             (self.visitor)(event, size)?;
             self.events.insert(key, digest);
+            if let Some(retained) = &mut self.retained {
+                retained.push(event, root, digest)?;
+            }
         }
         Ok(Some(batch))
     }

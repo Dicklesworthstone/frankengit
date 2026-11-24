@@ -34,6 +34,7 @@ pub mod delivery;
 pub mod discussions;
 pub mod dispatch;
 mod event_history;
+pub use event_history::VerifiedAggregateHistory;
 pub mod feed;
 pub mod history;
 pub mod issues;

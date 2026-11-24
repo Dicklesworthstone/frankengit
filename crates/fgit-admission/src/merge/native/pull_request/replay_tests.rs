@@ -14,6 +14,8 @@ use fgit_types::{GitHashAlgorithm, GitOid, PrincipalId, RepositoryId};
 use std::future::Future;
 use std::task::{Context, Poll, Waker};
 
+mod indexed;
+
 fn run<F: Future>(future: F) -> F::Output {
     match Box::pin(future)
         .as_mut()
