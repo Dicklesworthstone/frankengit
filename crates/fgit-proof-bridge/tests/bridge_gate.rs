@@ -99,6 +99,38 @@ fn rendering_the_same_corpus_twice_is_byte_identical() {
     assert_eq!(first_difference(&once, &twice), None);
 }
 
+#[test]
+fn corpus_replay_checks_the_full_recorded_head_before_projection() {
+    use fgit_proof_bridge::{CorpusRefusal, project};
+    use fgit_reference::trace::{DivergenceKind, decode, encode};
+    use fgit_types::DecisionSequence;
+
+    let dir = scratch("replay");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("simple_commit.fgtrace");
+    let bytes = std::fs::read(goldens().join("simple_commit.fgtrace")).unwrap();
+    std::fs::write(&path, &bytes).unwrap();
+    let expected = project_corpus(&dir).unwrap();
+
+    let mut changed = decode(&bytes).unwrap();
+    let last = changed.steps.len() - 1;
+    let decision = &mut changed.steps[last].head.latest_decision_sequence;
+    assert_eq!(*decision, Some(DecisionSequence::FIRST));
+    *decision = Some(DecisionSequence::try_new(2).unwrap());
+    // The Lean residue observes generation, so both recordings render identically.
+    assert_eq!(project("simple_commit", &changed).unwrap(), expected[0]);
+    std::fs::write(&path, encode(&changed).unwrap()).unwrap();
+    assert_eq!(
+        project_corpus(&dir),
+        Err(CorpusRefusal::Diverged {
+            golden: "simple_commit".to_owned(),
+            step_index: last,
+            kind: DivergenceKind::Head,
+        })
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 // -------------------------------------------------------------- the projection
 
 /// The corpus must actually exercise the abstract operations it claims to.

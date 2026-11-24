@@ -6,6 +6,11 @@ Run the local, fail-closed checker with:
 bash proofs/fg041/check.sh
 ```
 
+The vector generator's `check` and `generate` commands first replay each
+recorded history against the Rust reference model. Each step must reproduce its
+recorded outcome, root bytes, and full head position. A mismatch reports the
+golden name, first differing step, and observation kind before writing vectors.
+
 The proof E2E lane runs `bash proofs/fg041/check.sh --dpor` to check the model and both schedules. The existing `check_dpor.sh` command invokes the same checks.
 It replays the recorded `cas_loss_retry.fgtrace` seed, then lets the
 concurrency lab schedule its two competing staged batches at the common head.

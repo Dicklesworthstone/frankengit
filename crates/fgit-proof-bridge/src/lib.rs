@@ -58,7 +58,7 @@ pub use project::{
 
 use std::path::Path;
 
-/// Loads every checked-in golden and projects it.
+/// Replays every golden against the reference model before projecting it.
 ///
 /// The corpus is discovered by reading the directory rather than by a hard-coded
 /// list, so a golden added by the reference model's own tests cannot be silently
@@ -68,8 +68,8 @@ use std::path::Path;
 ///
 /// # Errors
 ///
-/// A refusal naming the first golden that could not be read, decoded, or
-/// projected.
+/// A refusal naming the first golden that could not be read, decoded,
+/// faithfully replayed, or projected.
 pub fn project_corpus(goldens: &Path) -> Result<Vec<ProjectedTrace>, CorpusRefusal> {
     let mut names = Vec::new();
     let entries = std::fs::read_dir(goldens).map_err(|error| CorpusRefusal::Unreadable {
@@ -100,6 +100,18 @@ pub fn project_corpus(goldens: &Path) -> Result<Vec<ProjectedTrace>, CorpusRefus
                 golden: name.clone(),
                 message: format!("{error:?}"),
             })?;
+        let replay =
+            fgit_reference::trace::replay(&trace).map_err(|error| CorpusRefusal::ReplayFailed {
+                golden: name.clone(),
+                error,
+            })?;
+        if let Some(divergence) = replay.divergence {
+            return Err(CorpusRefusal::Diverged {
+                golden: name,
+                step_index: divergence.step_index,
+                kind: divergence.kind,
+            });
+        }
         projected.push(
             project(&name, &trace).map_err(|refusal| CorpusRefusal::Unprojectable {
                 golden: name.clone(),
@@ -125,7 +137,23 @@ pub enum CorpusRefusal {
         /// What the codec said.
         message: String,
     },
-    /// A golden decoded but could not be projected.
+    /// The reference model could not execute the recorded inputs.
+    ReplayFailed {
+        /// Which golden.
+        golden: String,
+        /// The refused model or codec operation.
+        error: fgit_reference::trace::TraceError,
+    },
+    /// The model disagreed with a recorded observation.
+    Diverged {
+        /// Which golden.
+        golden: String,
+        /// The first differing step, starting at zero.
+        step_index: usize,
+        /// Whether the outcome, roots, or head differed.
+        kind: fgit_reference::trace::DivergenceKind,
+    },
+    /// A faithfully replayed golden could not be projected.
     Unprojectable {
         /// Which golden.
         golden: String,
