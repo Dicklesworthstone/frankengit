@@ -198,7 +198,7 @@ fn service_outlives_an_attempt_budget_and_publishes_each_new_event_once() {
             .with_publisher(PrincipalId::from_bytes([0xb3; 16]))
             .with_attempt_timeout(Duration::from_secs(2))
             .unwrap();
-        let running = Running::start(&f, watch);
+        let running = Running::start(&f, watch.clone());
         wait_for(&f, || reported(&f) == 1);
         assert_eq!(f.count(), "x");
         f.node().runtime().wait_for(Duration::from_millis(2200));
@@ -208,12 +208,38 @@ fn service_outlives_an_attempt_budget_and_publishes_each_new_event_once() {
         let receipt = running.stop();
         assert_eq!(receipt.dispatched, 2);
         assert_eq!(receipt.checks_committed, 2);
+        assert_eq!(receipt.checks_refused, 0);
+        assert!(receipt.node_closed);
         assert!(!receipt.non_green);
         assert!(!receipt.requires_reconciliation);
-        assert!(!receipt.publication_pending);
+        // The second reported file can become visible while the controller
+        // is still verifying another event. Stop may retain publication_pending
+        // until a complete scan. Readiness on restart is that public boundary.
+        let head = || {
+            f.node()
+                .runtime()
+                .block_on(f.node().authenticate_authority_head())
+                .unwrap()
+        };
+        let published = head();
+        let control = WorkflowWatchControl::default();
+        let recovered = run_service_with_ready(f.config.clone(), watch, control.clone(), || {
+            assert_eq!(reported(&f), 2);
+            control.request_stop();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(recovered.polls, 0);
+        assert_eq!(recovered.dispatched, 0);
+        assert_eq!(recovered.checks_committed, 0);
+        assert_eq!(recovered.checks_refused, 0);
+        assert!(recovered.node_closed);
+        assert!(!recovered.publication_pending);
+        assert!(!recovered.requires_reconciliation);
         let replay = poll!(f).unwrap();
         assert_eq!(replay.state(), "previously_settled");
         assert_eq!(f.count(), "xx");
+        assert_eq!(head().body().unwrap(), published.body().unwrap());
     }
 }
 
