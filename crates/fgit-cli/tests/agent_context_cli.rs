@@ -106,6 +106,110 @@ fn refused(args: &[String]) -> Value {
 }
 
 #[test]
+fn actual_command_opt_in_fusion_changes_the_selected_file_and_commits_its_receipt() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new();
+        let config = root.config(format);
+        let (node, _) = fixture_with_text(&root, format, config.clone(), b"nested\n");
+        build_index(&node);
+        let before = generation(&node);
+        node.shutdown().unwrap();
+        let mut args = arguments(&root, format);
+        let term = args.iter().position(|arg| arg == "--term").unwrap() + 1;
+        args[term] = "nested".into();
+        args.extend(["--max-files".into(), "1".into()]);
+        let raw = decode(&invoke(&args, 3).stdout);
+        let raw_evidence = field(&raw, "retrieval_evidence");
+        assert_eq!(
+            field(&array(field(&raw, "untrusted_sources"))[0], "path_hex").text(),
+            Some(hex(b"alpha.txt").as_str())
+        );
+        assert!(!raw_evidence.object().unwrap().contains_key("ranking"));
+        let mut explicit = args.clone();
+        explicit.extend(["--context-selection".into(), "raw-path-prefix".into()]);
+        let explicit = decode(&invoke(&explicit, 3).stdout);
+        assert_eq!(field(&explicit, "request"), field(&raw, "request"));
+        assert_eq!(field(&explicit, "retrieval_evidence"), raw_evidence);
+        assert_eq!(
+            field(&explicit, "evidence_commitment"),
+            field(&raw, "evidence_commitment")
+        );
+
+        args.extend([
+            "--context-selection".into(),
+            "context-weighted-rrf-q16-v1".into(),
+        ]);
+        let ranked = decode(&invoke(&args, 3).stdout);
+        let evidence = field(&ranked, "retrieval_evidence");
+        let receipt = field(evidence, "ranking");
+        assert_eq!(
+            field(field(&ranked, "request"), "context_selection").text(),
+            Some("context-weighted-rrf-q16-v1")
+        );
+        assert_eq!(field(receipt, "candidate_files").unsigned(), Some(2));
+        assert_eq!(
+            field(evidence, "omitted_candidate_files").unsigned(),
+            Some(1)
+        );
+        let selected = &array(field(receipt, "selected"))[0];
+        assert_eq!(
+            field(selected, "path_hex").text(),
+            Some(hex(b"dir/nested.txt").as_str())
+        );
+        assert_eq!(
+            field(selected, "score_q16").unsigned(),
+            Some(65_536 / 62 + 65_536 / 61)
+        );
+        assert_eq!(
+            field(
+                &array(field(&ranked, "untrusted_sources"))[0],
+                "untrusted_utf8"
+            )
+            .text(),
+            Some("needle in nested\n")
+        );
+        assert_eq!(
+            field(evidence, "content_channel"),
+            field(raw_evidence, "content_channel")
+        );
+        assert_eq!(
+            field(evidence, "path_channel"),
+            field(raw_evidence, "path_channel")
+        );
+        assert_ne!(
+            field(&ranked, "evidence_commitment"),
+            field(&raw, "evidence_commitment")
+        );
+        assert_ne!(
+            field(
+                field(&ranked, "context_packet"),
+                "request_intent_commitment"
+            ),
+            field(field(&raw, "context_packet"), "request_intent_commitment")
+        );
+        assert_eq!(
+            array(field(
+                field(&ranked, "context_packet"),
+                "omission_commitments"
+            )),
+            &[field(&ranked, "evidence_commitment").clone()]
+        );
+        let mut current = args.clone();
+        current.extend(["--index-source".into(), "current-native-v1".into()]);
+        let current = decode(&invoke(&current, 3).stdout);
+        assert_eq!(
+            field(field(&current, "retrieval_evidence"), "ranking"),
+            receipt
+        );
+        args.extend(["--max-source-bytes".into(), "7".into()]);
+        refused(&args);
+        let node = reopen(&config);
+        assert_eq!(generation(&node), before);
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
 fn actual_command_returns_authenticated_untrusted_context_for_both_formats() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let root = Scratch::new();

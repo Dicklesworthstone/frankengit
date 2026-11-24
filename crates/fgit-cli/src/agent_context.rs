@@ -2,6 +2,7 @@
 //! Sponsorship remains an explicit operator assertion, not a remote credential.
 mod options;
 
+pub use fgit_node::source_retrieval::agent_context::AgentContextSelection;
 pub use fgit_node::source_retrieval::agent_context::document::{
     AgentContextDocument, AgentContextRequest, MAX_LIFETIME, MAX_OUTPUT_BYTES, PROFILE,
 };
@@ -19,6 +20,7 @@ const USAGE: &str = "usage: fg agent context <storage-root> <tenant-id> <reposit
   [--symbol <Rust-name> --symbol-match exact|prefix --symbol-policy required|optional]
   [--expected-head alg:<algorithm>:<digest>] [--expires-after-secs <1..300>]
   [--index-source current-native-v1]
+  [--context-selection raw-path-prefix|context-weighted-rrf-q16-v1]
   [--max-results <1..1024>] [--max-work <units>] [--max-index-bytes <bytes>]
   [--max-files <1..32>] [--radius-bytes <0..4096>]
   [--max-source-bytes <1..67108864>] [--max-excerpt-bytes <1..1048576>]
@@ -32,6 +34,9 @@ metadata changes only when the current visible native commit and tree match;
 source changes still refuse. Without it, exact index authority positions must
 match. Original index provenance is retained in either mode. The sponsor is an
 operator assertion; path prefixes narrow selection, not repository authority.
+The default raw-path-prefix selection takes the earliest returned paths. The
+explicit weighted-fusion profile prioritizes agreement across returned content,
+path and symbol hits and retains its ranking receipt in the packet evidence.
 Repository excerpts are untrusted data. No task, durable run, effect, index,
 workspace or repository mutation is created. Global --timeout-secs can shorten
 the run's 30-second default lifetime. Exit 0: complete bounded context; 3: explicit
@@ -65,9 +70,19 @@ pub async fn read_agent_context_in(
     request: &NodeRequestContext,
     input: AgentContextRequest<'_>,
 ) -> Result<AgentContextDocument, String> {
+    read_agent_context_selected_in(node, request, input, AgentContextSelection::RawPathPrefix).await
+}
+
+/// The same trusted-local boundary with an explicit bounded selection profile.
+pub async fn read_agent_context_selected_in(
+    node: &OneNode,
+    request: &NodeRequestContext,
+    input: AgentContextRequest<'_>,
+    selection: AgentContextSelection,
+) -> Result<AgentContextDocument, String> {
     require_trusted_local(input.authorization)?;
-    fgit_node::source_retrieval::agent_context::document::read_agent_context_in(
-        node, request, input,
+    fgit_node::source_retrieval::agent_context::document::read_agent_context_selected_in(
+        node, request, input, selection,
     )
     .await
     .map_err(|error| error.to_string())
@@ -81,9 +96,25 @@ pub async fn read_agent_context_revalidated_in(
     request: &NodeRequestContext,
     input: AgentContextRequest<'_>,
 ) -> Result<AgentContextDocument, String> {
+    read_agent_context_revalidated_selected_in(
+        node,
+        request,
+        input,
+        AgentContextSelection::RawPathPrefix,
+    )
+    .await
+}
+
+/// Explicit current-source reuse with the selected file-ranking profile.
+pub async fn read_agent_context_revalidated_selected_in(
+    node: &OneNode,
+    request: &NodeRequestContext,
+    input: AgentContextRequest<'_>,
+    selection: AgentContextSelection,
+) -> Result<AgentContextDocument, String> {
     require_trusted_local(input.authorization)?;
-    fgit_node::source_retrieval::agent_context::document::read_agent_context_revalidated_in(
-        node, request, input,
+    fgit_node::source_retrieval::agent_context::document::read_agent_context_revalidated_selected_in(
+        node, request, input, selection,
     )
     .await
     .map_err(|error| error.to_string())
@@ -147,10 +178,19 @@ fn run_with(arguments: &[String], output: &mut impl Write) -> Result<u8, String>
         };
         if options.current_native {
             node.runtime()
-                .block_on(read_agent_context_revalidated_in(&node, &request, input))
+                .block_on(read_agent_context_revalidated_selected_in(
+                    &node,
+                    &request,
+                    input,
+                    options.selection,
+                ))
         } else {
-            node.runtime()
-                .block_on(read_agent_context_in(&node, &request, input))
+            node.runtime().block_on(read_agent_context_selected_in(
+                &node,
+                &request,
+                input,
+                options.selection,
+            ))
         }
     })();
     let cleanup = node.shutdown().err().map(|error| error.to_string());

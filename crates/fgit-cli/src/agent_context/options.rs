@@ -1,4 +1,6 @@
-use super::{ContextLimits, InitialLimits, InitialQuery, MAX_OUTPUT_BYTES, USAGE};
+use super::{
+    AgentContextSelection, ContextLimits, InitialLimits, InitialQuery, MAX_OUTPUT_BYTES, USAGE,
+};
 use fgit_forge::source_symbols::SymbolMatchMode;
 use fgit_node::source_retrieval::SymbolPolicy;
 use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
@@ -20,6 +22,7 @@ pub(super) struct Options {
     pub query: InitialQuery,
     pub expected_head: Option<RepositoryAuthorityHeadId>,
     pub current_native: bool,
+    pub selection: AgentContextSelection,
     pub retrieval_limits: InitialLimits,
     pub context_limits: ContextLimits,
     pub expires_after: Duration,
@@ -67,6 +70,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
                 | "--object-format"
                 | "--expected-head"
                 | "--index-source"
+                | "--context-selection"
                 | "--expires-after-secs"
                 | "--max-results"
                 | "--max-work"
@@ -209,6 +213,13 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
             Some("current-native-v1") => true,
             Some(_) => return Err("index source must be current-native-v1 when supplied".into()),
         },
+        selection: match flags.get("--context-selection").copied() {
+            None | Some("raw-path-prefix") => AgentContextSelection::RawPathPrefix,
+            Some(fgit_node::source_retrieval::context::ranked::PROFILE) => {
+                AgentContextSelection::WeightedRrf
+            }
+            Some(_) => return Err("unsupported agent context selection".into()),
+        },
         retrieval_limits,
         context_limits,
         expires_after: Duration::from_secs(
@@ -304,6 +315,7 @@ mod tests {
         let good = parse(&args(&[])).unwrap();
         assert_eq!(good.expires_after, Duration::from_secs(30));
         assert!(!good.current_native);
+        assert_eq!(good.selection, AgentContextSelection::RawPathPrefix);
         assert_eq!(good.query.content().terms(), &[b"needle".to_vec()]);
         for extra in [
             vec!["--trusted-local"],
@@ -322,6 +334,14 @@ mod tests {
             vec!["--index-source", "latest"],
             vec!["--index-source", "current-native-v2"],
             vec!["--index-source"],
+            vec!["--context-selection"],
+            vec!["--context-selection", "context-weighted-rrf-q16-v2"],
+            vec![
+                "--context-selection",
+                "raw-path-prefix",
+                "--context-selection",
+                "raw-path-prefix",
+            ],
             vec![
                 "--index-source",
                 "current-native-v1",
@@ -360,11 +380,14 @@ mod tests {
         let input = args(&[
             "--index-source",
             "current-native-v1",
+            "--context-selection",
+            "context-weighted-rrf-q16-v1",
             "--expected-head",
             &head,
         ]);
         let options = parse(&input).unwrap();
         assert!(options.current_native);
+        assert_eq!(options.selection, AgentContextSelection::WeightedRrf);
         assert_eq!(options.expected_head, Some(super::head(&head).unwrap()));
         assert_eq!(
             options.sponsor,

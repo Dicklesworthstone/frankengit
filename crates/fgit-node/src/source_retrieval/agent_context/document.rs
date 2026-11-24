@@ -5,13 +5,11 @@
 mod render;
 
 use super::{
-    AgentContextRead, AgentContextReadError, context_packet_for_revalidated_run,
-    context_packet_for_run,
+    AgentContextRead, AgentContextReadError, AgentContextSelection, AgentSourceContext,
+    RevalidatedAgentSourceContext, context_packet_for_revalidated_run, context_packet_for_run,
 };
 use crate::source_retrieval::authorization::SourceReadContext;
-use crate::source_retrieval::context::{
-    ContextFile, ContextLimits, InitialContext, RevalidatedInitialContext,
-};
+use crate::source_retrieval::context::{ContextFile, ContextLimits};
 use crate::source_retrieval::{Checkpoints, InitialLimits, InitialQuery};
 use crate::{NodeRefusal, NodeRequestContext, OneNode};
 use fgit_agent::{
@@ -39,6 +37,7 @@ pub const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_LIFETIME: Duration = Duration::from_secs(300);
 const VERIFIER: &[u8] = b"frankengit/native-agent-context/authenticated-head/v1\0";
 const RANKING: &[u8] = b"source-initial-retrieval-v1/raw-path-prefix/v1\0";
+const RANKED_RANKING: &[u8] = b"source-initial-retrieval-v1/context-weighted-rrf-q16-v1\0";
 
 /// Preserve transport-independent refusals without flattening native resource,
 /// source, authority or cancellation failures into an empty successful packet.
@@ -138,20 +137,20 @@ enum IndexSource {
 // Keep the native result types distinct all the way through packet binding.
 // In particular, a current observation never becomes fictitious index source.
 enum NativeContext {
-    Strict(InitialContext),
-    Revalidated(RevalidatedInitialContext),
+    Strict(AgentSourceContext),
+    Revalidated(RevalidatedAgentSourceContext),
 }
 impl NativeContext {
     fn files(&self) -> &[ContextFile] {
         match self {
-            Self::Strict(context) => context.files(),
-            Self::Revalidated(context) => context.files(),
+            Self::Strict(context) => context.context().files(),
+            Self::Revalidated(context) => context.context().files(),
         }
     }
     fn complete(&self) -> bool {
         match self {
-            Self::Strict(context) => context.complete(),
-            Self::Revalidated(context) => context.complete(),
+            Self::Strict(context) => context.context().complete(),
+            Self::Revalidated(context) => context.context().complete(),
         }
     }
     fn evidence(
@@ -159,8 +158,10 @@ impl NativeContext {
         live: &mut impl FnMut() -> Result<(), String>,
     ) -> Result<fgit_schema::json::Value, String> {
         match self {
-            Self::Strict(context) => render::evidence(context, live),
-            Self::Revalidated(context) => render::revalidated_evidence(context, live),
+            Self::Strict(context) => render::evidence(context.context(), context.ranking(), live),
+            Self::Revalidated(context) => {
+                render::revalidated_evidence(context.context(), context.ranking(), live)
+            }
         }
     }
     fn packet(
@@ -169,8 +170,10 @@ impl NativeContext {
         control: ContextControl,
     ) -> Result<ContextPacket, super::AgentContextRefusal> {
         match self {
-            Self::Strict(context) => context_packet_for_run(run, context, control),
-            Self::Revalidated(context) => context_packet_for_revalidated_run(run, context, control),
+            Self::Strict(context) => context_packet_for_run(run, context.context(), control),
+            Self::Revalidated(context) => {
+                context_packet_for_revalidated_run(run, context.context(), control)
+            }
         }
     }
 }
@@ -310,7 +313,19 @@ pub async fn read_agent_context_in(
     request: &NodeRequestContext,
     input: AgentContextRequest<'_>,
 ) -> Result<AgentContextDocument, AgentContextDocumentError> {
-    read_agent_context_with_source_in(node, request, input, IndexSource::Strict).await
+    read_agent_context_selected_in(node, request, input, AgentContextSelection::RawPathPrefix).await
+}
+
+/// Read a packet with an explicit file-selection profile. Only ranked selection
+/// adds the selector to request identity and the actual ranking receipt to the
+/// packet-bound evidence; the existing raw profile retains its original bytes.
+pub async fn read_agent_context_selected_in(
+    node: &OneNode,
+    request: &NodeRequestContext,
+    input: AgentContextRequest<'_>,
+    selection: AgentContextSelection,
+) -> Result<AgentContextDocument, AgentContextDocumentError> {
+    read_agent_context_with_source_in(node, request, input, IndexSource::Strict, selection).await
 }
 
 /// Explicitly read existing indexes revalidated against the current native
@@ -325,7 +340,25 @@ pub async fn read_agent_context_revalidated_in(
     request: &NodeRequestContext,
     input: AgentContextRequest<'_>,
 ) -> Result<AgentContextDocument, AgentContextDocumentError> {
-    read_agent_context_with_source_in(node, request, input, IndexSource::CurrentNative).await
+    read_agent_context_revalidated_selected_in(
+        node,
+        request,
+        input,
+        AgentContextSelection::RawPathPrefix,
+    )
+    .await
+}
+
+/// Ranked or raw selection over indexes revalidated against the exact current
+/// source. Ranking preserves original generations, labels and omission evidence.
+pub async fn read_agent_context_revalidated_selected_in(
+    node: &OneNode,
+    request: &NodeRequestContext,
+    input: AgentContextRequest<'_>,
+    selection: AgentContextSelection,
+) -> Result<AgentContextDocument, AgentContextDocumentError> {
+    read_agent_context_with_source_in(node, request, input, IndexSource::CurrentNative, selection)
+        .await
 }
 
 async fn read_agent_context_with_source_in(
@@ -333,6 +366,7 @@ async fn read_agent_context_with_source_in(
     request: &NodeRequestContext,
     input: AgentContextRequest<'_>,
     index_source: IndexSource,
+    selection: AgentContextSelection,
 ) -> Result<AgentContextDocument, AgentContextDocumentError> {
     input
         .authorization
@@ -375,6 +409,7 @@ async fn read_agent_context_with_source_in(
         IndexSource::Strict => render::intent(&input),
         IndexSource::CurrentNative => render::revalidated_intent(&input),
     };
+    let intent = render::with_selection(intent, selection);
     let intent_bytes = intent.encode(128 * 1024).map_err(str::to_owned)?;
     let request_commitment = commitment(
         b"frankengit/agent-context-request/v1\0",
@@ -418,7 +453,10 @@ async fn read_agent_context_with_source_in(
         clock.expiry,
     )
     .map_err(|error| error.to_string())?;
-    let ranking = sha256_digest(RANKING);
+    let ranking = sha256_digest(match selection {
+        AgentContextSelection::RawPathPrefix => RANKING,
+        AgentContextSelection::WeightedRrf => RANKED_RANKING,
+    });
     let control = ContextControl::new(request_commitment, read_scope(), ranking, vec![], vec![]);
     let read = AgentContextRead {
         run: &run,
@@ -432,18 +470,21 @@ async fn read_agent_context_with_source_in(
     };
     let context = match index_source {
         IndexSource::Strict => NativeContext::Strict(
-            node.retrieve_agent_context_local_in(request, read, &|| clock.now())
-                .await
-                .map_err(AgentContextDocumentError::Native)?
-                .into_parts()
-                .0,
+            node.retrieve_agent_context_selected_local_in(request, read, selection, &|| {
+                clock.now()
+            })
+            .await
+            .map_err(AgentContextDocumentError::Native)?,
         ),
         IndexSource::CurrentNative => NativeContext::Revalidated(
-            node.retrieve_agent_context_revalidated_local_in(request, read, &|| clock.now())
-                .await
-                .map_err(AgentContextDocumentError::Native)?
-                .into_parts()
-                .0,
+            node.retrieve_agent_context_revalidated_selected_local_in(
+                request,
+                read,
+                selection,
+                &|| clock.now(),
+            )
+            .await
+            .map_err(AgentContextDocumentError::Native)?,
         ),
     };
     clock.check(request)?;

@@ -6,11 +6,30 @@ use super::{
     match_run_current_source, match_run_source, run_receipt,
 };
 use crate::source_retrieval::authorization::SourceReadContext;
+use crate::source_retrieval::context::ranked::{self, ContextRanking};
 use crate::source_retrieval::context::{ContextLimits, InitialContext, RevalidatedInitialContext};
 use crate::source_retrieval::{Checkpoints, InitialLimits, InitialQuery, RetrievalError, live};
 use crate::{NodeRequestContext, OneNode};
 use fgit_agent::{ContextControl, ContextPacket, IntentRun, LogicalTime};
 use fgit_types::RefName;
+
+/// Explicit bounded file selection over already authorized Initial results.
+/// Ranking can choose which returned paths to hydrate, never widen a read grant.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum AgentContextSelection {
+    #[default]
+    RawPathPrefix,
+    WeightedRrf,
+}
+impl AgentContextSelection {
+    #[must_use]
+    pub const fn profile(self) -> &'static str {
+        match self {
+            Self::RawPathPrefix => "raw-path-prefix",
+            Self::WeightedRrf => ranked::PROFILE,
+        }
+    }
+}
 
 /// Explicit inputs to one native agent-context read. The host must supply BOTH
 /// its current source-read authorization and the previously authenticated run.
@@ -37,6 +56,7 @@ pub struct AgentContextRead<'a> {
 pub struct AgentSourceContext {
     context: InitialContext,
     packet: ContextPacket,
+    ranking: Option<ContextRanking>,
 }
 impl AgentSourceContext {
     #[must_use]
@@ -47,6 +67,12 @@ impl AgentSourceContext {
     #[must_use]
     pub const fn packet(&self) -> &ContextPacket {
         &self.packet
+    }
+
+    /// Selection-order scores and channel contributions, when explicitly ranked.
+    #[must_use]
+    pub const fn ranking(&self) -> Option<&ContextRanking> {
+        self.ranking.as_ref()
     }
 
     #[must_use]
@@ -61,6 +87,7 @@ impl AgentSourceContext {
 pub struct RevalidatedAgentSourceContext {
     context: RevalidatedInitialContext,
     packet: ContextPacket,
+    ranking: Option<ContextRanking>,
 }
 impl RevalidatedAgentSourceContext {
     #[must_use]
@@ -71,6 +98,11 @@ impl RevalidatedAgentSourceContext {
     #[must_use]
     pub const fn packet(&self) -> &ContextPacket {
         &self.packet
+    }
+
+    #[must_use]
+    pub const fn ranking(&self) -> Option<&ContextRanking> {
+        self.ranking.as_ref()
     }
 
     #[must_use]
@@ -157,6 +189,28 @@ impl OneNode {
     where
         C: Fn() -> LogicalTime + ?Sized,
     {
+        self.retrieve_agent_context_selected_local_in(
+            request,
+            input,
+            AgentContextSelection::RawPathPrefix,
+            now,
+        )
+        .await
+    }
+
+    /// Select files with the named profile while retaining the same exact run,
+    /// authorization, phase clocks and native hydration bounds as the raw reader.
+    /// The result keeps the actual ranking receipt alongside the ContextPacket.
+    pub async fn retrieve_agent_context_selected_local_in<C>(
+        &self,
+        request: &NodeRequestContext,
+        input: AgentContextRead<'_>,
+        selection: AgentContextSelection,
+        now: &C,
+    ) -> Result<AgentSourceContext, AgentContextReadError>
+    where
+        C: Fn() -> LogicalTime + ?Sized,
+    {
         live(request)?;
         input.authorization.check_node(self)?;
         let receipt = run_receipt(input.run, &input.control)?;
@@ -191,18 +245,38 @@ impl OneNode {
         // Do not hydrate a report for another RCR or forge position even if a
         // future retrieval implementation were to return an inconsistent join.
         match_run_source(receipt, &initial)?;
-        let context = self
-            .hydrate_source_initial_local_in(
-                request,
-                input.authorization,
-                initial,
-                input.context_limits,
-            )
-            .await?;
+        let (context, ranking) = match selection {
+            AgentContextSelection::RawPathPrefix => (
+                self.hydrate_source_initial_local_in(
+                    request,
+                    input.authorization,
+                    initial,
+                    input.context_limits,
+                )
+                .await?,
+                None,
+            ),
+            AgentContextSelection::WeightedRrf => {
+                let (context, ranking) = self
+                    .hydrate_source_initial_ranked_local_in(
+                        request,
+                        input.authorization,
+                        initial,
+                        input.context_limits,
+                    )
+                    .await?
+                    .into_parts();
+                (context, Some(ranking))
+            }
+        };
         clock.check(request)?;
         let packet = context_packet_for_run(input.run, &context, input.control)?;
         clock.check(request)?;
-        Ok(AgentSourceContext { context, packet })
+        Ok(AgentSourceContext {
+            context,
+            packet,
+            ranking,
+        })
     }
 
     /// Explicitly revalidate persisted indexes against the run's ORIGINAL
@@ -216,6 +290,27 @@ impl OneNode {
         &self,
         request: &NodeRequestContext,
         input: AgentContextRead<'_>,
+        now: &C,
+    ) -> Result<RevalidatedAgentSourceContext, AgentContextReadError>
+    where
+        C: Fn() -> LogicalTime + ?Sized,
+    {
+        self.retrieve_agent_context_revalidated_selected_local_in(
+            request,
+            input,
+            AgentContextSelection::RawPathPrefix,
+            now,
+        )
+        .await
+    }
+
+    /// Explicit ranked selection with current-source revalidation. Original
+    /// index positions and authorization labels remain unchanged in the result.
+    pub async fn retrieve_agent_context_revalidated_selected_local_in<C>(
+        &self,
+        request: &NodeRequestContext,
+        input: AgentContextRead<'_>,
+        selection: AgentContextSelection,
         now: &C,
     ) -> Result<RevalidatedAgentSourceContext, AgentContextReadError>
     where
@@ -252,18 +347,38 @@ impl OneNode {
             .await?;
         clock.check(request)?;
         match_run_current_source(receipt, initial.current_source())?;
-        let context = self
-            .hydrate_source_initial_revalidated_local_in(
-                request,
-                input.authorization,
-                initial,
-                input.context_limits,
-            )
-            .await?;
+        let (context, ranking) = match selection {
+            AgentContextSelection::RawPathPrefix => (
+                self.hydrate_source_initial_revalidated_local_in(
+                    request,
+                    input.authorization,
+                    initial,
+                    input.context_limits,
+                )
+                .await?,
+                None,
+            ),
+            AgentContextSelection::WeightedRrf => {
+                let (context, ranking) = self
+                    .hydrate_source_initial_revalidated_ranked_local_in(
+                        request,
+                        input.authorization,
+                        initial,
+                        input.context_limits,
+                    )
+                    .await?
+                    .into_parts();
+                (context, Some(ranking))
+            }
+        };
         clock.check(request)?;
         let packet = context_packet_for_revalidated_run(input.run, &context, input.control)?;
         clock.check(request)?;
-        Ok(RevalidatedAgentSourceContext { context, packet })
+        Ok(RevalidatedAgentSourceContext {
+            context,
+            packet,
+            ranking,
+        })
     }
 }
 

@@ -4,6 +4,7 @@
 use super::*;
 use fgit_node::source_retrieval::agent_context::document::{MCP_AGENT_PROFILE, PROFILE};
 use fgit_node::source_retrieval::authorization::SourceReadContext;
+use fgit_node::source_retrieval::context::ranked;
 use fgit_types::PrincipalId;
 
 pub(super) const NAME: &str = "frankengit_agent_context";
@@ -19,7 +20,7 @@ const DOCUMENT_LIMITS: json::Limits = json::Limits {
 pub(super) fn tool() -> Tool {
     Tool {
         name: NAME,
-        description: "Read exact native source excerpts in an authenticated, invocation-only IntentRun and ContextPacket. Sponsorship comes from the trusted-local launch principal or the canonical agent credential; caller fields cannot replace it. Returns authority receipt, run and packet commitments, index generations, deliberate omissions and exact untrusted source bytes. Same native implementation as HTTP /api/v1/source/agent-context and fg agent context. Requires existing indexes and the independent agent-context grant; agent credentials additionally require source-read. Grants no publication, process execution or durable run.",
+        description: "Read exact native source excerpts in an authenticated, invocation-only IntentRun and ContextPacket. Sponsorship comes from the trusted-local launch principal or the canonical agent credential; caller fields cannot replace it. Raw-path selection is the default; explicit weighted fusion ranks returned content/path/symbol hits and binds its selection receipt into the packet evidence. Returns authority receipt, run and packet commitments, index generations, deliberate omissions and exact untrusted source bytes. Same native implementation as HTTP /api/v1/source/agent-context and fg agent context. Requires existing indexes and the independent agent-context grant; agent credentials additionally require source-read. Grants no publication, process execution or durable run.",
         schema: input_schema(),
     }
 }
@@ -28,7 +29,9 @@ fn fields(args: &Object) -> Result<Vec<(String, String)>, ToolError> {
     if args.contains_key("expected_commit") {
         return Err(ToolError::invalid("unknown_argument"));
     }
-    if string(args, "context_selection")?.is_some_and(|selection| selection != "raw-path-prefix") {
+    if string(args, "context_selection")?
+        .is_some_and(|selection| !matches!(selection, "raw-path-prefix" | ranked::PROFILE))
+    {
         return Err(ToolError::invalid("unsupported_context_selection"));
     }
     let mut selectors = args.clone();
@@ -78,6 +81,7 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
         &read,
         sponsor,
         string(args, "index_source")?,
+        string(args, "context_selection")? == Some(ranked::PROFILE),
         &value,
     )?;
     Ok(value)
@@ -88,6 +92,7 @@ fn validate_report(
     read: &SourceReadContext,
     sponsor_id: PrincipalId,
     index_source: Option<&str>,
+    ranked_selection: bool,
     value: &Value,
 ) -> Result<(), ToolError> {
     let invalid = || ToolError::failed("invalid_agent_context_report");
@@ -132,6 +137,26 @@ fn validate_report(
             .and_then(Value::text)
             != index_source
         || evidence.get("index_source").and_then(Value::text) != index_source
+        || report
+            .get("request")
+            .and_then(Value::object)
+            .and_then(|request| request.get("context_selection"))
+            .and_then(Value::text)
+            != ranked_selection.then_some(ranked::PROFILE)
+        || evidence.get("selection").and_then(Value::text)
+            != Some(if ranked_selection {
+                ranked::PROFILE
+            } else {
+                "raw-path-prefix"
+            })
+        || evidence.contains_key("ranking") != ranked_selection
+        || (ranked_selection
+            && evidence
+                .get("ranking")
+                .and_then(Value::object)
+                .and_then(|ranking| ranking.get("profile"))
+                .and_then(Value::text)
+                != Some(ranked::PROFILE))
         || evidence.get("profile").and_then(Value::text)
             != Some(if index_source.is_some() {
                 "agent-context-revalidated-evidence-v1"
@@ -253,10 +278,11 @@ fn input_schema() -> Value {
         "context_selection".into(),
         object([
             ("type", text("string")),
-            ("enum", Value::Array(vec![text("raw-path-prefix")])),
+            ("enum", Value::Array(vec![text("raw-path-prefix"), text(ranked::PROFILE)])),
+            ("default", text("raw-path-prefix")),
             (
                 "description",
-                text("Exact raw-path-prefix selection; ranking cannot alter this agent profile."),
+                text("Raw path order by default, or bounded weighted fusion across returned channels with its full selection receipt bound into the ContextPacket evidence. Neither profile grants source access."),
             ),
         ]),
     );
@@ -338,6 +364,15 @@ mod tests {
             "context_selection".into(),
             text("context-weighted-rrf-q16-v1"),
         );
+        assert!(
+            fields(&permitted)
+                .unwrap()
+                .contains(&("context_selection".into(), ranked::PROFILE.into()))
+        );
+        permitted.insert(
+            "context_selection".into(),
+            text("context-weighted-rrf-q16-v2"),
+        );
         assert_eq!(
             fields(&permitted).unwrap_err().code,
             "unsupported_context_selection"
@@ -351,6 +386,10 @@ mod tests {
         for field in ["sponsor", "principal", "run_id", "expected_commit"] {
             assert!(!properties.contains_key(field));
         }
+        assert_eq!(
+            properties["context_selection"].object().unwrap()["enum"],
+            Value::Array(vec![text("raw-path-prefix"), text(ranked::PROFILE)])
+        );
         assert_eq!(
             properties["expires_after_secs"].object().unwrap()["maximum"].unsigned(),
             Some(300)

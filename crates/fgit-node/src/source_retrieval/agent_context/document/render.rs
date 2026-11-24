@@ -1,4 +1,6 @@
 use super::{AgentContextRequest, CURRENT_NATIVE_INDEX_SOURCE, profile, sponsor_authentication};
+use crate::source_retrieval::agent_context::AgentContextSelection;
+use crate::source_retrieval::context::ranked::{self, ContextRanking};
 use crate::source_retrieval::context::{ContextFile, InitialContext, RevalidatedInitialContext};
 use crate::source_retrieval::current_index::{
     GenerationActivation, IndexedLexicalReport, LexicalSource,
@@ -87,6 +89,76 @@ fn with_agent_authentication(input: &AgentContextRequest<'_>, mut value: Value) 
         );
     }
     value
+}
+
+/// Preserve every existing raw-mode byte while committing an explicit ranked
+/// selector into the intent before any run or packet identity is derived.
+pub(super) fn with_selection(mut value: Value, selection: AgentContextSelection) -> Value {
+    if selection != AgentContextSelection::RawPathPrefix
+        && let Value::Object(fields) = &mut value
+    {
+        fields.insert("context_selection".into(), text(selection.profile()));
+    }
+    value
+}
+
+/// The typed native ranker has already joined every selected path and blob to
+/// the hydrated context. Retain its full decision receipt inside the evidence
+/// commitment; scores neither authorize a source nor assert semantic relevance.
+fn with_ranking(
+    mut evidence: Value,
+    ranking: Option<&ContextRanking>,
+    live: &mut impl FnMut() -> Result<(), String>,
+) -> Result<Value, String> {
+    let Some(ranking) = ranking else {
+        return Ok(evidence);
+    };
+    let mut selected = Vec::with_capacity(ranking.selected().len());
+    for (ordinal, file) in ranking.selected().iter().enumerate() {
+        live()?;
+        let mut contributions = Vec::with_capacity(file.contributions().len());
+        for contribution in file.contributions() {
+            live()?;
+            contributions.push(object([
+                ("channel", text(contribution.channel().as_str())),
+                (
+                    "document_rank",
+                    number(u64::from(contribution.document_rank())),
+                ),
+                (
+                    "weight",
+                    number(u64::from(ranked::channel_weight(contribution.channel()))),
+                ),
+                ("score_q16", number(u64::from(contribution.score_q16()))),
+            ]));
+        }
+        selected.push(object([
+            ("position", count(ordinal + 1)),
+            ("path_hex", bytes(file.path())),
+            ("blob", text(file.blob().to_string())),
+            ("score_q16", number(u64::from(file.score_q16()))),
+            ("contributions", Value::Array(contributions)),
+        ]));
+    }
+    if let Value::Object(fields) = &mut evidence {
+        fields.insert("selection".into(), text(ranked::PROFILE));
+        fields.insert(
+            "ranking".into(),
+            object([
+                ("profile", text(ranked::PROFILE)),
+                ("rank_constant", number(u64::from(ranked::RANK_CONSTANT))),
+                ("score_scale", number(u64::from(ranked::SCORE_SCALE))),
+                ("input_order", text("raw-path-distinct-documents")),
+                ("tie_break", text("raw-path-ascending")),
+                ("ranked_over", text("returned-channel-hits")),
+                ("semantic_relevance", Value::Bool(false)),
+                ("candidate_files", count(ranking.candidate_files())),
+                ("selected", Value::Array(selected)),
+            ]),
+        );
+    }
+    live()?;
+    Ok(evidence)
 }
 
 pub(super) fn intent(input: &AgentContextRequest<'_>) -> Value {
@@ -385,51 +457,56 @@ fn evidence_files(
 /// byte strings, and every source excerpt is separately retained below.
 pub(super) fn evidence(
     context: &InitialContext,
+    ranking: Option<&ContextRanking>,
     live: &mut impl FnMut() -> Result<(), String>,
 ) -> Result<Value, String> {
     let initial = context.retrieval();
     let files = evidence_files(context.files(), live)?;
-    Ok(object([
-        ("profile", text("agent-context-evidence-v1")),
-        ("source", source(initial.source())),
-        (
-            "authorization_binding",
-            bytes(initial.authorization().binding()),
-        ),
-        ("authorization_host", text(initial.authorization().host())),
-        ("authorization_scope", text("whole-repository")),
-        ("reusable_capability", Value::Bool(false)),
-        (
-            "lexical_generation",
-            generation(&initial.generations().lexical),
-        ),
-        (
-            "symbol_generation",
-            optional(initial.generations().symbols.as_ref(), generation),
-        ),
-        ("content_channel", lexical(initial.content(), live)?),
-        ("path_channel", lexical(initial.path(), live)?),
-        ("symbol_channel", symbols(initial.symbols(), live)?),
-        ("complete", Value::Bool(context.complete())),
-        (
-            "coverage_meaning",
-            text(
-                "all requested channels complete and every returned match hydrated; excerpts do not claim whole-file or repository completeness",
+    with_ranking(
+        object([
+            ("profile", text("agent-context-evidence-v1")),
+            ("source", source(initial.source())),
+            (
+                "authorization_binding",
+                bytes(initial.authorization().binding()),
             ),
-        ),
-        ("selection", text("raw-path-prefix")),
-        ("candidate_files", count(context.candidate_files())),
-        ("omitted_candidate_files", count(context.omitted_files())),
-        ("source_bytes_read", count(context.source_bytes_read())),
-        ("excerpt_bytes", count(context.excerpt_bytes())),
-        ("source_file_limit", count(context.source_file_limit())),
-        (
-            "lineage_metadata_bytes",
-            count(context.lineage_metadata_bytes()),
-        ),
-        ("result_bytes", count(initial.result_bytes())),
-        ("files", Value::Array(files)),
-    ]))
+            ("authorization_host", text(initial.authorization().host())),
+            ("authorization_scope", text("whole-repository")),
+            ("reusable_capability", Value::Bool(false)),
+            (
+                "lexical_generation",
+                generation(&initial.generations().lexical),
+            ),
+            (
+                "symbol_generation",
+                optional(initial.generations().symbols.as_ref(), generation),
+            ),
+            ("content_channel", lexical(initial.content(), live)?),
+            ("path_channel", lexical(initial.path(), live)?),
+            ("symbol_channel", symbols(initial.symbols(), live)?),
+            ("complete", Value::Bool(context.complete())),
+            (
+                "coverage_meaning",
+                text(
+                    "all requested channels complete and every returned match hydrated; excerpts do not claim whole-file or repository completeness",
+                ),
+            ),
+            ("selection", text("raw-path-prefix")),
+            ("candidate_files", count(context.candidate_files())),
+            ("omitted_candidate_files", count(context.omitted_files())),
+            ("source_bytes_read", count(context.source_bytes_read())),
+            ("excerpt_bytes", count(context.excerpt_bytes())),
+            ("source_file_limit", count(context.source_file_limit())),
+            (
+                "lineage_metadata_bytes",
+                count(context.lineage_metadata_bytes()),
+            ),
+            ("result_bytes", count(initial.result_bytes())),
+            ("files", Value::Array(files)),
+        ]),
+        ranking,
+        live,
+    )
 }
 
 /// Current disclosure and immutable index provenance are separate records.
@@ -437,6 +514,7 @@ pub(super) fn evidence(
 /// file selection; hydrated anchors keep their saved labels and commitments.
 pub(super) fn revalidated_evidence(
     context: &RevalidatedInitialContext,
+    ranking: Option<&ContextRanking>,
     live: &mut impl FnMut() -> Result<(), String>,
 ) -> Result<Value, String> {
     let initial = context.retrieval();
@@ -469,49 +547,53 @@ pub(super) fn revalidated_evidence(
     // explicit without another selection or any rewrite of the index reports.
     let current = source(initial.current_source());
     let files = evidence_files(context.files(), live)?;
-    Ok(object([
-        ("profile", text("agent-context-revalidated-evidence-v1")),
-        ("index_source", text(CURRENT_NATIVE_INDEX_SOURCE)),
-        ("source", current.clone()),
-        ("current_source", current),
-        (
-            "authorization_binding",
-            bytes(initial.authorization().binding()),
-        ),
-        ("authorization_host", text(initial.authorization().host())),
-        ("authorization_scope", text("whole-repository")),
-        ("reusable_capability", Value::Bool(false)),
-        (
-            "lexical_generation",
-            generation(&initial.generations().lexical),
-        ),
-        (
-            "symbol_generation",
-            optional(initial.generations().symbols.as_ref(), generation),
-        ),
-        ("content_channel", content),
-        ("path_channel", path),
-        ("symbol_channel", symbol_channel),
-        ("complete", Value::Bool(context.complete())),
-        (
-            "coverage_meaning",
-            text(
-                "all requested channels complete and every returned match hydrated; excerpts do not claim whole-file or repository completeness",
+    with_ranking(
+        object([
+            ("profile", text("agent-context-revalidated-evidence-v1")),
+            ("index_source", text(CURRENT_NATIVE_INDEX_SOURCE)),
+            ("source", current.clone()),
+            ("current_source", current),
+            (
+                "authorization_binding",
+                bytes(initial.authorization().binding()),
             ),
-        ),
-        ("selection", text("raw-path-prefix")),
-        ("candidate_files", count(context.candidate_files())),
-        ("omitted_candidate_files", count(context.omitted_files())),
-        ("source_bytes_read", count(context.source_bytes_read())),
-        ("excerpt_bytes", count(context.excerpt_bytes())),
-        ("source_file_limit", count(context.source_file_limit())),
-        (
-            "lineage_metadata_bytes",
-            count(context.lineage_metadata_bytes()),
-        ),
-        ("result_bytes", count(initial.result_bytes())),
-        ("files", Value::Array(files)),
-    ]))
+            ("authorization_host", text(initial.authorization().host())),
+            ("authorization_scope", text("whole-repository")),
+            ("reusable_capability", Value::Bool(false)),
+            (
+                "lexical_generation",
+                generation(&initial.generations().lexical),
+            ),
+            (
+                "symbol_generation",
+                optional(initial.generations().symbols.as_ref(), generation),
+            ),
+            ("content_channel", content),
+            ("path_channel", path),
+            ("symbol_channel", symbol_channel),
+            ("complete", Value::Bool(context.complete())),
+            (
+                "coverage_meaning",
+                text(
+                    "all requested channels complete and every returned match hydrated; excerpts do not claim whole-file or repository completeness",
+                ),
+            ),
+            ("selection", text("raw-path-prefix")),
+            ("candidate_files", count(context.candidate_files())),
+            ("omitted_candidate_files", count(context.omitted_files())),
+            ("source_bytes_read", count(context.source_bytes_read())),
+            ("excerpt_bytes", count(context.excerpt_bytes())),
+            ("source_file_limit", count(context.source_file_limit())),
+            (
+                "lineage_metadata_bytes",
+                count(context.lineage_metadata_bytes()),
+            ),
+            ("result_bytes", count(initial.result_bytes())),
+            ("files", Value::Array(files)),
+        ]),
+        ranking,
+        live,
+    )
 }
 
 fn receipt(value: &AuthorityReadReceipt) -> Result<Value, String> {

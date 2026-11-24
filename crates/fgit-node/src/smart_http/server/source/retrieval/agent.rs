@@ -6,11 +6,11 @@ use super::{
     GitHashAlgorithm, HttpLimits, IndexSource, JsonReply, OneNode, Read, SourceReadContext, Status,
     context, drive_request_while, parse_form, positive, read_form,
 };
-use crate::source_retrieval::agent_context::AgentContextReadError;
 use crate::source_retrieval::agent_context::document::{
     AgentContextDocumentError, AgentContextRequest, MAX_LIFETIME, MAX_OUTPUT_BYTES,
-    read_agent_context_in, read_agent_context_revalidated_in,
+    read_agent_context_revalidated_selected_in, read_agent_context_selected_in,
 };
+use crate::source_retrieval::agent_context::{AgentContextReadError, AgentContextSelection};
 use crate::{GitDaemonSessionTimeout, NodeRequestContext};
 use fgit_types::PrincipalId;
 use std::time::Duration;
@@ -69,9 +69,6 @@ fn command_fields(
         return Err(ApiError::too_large());
     }
     let context = context::command_fields(context, format)?;
-    if context.ranked {
-        return Err(ApiError::bad("unsupported_agent_context_selection"));
-    }
     Ok(AgentCommand {
         context,
         expires_after: Duration::from_secs(expires_after),
@@ -166,10 +163,18 @@ fn run(
                 expires_after,
                 max_output_bytes: command.max_output_bytes,
             };
+            let selection = if context.ranked {
+                AgentContextSelection::WeightedRrf
+            } else {
+                AgentContextSelection::RawPathPrefix
+            };
             match context.initial.index_source {
-                IndexSource::Exact => read_agent_context_in(node, &request, input).await,
+                IndexSource::Exact => {
+                    read_agent_context_selected_in(node, &request, input, selection).await
+                }
                 IndexSource::Current => {
-                    read_agent_context_revalidated_in(node, &request, input).await
+                    read_agent_context_revalidated_selected_in(node, &request, input, selection)
+                        .await
                 }
             }
         },

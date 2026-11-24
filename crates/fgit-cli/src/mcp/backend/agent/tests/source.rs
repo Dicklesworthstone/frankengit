@@ -412,6 +412,36 @@ fn sponsored_source_tools_read_real_objects_and_indexes_in_both_formats() {
         );
         assert!(!backend.command_context().is_live());
 
+        context_args.insert(
+            "context_selection".into(),
+            text("context-weighted-rrf-q16-v1"),
+        );
+        context_args.insert("context_max_files".into(), json::number(1));
+        let ranked = backend.call(CONTEXT, &context_args).unwrap();
+        assert_sponsorship(&ranked, fixture.credential_id);
+        assert_eq!(
+            field(&ranked, &["retrieval_evidence", "ranking", "profile"]).text(),
+            Some("context-weighted-rrf-q16-v1")
+        );
+        assert_eq!(
+            rows(field(
+                &ranked,
+                &["retrieval_evidence", "ranking", "selected"]
+            ))
+            .len(),
+            1
+        );
+        assert_eq!(
+            rows(field(&ranked, &["context_packet", "omission_commitments"])),
+            &[field(&ranked, &["evidence_commitment"]).clone()]
+        );
+        assert_ne!(
+            field(&ranked, &["context_packet", "request_intent_commitment"]),
+            field(&document, &["context_packet", "request_intent_commitment"])
+        );
+        assert!(backend.agent.as_ref().unwrap().request.is_none());
+        assert!(backend.response_checkpoint(OUTPUT_BYTES).is_ok());
+
         let mut pinned = query(CONTEXT);
         pinned.insert(
             "expected_head".into(),

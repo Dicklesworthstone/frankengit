@@ -581,12 +581,32 @@ fn agent_context_uses_the_real_native_packet_with_launch_sponsorship_in_both_for
                 )
                 .is_none()
         );
-        let response = server.receive(&mut backend, br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"frankengit_agent_context","arguments":{"reference":"refs/heads/main","terms_hex":["5468696e67"],"context_max_files":1}}}"#).unwrap();
+        let response = server.receive(&mut backend, br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"frankengit_agent_context","arguments":{"reference":"refs/heads/main","terms_hex":["5468696e67"],"context_max_files":1,"context_selection":"context-weighted-rrf-q16-v1"}}}"#).unwrap();
         let result = response.object().unwrap()["result"].object().unwrap();
         assert_eq!(result["isError"], Value::Bool(false));
         let partial = &result["structuredContent"];
         assert_eq!(field(partial, &["complete"]), &Value::Bool(false));
         assert!(!array(field(partial, &["untrusted_sources"])).is_empty());
+        assert_eq!(
+            field(partial, &["request", "context_selection"]).text(),
+            Some("context-weighted-rrf-q16-v1")
+        );
+        assert_eq!(
+            field(partial, &["retrieval_evidence", "ranking", "profile"]).text(),
+            Some("context-weighted-rrf-q16-v1")
+        );
+        assert_eq!(
+            array(field(
+                partial,
+                &["retrieval_evidence", "ranking", "selected"]
+            ))
+            .len(),
+            1
+        );
+        assert_eq!(
+            array(field(partial, &["context_packet", "omission_commitments"])),
+            &[field(partial, &["evidence_commitment"]).clone()]
+        );
         assert_eq!(
             field(partial, &["publication_authorized"]),
             &Value::Bool(false)

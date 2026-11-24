@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 //! Native authority, index and TreeFS integration; no substitute context reader.
+#[path = "agent_source_context/ranked.rs"]
+mod ranked;
 #[path = "source_http/support.rs"]
 mod support;
 
@@ -9,8 +11,8 @@ use fgit_agent::{
 use fgit_forge::preparation::MergeMetadata;
 use fgit_forge::source_symbols::SymbolMatchMode;
 use fgit_node::source_retrieval::agent_context::{
-    AgentContextRead, AgentContextReadError, AgentContextRefusal, AgentSourceContext,
-    context_packet_for_run,
+    AgentContextRead, AgentContextReadError, AgentContextRefusal, AgentContextSelection,
+    AgentSourceContext, context_packet_for_run,
 };
 use fgit_node::source_retrieval::authorization::SourceReadContext;
 use fgit_node::source_retrieval::context::ContextLimits;

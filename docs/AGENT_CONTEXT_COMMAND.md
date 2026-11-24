@@ -53,8 +53,8 @@ remain refusals. Reading never builds indexes or retries against a newer head.
 
 Omitting the selector retains the original strict behavior: index authority
 positions must coincide with the selected current source. Only the exact value
-`current-native-v1` is accepted when supplied. The mode supports raw-path-prefix
-context selection; it does not implicitly select ranked retrieval.
+`current-native-v1` is accepted when supplied. Both index modes use raw-path-prefix
+context selection by default and accept the explicit ranked selector below.
 
 The current source authenticates the run and packet. The new request commits
 `index_source: "current-native-v1"`; `retrieval_evidence.current_source` retains
@@ -91,6 +91,45 @@ The default symbol match is `exact` and the default policy is `required`.
 `optional` permits an unavailable or stale symbol generation only when the
 native retrieval layer can report that specific omission. It does not suppress
 integrity, authorization, resource, or cancellation failures.
+
+### Choose files by agreement across retrieval channels
+
+Add `--context-selection context-weighted-rrf-q16-v1` to prioritize files that
+appear in several returned content, path and symbol channels when `--max-files`
+cannot include every candidate:
+
+```sh
+fg agent context /srv/frankengit/repository \
+  TENANT_ID REPOSITORY_ID refs/heads/main \
+  --trusted-local --sponsor SPONSOR_ID --term cancellation \
+  --symbol Cancel --symbol-match prefix --symbol-policy optional \
+  --context-selection context-weighted-rrf-q16-v1 --max-files 4
+```
+
+This uses the existing bounded native weighted reciprocal-rank selector. Each
+distinct returned path has its raw-path rank in each channel; content and path
+have weight 1, symbols weight 2. The score is the sum of
+`floor(weight * 65536 / (60 + document_rank))`, with one-based ranks. Descending
+score selects the files, and ascending raw path resolves ties. Repeated hits in
+one file do not multiply its contribution. These scores measure agreement among
+the returned channels; they are not semantic relevance scores or permission to
+read additional source. Missing optional channels and bounded retrieval omissions
+remain visible, and an oversized selected file refuses rather than substituting
+a cheaper candidate.
+
+The response commits `request.context_selection` and includes
+`retrieval_evidence.ranking`: the profile, fixed parameters, candidate count,
+selected paths/blobs in ranking order, and every contributing channel's document
+rank, weight and score. The evidence commitment binds the complete receipt into
+the ContextPacket. Hydrated files, excerpts and packet source references retain
+canonical raw-path order; the receipt's `selected` array supplies selection order.
+Original source observations and authorization labels remain unchanged.
+
+Omitting the option or explicitly choosing `raw-path-prefix` preserves the
+original request/evidence encoding, including omission of the ranking field.
+Either selector works with `--index-source current-native-v1`. Ranking shares
+the original request lifetime and byte/work envelopes, including the serialized
+response ceiling; it creates no new grant, run allowance or index.
 
 ## Authority and provenance
 
@@ -219,7 +258,7 @@ Requests use `application/x-www-form-urlencoded`, with these fields:
 | `minimum_symbol_token`, `minimum_symbol_number` | Optional paired symbol-generation floor. |
 | `max_results_per_channel`, `max_work`, `max_payload_bytes`, `max_result_bytes` | Existing finite Initial retrieval bounds. |
 | `context_max_files`, `context_radius_bytes`, `context_max_source_bytes`, `context_max_excerpt_bytes` | The CLI's corresponding hydration bounds. |
-| `context_selection` | Only `raw-path-prefix` is supported for this agent profile. |
+| `context_selection` | Optional `raw-path-prefix` (default) or `context-weighted-rrf-q16-v1`; works with either index mode. |
 | `expires_after_secs` | 1–300 seconds, default 30, further limited by the server's session timeout. |
 | `max_output_bytes` | Optional serialized-document ceiling, never greater than the selected host ceiling. |
 
@@ -245,7 +284,7 @@ inspect `complete` and omission evidence. Shape/identity injection refuses with
 400, missing credentials with 401, missing read authority with 403, a changed
 head or required index position with 409, a resource/output limit with 413, and
 an expired or cancelled native request with 408. Refusals contain no packet or
-source excerpts. `expected_commit`, ranked context selection, transaction keys,
+source excerpts. `expected_commit`, unsupported selection profiles, transaction keys,
 caller-selected identities, duplicate fields and unknown fields are rejected.
 The existing `source/context-initial` endpoint retains its original response;
 it does not silently acquire Agent Protocol semantics.
@@ -312,6 +351,10 @@ usable context after unrelated metadata changes. It uses the same source-read
 credential and independent launch ceiling, and commits the selector into the
 request. The host authentication profile and original credential lifetime remain
 unchanged; the retrieval evidence distinguishes current source from index origins.
+Add `"context_selection":"context-weighted-rrf-q16-v1"` to request the same
+bounded cross-channel selection and committed ranking receipt as CLI and HTTP.
+The selector is available with trusted-local or canonical sponsored credentials;
+the independent source-read and agent-context grants are still required.
 
 A partial packet remains a successful read with `complete: false` and explicit
 omissions in `structuredContent`; it grants no publication rights. Cancellation

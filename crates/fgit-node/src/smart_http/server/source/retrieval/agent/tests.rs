@@ -38,6 +38,7 @@ fn agent_context_has_a_closed_bounded_non_mutating_grammar() {
         "&run_id=caller",
         "&expected_commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "&context_selection=source-context-ranked-v1",
+        "&context_selection=raw-path-prefix&context_selection=context-weighted-rrf-q16-v1",
         "&force=true",
     ] {
         assert!(
@@ -126,14 +127,20 @@ fn agent_context_index_mode_is_explicit_and_retains_the_closed_grammar() {
         .code,
         "duplicate_field"
     );
-    assert_eq!(
-        parse(
-            &format!("{current}&context_selection=context-weighted-rrf-q16-v1"),
-            1024 * 1024
+    for input in [BASE, current.as_str()] {
+        let ranked = parse(
+            &format!("{input}&context_selection=context-weighted-rrf-q16-v1"),
+            1024 * 1024,
         )
-        .err()
-        .unwrap()
-        .code,
-        "unsupported_agent_context_selection"
-    );
+        .unwrap();
+        assert!(ranked.context.ranked);
+        assert_eq!(
+            ranked.context.initial.index_source,
+            if input == BASE {
+                IndexSource::Exact
+            } else {
+                IndexSource::Current
+            }
+        );
+    }
 }

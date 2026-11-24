@@ -79,6 +79,117 @@ fn no_context(reply: &Reply) {
 }
 
 #[test]
+fn http_ranked_agent_context_selects_cross_channel_evidence_under_the_same_credential() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new();
+        let config = root.config(format);
+        let (node, _) = fixture_with_text(&root, format, config.clone(), b"nested\n");
+        index(&node);
+        let before = generation(&node);
+        let path = root.0.join("credentials");
+        credentials(&node, &path);
+        let server = Server::start(node, &path, 6, true, false);
+        let input = format!(
+            "{}&term_hex=6e6573746564&context_max_files=1",
+            common(format)
+        );
+        let reply = post(&server.client, "agent-context", 'a', &input, false);
+        status(&reply, 200);
+        let raw = decode(&reply.body);
+        assert_eq!(
+            field(&rows(field(&raw, "untrusted_sources"))[0], "path_hex").text(),
+            Some(hex(b"alpha.txt").as_str())
+        );
+        assert!(
+            !field(&raw, "retrieval_evidence")
+                .object()
+                .unwrap()
+                .contains_key("ranking")
+        );
+
+        let selected = format!("{input}&context_selection=context-weighted-rrf-q16-v1");
+        let reply = post(&server.client, "agent-context", 'a', &selected, true);
+        status(&reply, 200);
+        let ranked = decode(&reply.body);
+        let evidence = field(&ranked, "retrieval_evidence");
+        let receipt = field(evidence, "ranking");
+        assert_eq!(field(&ranked, "complete"), &Value::Bool(false));
+        assert_eq!(field(receipt, "candidate_files").unsigned(), Some(2));
+        assert_eq!(
+            field(evidence, "omitted_candidate_files").unsigned(),
+            Some(1)
+        );
+        let winner = &rows(field(receipt, "selected"))[0];
+        assert_eq!(
+            field(winner, "path_hex").text(),
+            Some(hex(b"dir/nested.txt").as_str())
+        );
+        assert_eq!(
+            field(winner, "score_q16").unsigned(),
+            Some(65_536 / 62 + 65_536 / 61)
+        );
+        let source = &rows(field(&ranked, "untrusted_sources"))[0];
+        assert_eq!(field(source, "path_hex"), field(winner, "path_hex"));
+        assert_eq!(
+            field(source, "untrusted_utf8").text(),
+            Some("needle in nested\n")
+        );
+        for key in ["source", "content_channel", "path_channel"] {
+            assert_eq!(
+                field(evidence, key),
+                field(field(&raw, "retrieval_evidence"), key)
+            );
+        }
+        assert_eq!(field(&ranked, "sponsor"), field(&raw, "sponsor"));
+        assert_ne!(
+            field(&ranked, "evidence_commitment"),
+            field(&raw, "evidence_commitment")
+        );
+        assert_eq!(
+            rows(field(
+                field(&ranked, "context_packet"),
+                "omission_commitments"
+            )),
+            &[field(&ranked, "evidence_commitment").clone()]
+        );
+        let reply = post(
+            &server.client,
+            "agent-context",
+            'a',
+            &(selected.clone() + "&index_source=current-native-v1"),
+            false,
+        );
+        status(&reply, 200);
+        let current = decode(&reply.body);
+        assert_eq!(
+            field(field(&current, "retrieval_evidence"), "ranking"),
+            receipt
+        );
+        assert_eq!(
+            field(field(&current, "request"), "index_source").text(),
+            Some("current-native-v1")
+        );
+        for (credential, form, code) in [
+            ('b', selected.clone(), 403),
+            ('a', selected + "&context_max_source_bytes=7", 413),
+            (
+                'a',
+                input + "&context_selection=context-weighted-rrf-q16-v2",
+                400,
+            ),
+        ] {
+            let refused = post(&server.client, "agent-context", credential, &form, false);
+            status(&refused, code);
+            no_context(&refused);
+        }
+        assert_eq!(server.finish().accepted_sessions(), 6);
+        let node = reopen(&config);
+        assert_eq!(generation(&node), before);
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
 fn http_agent_packet_binds_credential_authority_and_exact_untrusted_native_bytes() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let root = Scratch::new();

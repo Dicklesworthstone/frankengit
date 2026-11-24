@@ -69,6 +69,44 @@ visibility changes, old current-head pins, missing backing and stale generation
 floors still refuse. Original retrieval, lineage, hydration and response bounds
 remain active; no phase obtains a fresh lifetime or implicitly rebuilds indexes.
 
+### Explicit ranked selection
+
+The existing readers retain raw-path-prefix selection. Their selected variants,
+`retrieve_agent_context_selected_local_in` and
+`retrieve_agent_context_revalidated_selected_local_in`, additionally accept an
+`AgentContextSelection` immediately before the logical clock. `RawPathPrefix`
+preserves the original behavior; `WeightedRrf` applies the existing
+`context-weighted-rrf-q16-v1` selector to the authorized Initial channel results
+before exact native hydration. Neither selection changes `AgentContextRead`,
+the authenticated run, its head/RCR joins, or source disclosure permissions.
+
+Both result types expose `ranking() -> Option<&ContextRanking>`. A ranked result
+retains the candidate count and selected paths/blobs, fixed-point scores, and
+each channel's distinct-document rank and contribution. The receipt lists files
+by descending score with ascending raw-path ties. Native context files and
+packet source references retain their canonical raw-path/excerpt order. All
+original generation positions, authorization labels and exact bytes remain
+available beside the receipt. The existing two-part `into_parts` methods remain
+compatible; hosts that need the ranking receipt should retain it before consuming
+the result. The host still supplies the native `ContextControl` commitments.
+
+The document entry points `read_agent_context_selected_in` and
+`read_agent_context_revalidated_selected_in` accept the same selection after
+the unchanged `AgentContextRequest`. They commit the explicit ranked selector
+into the request, use its retrieval-profile commitment, and bind the actual
+ranking receipt into serialized evidence and the packet's omission commitment.
+Raw selection retains the original request/evidence bytes with no new field.
+CLI `--context-selection` and HTTP/MCP `context_selection` expose these same
+profiles under their existing local or credential-bound source authorization.
+See [the selection contract](AGENT_CONTEXT_COMMAND.md#choose-files-by-agreement-across-retrieval-channels)
+for the fixed weights and score formula.
+
+Ranking uses the returned bounded channel hits, so missing/partial channels and
+selection omissions remain explicit. It does not assert semantic relevance,
+search an unbounded candidate set, enlarge a budget, extend expiry, or replace
+an oversized selected source with another file. Cancellation and all retrieval,
+hydration, evidence encoding and output ceilings remain active.
+
 ## Enforced behavior
 
 Before source acquisition, both native limit sets are validated and the method
@@ -113,6 +151,11 @@ hash domains, exact source bytes and independent commitment goldens, stable
 packet identity, scope/control refusals, foreign node authorization, lifetime
 boundaries, backwards time, cancellation including the final callback, visible
 omissions/optional-channel failures and explicit source advancement/reindexing.
+The ranked cases use a real corpus where channel agreement selects a different
+file from the raw prefix, compare its original native lineage, and exercise
+scope, expiry, source-byte exhaustion and final-callback cancellation. Current
+source unit tests retain independently dated lexical and symbol provenance in
+both selection modes and independently recompute request/evidence commitments.
 The tests do not use a mock retrieval service or an external Git subprocess.
 
 At the original native-API implementation, Rust/Cargo/rustfmt were unavailable

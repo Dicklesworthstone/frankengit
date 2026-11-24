@@ -305,5 +305,26 @@ fn explicit_index_source_changes_only_the_committed_selector_not_the_host_profil
             render::intent(&input).encode(128 * 1024).unwrap(),
             strict_bytes
         );
+        for intent in [strict, revalidated] {
+            let bytes = intent.encode(128 * 1024).unwrap();
+            assert_eq!(
+                render::with_selection(intent.clone(), AgentContextSelection::RawPathPrefix)
+                    .encode(128 * 1024)
+                    .unwrap(),
+                bytes
+            );
+            let ranked = render::with_selection(intent.clone(), AgentContextSelection::WeightedRrf);
+            assert_eq!(
+                field(&ranked, "context_selection").text(),
+                Some(AgentContextSelection::WeightedRrf.profile())
+            );
+            let mut original_fields = ranked.object().unwrap().clone();
+            original_fields.remove("context_selection");
+            assert_eq!(Value::Object(original_fields), intent);
+            assert_ne!(
+                commitment(domain, bytes.as_bytes()),
+                commitment(domain, ranked.encode(128 * 1024).unwrap().as_bytes())
+            );
+        }
     }
 }

@@ -206,9 +206,25 @@ impl Fixture {
         context_limits: ContextLimits,
         now: &C,
     ) -> Result<RevalidatedAgentSourceContext, AgentContextReadError> {
+        self.selected_read(
+            run,
+            retrieval_limits,
+            context_limits,
+            AgentContextSelection::RawPathPrefix,
+            now,
+        )
+    }
+    fn selected_read<C: Fn() -> LogicalTime>(
+        &self,
+        run: &IntentRun,
+        retrieval_limits: InitialLimits,
+        context_limits: ContextLimits,
+        selection: AgentContextSelection,
+        now: &C,
+    ) -> Result<RevalidatedAgentSourceContext, AgentContextReadError> {
         let node = self.node();
         node.runtime()
-            .block_on(node.retrieve_agent_context_revalidated_local_in(
+            .block_on(node.retrieve_agent_context_revalidated_selected_local_in(
                 &node.request_context(),
                 AgentContextRead {
                     run,
@@ -220,6 +236,7 @@ impl Fixture {
                     context_limits,
                     control: control(),
                 },
+                selection,
                 now,
             ))
     }
@@ -227,9 +244,16 @@ impl Fixture {
         &self,
         max_output_bytes: usize,
     ) -> Result<document::AgentContextDocument, document::AgentContextDocumentError> {
+        self.selected_document(max_output_bytes, AgentContextSelection::RawPathPrefix)
+    }
+    fn selected_document(
+        &self,
+        max_output_bytes: usize,
+        selection: AgentContextSelection,
+    ) -> Result<document::AgentContextDocument, document::AgentContextDocumentError> {
         let node = self.node();
         node.runtime()
-            .block_on(document::read_agent_context_revalidated_in(
+            .block_on(document::read_agent_context_revalidated_selected_in(
                 node,
                 &node.command_request_context(None),
                 AgentContextRequest {
@@ -244,6 +268,7 @@ impl Fixture {
                     expires_after: Duration::from_secs(30),
                     max_output_bytes,
                 },
+                selection,
             ))
     }
     fn change_code(&mut self) {
@@ -331,15 +356,28 @@ fn commitment(domain: &[u8], bytes: &[u8]) -> Value {
 
 #[test]
 fn current_run_keeps_original_index_sources_and_exact_packet_evidence_in_both_formats() {
-    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+    for (format, selection) in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256]
+        .into_iter()
+        .flat_map(|format| {
+            [
+                AgentContextSelection::RawPathPrefix,
+                AgentContextSelection::WeightedRrf,
+            ]
+            .map(move |selection| (format, selection))
+        })
+    {
         let fixture = Fixture::new(format);
         let node = fixture.node();
         let before = fixture.head();
         let run = run(node);
         let native = fixture
-            .read(&run, Default::default(), Default::default(), &|| {
-                LogicalTime::new(20)
-            })
+            .selected_read(
+                &run,
+                Default::default(),
+                Default::default(),
+                selection,
+                &|| LogicalTime::new(20),
+            )
             .unwrap();
         let context = native.context();
         let initial = context.retrieval();
@@ -373,6 +411,20 @@ fn current_run_keeps_original_index_sources_and_exact_packet_evidence_in_both_fo
         assert_eq!(initial.generations().symbols, fixture.checkpoints.symbols);
         assert!(context.complete());
         assert_eq!(context.files().len(), 2);
+        assert_eq!(
+            native.ranking().is_some(),
+            selection == AgentContextSelection::WeightedRrf
+        );
+        if let Some(ranking) = native.ranking() {
+            assert_eq!(ranking.candidate_files(), 2);
+            assert_eq!(ranking.selected().len(), 2);
+            assert!(
+                ranking
+                    .selected()
+                    .iter()
+                    .all(|file| file.contributions().len() == 3)
+            );
+        }
         for file in context.files() {
             file.validate_revalidated_lineage(initial, &mut || Ok(()))
                 .unwrap();
@@ -414,10 +466,18 @@ fn current_run_keeps_original_index_sources_and_exact_packet_evidence_in_both_fo
             )))
         ));
 
-        let document = fixture.document(1024 * 1024).unwrap();
+        let document = fixture.selected_document(1024 * 1024, selection).unwrap();
         let value = json::parse(document.json.as_bytes()).unwrap();
         let evidence = field(&value, "retrieval_evidence");
         assert_eq!(field(&value, "profile").text(), Some(document::PROFILE));
+        assert_eq!(
+            field(evidence, "selection").text(),
+            Some(selection.profile())
+        );
+        assert_eq!(
+            evidence.object().unwrap().contains_key("ranking"),
+            native.ranking().is_some()
+        );
         assert_eq!(
             field(evidence, "profile").text(),
             Some("agent-context-revalidated-evidence-v1")
