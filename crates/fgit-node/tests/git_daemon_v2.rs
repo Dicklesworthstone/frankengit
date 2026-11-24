@@ -140,19 +140,20 @@ fn v2_ls_refs_request() -> Vec<u8> {
     wire
 }
 
-fn expected_v2_advertisement(object_format: &[u8]) -> Vec<u8> {
-    let mut advertisement = Vec::new();
+fn expected_empty_ls_refs_exchange(object_format: &[u8]) -> Vec<u8> {
+    let mut response = Vec::new();
     for packet in [
         b"version 2\n".as_slice(),
         // As upstream: v2 clients ask for an unborn HEAD only when offered.
         b"ls-refs=unborn\n",
-        b"fetch\n",
+        b"fetch=wait-for-done\n",
         &[b"object-format=".as_slice(), object_format, b"\n"].concat(),
     ] {
-        advertisement.extend_from_slice(&pkt_line(packet));
+        response.extend_from_slice(&pkt_line(packet));
     }
-    advertisement.extend_from_slice(FLUSH);
-    advertisement
+    response.extend_from_slice(FLUSH); // End of capabilities.
+    response.extend_from_slice(FLUSH); // No refs in the selected repository.
+    response
 }
 
 fn serve(
@@ -213,8 +214,9 @@ fn v2_advertisement_packet_bytes_follow_the_repository_object_format() {
         sha1_outcome,
         Ok(GitDaemonSessionOutcome::EmptyRepository(_))
     ));
-    assert!(
-        sha1_output.starts_with(&expected_v2_advertisement(b"sha1")),
+    assert_eq!(
+        sha1_output,
+        expected_empty_ls_refs_exchange(b"sha1"),
         "a SHA-1 repository must advertise its SHA-1 format packet"
     );
 
@@ -223,8 +225,9 @@ fn v2_advertisement_packet_bytes_follow_the_repository_object_format() {
         sha256_outcome,
         Ok(GitDaemonSessionOutcome::EmptyRepository(_))
     ));
-    assert!(
-        sha256_output.starts_with(&expected_v2_advertisement(b"sha256")),
+    assert_eq!(
+        sha256_output,
+        expected_empty_ls_refs_exchange(b"sha256"),
         "a SHA-256 repository must advertise its SHA-256 format packet"
     );
 }
