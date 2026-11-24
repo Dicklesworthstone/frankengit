@@ -93,7 +93,16 @@ fn a_cached_closure_is_still_written_to_a_different_store_with_the_same_instance
         assert_eq!(left.authority.instance_id(), right.authority.instance_id());
         let closure = stored_closure(&left);
         assert_eq!(stored_closure(&right), closure);
+        let authenticated_heads = || {
+            [&left, &right].map(|node| {
+                node.runtime()
+                    .block_on(node.authenticate_authority_head())
+                    .unwrap()
+            })
+        };
+        let before_staging = authenticated_heads();
         let selected = selected(&left);
+        assert_eq!(before_staging[0].body().unwrap(), *selected.basis().body());
         let (context, _, _) = evidence_request(&left);
         let projection = left.durable_admission_projection(&context).unwrap();
         let closure_key = key(&left, &closure);
@@ -124,17 +133,11 @@ fn a_cached_closure_is_still_written_to_a_different_store_with_the_same_instance
             ImmutableRead::Present(expected.clone())
         );
         assert_eq!(read(&right, &closure_key), ImmutableRead::Present(expected));
-        for node in [&left, &right] {
-            assert_eq!(
-                node.runtime()
-                    .block_on(node.authenticate_authority_head())
-                    .unwrap()
-                    .body()
-                    .unwrap(),
-                *selected.basis().body(),
-                "staged cached bytes never publish repository state"
-            );
-        }
+        assert_eq!(
+            authenticated_heads(),
+            before_staging,
+            "staging cached bytes must preserve each store's authenticated head"
+        );
         drop(projection);
         left.shutdown().unwrap();
         right.shutdown().unwrap();
