@@ -214,31 +214,47 @@ impl fmt::Display for GitOidSha256 {
 
 /// A native Git object identity whose algorithm is carried at runtime.
 ///
-/// The domain separation is enforced by the compiler, not by a runtime check.
-/// Comparing the two domains does not build:
+/// Equality requires the same digest type on both sides. The compiler rejects
+/// each mixed comparison with a type mismatch.
 ///
-/// ```compile_fail
+/// ```compile_fail,E0308
 /// use fgit_types::native::{GitOidSha1, GitOidSha256};
 /// let narrow = GitOidSha1::from_bytes([0_u8; 20]);
 /// let wide = GitOidSha256::from_bytes([0_u8; 32]);
 /// let _ = narrow == wide;
 /// ```
 ///
-/// Nor does passing one where the other is required:
+/// ```compile_fail,E0308
+/// use fgit_types::native::{GitOidSha1, GitOidSha256};
+/// let _ = GitOidSha256::ZERO == GitOidSha1::ZERO;
+/// ```
 ///
-/// ```compile_fail
+/// Typed function arguments enforce the same boundary in each direction.
+///
+/// ```compile_fail,E0308
 /// use fgit_types::native::{GitOidSha1, GitOidSha256};
 /// fn takes_sha256(_oid: GitOidSha256) {}
 /// takes_sha256(GitOidSha1::from_bytes([0_u8; 20]));
 /// ```
 ///
-/// The permitted counterpart, comparing within one domain, does build:
+/// ```compile_fail,E0308
+/// use fgit_types::native::{GitOidSha1, GitOidSha256};
+/// fn takes_sha1(_oid: GitOidSha1) {}
+/// takes_sha1(GitOidSha256::ZERO);
+/// ```
+///
+/// Both operations succeed within each domain.
 ///
 /// ```
-/// use fgit_types::native::GitOidSha1;
-/// let left = GitOidSha1::from_bytes([0_u8; 20]);
-/// let right = GitOidSha1::ZERO;
-/// assert_eq!(left, right);
+/// use fgit_types::native::{GitOidSha1, GitOidSha256};
+/// fn takes_sha1(_oid: GitOidSha1) {}
+/// fn takes_sha256(_oid: GitOidSha256) {}
+/// let narrow = GitOidSha1::from_bytes([0_u8; 20]);
+/// let wide = GitOidSha256::from_bytes([0_u8; 32]);
+/// assert_eq!(narrow, GitOidSha1::ZERO);
+/// assert_eq!(wide, GitOidSha256::ZERO);
+/// takes_sha1(narrow);
+/// takes_sha256(wide);
 /// ```
 ///
 /// Every interface that can cross repository context uses this form so the
