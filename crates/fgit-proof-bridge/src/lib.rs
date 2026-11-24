@@ -22,7 +22,7 @@
 //! The exporter checks the recorded observations against fresh reference-model
 //! replay. It reads each terminal from the replayed decision stream in order and
 //! compares it with the recorded head's outcome entry. The Lean checker uses
-//! the head generation and decision sequence at each step as its observations.
+//! the head generation and both sequence positions at each step as its observations.
 //!
 //! # Stated limits of the corpus
 //!

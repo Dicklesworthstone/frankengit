@@ -25,7 +25,7 @@ use fgit_reference::trace::{
 };
 use fgit_types::native::GitOid;
 use fgit_types::refs::RefName;
-use fgit_types::{DecisionOutcome, DecisionSequence, TxId};
+use fgit_types::{DecisionOutcome, DecisionSequence, RepositorySequence, TxId};
 
 /// The Lean model's terminal outcomes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -131,6 +131,8 @@ pub struct ProjectedStep {
     pub generation_after: u64,
     /// Final decision sequence recorded by this head, zero at genesis.
     pub decision_sequence_after: u64,
+    /// Final repository sequence recorded by this head. Only commits advance it.
+    pub repository_sequence_after: u64,
 }
 
 /// A whole history, projected.
@@ -377,6 +379,10 @@ pub(crate) fn project_replayed(
                 .head
                 .latest_decision_sequence
                 .map_or(0, DecisionSequence::get),
+            repository_sequence_after: step
+                .head
+                .latest_repository_sequence
+                .map_or(0, RepositorySequence::get),
         });
     }
 

@@ -278,6 +278,7 @@ fn mixed_batch_exports_both_ordered_terminal_decisions() {
         ]
     ));
     assert_eq!(last.decision_sequence_after, 2);
+    assert_eq!(last.repository_sequence_after, 1);
 }
 
 /// Stuttering steps keep their concrete index, so a divergence names a real step.
