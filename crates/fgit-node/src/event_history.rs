@@ -34,14 +34,17 @@ struct Entry {
 }
 
 impl Entry {
-    fn matches(&self, node: &OneNode, head: RepositoryAuthorityHeadId) -> bool {
+    fn matches_scope(&self, node: &OneNode) -> bool {
         self.root == node.fabric.root()
             && self.store_instance == node.authority.instance_id()
             && self.tenant == node.tenant_id
             && self.repository == node.repository_id
             && self.incarnation == node.repository_incarnation_id
             && self.format == node.object_format
-            && self.index.source_head() == head
+    }
+
+    fn matches(&self, node: &OneNode, head: RepositoryAuthorityHeadId) -> bool {
+        self.matches_scope(node) && self.index.source_head() == head
     }
 }
 
@@ -102,15 +105,24 @@ impl EventHistoryIndexCache {
         Some(Arc::clone(&entry.index))
     }
 
-    /// Offer only the exact direct predecessor of this freshly selected head.
-    /// The admission reader must still verify the new canonical edge before
-    /// these coordinates can be reused. Probing never records a cache hit.
+    /// Offer a bounded older index in the same complete storage scope. The
+    /// generation preflight grants no ancestry: the admission reader must
+    /// verify every intervening canonical edge back to this exact source head
+    /// before reusing its coordinates. Probing never records a cache hit.
     pub(crate) fn extension_candidate(
         &self,
         node: &OneNode,
         basis: &PublicationBasis,
     ) -> Option<Arc<VerifiedEventIndex>> {
-        self.lookup(node, basis.body().predecessor_head_id?)
+        if self.max_bytes == 0 {
+            return None;
+        }
+        let entry = self.entry.try_lock().ok()?;
+        let entry = entry.as_ref()?;
+        if !entry.matches_scope(node) || !entry.index.can_catch_up_at(basis) {
+            return None;
+        }
+        Some(Arc::clone(&entry.index))
     }
 
     pub(crate) fn record_hit(&self) {
@@ -142,6 +154,16 @@ impl EventHistoryIndexCache {
         let Ok(mut entry) = self.entry.try_lock() else {
             return;
         };
+        // An older request can finish after a newer reader. It may still use
+        // its own pinned index, but must not evict newer metadata from the same
+        // scope and force subsequent readers to rebuild it. Equal-generation
+        // results also cannot establish a newer cache source.
+        if entry.as_ref().is_some_and(|retained| {
+            retained.matches_scope(node)
+                && retained.index.source_generation() >= index.source_generation()
+        }) {
+            return;
+        }
         *entry = Some(Entry {
             root,
             store_instance: node.authority.instance_id(),

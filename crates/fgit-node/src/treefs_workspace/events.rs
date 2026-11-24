@@ -97,15 +97,17 @@ impl OneNode {
             return Ok(page);
         }
         let budget = cache.index_budget(self);
-        let predecessor = cache.extension_candidate(self, basis);
-        let extension_attempted = predecessor.is_some();
+        let candidate = cache.extension_candidate(self, basis);
+        let extension_attempted = candidate.is_some();
         if budget != 0
-            && let Some(previous) = predecessor
+            && let Some(previous) = candidate
         {
-            // Reuse an old prefix only after verifying this exact new edge.
-            // This also serves resumed cursors without walking older history.
+            // Reuse an old prefix only after verifying every unobserved edge
+            // back to its exact source head. Recent polling and old-cursor
+            // backfills need not rebuild an unchanged verified prefix merely
+            // because multiple publications occurred between requests.
             let extended = previous
-                .extend_at(
+                .catch_up_at(
                     &self.authority,
                     request.authority(),
                     basis,

@@ -224,16 +224,16 @@ The shared node read uses one authenticated head for configuration, disclosure
 policy and event history, without materializing unrelated source/outbox state.
 Recent-cursor cache misses walk only the verified decision suffix through that
 cursor. At a retained exact head, the shared verified metadata index seeks to
-the cursor and rereads the required nonempty event batches. An immediate
-successor can extend that index after verifying the new canonical history edge,
+the cursor and rereads the required nonempty event batches. A later head can
+extend that index across at most 64 intervening publications after verifying
+every canonical history edge and the exact retained ancestor,
 including refusal-only decisions and checkpoints. Cold initial reads
 and uncached old-cursor backfills can still be **O(history)**. See
 [the cursor-read contract](FORGE_EVENT_CURSOR_READS.md) for required-body checks,
 work bounds and explicit non-claims. No second event database or canonical
 schema is added. The warm event-batch bound does not include V2's separate
-canonical visibility readers. Persistent indexing and extension across multiple
-unobserved publications remain outstanding. These changes
-do not close the bead.
+canonical visibility readers. Persistent indexing and arbitrary-age cold lookup
+remain outstanding. These changes do not close the bead.
 
 Authored tests cover exact cursors, independent grants, hidden-ref filtering, filtering before
 encoding, empty-page progression, byte-budget continuation, cancellation,

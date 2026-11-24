@@ -54,7 +54,7 @@ Together the two changes bound recent polling by its decision suffix plus
 configuration/policy reads, rather than adding a complete source/outbox replay.
 Cold initial reads and uncached old-cursor backfills can still be O(history).
 The disposable index below accelerates repeated reads of one already-verified
-head and can extend across an immediate canonical successor. Optional
+head and can catch up across at most 64 unobserved canonical publications. Optional
 [bounded tail waits](SCOPED_FORGE_EVENT_FEED.md#bounded-waits-for-new-events)
 reuse this reader and authenticate the live head without rereading an unchanged
 event page. No new canonical format is added. Cold node opening may have
@@ -97,15 +97,20 @@ policy cannot fall back to an earlier successful read. Selected event bodies
 are reread, including the cursor body at EOF, so cached coordinates cannot
 conceal missing or corrupt selected payloads.
 
-A direct successor can reuse the retained prefix after verifying its complete
-new canonical edge: predecessor body plus decision batch or checkpoint capsule.
-The new index checks repository and store binding, exact predecessor identity,
-generation, committed sequence progression, and the existing complete-history
-ceilings. Refusal-only decisions and checkpoints advance the index without
+A later head can reuse the retained prefix after verifying every intervening
+canonical edge: predecessor body plus decision batch or checkpoint capsule.
+The generation gap is only an eligibility preflight and is capped at 64 edges,
+including refusal-only and checkpoint publications. The verifier must reach the
+exact retained head identity; matching generation or repository sequence alone
+cannot join unrelated histories. The new index checks repository and store
+binding, each transition, committed sequence progression, and the existing
+complete-history ceilings. Refusal-only decisions and checkpoints advance the index without
 inventing events. Both newly referenced empty schemas are verified before their
 rows are omitted. Cancellation and retention checks also cover copying the
-previous descriptors. Storage work is one edge plus at most two empty bodies;
-the immutable descriptor copy remains O(retained rows), not constant CPU work.
+previous descriptors. Storage work is proportional to the unobserved edges plus
+at most two empty bodies, independently of the verified prefix length. New
+microbatches retain their internal canonical order. The immutable descriptor
+copy remains O(retained rows), not constant CPU work.
 
 The node uses this extension for initial and resumed pages, only within the same
 complete storage scope. It retains the result after a successful page read.
@@ -113,9 +118,12 @@ Corrupt or missing edge evidence refuses; an exhausted optional retention
 allowance falls back to the canonical reader without a second speculative
 build. An invalid cursor or cancelled page does not replace the previous index.
 
-Other changed heads or scopes miss. An initial read may rebuild; a cold resumed
-cursor uses the existing suffix reader without searching for an older cached
-prefix or populating optional metadata.
+Same or older heads, gaps exceeding 64 edges, unrelated histories and different
+storage scopes do not reuse a prefix. An initial read may rebuild; a cold
+resumed cursor uses the existing suffix reader without populating optional
+metadata. A slower request completing at an older generation cannot evict a
+newer index in the same scope. This rule affects cache custody only; every
+request still returns the page at its own authenticated selected head.
 A conservative sequence-based preflight skips builds that cannot be guaranteed
 to fit, before any history I/O. Other construction failures never supply a
 page: fallback uses canonical reading with the same remaining request budget,
@@ -129,9 +137,12 @@ corruption, cancellation, stale bindings and memory bounds. The adjacent
 `extension_tests.rs` compares every cursor with replay, counts new-edge I/O
 independently of prefix length, and exercises invalid transitions, checkpoints,
 empty histories, damaged metadata, cancellation and full-history limits.
+`catch_up_tests.rs` extends those checks to missed publications, exact ancestor
+matching, corruption in intermediate edges and the 64-edge boundary.
 Native tests in `events/tests/cache.rs` cover both hash domains, reopen,
 discarded caches, advancing heads, skipped heads, refusal/checkpoint edges,
 identical history in another storage root, retention exhaustion and per-request
 grants. These are authored tests, not a passing execution claim. Persistent
-indexing, extension across multiple unobserved publications and the full Bead
-acceptance remain open.
+indexing, arbitrary-age cold lookup and the full Bead acceptance remain open.
+The 64-edge catch-up mechanism does not establish a latency, throughput or
+whole-feed O(limit) claim.
