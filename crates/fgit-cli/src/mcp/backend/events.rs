@@ -8,7 +8,7 @@ pub(super) const NAME: &str = "frankengit_events";
 pub(super) fn tool() -> Tool {
     Tool {
         name: NAME,
-        description: "Read canonical events under independent read grants. The default issues-pulls-v1 profile preserves issue/PR lifecycle and merge events. Opt into collaboration-v2 for milestones under issues, PR conversations and review votes under pulls, and discussions under discussions. Cursor-paged and read-only. limit bounds scanned events, so an empty page may have next_after. Save resume_after with the repository, profile and grants for polling. Optional expected_head refuses snapshot movement. Cursors reveal repository activity and position gaps; no ungranted event payload is disclosed. No webhook acknowledgement, event append, long-poll or indexed-read claim.",
+        description: "Read canonical events under independent read grants. The default issues-pulls-v1 profile preserves issue/PR lifecycle and merge events. Opt into collaboration-v2 for milestones under issues, PR conversations and review votes under pulls, and discussions under discussions. Cursor-paged and read-only. limit bounds scanned events, so an empty page may have next_after. Save resume_after with the repository, profile and grants for polling. Optional wait_ms waits at the current tail for up to 30000 ms within the original request deadline; any scanned cursor progress, including hidden events, returns immediately. MCP calls remain serial during the wait. Optional expected_head refuses snapshot movement on every reread. Cursors reveal repository activity and position gaps; no ungranted event payload is disclosed. No webhook acknowledgement or event append.",
         schema: object([
             ("type", text("object")),
             (
@@ -62,6 +62,24 @@ pub(super) fn tool() -> Tool {
                         ]),
                     ),
                     (
+                        "wait_ms",
+                        object([
+                            ("type", text("integer")),
+                            ("minimum", json::number(0)),
+                            (
+                                "maximum",
+                                json::number(u64::from(OneNode::MAX_FORGE_EVENT_WAIT_MS)),
+                            ),
+                            ("default", json::number(0)),
+                            (
+                                "description",
+                                text(
+                                    "Wait at the current tail within the original request deadline. Cursor progress returns immediately, even when all scanned events are hidden. A supplied expected_head is enforced on every reread.",
+                                ),
+                            ),
+                        ]),
+                    ),
+                    (
                         "expected_head",
                         object([
                             ("type", text("string")),
@@ -83,11 +101,15 @@ pub(super) fn tool() -> Tool {
 struct Query {
     after: Option<(u64, u32)>,
     limit: u16,
+    wait_ms: u32,
     expected_head: Option<RepositoryAuthorityHeadId>,
     disclosure_profile: ForgeEventDisclosureProfile,
 }
 fn parse(args: &Object) -> Result<Query, ToolError> {
-    require_fields(args, &["after", "limit", "expected_head", "profile"])?;
+    require_fields(
+        args,
+        &["after", "limit", "wait_ms", "expected_head", "profile"],
+    )?;
     let disclosure_profile = match string(args, "profile")? {
         None | Some("issues-pulls-v1") => ForgeEventDisclosureProfile::IssuesPullsV1,
         Some("collaboration-v2") => ForgeEventDisclosureProfile::CollaborationV2,
@@ -106,10 +128,23 @@ fn parse(args: &Object) -> Result<Query, ToolError> {
     if !(1..=100).contains(&limit) {
         return Err(ToolError::invalid("invalid_event_limit"));
     }
+    let wait_ms = args
+        .get("wait_ms")
+        .map(|value| {
+            value
+                .unsigned()
+                .ok_or(ToolError::invalid("invalid_event_wait"))
+        })
+        .transpose()?
+        .unwrap_or(0);
+    if wait_ms > u64::from(OneNode::MAX_FORGE_EVENT_WAIT_MS) {
+        return Err(ToolError::invalid("invalid_event_wait"));
+    }
     let expected_head = string(args, "expected_head")?.map(parse_head).transpose()?;
     Ok(Query {
         after,
         limit: limit as u16,
+        wait_ms: wait_ms as u32,
         expected_head,
         disclosure_profile,
     })
@@ -130,7 +165,7 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
     let page = backend
         .node
         .runtime()
-        .block_on(backend.node.read_profiled_forge_events_in(
+        .block_on(backend.node.read_profiled_forge_events_wait_in(
             &request,
             query.after,
             query.limit,
@@ -143,11 +178,13 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
                 // MCP review reads already share the trusted-local pulls grant.
                 reviews: backend.options.pulls,
             },
+            query.wait_ms,
         ))
         .map_err(|error| match error.public_code() {
-            "invalid_event_limit" | "invalid_event_cursor" | "events_not_granted" => {
-                ToolError::invalid(error.public_code())
-            }
+            "invalid_event_limit"
+            | "invalid_event_cursor"
+            | "invalid_event_wait"
+            | "events_not_granted" => ToolError::invalid(error.public_code()),
             _ => ToolError::failed(error.public_code()),
         })?;
     let mut result = backend.header(page.source_head());

@@ -9,7 +9,7 @@ fge_init scoped-event-feed
 fge_kind e2e-binary
 fge_context bead frankengit-root-doctrine-x2mv.4.35
 fge_context evidence_class real_binary_http_stdio_cli
-fge_context non_claim 'Native issue fixture in SHA-1/SHA-256; PR hidden-ref policy is unit-covered. Not indexed O(limit), full forge history, long-poll, browser or TLS evidence.'
+fge_context non_claim 'Native issue fixture in SHA-1/SHA-256; PR hidden-ref policy is unit-covered. Not indexed O(limit), full forge history, browser or TLS evidence.'
 fge_phase setup
 if [ -z "${FG_BIN:-}" ] || [ ! -x "$FG_BIN" ]; then
     fge_skip EVENT-FEED-001 'FG_BIN must identify a prebuilt native fg; no implicit build or substitute is allowed'
@@ -29,12 +29,12 @@ fge_run_timeout 900 campaign python3 "$E2E_ROOT/scoped_events_smoke.py" \
 fge_assert_exit EVENT-FEED-001 0 "$FGE_LAST_EXIT" 'actual fg commands, HTTP and MCP requests completed with owned children drained'
 fge_phase assert
 fact() {
-    python3 - "$SUMMARY" "$1" <<'PY'
+    python3 - "$SUMMARY" "$@" <<'PY'
 import json, sys
 try:
     with open(sys.argv[1], encoding="utf-8") as source:
         summary = json.load(source)
-    result = summary.get("complete") is True and summary.get("facts", {}).get(sys.argv[2]) is True
+    result = summary.get("complete") is True and all(summary.get("facts", {}).get(key) is True for key in sys.argv[2:])
 except (OSError, ValueError) as error:
     print(f"event feed summary unavailable: {error}", file=sys.stderr)
     result = False
@@ -43,8 +43,8 @@ PY
 }
 fge_assert_eq EVENT-FEED-002 true "$(fact sha1_parity_scopes_bounds)" 'SHA-1 canonical frame parity; independent read scopes; typed refusal and permitted twins'
 fge_assert_eq EVENT-FEED-003 true "$(fact sha256_parity_scopes_bounds)" 'SHA-256 canonical frame parity; independent read scopes; typed refusal and permitted twins'
-fge_assert_eq EVENT-FEED-004 true "$(fact sha1_restart_append_drain)" 'SHA-1 cursors survive process reopen and append; stale pin refuses; both services drain'
-fge_assert_eq EVENT-FEED-005 true "$(fact sha256_restart_append_drain)" 'SHA-256 cursors survive process reopen and append; stale pin refuses; both services drain'
+fge_assert_eq EVENT-FEED-004 true "$(fact sha1_restart_append_drain sha1_bounded_wait)" 'SHA-1 cursors survive reopen; bounded waits observe append and refuse moved pins; services drain'
+fge_assert_eq EVENT-FEED-005 true "$(fact sha256_restart_append_drain sha256_bounded_wait)" 'SHA-256 cursors survive reopen; bounded waits observe append and refuse moved pins; services drain'
 if [ -f "$SUMMARY" ]; then fge_artifact "$SUMMARY" event-feed-summary; fi
 if [ -f "$WORK/campaign/commands.jsonl" ]; then fge_artifact "$WORK/campaign/commands.jsonl" native-command-journal; fi
 fge_note replay "$(fge_replay_command)"

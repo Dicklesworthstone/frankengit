@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -24,6 +25,7 @@ from urllib.parse import urlencode, urlsplit
 TENANT, REPOSITORY, PRINCIPAL = "11" * 16, "22" * 16, "33" * 16
 TOKENS = {"issues": "a" * 64, "pulls": "b" * 64, "write": "c" * 64, "both": "d" * 64}
 MAX_RESPONSE = 2 * 1024 * 1024
+ARTIFACT_LOCK = threading.Lock()
 
 
 def require(condition: bool, message: str) -> None:
@@ -67,12 +69,13 @@ class Campaign:
         self.journal = work / "commands.jsonl"
 
     def record(self, **entry: Any) -> None:
-        with self.journal.open("a", encoding="utf-8") as out:
+        with ARTIFACT_LOCK, self.journal.open("a", encoding="utf-8") as out:
             out.write(json.dumps(entry, sort_keys=True) + "\n")
 
     def run(self, *args: Any, input_bytes: bytes | None = None) -> bytes:
-        self.serial += 1
-        stem = self.work / f"command-{self.serial:03d}"
+        with ARTIFACT_LOCK:
+            self.serial += 1
+            stem = self.work / f"command-{self.serial:03d}"
         command = [str(self.fg), *map(str, args)]
         started = time.monotonic()
         with stem.with_suffix(".stdout").open("wb") as stdout, stem.with_suffix(".stderr").open("wb") as stderr:
@@ -104,7 +107,8 @@ class Campaign:
         return json.loads(self.run("events", root, TENANT, REPOSITORY, "--trusted-local",
                                    "--object-format", fmt, "--limit", "100"))
 
-    def mcp(self, root: Path, fmt: str, grant: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
+    def mcp(self, root: Path, fmt: str, grant: str, arguments: dict[str, Any] | None,
+            *, invalid: str | None = None, failed: str | None = None) -> dict[str, Any]:
         messages = [
             {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
                 "protocolVersion": "2025-06-18", "capabilities": {},
@@ -119,8 +123,19 @@ class Campaign:
                           "--object-format", fmt, "--max-messages", "8", input_bytes=data)
         replies = [json.loads(line) for line in output.splitlines()]
         require(len(replies) == 2 and replies[-1].get("id") == 2, "MCP did not finish the actual protocol")
+        if invalid is not None:
+            error = replies[-1].get("error", {})
+            require(error.get("code") == -32602 and error.get("message") == invalid,
+                    f"MCP did not report the exact invalid-parameter refusal: {replies[-1]}")
+            return error
         require("error" not in replies[-1], f"MCP refused: {replies[-1]}")
         result = replies[-1]["result"]
+        if failed is not None:
+            body = result.get("structuredContent", {})
+            require(result.get("isError") is True and body.get("code") == failed
+                    and body.get("complete") is False,
+                    f"MCP did not report the exact read refusal: {result}")
+            return body
         require(not result.get("isError", False), f"MCP read failed: {result}")
         return result if arguments is None else result["structuredContent"]
 
@@ -259,7 +274,9 @@ class HttpServer:
 
     def get(self, grant: str | None, *, parameters: dict[str, Any] | None = None,
             suffix: str | None = None, expected: int = 200, method: str = "GET",
-            body: bytes | None = None, basic: bool = False) -> dict[str, Any]:
+            body: bytes | None = None, basic: bool = False,
+            connection: http.client.HTTPConnection | None = None,
+            request_sent: threading.Event | None = None) -> dict[str, Any]:
         parsed = urlsplit(self.url)
         query = urlencode(parameters or {})
         target = parsed.path + "/api/v1/events" + ("?" + query if query else "")
@@ -268,12 +285,16 @@ class HttpServer:
         headers = {"Connection": "close"}
         if grant is not None:
             headers["Authorization"] = "Basic Z2l0OmFhYQ==" if basic else "Bearer " + TOKENS[grant]
-        connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=90)
-        self.campaign.serial += 1
-        artifact = self.campaign.work / f"http-{self.campaign.serial:03d}.json"
+        if connection is None:
+            connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=90)
+        with ARTIFACT_LOCK:
+            self.campaign.serial += 1
+            artifact = self.campaign.work / f"http-{self.campaign.serial:03d}.json"
         started = time.monotonic()
         try:
             connection.request(method, target, body=body, headers=headers)
+            if request_sent is not None:
+                request_sent.set()
             response = connection.getresponse()
             wire = response.read(MAX_RESPONSE + 1)
             require(len(wire) <= MAX_RESPONSE, "HTTP response exceeded its output bound")
@@ -302,6 +323,79 @@ class HttpServer:
             connection.close()
 
 
+def append_while_http_waits(campaign: Campaign, server: HttpServer, root: Path,
+                           fmt: str, resume: str, pin: str) -> dict[str, dict[str, Any]]:
+    """Own both real HTTP reads until a CLI append wakes or refuses them."""
+    parsed = urlsplit(server.url)
+    requests = {
+        "unpinned": ({"after": resume, "wait_ms": 5000}, 200),
+        "pinned": ({"after": resume, "expected_head": pin, "wait_ms": 5000}, 409),
+    }
+    connections = {name: http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=10)
+                   for name in requests}
+    sent = {name: threading.Event() for name in requests}
+    done = {name: threading.Event() for name in requests}
+    pages: dict[str, dict[str, Any]] = {}
+    errors: dict[str, BaseException] = {}
+    threads: list[threading.Thread] = []
+
+    def read(name: str) -> None:
+        parameters, expected = requests[name]
+        try:
+            pages[name] = server.get("issues", parameters=parameters, expected=expected,
+                                     connection=connections[name], request_sent=sent[name])
+        except BaseException as error:
+            errors[name] = error
+        finally:
+            done[name].set()
+
+    try:
+        for name in requests:
+            thread = threading.Thread(target=read, args=(name,), name=f"event-wait-{fmt}-{name}")
+            threads.append(thread)
+            thread.start()
+        for name in requests:
+            require(sent[name].wait(5), f"{name} HTTP wait was not sent within its bound")
+            # A response-completion barrier makes a premature empty response
+            # observable; publication is not coordinated by a guessed sleep.
+            require(not done[name].wait(0.1), f"{name} HTTP read completed before the append")
+        campaign.record(kind="event_wait", object_format=fmt, wait_ms=5000,
+                        phase="both_requests_pending", after=resume)
+        campaign.issue(root, fmt, 2, "append-fixture", "Third event during bounded HTTP waits")
+        for name in requests:
+            require(done[name].wait(10), f"{name} HTTP wait did not finish after publication")
+    finally:
+        # On assertion, timeout or interruption, release each owned socket
+        # before joining. Repeated cancellation cannot interrupt this drain.
+        handlers = {}
+        try:
+            if threading.current_thread() is threading.main_thread():
+                for number in (signal.SIGTERM, signal.SIGINT):
+                    handlers[number] = signal.signal(number, signal.SIG_IGN)
+            for connection in connections.values():
+                owned_socket = connection.sock
+                if owned_socket is not None:
+                    try:
+                        owned_socket.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                connection.close()
+            for thread in threads:
+                if thread.ident is not None:
+                    thread.join(timeout=12)
+            require(all(not thread.is_alive() for thread in threads), "HTTP wait reader did not drain")
+        finally:
+            for number, handler in handlers.items():
+                signal.signal(number, handler)
+    if errors:
+        raise AssertionError(f"bounded HTTP wait failed: {errors}") from next(iter(errors.values()))
+    require(set(pages) == set(requests), "HTTP wait lost a completed response")
+    require(pages["pinned"]["code"] == "snapshot_moved", "pinned wait silently selected a new head")
+    campaign.record(kind="event_wait", object_format=fmt, phase="readers_joined",
+                    pinned_code=pages["pinned"]["code"], unpinned_events=len(pages["unpinned"]["events"]))
+    return pages
+
+
 def run_case(campaign: Campaign, fmt: str) -> None:
     directory = campaign.work / fmt
     directory.mkdir()
@@ -328,13 +422,20 @@ def run_case(campaign: Campaign, fmt: str) -> None:
         require(first == campaign.mcp(root, fmt, "--allow-issues", {"limit": 1}), "HTTP and MCP first pages diverge")
         require(second == campaign.mcp(root, fmt, "--allow-issues", {
             "after": first["next_after"], "limit": 1, "expected_head": pin}), "HTTP and MCP tails diverge")
+        for wait_ms in (0, 2000):
+            arguments = {"limit": 1, "wait_ms": wait_ms}
+            require(server.get("issues", parameters=arguments) == first,
+                    "HTTP wait changed an already available canonical page")
+            require(campaign.mcp(root, fmt, "--allow-issues", arguments) == first,
+                    "MCP wait changed an already available canonical page")
         for event in first["events"] + second["events"]:
             for field in ("repository_sequence", "event_index", "policy_epoch", "aggregate_version"):
                 require(isinstance(event[field], str) and event[field].isdigit(), "lossy numeric event field")
-        hidden = server.get("pulls", parameters={"limit": 1})
+        hidden = server.get("pulls", parameters={"limit": 1, "wait_ms": 2000})
         require(hidden["events"] == [] and hidden["next_after"] == first["next_after"], "filtered page stalled/leaked")
         require(hidden["cursor_discloses_repository_activity"] is True, "cursor leakage was not explicit")
-        require(hidden == campaign.mcp(root, fmt, "--allow-pulls", {"limit": 1}), "filtered transports differ")
+        require(hidden == campaign.mcp(root, fmt, "--allow-pulls", {"limit": 1, "wait_ms": 2000}),
+                "filtered wait transports differ")
         hidden_tail = server.get("pulls", parameters={"after": hidden["next_after"]})
         require(hidden_tail["events"] == [] and hidden_tail["resume_after"] == resume, "hidden tail did not advance")
         server.get("write", expected=403)
@@ -344,6 +445,11 @@ def run_case(campaign: Campaign, fmt: str) -> None:
         server.get("issues", suffix="?limit=1&%6cimit=2", expected=400)
         server.get("issues", parameters={"after": "1:00"}, expected=400)
         server.get("issues", parameters={"limit": 101}, expected=400)
+        for wait_ms in (30001, 18446744073709551616, -1, "1.0", "1e3", ""):
+            refused = server.get("issues", parameters={"wait_ms": wait_ms}, expected=400)
+            require(refused["code"] == "invalid_event_wait", "HTTP wait bound was not a typed refusal")
+        for wait_ms in (30001, 18446744073709551616, -1, 1.0, "1", None, False):
+            campaign.mcp(root, fmt, "--allow-issues", {"wait_ms": wait_ms}, invalid="invalid_event_wait")
         server.get("issues", method="POST", expected=405)
         server.get("issues", body=b"not an event append", expected=400)
         # A planted-invalid request must not disturb its exact permitted twin.
@@ -351,6 +457,14 @@ def run_case(campaign: Campaign, fmt: str) -> None:
                 "refusals changed repository state")
         tools = campaign.mcp(root, fmt, "--allow-source", None)["tools"]
         require(all(tool["name"] != "frankengit_events" for tool in tools), "source read silently grants metadata")
+        tools = campaign.mcp(root, fmt, "--allow-issues", None)["tools"]
+        event_tool = next(tool for tool in tools if tool["name"] == "frankengit_events")
+        schema = event_tool["inputSchema"]
+        wait = schema["properties"]["wait_ms"]
+        require(wait["type"] == "integer" and wait["minimum"] == 0
+                and wait["maximum"] == 30000 and wait["default"] == 0
+                and schema["additionalProperties"] is False,
+                "live MCP catalog does not describe the strict bounded optional wait")
     campaign.facts[fmt + "_parity_scopes_bounds"] = True
 
     # Reopening separate HTTP/MCP processes reconstructs, rather than remembers,
@@ -360,18 +474,33 @@ def run_case(campaign: Campaign, fmt: str) -> None:
         require(eof["events"] == [] and eof["resume_after"] == resume, "restart lost EOF watermark")
         require(eof == campaign.mcp(root, fmt, "--allow-issues", {"after": resume, "expected_head": pin}),
                 "MCP restart changed cursor semantics")
-        campaign.issue(root, fmt, 2, "append-fixture", "Third event after restart")
-        stale = server.get("issues", parameters={"after": resume, "expected_head": pin}, expected=409)
+        for wait_ms in (0, 100):
+            arguments = {"after": resume, "expected_head": pin, "wait_ms": wait_ms}
+            started = time.monotonic()
+            require(server.get("issues", parameters=arguments) == eof,
+                    "HTTP tail timeout changed the empty page, cursor or exact pin")
+            if wait_ms:
+                require(time.monotonic() - started >= 0.075, "HTTP tail returned before its bounded wait")
+            require(campaign.mcp(root, fmt, "--allow-issues", arguments) == eof,
+                    "MCP tail timeout changed the empty page, cursor or exact pin")
+        waiting = append_while_http_waits(campaign, server, root, fmt, resume, pin)
+        stale = server.get("issues", parameters={"after": resume, "expected_head": pin, "wait_ms": 2000}, expected=409)
         require(stale["code"] == "snapshot_moved", "stale pin silently refreshed")
-        appended = server.get("issues", parameters={"after": resume})
+        require(waiting["pinned"] == stale, "head movement during a wait changed the refusal contract")
+        campaign.mcp(root, fmt, "--allow-issues", {
+            "after": resume, "expected_head": pin, "wait_ms": 2000}, failed="snapshot_moved")
+        appended = server.get("issues", parameters={"after": resume, "wait_ms": 2000})
         require(len(appended["events"]) == 1 and appended["events"][0]["aggregate_version"] == "3", "append cursor skipped/duplicated")
-        require(appended == campaign.mcp(root, fmt, "--allow-issues", {"after": resume}), "append transports differ")
+        require(waiting["unpinned"] == appended, "pending HTTP wait did not return the exact appended page")
+        require(appended == campaign.mcp(root, fmt, "--allow-issues", {"after": resume, "wait_ms": 2000}),
+                "append wait transports differ")
         require(rows(campaign.canonical(root, fmt)) == rows(canonical) + rows(appended), "canonical parity after append")
         require(appended["snapshot_token"] != pin, "append did not advance authority")
         after_reads = server.get("issues", parameters={"expected_head": appended["snapshot_token"]})
         require(rows(after_reads) == rows(canonical) + rows(appended), "reads unexpectedly published")
     campaign.facts[fmt + "_restart_append_drain"] = True
-    print(f"SCOPED_EVENTS format={fmt} canonical_parity_scopes_restart_append_drain=passed", flush=True)
+    campaign.facts[fmt + "_bounded_wait"] = True
+    print(f"SCOPED_EVENTS format={fmt} canonical_parity_scopes_restart_append_wait_pin_drain=passed", flush=True)
 
 
 def main() -> None:
@@ -388,7 +517,7 @@ def main() -> None:
     summary: dict[str, Any] = {"facts": campaign.facts, "complete": False,
         "binary_sha256": file_sha256(fg),
         "python": sys.version, "artifacts": str(campaign.work),
-        "non_claim": "No indexed O(limit) read, browser, TLS, hostile isolation, long-poll or full forge event coverage."}
+        "non_claim": "No indexed O(limit) read, browser, TLS, hostile isolation or full forge event coverage."}
     def stop(_signum: int, _frame: Any) -> None:
         raise InterruptedError("campaign interrupted; draining owned children")
     signal.signal(signal.SIGTERM, stop)

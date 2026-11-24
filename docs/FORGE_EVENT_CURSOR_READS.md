@@ -54,8 +54,10 @@ Together the two changes bound recent polling by its decision suffix plus
 configuration/policy reads, rather than adding a complete source/outbox replay.
 Cold initial reads and uncached old-cursor backfills can still be O(history).
 The disposable index below accelerates repeated reads of one already-verified
-head and can extend across an immediate canonical successor. There is no
-long-poll or new canonical format. Cold node opening may have
+head and can extend across an immediate canonical successor. Optional
+[bounded tail waits](SCOPED_FORGE_EVENT_FEED.md#bounded-waits-for-new-events)
+reuse this reader and authenticate the live head without rereading an unchanged
+event page. No new canonical format is added. Cold node opening may have
 other initialization costs. The bead remains open until its complete bounded
 lookup, real-binary execution and independent verification acceptance is met.
 

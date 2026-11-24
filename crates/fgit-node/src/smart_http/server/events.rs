@@ -30,6 +30,7 @@ struct Request<'a> {
     repository_route: &'a str,
     after: Option<(u64, u32)>,
     limit: u16,
+    wait_ms: u32,
     expected_head: Option<RepositoryAuthorityHeadId>,
     disclosure_profile: ForgeEventDisclosureProfile,
 }
@@ -58,10 +59,10 @@ impl<'a> Request<'a> {
         }
         let mut fields = BTreeMap::new();
         if !query.is_empty() {
-            for (name, value) in issues::parse_form(query.as_bytes(), 4)? {
+            for (name, value) in issues::parse_form(query.as_bytes(), 5)? {
                 if !matches!(
                     name.as_str(),
-                    "after" | "limit" | "expected_head" | "profile"
+                    "after" | "limit" | "expected_head" | "profile" | "wait_ms"
                 ) || fields.insert(name, value).is_some()
                 {
                     return Err(ApiError::bad("invalid_event_query"));
@@ -78,6 +79,16 @@ impl<'a> Request<'a> {
             .unwrap_or(20);
         if !(1..=100).contains(&limit) {
             return Err(ApiError::bad("invalid_event_limit"));
+        }
+        let wait_ms = fields
+            .get("wait_ms")
+            .map(|value| {
+                issues::parse_decimal(value).map_err(|_| ApiError::bad("invalid_event_wait"))
+            })
+            .transpose()?
+            .unwrap_or(0);
+        if wait_ms > u64::from(OneNode::MAX_FORGE_EVENT_WAIT_MS) {
+            return Err(ApiError::bad("invalid_event_wait"));
         }
         let expected_head = fields
             .get("expected_head")
@@ -97,13 +108,14 @@ impl<'a> Request<'a> {
             repository_route,
             after,
             limit: limit as u16,
+            wait_ms: wait_ms as u32,
             expected_head,
             disclosure_profile,
         })
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ReadGrant {
     principal: PrincipalId,
     issues: bool,
@@ -144,7 +156,7 @@ fn authenticate(
 
 fn read_error(code: &'static str) -> ApiError {
     let status = match code {
-        "invalid_event_limit" | "invalid_event_cursor" => Status::BadRequest,
+        "invalid_event_limit" | "invalid_event_cursor" | "invalid_event_wait" => Status::BadRequest,
         "snapshot_moved" => Status::Conflict,
         "events_not_granted" => Status::Forbidden,
         "event_response_limit" => Status::TooLarge,
@@ -152,6 +164,21 @@ fn read_error(code: &'static str) -> ApiError {
         _ => return ApiError::new(Status::Unavailable, "event_read_unavailable"),
     };
     ApiError::new(status, code)
+}
+
+/// A bounded wait can span credential rotation. Do not disclose a page selected
+/// under a different principal or effective grant, even if the new grant is
+/// broader: the caller must explicitly restart with the new cursor contract.
+fn revalidate_wait_grant(
+    profile: &Profile,
+    envelope: &Envelope<'_>,
+    request: &Request<'_>,
+    original: ReadGrant,
+) -> Result<(), ApiError> {
+    if request.wait_ms != 0 && authenticate(profile, envelope, request)? != original {
+        return Err(ApiError::new(Status::Forbidden, "event_grant_changed"));
+    }
+    Ok(())
 }
 
 /// No node is opened/leased before credentials, independent endpoint ceilings,
@@ -173,6 +200,9 @@ fn prepare(
         .map_err(|_| ApiError::new(Status::RateLimited, "rate_limited"))?;
     let node = profile.nodes.lease().ok_or_else(ApiError::unavailable)?;
     let result = execute(&node, &request, grant, profile.maximum_response_bytes);
+    // Recheck even a refused read: snapshot movement itself reveals repository
+    // activity and must not outlive the credential that authorized the wait.
+    let result = revalidate_wait_grant(profile, envelope, &request, grant).and(result);
     match result {
         Ok(body) => Ok((node, body)),
         Err(error) => {
@@ -198,7 +228,7 @@ fn execute(
     let page = drive_request_while(
         node,
         &request,
-        node.read_profiled_forge_events_in(
+        node.read_profiled_forge_events_wait_in(
             &request,
             query.after,
             query.limit,
@@ -210,6 +240,7 @@ fn execute(
                 discussions: grant.discussions,
                 reviews: grant.reviews,
             },
+            query.wait_ms,
         ),
         &mut || !deadline.expired(),
     )
