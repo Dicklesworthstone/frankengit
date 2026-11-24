@@ -54,7 +54,8 @@ Together the two changes bound recent polling by its decision suffix plus
 configuration/policy reads, rather than adding a complete source/outbox replay.
 Cold initial reads and uncached old-cursor backfills can still be O(history).
 The disposable index below accelerates repeated reads of one already-verified
-head. There is no long-poll or new canonical format. Cold node opening may have
+head and can extend across an immediate canonical successor. There is no
+long-poll or new canonical format. Cold node opening may have
 other initialization costs. The bead remains open until its complete bounded
 lookup, real-binary execution and independent verification acceptance is met.
 
@@ -94,8 +95,25 @@ policy cannot fall back to an earlier successful read. Selected event bodies
 are reread, including the cursor body at EOF, so cached coordinates cannot
 conceal missing or corrupt selected payloads.
 
-A changed head or scope misses. An initial read may rebuild; a cold resumed
-cursor uses the existing suffix reader without populating optional metadata.
+A direct successor can reuse the retained prefix after verifying its complete
+new canonical edge: predecessor body plus decision batch or checkpoint capsule.
+The new index checks repository and store binding, exact predecessor identity,
+generation, committed sequence progression, and the existing complete-history
+ceilings. Refusal-only decisions and checkpoints advance the index without
+inventing events. Both newly referenced empty schemas are verified before their
+rows are omitted. Cancellation and retention checks also cover copying the
+previous descriptors. Storage work is one edge plus at most two empty bodies;
+the immutable descriptor copy remains O(retained rows), not constant CPU work.
+
+The node uses this extension for initial and resumed pages, only within the same
+complete storage scope. It retains the result after a successful page read.
+Corrupt or missing edge evidence refuses; an exhausted optional retention
+allowance falls back to the canonical reader without a second speculative
+build. An invalid cursor or cancelled page does not replace the previous index.
+
+Other changed heads or scopes miss. An initial read may rebuild; a cold resumed
+cursor uses the existing suffix reader without searching for an older cached
+prefix or populating optional metadata.
 A conservative sequence-based preflight skips builds that cannot be guaranteed
 to fit, before any history I/O. Other construction failures never supply a
 page: fallback uses canonical reading with the same remaining request budget,
@@ -105,8 +123,13 @@ on cache lifetime.
 
 Reference tests in `feed/history_tests/index.rs` compare full pages to canonical
 replay and count actual store reads across history lengths, both empty schemas,
-corruption, cancellation, stale bindings and memory bounds. Native tests in
-`events/tests/cache.rs` cover both hash domains, reopen, discarded caches,
-changed heads and per-request grants. These are authored tests, not a passing
-execution claim. Persistent indexing, incremental maintenance across changed
-heads and the full Bead acceptance remain open.
+corruption, cancellation, stale bindings and memory bounds. The adjacent
+`extension_tests.rs` compares every cursor with replay, counts new-edge I/O
+independently of prefix length, and exercises invalid transitions, checkpoints,
+empty histories, damaged metadata, cancellation and full-history limits.
+Native tests in `events/tests/cache.rs` cover both hash domains, reopen,
+discarded caches, advancing heads, skipped heads, refusal/checkpoint edges,
+identical history in another storage root, retention exhaustion and per-request
+grants. These are authored tests, not a passing execution claim. Persistent
+indexing, extension across multiple unobserved publications and the full Bead
+acceptance remain open.

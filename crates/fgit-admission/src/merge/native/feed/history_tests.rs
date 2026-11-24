@@ -1,5 +1,6 @@
 //! Count actual authority reads and compare cursor pages with a complete replay.
 //! Reference-store tests only; not a native-runtime or filesystem benchmark.
+mod extension_tests;
 mod index;
 mod support;
 use super::*;

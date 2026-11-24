@@ -8768,9 +8768,10 @@ impl NodeConfig {
     ///
     /// The default is 16 MiB; zero disables retention. Service children share
     /// at most one exact-head index. Initial reads construct it from verified
-    /// history, while cold resumed reads retain the bounded suffix reader.
-    /// Payloads and disclosure decisions are never cached. This allowance is
-    /// additional to per-request history and event-byte limits.
+    /// history. An immediate successor can extend it after verifying the new
+    /// canonical edge; other cold resumed reads retain the bounded suffix
+    /// reader. Payloads and disclosure decisions are never cached. This
+    /// allowance is additional to per-request history and event-byte limits.
     #[must_use]
     pub fn with_event_history_index_cache_bytes(mut self, max_bytes: usize) -> Self {
         self.event_history_index_cache =
