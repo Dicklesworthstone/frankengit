@@ -179,11 +179,23 @@ and owner-unreadable modes remain refused.
 
 The profile preserves case and Unicode byte distinctions when the host does;
 exclusive creation/alias checks refuse collisions. Symlink materialization,
-gitlinks, special files, cross-mount traversal, and shared host hardlinks are
+special files, cross-mount traversal, and shared host hardlinks are
 unsupported. The immutable `Arc<SparseManifest>` is shared between runs;
 each host workspace copies its input payloads and has private changes. The
 receipt reports copied bytes and **zero shared host bytes**. This is no claim
 of reflink/FUSE performance or million-workspace scale.
+
+Opaque gitlink inputs are a supported extension of the same sparse-directory
+writer. Their exact source OID and distinct entry kind remain in the manifest
+and plan identity; the host representation is an empty uninitialized directory.
+No foreign object is read and no credentials or recursive authorization are
+delegated. Declared outputs and artifacts cannot overlap a gitlink. Directory
+emptiness, mode, confinement and current-lease identity are checked before
+accepting output; reopen requires the same source-bound plan and empty
+representation. Ordinary edits preserve the untouched Git pointer. These
+checks add no host gitlink-edit or recursive checkout capability; see
+[`GIT_TREE_FS.md` §10.4](GIT_TREE_FS.md#104-opaque-submodules-in-sparse-directories)
+for the lifecycle and executable test boundaries.
 
 ### Consumable resource accounting and interruption (v2, 2026-09-08)
 

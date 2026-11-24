@@ -15,7 +15,7 @@ use fgit_runner::sparse_workspace::{
 };
 use fgit_treefs::{
     BaseView, ExportLimits, ExportPlanner, ObjectSource, ObjectSourceError, PathPolicy, ReadGrant,
-    SparseLimits, SparseManifest, SparseRefusal, TreeCapability, TreePath, WorkspaceId,
+    SparseLimits, SparseManifest, TreeCapability, TreePath, WorkspaceId,
 };
 use fgit_types::{CodecVersion, DigestAlgorithmId, DigestBytes, RepositoryCommitId, RepositoryId};
 use std::fs::{self, File};
@@ -840,12 +840,12 @@ fn plan_and_host_permissions_refuse_before_io_beside_admitted_inputs() {
 }
 
 #[test]
-fn gitlink_refuses_before_host_creation_beside_a_regular_file_at_the_same_path() {
+fn gitlink_materializes_as_an_empty_directory_beside_a_regular_file_at_the_same_path() {
     for gitlink in [false, true] {
         let scratch = Scratch::new();
         let (source, _, _) = fixture(&scratch.0, None);
-        // The foreign commit is deliberately absent. A gitlink must be
-        // refused as a host entry without attempting to read foreign objects.
+        // The foreign commit is deliberately absent. An uninitialized gitlink
+        // is an empty host directory without attempting to read foreign objects.
         let oid = if gitlink {
             Oid::of_object(GitObjectKind::Commit, b"foreign repository commit")
         } else {
@@ -877,34 +877,38 @@ fn gitlink_refuses_before_host_creation_beside_a_regular_file_at_the_same_path()
             0,
             SparseLimits::default(),
         );
+        let workspace_plan = SparseWorkspacePlan::new(
+            Arc::new(manifest.unwrap()),
+            vec![],
+            &capability(),
+            0,
+            SparseLimits {
+                max_entries: 10,
+                max_entry_bytes: 1024,
+                max_payload_bytes: 2048,
+            },
+        )
+        .unwrap();
+        let obligations = ledger();
+        let w = create(&scratch, &obligations, workspace_plan, b"workspace");
         if gitlink {
-            assert!(
-                matches!(manifest, Err(SparseRefusal::SubmoduleUnsupported { path: workspace_plan }) if workspace_plan == path(b"src"))
+            assert!(w.tool_directory().join("src").is_dir());
+            assert_eq!(
+                fs::read_dir(w.tool_directory().join("src"))
+                    .unwrap()
+                    .count(),
+                0
             );
-            assert!(!scratch.0.join("workspace").exists());
+            w.verify_opaque_inputs(&|_| false).unwrap();
             assert!(!source.0.join(hex(&oid)).exists());
         } else {
-            let workspace_plan = SparseWorkspacePlan::new(
-                Arc::new(manifest.unwrap()),
-                vec![],
-                &capability(),
-                0,
-                SparseLimits {
-                    max_entries: 10,
-                    max_entry_bytes: 1024,
-                    max_payload_bytes: 2048,
-                },
-            )
-            .unwrap();
-            let obligations = ledger();
-            let w = create(&scratch, &obligations, workspace_plan, b"workspace");
             assert_eq!(
                 fs::read(w.tool_directory().join("src")).unwrap(),
                 b"ordinary file\n"
             );
-            let _ = w.close().unwrap();
-            quiescent(obligations);
         }
+        let _ = w.close().unwrap();
+        quiescent(obligations);
     }
 }
 

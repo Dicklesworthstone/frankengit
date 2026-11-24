@@ -6,14 +6,15 @@
 //! side effects that belong to the runner-owned adapter and its obligations.
 //! This module owns the preceding final boundary: deterministic discovery,
 //! per-object identity verification, capability charging, path containment,
-//! and a typed representation in which symlinks remain link-text data.
+//! and typed representations in which symlinks remain link-text data and
+//! gitlinks remain opaque foreign-commit identities without recursive access.
 
 use crate::base::{BaseError, BaseView, ObjectSource, ObjectSourceError};
 use crate::capability::{CapabilityRefusal, TreeCapability};
 use crate::overlay::FileMode;
 use crate::path::TreePath;
 use core::fmt::{self, Display, Formatter};
-use fgit_crypto::{GitHashAlgorithm, GitObjectKind, GitOid};
+use fgit_crypto::{GitHashAlgorithm, GitObjectKind, GitOid, NativeObjectIdentity};
 use fgit_types::{RepositoryCommitId, RepositoryId};
 use std::collections::BTreeMap;
 
@@ -47,7 +48,8 @@ impl Default for SparseLimits {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SparseProfile {
     /// Canonically ordered `TreeFS` entries with files and symlinks represented
-    /// as verified byte bodies and no host filesystem effect.
+    /// as verified byte bodies, gitlinks as opaque identities authenticated by
+    /// their containing tree, and no host filesystem effect.
     ManifestV1,
 }
 
@@ -157,12 +159,14 @@ impl<A: GitHashAlgorithm> SparseEntry<A> {
     }
 
     /// Git object identity whose checked body or tree produced this entry.
+    /// For a gitlink this is the opaque foreign commit named by the verified
+    /// containing tree; the target itself is never read or verified here.
     #[must_use]
     pub const fn source_oid(&self) -> &GitOid<A> {
         &self.source_oid
     }
 
-    /// Directory, regular-file, or data-only symlink representation.
+    /// Directory, regular-file, data-only symlink, or opaque gitlink representation.
     #[must_use]
     pub const fn kind(&self) -> &SparseEntryKind {
         &self.kind
@@ -186,6 +190,11 @@ pub enum SparseEntryKind {
         /// Checked blob body containing raw link-text bytes.
         target: Vec<u8>,
     },
+    /// An uninitialized submodule boundary. Its exact foreign commit identity
+    /// is [`SparseEntry::source_oid`], authenticated only as containing-tree
+    /// data. A host adapter may create an empty directory; it must never infer
+    /// permission to fetch the target or import edits at or beneath this path.
+    Gitlink,
 }
 
 impl SparseEntryKind {
@@ -194,7 +203,7 @@ impl SparseEntryKind {
     pub const fn file_mode(&self) -> Option<FileMode> {
         match self {
             Self::File { mode, .. } => Some(*mode),
-            Self::Directory | Self::Symlink { .. } => None,
+            Self::Directory | Self::Symlink { .. } | Self::Gitlink => None,
         }
     }
 
@@ -204,7 +213,7 @@ impl SparseEntryKind {
         match self {
             Self::File { body, .. } => Some(body),
             Self::Symlink { target } => Some(target),
-            Self::Directory => None,
+            Self::Directory | Self::Gitlink => None,
         }
     }
 }
@@ -222,7 +231,8 @@ impl<A: GitHashAlgorithm> SparseManifest<A> {
     /// Discovery is completed before payload reads, preserving canonical order
     /// and refusing entry-count excess before retaining file data.  Every
     /// retained payload crosses `BaseView`'s Git-object identity check and is
-    /// charged to `capability`.  Symlink bodies are retained only as data.
+    /// charged to `capability`. Symlink bodies are retained only as data.
+    /// Gitlinks retain their exact typed OID without reading the foreign target.
     pub fn build<S: ObjectSource<A>>(
         base: &BaseView<A>,
         source: &S,
@@ -243,6 +253,7 @@ impl<A: GitHashAlgorithm> SparseManifest<A> {
         for (path, entry) in planned {
             let (source_oid, kind) = match entry {
                 PlannedEntry::Directory { oid } => (oid, SparseEntryKind::Directory),
+                PlannedEntry::Gitlink { oid } => (oid, SparseEntryKind::Gitlink),
                 PlannedEntry::File { oid, mode } => {
                     let body = read_payload(base, source, capability, &path, &oid, now)?;
                     check_entry_bytes(&path, body.len(), limits.max_entry_bytes)?;
@@ -329,10 +340,9 @@ pub enum SparseRefusal {
         /// Configured maximum.
         limit: usize,
     },
-    /// A gitlink has no ordinary sparse-directory representation in this
-    /// profile.
-    SubmoduleUnsupported {
-        /// Gitlink path.
+    /// Git's all-zero sentinel cannot name an uninitialized submodule.
+    InvalidGitlink {
+        /// Gitlink path whose target is not a native object identity.
         path: TreePath,
     },
     /// A file mode lies outside the closed set a `TreeFS` host adapter creates.
@@ -378,11 +388,8 @@ impl Display for SparseRefusal {
                 formatter,
                 "sparse payload would retain {observed} bytes, limit is {limit}"
             ),
-            Self::SubmoduleUnsupported { path } => {
-                write!(
-                    formatter,
-                    "submodule {path} is unsupported in sparse materialization"
-                )
+            Self::InvalidGitlink { path } => {
+                write!(formatter, "sparse gitlink {path} has an all-zero target")
             }
             Self::UnsupportedFileMode { path, mode } => write!(
                 formatter,
@@ -407,6 +414,7 @@ enum PlannedEntry<A: GitHashAlgorithm> {
     Directory { oid: GitOid<A> },
     File { oid: GitOid<A>, mode: FileMode },
     Symlink { oid: GitOid<A> },
+    Gitlink { oid: GitOid<A> },
 }
 
 fn discover<A: GitHashAlgorithm, S: ObjectSource<A>>(
@@ -448,8 +456,11 @@ fn discover<A: GitHashAlgorithm, S: ObjectSource<A>>(
                     .map_err(SparseRefusal::Capability)?;
                 PlannedEntry::Symlink { oid }
             }
-            crate::base::BaseEntry::Submodule { .. } => {
-                return Err(SparseRefusal::SubmoduleUnsupported { path });
+            crate::base::BaseEntry::Submodule { oid } => {
+                if oid.digest_bytes().iter().all(|byte| *byte == 0) {
+                    return Err(SparseRefusal::InvalidGitlink { path });
+                }
+                PlannedEntry::Gitlink { oid }
             }
         };
         if planned.insert(path.clone(), entry).is_some() {

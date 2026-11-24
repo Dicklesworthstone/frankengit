@@ -12,11 +12,15 @@
 //! exclude concurrent tools during import/close and protect the parent from
 //! rename or deletion by other principals. The optional shared-input cache
 //! uses distinct-inode reflinks, with an explicit private-copy fallback.
-//! FUSE, shared host inodes, symlink materialization, and gitlinks are unsupported.
+//! Gitlinks become empty uninitialized directories with no recursive access;
+//! their opaque source identities remain in the manifest. FUSE, shared host
+//! inodes and symlink materialization are unsupported.
 
+mod gitlinks;
 mod inputs;
 mod job_inputs;
 mod shared_inputs;
+use gitlinks::GitlinkDirectories;
 use inputs::WorkspaceManifest;
 pub use job_inputs::JobInput;
 pub use shared_inputs::{
@@ -61,6 +65,7 @@ pub enum HostEpoch {
     SyncingParent(usize),
     Visible,
     Durable,
+    ValidatingGitlink(usize),
     Importing(usize),
     Imported,
 }
@@ -108,6 +113,9 @@ pub struct HostReservation {
     pub workspace: WorkspaceId,
     pub max_bytes: u64,
     pub max_entries: u64,
+    /// Retained opaque-directory handles plus bounded inspection headroom.
+    /// Zero for plans without gitlinks, preserving their existing budgets.
+    pub max_descriptors: u64,
 }
 
 /// Runtime-consumed receipt for a workspace whose directory has been reaped.
@@ -149,6 +157,7 @@ pub struct SparseWorkspacePlan<A: GitHashAlgorithm> {
     job_inputs: Vec<JobInput>,
     outputs: BTreeSet<TreePath>,
     directories: BTreeSet<TreePath>,
+    gitlinks: BTreeMap<Vec<u8>, TreePath>,
     limits: SparseLimits,
     reservation: HostReservation,
     marker: Vec<u8>,
@@ -200,6 +209,7 @@ impl<A: GitHashAlgorithm> SparseWorkspacePlan<A> {
         }
         let mut directories = BTreeSet::new();
         let mut files = BTreeSet::new();
+        let mut gitlinks = BTreeMap::new();
         for entry in manifest.entries() {
             validate_path(entry.path())?;
             authorize_entry(
@@ -211,6 +221,12 @@ impl<A: GitHashAlgorithm> SparseWorkspacePlan<A> {
             match entry.kind() {
                 SparseEntryKind::Directory => {
                     retain_path(&mut directories, &files, entry.path(), limits.max_entries)?;
+                }
+                SparseEntryKind::Gitlink => {
+                    // A distinct semantic kind despite the empty host directory.
+                    // Its source target is not part of this repository's closure.
+                    retain_path(&mut directories, &files, entry.path(), limits.max_entries)?;
+                    gitlinks.insert(entry.path().as_bytes().to_vec(), entry.path().clone());
                 }
                 SparseEntryKind::File { body, .. } if body.len() <= limits.max_entry_bytes => {
                     retain_path(&mut files, &directories, entry.path(), limits.max_entries)?;
@@ -235,6 +251,7 @@ impl<A: GitHashAlgorithm> SparseWorkspacePlan<A> {
             capability
                 .authorize_write(path, now)
                 .map_err(HostRefusal::Capability)?;
+            gitlinks::refuse_overlap(&gitlinks, path)?;
             if directories.contains(path) {
                 return Err(HostRefusal::UnsupportedEntry(path.clone()));
             }
@@ -276,6 +293,7 @@ impl<A: GitHashAlgorithm> SparseWorkspacePlan<A> {
                     ..
                 } => 2,
                 SparseEntryKind::Symlink { .. } => 3,
+                SparseEntryKind::Gitlink => 4,
             });
         }
         // Framed counts separate input and output sequences unambiguously.
@@ -300,12 +318,18 @@ impl<A: GitHashAlgorithm> SparseWorkspacePlan<A> {
                 + marker.len() as u64
                 + limits.max_payload_bytes as u64,
             max_entries: created_entries + limits.max_entries as u64,
+            max_descriptors: if gitlinks.is_empty() {
+                0
+            } else {
+                gitlinks.len() as u64 + 3
+            },
         };
         Ok(Self {
             manifest,
             job_inputs: Vec::new(),
             outputs,
             directories,
+            gitlinks,
             limits,
             reservation,
             marker,
@@ -318,12 +342,20 @@ impl<A: GitHashAlgorithm> SparseWorkspacePlan<A> {
         self.reservation.clone()
     }
 
+    /// Whether a workflow must verify opaque source boundaries after tool
+    /// quiescence, even when it requests no artifact or imported edit.
+    #[must_use]
+    pub fn has_opaque_inputs(&self) -> bool {
+        !self.gitlinks.is_empty()
+    }
+
     /// Reserve these grades in the caller's region before materialization.
     #[must_use]
     pub fn budget(&self) -> ResourceVector {
         ResourceVector::from_grades(&[
             (Grade::Bytes, self.reservation.max_bytes),
             (Grade::Objects, self.reservation.max_entries),
+            (Grade::FileDescriptors, self.reservation.max_descriptors),
         ])
     }
 
@@ -365,6 +397,7 @@ pub struct SparseWorkspace<A: GitHashAlgorithm> {
     plan: SparseWorkspacePlan<A>,
     parent: File,
     root: WorkspaceRoot,
+    gitlinks: GitlinkDirectories,
     name: TreePath,
     obligation: ReservedObligation<SparseDirectoryLease>,
     copied_bytes: u64,
@@ -466,6 +499,7 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
         let mut root = WorkspaceRoot::new(root);
         let mut visible = false;
         let mut shared_host_bytes = 0_u64;
+        let mut gitlinks = GitlinkDirectories::default();
         let result = (|| {
             root.lock()?;
             write_new(
@@ -485,6 +519,7 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
                 let directory = open(&root, path.as_bytes(), OFlags::RDONLY | OFlags::DIRECTORY)?;
                 remember_inode(&directory, path, &mut aliases)?;
             }
+            gitlinks = GitlinkDirectories::capture(&root, &plan.gitlinks, cancelled)?;
             for (index, entry) in plan.manifest.entries().iter().enumerate() {
                 checkpoint(cancelled, HostEpoch::Writing(index))?;
                 if let SparseEntryKind::File { mode, body } = entry.kind() {
@@ -553,9 +588,14 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
             visible = true;
             checkpoint(cancelled, HostEpoch::Visible)?;
             sync(&parent)?;
-            checkpoint(cancelled, HostEpoch::Durable)
+            checkpoint(cancelled, HostEpoch::Durable)?;
+            gitlinks.verify(&root, cancelled)
         })();
         if let Err(error) = result {
+            // Release pinned directory handles before bounded reaping so a
+            // failed open (including descriptor exhaustion) leaves cleanup
+            // its temporary descriptor headroom.
+            drop(gitlinks);
             let owned_name = if visible {
                 name.as_bytes()
             } else {
@@ -591,6 +631,7 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
             plan,
             parent,
             root,
+            gitlinks,
             name,
             obligation,
             copied_bytes,
@@ -615,7 +656,7 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
         capability: &TreeCapability,
         now: u64,
     ) -> Result<Self, HostRefusal> {
-        let opened: Result<WorkspaceRoot, HostRefusal> = (|| {
+        let opened: Result<(WorkspaceRoot, GitlinkDirectories), HostRefusal> = (|| {
             validate_slot(&name)?;
             validate_parent(&parent)?;
             plan.authorize(capability, now)?;
@@ -626,13 +667,15 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
             root.lock()?;
             check_marker(&root, &plan.marker)?;
             job_inputs::verify_retained(&root, &plan.job_inputs)?;
-            Ok(root)
+            let gitlinks = GitlinkDirectories::capture(&root, &plan.gitlinks, &|_| false)?;
+            Ok((root, gitlinks))
         })();
         match opened {
-            Ok(root) => Ok(Self {
+            Ok((root, gitlinks)) => Ok(Self {
                 plan,
                 parent,
                 root,
+                gitlinks,
                 name,
                 obligation,
                 copied_bytes: 0,
@@ -711,6 +754,8 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
         if maximum_bytes > 64 * 1024 * 1024 || path.as_bytes() == MARKER {
             return Err(HostRefusal::ResourceLimit);
         }
+        gitlinks::refuse_overlap(&self.plan.gitlinks, path)?;
+        self.verify_opaque_inputs(cancelled)?;
         checkpoint(cancelled, HostEpoch::Importing(0))?;
         check_marker(&self.root, &self.plan.marker)?;
         let result = read_regular(
@@ -722,7 +767,20 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
         )?;
         checkpoint(cancelled, HostEpoch::Imported)?;
         check_marker(&self.root, &self.plan.marker)?;
+        self.verify_opaque_inputs(cancelled)?;
         Ok(result)
+    }
+
+    /// Recheck opaque submodule inputs after the caller has quiesced tools.
+    /// Their directories must still be the same empty, descriptor-confined
+    /// entries. This verifies no foreign content and authorizes no Git edit.
+    /// Workflow controllers call this before accepting a job's result even
+    /// when the job emits no artifact or imported edit.
+    pub fn verify_opaque_inputs(
+        &self,
+        cancelled: &dyn Fn(HostEpoch) -> bool,
+    ) -> Result<(), HostRefusal> {
+        self.gitlinks.verify(&self.root, cancelled)
     }
 
     /// Read a declared output set at quiescence and return an all-or-nothing
@@ -743,6 +801,7 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
         }
         self.plan.authorize(capability, now)?;
         check_marker(&self.root, &self.plan.marker)?;
+        self.verify_opaque_inputs(cancelled)?;
         let inputs: BTreeMap<_, _> = self
             .plan
             .manifest
@@ -813,6 +872,7 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
         }
         checkpoint(cancelled, HostEpoch::Imported)?;
         self.plan.authorize(capability, now)?;
+        self.verify_opaque_inputs(cancelled)?;
         self.imported_bytes += changed_bytes;
         self.imported_entries += log.len() as u64;
         Ok(log)
@@ -822,6 +882,7 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
     /// descriptor-relatively under the same entry budget. A substituted mount,
     /// raced root name, or cleanup excess is explicit containment failure.
     pub fn close(self) -> Result<SettledObligation<SparseDirectoryLease>, HostRefusal> {
+        drop(self.gitlinks);
         let removed = reap(
             &self.parent,
             &self.root,
@@ -929,6 +990,7 @@ fn validate_reservation<A: GitHashAlgorithm>(
     if obligation.reservation() != &plan.reservation
         || obligation.reserved().get(Grade::Bytes) < plan.reservation.max_bytes
         || obligation.reserved().get(Grade::Objects) < plan.reservation.max_entries
+        || obligation.reserved().get(Grade::FileDescriptors) < plan.reservation.max_descriptors
     {
         return Err(HostRefusal::ReservationMismatch);
     }

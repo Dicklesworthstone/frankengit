@@ -31,12 +31,21 @@ impl Fixture {
         Self::new_inner(format, workflow, true)
     }
     fn new_inner(format: GitHashAlgorithm, workflow: &str, dispatch: bool) -> Self {
-        Self::new_layout(format, workflow, dispatch, false)
+        Self::new_layout(format, workflow, dispatch, false, false)
     }
     fn new_nested(format: GitHashAlgorithm, workflow: &str) -> Self {
-        Self::new_layout(format, workflow, false, true)
+        Self::new_layout(format, workflow, false, true, false)
     }
-    fn new_layout(format: GitHashAlgorithm, workflow: &str, dispatch: bool, nested: bool) -> Self {
+    fn new_gitlink(format: GitHashAlgorithm, workflow: &str) -> Self {
+        Self::new_layout(format, workflow, false, false, true)
+    }
+    fn new_layout(
+        format: GitHashAlgorithm,
+        workflow: &str,
+        dispatch: bool,
+        nested: bool,
+        gitlink: bool,
+    ) -> Self {
         // Create-new ownership, including stale directories from a reused PID.
         let root = loop {
             let path = std::env::temp_dir().join(format!(
@@ -138,6 +147,15 @@ impl Fixture {
         .into_iter()
         .filter(|_| !nested)
         {
+            if gitlink && name == b"workflow.yml" {
+                // This foreign commit is deliberately absent from the object
+                // source. Import and execution must preserve the pointer
+                // without fetching or inheriting another repository's access.
+                tree.extend_from_slice(b"160000 module\0");
+                tree.extend_from_slice(
+                    git_object_id(format, GitObjectKind::Commit, b"foreign module").as_bytes(),
+                );
+            }
             tree.extend_from_slice(b"100644 ");
             tree.extend_from_slice(name);
             tree.push(0);
@@ -750,3 +768,6 @@ mod shell_tests;
 
 #[path = "trusted_workflow/defaults.rs"]
 mod defaults_tests;
+
+#[path = "trusted_workflow/gitlinks.rs"]
+mod gitlink_tests;

@@ -507,6 +507,17 @@ A fresh process reopens the node and reads the same canonical input. Hidden,
 absent, wrong-format and revoked twins exercise disclosure refusal. The test
 also checks that importing host output has not silently changed the ref.
 
+Opaque uninitialized submodules have both-hash cells in
+`crates/fgit-treefs/tests/sparse_gitlinks.rs` and
+`crates/fgit-runner/tests/sparse_gitlinks.rs`: exact pointer preservation without
+foreign-object reads, capability and resource limits, empty directory custody,
+output conflicts, replacement/link/content tampering, cancellation, reopen and
+shared-input identity. `crates/fgit-node/tests/trusted_workflow/gitlinks.rs` runs
+real trusted jobs and workspace tools after native import. It checks independent
+job copies, persisted reports across node reopen, exact unchanged gitlink bytes in
+exported candidate trees, and refusal of tampering even without artifact capture.
+These cases do not establish recursive submodule checkout or hostile-code isolation.
+
 The workspace child suite in `sealed_native_merge_publication.rs` exercises
 node-owned edit/export and native merge publication for both Git object formats:
 current/stale snapshot pairs, candidate-tree and target-base binding,

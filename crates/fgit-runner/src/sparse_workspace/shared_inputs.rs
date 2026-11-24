@@ -90,6 +90,9 @@ impl SharedInputCachePlan {
                 }
                 // Valid host plans already reject symlink materialization.
                 SparseEntryKind::Symlink { .. } => hash.update(&[3]),
+                // Identity and kind are bound above; no foreign bytes enter
+                // the source cache or receive a sharing allowance.
+                SparseEntryKind::Gitlink => hash.update(&[4]),
             }
         }
         Self {

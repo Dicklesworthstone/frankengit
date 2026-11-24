@@ -662,6 +662,15 @@ and protect the parent from concurrent rename. This adapter does not supply
 the hostile runner boundary; those requirements remain with the registered
 containment substrate and its independent campaign.
 
+Uninitialized submodules retain their exact parent-tree gitlink identities and
+materialize only as empty private directories. Their foreign commits are never
+read, fetched or granted inherited credentials. Declared outputs cannot replace
+or descend into them. After trusted processes quiesce, bounded descriptor-relative
+checks reject replacement, symlink substitution, changed permissions and nonempty
+directories before edit import, artifact capture or a successful workflow result.
+The same checks run on reopen; cleanup remains a separate obligation after refusal.
+This permits work on the parent repository, not recursive submodule execution.
+
 ### 7.8 ATP-Git and peer/cache attacks
 
 **Threats**

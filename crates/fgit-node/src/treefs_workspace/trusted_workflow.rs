@@ -1114,9 +1114,11 @@ impl<A: GitHashAlgorithm> WorkflowExecutor for Executor<'_, A> {
         )
     }
     fn has_job_outputs(&self, job: &WorkflowJob) -> bool {
-        self.artifacts
-            .as_ref()
-            .is_some_and(|collector| collector.selects(&job.id))
+        self.plan.has_opaque_inputs()
+            || self
+                .artifacts
+                .as_ref()
+                .is_some_and(|collector| collector.selects(&job.id))
     }
     fn observe_job(&mut self, report: &fgit_runner::workflow::JobReport) {
         if let Some(collector) = &mut self.artifacts {
@@ -1128,13 +1130,20 @@ impl<A: GitHashAlgorithm> WorkflowExecutor for Executor<'_, A> {
         job: &WorkflowJob,
         live: &dyn Fn() -> bool,
     ) -> Result<(), WorkerFailure> {
-        let Some(collector) = &mut self.artifacts else {
-            return Ok(());
-        };
         let (workspace, _) = self
             .current
             .as_ref()
             .ok_or_else(|| WorkerFailure::new("artifact workspace missing", true))?;
+        // Gitlinks are opaque parent-repository inputs. A successful command
+        // may not turn their empty directories into implicit submodule output,
+        // even when no artifact collection was requested. Perform this check
+        // in the cancellable observation phase; finish_job still owns cleanup.
+        workspace
+            .verify_opaque_inputs(&|_| !live())
+            .map_err(|error| WorkerFailure::new(format!("opaque inputs: {error}"), false))?;
+        let Some(collector) = &mut self.artifacts else {
+            return Ok(());
+        };
         collector.capture(
             workspace,
             self.job_index,

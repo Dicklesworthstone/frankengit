@@ -120,6 +120,15 @@ candidate. Newly created undeclared files do not enter the candidate; they are
 subject to the host adapter's bounded cleanup. Symlink/gitlink editing and
 non-regular outputs are not supported by this command profile.
 
+Selected submodule entries are available as empty, uninitialized directories,
+so an ordinary file edit can proceed in a repository containing gitlinks. The
+exact foreign commit OID remains in the source manifest and exported tree;
+neither the target object nor its remote is read. An output may not replace a
+gitlink, replace its ancestor, or lie inside it. Import refuses deleted,
+replaced, populated or symlinked submodule directories, including when another
+declared file has a valid edit. The host adapter still performs bounded cleanup
+after a refusal. This does not initialize submodules or authorize their content.
+
 The tool must be a **foreground program that joins its own descendants before
 exiting**. A normal successful exit permits output import. A normal nonzero exit
 returns failure and reaps the workspace under that trusted-program contract.

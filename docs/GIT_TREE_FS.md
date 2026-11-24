@@ -320,6 +320,51 @@ requested, support-required reflink isolation test and an interleaved
 materialization measurement. The 1,000-workspace / 100 MB physical-allocation
 acceptance target remains unverified; fallback results do not establish it.
 
+### 10.4 Opaque submodules in sparse directories
+
+Sparse manifests retain a visible Git `160000` entry as
+`SparseEntryKind::Gitlink`. Its `source_oid()` is the exact typed SHA-1 or
+SHA-256 foreign commit recorded by the authenticated containing tree. The
+manifest does not read that commit, expand `.gitmodules`, resolve a remote,
+delegate credentials, or inherit authorization for another repository. An
+all-zero target refuses. Source capability, expiry, revocation and entry-count
+limits still apply; the gitlink contributes no payload bytes.
+
+The Linux sparse-directory adapter materializes this entry as an empty,
+uninitialized directory. Its source identity and distinct kind enter the
+workspace plan and shared-input cache scope. The directory is counted in the
+existing object reservation and follows ordinary staging, sync, publication,
+cancellation and cleanup. Source plans without gitlinks retain their existing
+identity encoding. No foreign bytes enter the shared-input cache.
+
+Declared outputs and artifact selections cannot replace a gitlink, replace its
+ancestor, or write beneath it. After tools quiesce, import and artifact capture
+verify that each opaque directory remains empty, private, descriptor-confined
+and associated with the same device/inode as the current lease. A retained
+descriptor pins each original inode so unlink/recreate cannot impersonate it
+through inode reuse. The plan reserves those descriptors and bounded inspection
+headroom; materialize and reopen refuse underfunded reservations before taking
+responsibility for a directory. Handles are released before cleanup and lease
+settlement. Deletion,
+replacement, symlinks, population or changed permissions refuse the result;
+cleanup remains available and never follows a substituted symlink. Reopen
+first verifies the source-bound marker and the empty representation, then
+captures directory identities for the new lease. Physical inode identities are
+local consistency checks, never repository authority or Git object identities.
+
+`SparseWorkspacePlan::has_opaque_inputs()` tells workflow controllers to call
+`SparseWorkspace::verify_opaque_inputs` before accepting job results even when
+no artifacts or edits were requested. Native trusted workflows use this check
+in output capture and keep cleanup separate from semantic refusal. These
+checks do not make trusted host tools a hostile-code sandbox. Submodule
+initialization, recursive execution and gitlink editing through host outputs
+remain outside this profile; explicit pointer edits use §6.2.
+
+The `sparse_gitlinks` integration targets in `fgit-treefs` and `fgit-runner`
+exercise both native hash domains, absent foreign objects, canonical and
+candidate inputs, scope and budget boundaries, unchanged-pointer export,
+real-directory tampering, cancellation, reopen and shared-input reuse.
+
 ## 11. Build and test inputs
 
 A CI job receives a `BuildInputCapsule`:
