@@ -1151,6 +1151,13 @@ impl FsqliteAuthorityStore {
                 if let Err(cause) = self.commit(cx, &mut lease).await {
                     return Err(self.rollback_after(cx, &mut lease, cause).await);
                 }
+                // The head and these exact write-once outcomes committed
+                // together. Admission immediately reads the entries back to
+                // reconcile each decision; the ordinary body cache can serve
+                // those reads only after the transaction has succeeded.
+                for (outcome_key, bytes) in outcomes {
+                    self.bodies.insert(outcome_key.as_bytes(), bytes);
+                }
                 Ok(outcome)
             }
             Ok(CasOutcome::PredecessorMismatch) => {
