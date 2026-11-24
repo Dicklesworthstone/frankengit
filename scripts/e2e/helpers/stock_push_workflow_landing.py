@@ -134,10 +134,22 @@ def lifecycle(campaign, fmt):
         assert f"{REF}:{REF}" in porcelain and "[up to date]" not in porcelain, porcelain
         shutil.copyfile(transcript / "receipt.tsv", f.root / "pinned-push.tsv")
         assert refs(f) == {**initial, REF: tip}
+        # The push must run CI while the PR still records its original tip.
+        server.wait(lambda _: f.effects_count() == 2 and len(event_directories(f)) == 2 and all(
+            (event / "settled").is_file() for event in event_directories(f)))
+        reports = []
+        for event in event_directories(f):
+            report_path, = event.glob("dispatch-*/workflow-*/report.json")
+            report = json.loads(report_path.read_bytes())
+            assert report["type"] == "trusted_workflow_run" and report["workspaces_closed"], report
+            assert not report["request_interrupted"], report
+            reports.append(report["executed_commit"])
+        assert sorted(reports) == sorted([initial[REF], tip]), reports
         status, body = server.request("GET", "/api/v1/pulls/1/checks")
         former = json.loads(body)
         assert status == 200 and former["source_current"] is False, former
         assert former["source_tip"] == f.tips[0] and int(former["pull_request_version"]) == 1, former
+        assert former["complete"] and former["checks"] == [], former
         updated = json.loads(campaign.invoke("refresh-existing-pull", [
             "pr", "update", *f.scope, 1, "--trusted-local", "--principal", PRINCIPAL,
             "--idempotency-key", "refresh-pushed-subject", "--expected-version", 1,
@@ -147,8 +159,6 @@ def lifecycle(campaign, fmt):
         ]))
         assert updated["command_committed"] and not updated["refs_changed"], updated
         f.tips[0] = tip
-        server.wait(lambda _: f.effects_count() == 2 and all(
-            (e / "settled").is_file() for e in event_directories(f)))
         status, body = server.request("GET", "/api/v1/pulls/1/checks")
         empty = json.loads(body)
         assert status == 200 and empty["source_current"] and empty["source_tip"] == tip, empty
@@ -179,6 +189,7 @@ def lifecycle(campaign, fmt):
         drained, _ = server.stop()
         assert not drained["requires_reconciliation"] and not drained["execution_retried"], drained
     campaign.record(fmt, "stock-push-http-check-protected-fast-forward", source=tip,
+                    executed_before_pr_refresh=sorted(reports),
                     former_target=f.base, pull_request=1, refreshed_version=2,
                     former_check=prior["id"], check=checked["id"],
                     workflow_graph=graph, publisher=checked["publisher"], job=checked["job"],
