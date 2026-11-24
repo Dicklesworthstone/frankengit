@@ -1264,8 +1264,9 @@ fn an_abandoned_store_releases_its_descriptors_too() {
 // fixtures cannot encode a domain/algorithm pairing the registry forbids.
 
 use fgit_authority::{
-    DuplicateScan, authority_head_identity, decision_batch_identity, outcome_key,
-    publish_decisions_async, scan_for_existing_decisions_async,
+    DuplicateScan, OutcomeLookup, TerminalOutcome, authority_head_identity,
+    decision_batch_identity, indexed_outcome_async, outcome_key, publish_decisions_async,
+    scan_for_existing_decisions_async,
 };
 use fgit_codec::RepositoryDecision;
 use fgit_codec::{
@@ -1436,6 +1437,27 @@ fn a_kill_around_the_atomic_publication_leaves_head_and_outcomes_agreeing() {
          without it this test passes down the did-not-move branch and proves nothing about \
          atomicity: {published:?}"
     );
+    let decision = &batch.decisions[0];
+    let before = store.store.body_cache_stats();
+    let indexed = node
+        .block_on(indexed_outcome_async(
+            &store.store,
+            &store.cx,
+            tenant_id(),
+            repository_id(),
+            decision.tx_id,
+        ))
+        .expect("the published outcome reconciles");
+    assert_eq!(
+        indexed,
+        OutcomeLookup::Decided(TerminalOutcome {
+            decision_sequence: decision.decision_sequence,
+            outcome: decision.outcome,
+        })
+    );
+    let after = store.store.body_cache_stats();
+    assert_eq!(after.hits, before.hits + 1);
+    assert_eq!(after.misses, before.misses);
     store.kill();
 
     let reopened = Crashable::open(&node, scratch.as_str(), StoreInstanceId::from_raw(1));
@@ -1476,6 +1498,69 @@ fn a_kill_around_the_atomic_publication_leaves_head_and_outcomes_agreeing() {
             "an acknowledged publication must not be absent after reopen"
         );
     }
+}
+
+#[test]
+fn a_duplicate_outcome_is_cached_only_if_all_its_bytes_commit() {
+    let scratch = Scratch::new("atomic-publish-duplicate-outcomes");
+    let node = node();
+    let key = head_key();
+    let genesis = genesis_head_body();
+    let store = Crashable::open(&node, scratch.as_str(), StoreInstanceId::from_raw(1));
+    let genesis_bytes = encode_body(&genesis).expect("genesis encodes");
+    store.init_head(&key, HeadGeneration::FIRST, &genesis_bytes);
+    let token = store.token(&key);
+    let tx = tx_of(0xd1);
+    let DuplicateScan::Absent(witness) = node
+        .block_on(scan_for_existing_decisions_async(
+            &store.store,
+            &store.cx,
+            &key,
+            &[tx],
+        ))
+        .expect("genesis reads")
+    else {
+        panic!("genesis already decided the transaction");
+    };
+    let outcome_key = outcome_key(tenant_id(), repository_id(), tx).expect("the key derives");
+    let next = successor_of(&genesis, batch_body_id(&batch_for(&genesis)));
+    let next_bytes = encode_body(&next).expect("the successor encodes");
+    let publish = |entries: &[(ImmutableKey, Vec<u8>)]| {
+        node.block_on(store.store.publish_head_with_outcomes(
+            &store.cx,
+            &key,
+            token,
+            next.generation,
+            &next_bytes,
+            entries,
+            &witness,
+        ))
+    };
+    // A conflicting second entry must roll back the first insertion, including
+    // any in-process copy. The storage primitive accepts opaque outcome bytes.
+    let mut entries = [
+        (outcome_key.clone(), b"one".to_vec()),
+        (outcome_key.clone(), b"two".to_vec()),
+    ];
+    assert!(matches!(
+        publish(&entries),
+        Err(EngineError::Contract(
+            fgit_authority::AuthorityRefusal::TokenBodyMismatch
+        ))
+    ));
+    assert_eq!(store.token(&key), token);
+    assert_eq!(store.read_body(&outcome_key), Ok(ImmutableRead::Absent));
+
+    entries[1].1 = entries[0].1.clone();
+    assert!(matches!(publish(&entries), Ok(CasOutcome::Committed(_))));
+    let before = store.store.body_cache_stats();
+    assert_eq!(
+        store.read_body(&outcome_key),
+        Ok(ImmutableRead::Present(b"one".to_vec()))
+    );
+    let after = store.store.body_cache_stats();
+    assert_eq!(after.hits, before.hits + 1);
+    assert_eq!(after.misses, before.misses);
 }
 
 #[test]
