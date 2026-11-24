@@ -73,6 +73,7 @@ fn stage(
         &request,
         &fold,
         closure,
+        None,
     ))
 }
 
