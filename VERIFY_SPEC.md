@@ -518,6 +518,17 @@ job copies, persisted reports across node reopen, exact unchanged gitlink bytes 
 exported candidate trees, and refusal of tampering even without artifact capture.
 These cases do not establish recursive submodule checkout or hostile-code isolation.
 
+The opt-in selected-file link-copy projection has real host cases in
+`crates/fgit-runner/tests/sparse_file_links.rs`, native tool/export cases in
+`crates/fgit-node/tests/workspace_link_copies.rs`, and command/recovery cases in
+`crates/fgit-cli/tests/workspace_link_inputs.rs`. The required pairs cover both
+Git hash formats, ordinary private copies with unchanged original symlink export,
+independent target selection/authorization, output/target alias refusals,
+expanded payload and descriptor conservation, mutation/replacement, cancellation,
+reopen, cache separation, and execution-request identity. The default refusal
+profile retains its bytes and behavior. These cases do not claim host symlink
+traversal, POSIX readlink identity, or workflow-dispatch admission of this profile.
+
 The workspace child suite in `sealed_native_merge_publication.rs` exercises
 node-owned edit/export and native merge publication for both Git object formats:
 current/stale snapshot pairs, candidate-tree and target-base binding,

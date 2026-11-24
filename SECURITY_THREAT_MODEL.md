@@ -671,6 +671,18 @@ directories before edit import, artifact capture or a successful workflow result
 The same checks run on reopen; cleanup remains a separate obligation after refusal.
 This permits work on the parent repository, not recursive submodule execution.
 
+The opt-in `selected-file-link-copies-v1` host projection creates ordinary
+private copies for Git file links. Resolution uses only the already selected
+manifest and separately authorized regular target; unselected, external,
+directory, chained and gitlink targets refuse. No host link is created or
+followed. Alias paths and their targets cannot overlap outputs or artifact
+selections. Expanded copy bytes and retained identity handles consume finite
+budgets; mutation, replacement, hard links and symlink substitution refuse
+before accepting output. The original Git symlink text and OID remain unchanged
+in export. The profile is bound into host/cache identity and the CLI execution
+request. It is an explicit immutable input projection for trusted local tools,
+not POSIX symlink emulation or a change to the TreeFS DataOnly capability.
+
 ### 7.8 ATP-Git and peer/cache attacks
 
 **Threats**

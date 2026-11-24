@@ -4,7 +4,7 @@
 
 use super::{
     Arc, Encoder, GitHashAlgorithm, HostRefusal, NativeObjectIdentity, SparseLimits,
-    SparseManifest, SparseWorkspacePlan, TreeCapability, frame,
+    SparseManifest, SparseWorkspacePlan, SymlinkInputPolicy, TreeCapability, frame,
 };
 use fgit_crypto::GitOid;
 use fgit_treefs::{SparseCandidateManifest, SparseEntry};
@@ -92,12 +92,31 @@ impl<A: GitHashAlgorithm> SparseWorkspacePlan<A> {
         now: u64,
         limits: SparseLimits,
     ) -> Result<Self, HostRefusal> {
+        Self::for_candidate_with_symlink_policy(
+            manifest,
+            capability,
+            now,
+            limits,
+            SymlinkInputPolicy::Refuse,
+        )
+    }
+
+    /// The same unpublished input boundary with explicit selected-file copies
+    /// for symlink entries. Projection never grants output-import authority.
+    pub fn for_candidate_with_symlink_policy(
+        manifest: Arc<SparseCandidateManifest<A>>,
+        capability: &TreeCapability,
+        now: u64,
+        limits: SparseLimits,
+        symlink_policy: SymlinkInputPolicy,
+    ) -> Result<Self, HostRefusal> {
         Self::from_manifest(
             WorkspaceManifest::Candidate(manifest),
             Vec::new(),
             capability,
             now,
             limits,
+            symlink_policy,
         )
     }
 }

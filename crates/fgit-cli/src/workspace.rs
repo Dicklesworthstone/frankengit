@@ -4,7 +4,7 @@ mod invocation;
 
 use fgit_node::{
     NodeConfig, OneNode, WorkspaceBatchJob, WorkspaceHostTelemetry, WorkspaceInputSharing,
-    WorkspaceToolResult,
+    WorkspaceSymlinkInputs, WorkspaceToolResult,
 };
 use fgit_runner::sparse_workspace::SharedInputCacheStats;
 use fgit_schema::json::{self, Value as JsonValue};
@@ -20,7 +20,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-const USAGE: &str = "usage: fg workspace run <storage-root> <tenant-id> <repository-id> <ref> <private-parent> <workspace-id-hex> <new-bundle-name> --trusted-local --read <top-level-path> [--read ...] [--write <exact-output-path> ...] [--shared-inputs copy|prefer-reflink|require-reflink] --author 'Name <email>' --timestamp <unix-seconds> --message <text> [--timeout-secs <1..3600>] [--expected-head <snapshot-token>] [--expected-commit <native-oid>] -- /absolute/tool [args...]";
+const USAGE: &str = "usage: fg workspace run <storage-root> <tenant-id> <repository-id> <ref> <private-parent> <workspace-id-hex> <new-bundle-name> --trusted-local --read <top-level-path> [--read ...] [--write <exact-output-path> ...] [--shared-inputs copy|prefer-reflink|require-reflink] [--symlink-inputs refuse|selected-file-link-copies-v1] --author 'Name <email>' --timestamp <unix-seconds> --message <text> [--timeout-secs <1..3600>] [--expected-head <snapshot-token>] [--expected-commit <native-oid>] -- /absolute/tool [args...]\nSelected-file link copies are private ordinary files projected from already-selected regular inputs. Both the link and its target remain read-only; exported Git symlinks retain their original text and identity. No host symlink is created or followed. This opt-in profile applies only to workspace run.";
 const BATCH_USAGE: &str = "usage: fg workspace run-batch <storage-root> <tenant-id> <repository-id> <ref> <private-parent> --trusted-local --read <top-level-path> [--read ...] [--shared-inputs copy|prefer-reflink|require-reflink] [--timeout-secs <1..3600>] [--expected-head <snapshot-token>] [--expected-commit <native-oid>] --spec <batch-spec-json>";
 const MAX_SPEC_BYTES: usize = json::MAX_INPUT;
 const MAX_BATCH_JOBS: usize = 64;
@@ -39,6 +39,7 @@ struct Options {
     reads: Vec<Vec<u8>>,
     writes: Vec<Vec<u8>>,
     sharing: WorkspaceInputSharing,
+    symlink_inputs: WorkspaceSymlinkInputs,
     author: String,
     timestamp: u64,
     message: String,
@@ -81,7 +82,7 @@ pub fn run(arguments: &[String]) -> Result<(), String> {
                 let (claimed, head, commit) = invocation::reserve(&node, request, &options)?;
                 invocation = Some(claimed);
                 node.runtime()
-                    .block_on(node.run_trusted_workspace_tool_shared_at_in(
+                    .block_on(node.run_trusted_workspace_tool_profiled_at_in(
                         request,
                         &options.reference,
                         (Some(head), Some(commit)),
@@ -90,6 +91,7 @@ pub fn run(arguments: &[String]) -> Result<(), String> {
                         &options.reads,
                         &options.writes,
                         options.sharing,
+                        options.symlink_inputs,
                         &mut command,
                         options.timeout,
                         (
@@ -286,6 +288,12 @@ fn finalize_candidate_output(
         telemetry_json(&result.telemetry),
     );
     receipt.pop();
+    if options.symlink_inputs != WorkspaceSymlinkInputs::Refuse {
+        receipt.push_str(&format!(
+            ",\"symlink_inputs\":{}",
+            quote(options.symlink_inputs.as_str())
+        ));
+    }
     receipt.push_str(&format!(
         ",\"invocation_directory\":{},\"request_sha256\":\"{}\"}}",
         quote(&invocation.directory.to_string_lossy()),
@@ -400,6 +408,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     let (mut author, mut timestamp, mut message, mut timeout) = (None, None, None, None);
     let (mut expected_head, mut expected_commit) = (None, None);
     let mut sharing = None;
+    let mut symlink_inputs = None;
     let mut trusted = false;
     let mut cursor = 8;
     while cursor < boundary {
@@ -431,6 +440,9 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             "--read" => reads.push(value.as_bytes().to_vec()),
             "--write" => writes.push(value.as_bytes().to_vec()),
             "--shared-inputs" => set_once(&mut sharing, parse_sharing(value)?, flag)?,
+            "--symlink-inputs" => {
+                set_once(&mut symlink_inputs, parse_symlink_inputs(value)?, flag)?
+            }
             "--author" => set_once(&mut author, value.clone(), flag)?,
             "--message" => set_once(&mut message, value.clone(), flag)?,
             "--timestamp" => set_once(&mut timestamp, number(value)?, flag)?,
@@ -461,6 +473,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         reads,
         writes,
         sharing: sharing.unwrap_or(WorkspaceInputSharing::PreferReflink),
+        symlink_inputs: symlink_inputs.unwrap_or_default(),
         author: author.ok_or("--author is required")?,
         timestamp: timestamp.ok_or("--timestamp is required")?,
         message: message.ok_or("--message is required")?,
@@ -709,6 +722,7 @@ fn parse_batch_spec_bytes(
             reads: reads.clone(),
             writes,
             sharing,
+            symlink_inputs: WorkspaceSymlinkInputs::Refuse,
             author,
             timestamp,
             message,
@@ -742,6 +756,16 @@ fn parse_sharing(value: &str) -> Result<WorkspaceInputSharing, String> {
         "copy" => Ok(WorkspaceInputSharing::Copy),
         _ => Err(format!(
             "invalid --shared-inputs value {value}; expected copy, prefer-reflink, or require-reflink"
+        )),
+    }
+}
+
+fn parse_symlink_inputs(value: &str) -> Result<WorkspaceSymlinkInputs, String> {
+    match value {
+        "refuse" => Ok(WorkspaceSymlinkInputs::Refuse),
+        "selected-file-link-copies-v1" => Ok(WorkspaceSymlinkInputs::SelectedFileCopies),
+        _ => Err(format!(
+            "invalid --symlink-inputs value {value}; expected refuse or selected-file-link-copies-v1"
         )),
     }
 }
@@ -923,6 +947,45 @@ mod tests {
             "this-is-a-literal-tool-argument".into(),
         ]);
         assert!(parse(&input).unwrap().expected_commit.is_none());
+    }
+
+    #[test]
+    fn selected_file_link_copies_require_one_explicit_supported_policy() {
+        assert_eq!(
+            parse(&args()).unwrap().symlink_inputs,
+            WorkspaceSymlinkInputs::Refuse
+        );
+        for (raw, expected) in [
+            ("refuse", WorkspaceSymlinkInputs::Refuse),
+            (
+                "selected-file-link-copies-v1",
+                WorkspaceSymlinkInputs::SelectedFileCopies,
+            ),
+        ] {
+            let mut input = args();
+            let at = input.iter().position(|s| s == "--").unwrap();
+            input.splice(at..at, ["--symlink-inputs".into(), raw.into()]);
+            assert_eq!(parse(&input).unwrap().symlink_inputs, expected);
+            let at = input.iter().position(|s| s == "--").unwrap();
+            input.splice(at..at, ["--symlink-inputs".into(), raw.into()]);
+            assert!(parse(&input).is_err());
+        }
+        for unknown in ["follow", "selected-file-link-copies-v2", ""] {
+            let mut input = args();
+            let at = input.iter().position(|s| s == "--").unwrap();
+            input.splice(at..at, ["--symlink-inputs".into(), unknown.into()]);
+            assert!(parse(&input).is_err());
+        }
+        let mut missing = args();
+        let at = missing.iter().position(|s| s == "--").unwrap();
+        missing.insert(at, "--symlink-inputs".into());
+        assert!(parse(&missing).is_err());
+        let mut literal = args();
+        literal.extend(["--symlink-inputs".into(), "follow".into()]);
+        assert_eq!(
+            parse(&literal).unwrap().symlink_inputs,
+            WorkspaceSymlinkInputs::Refuse
+        );
     }
 
     #[test]

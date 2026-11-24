@@ -124,3 +124,66 @@ the HTTP `search-initial` / `context-initial` grammar and JSON document; see
 [SOURCE_CONTEXT.md](SOURCE_CONTEXT.md). They require built indexes and never
 build them; a missing index fails with `source_index_uninitialized`.
 
+## Buffered progressive context
+
+To retain the indexed answer when exact-excerpt hydration cannot finish, call
+the existing `frankengit_source_context` tool with `operation: "progressive"`:
+
+```json
+{
+  "operation": "progressive",
+  "reference": "refs/heads/main",
+  "terms_hex": ["5468696e67"],
+  "path_prefixes_hex": ["737263"],
+  "symbol_name_hex": "5468696e67",
+  "symbol_policy": "required",
+  "context_max_files": 8
+}
+```
+
+This runs the same native progressive read as `fg search --progressive` and HTTP
+`source/search-progressive`. The MCP result has profile
+`source-context-progressive-mcp-v1`, `delivery: "buffered"`, and a `phases` array
+containing the original `Initial` record followed by `Refined` or
+`RefinementFailed`. Both records arrive together in one tool response; this
+operation does not provide live MCP streaming or progress notifications.
+
+`phases[0].answer` is the complete native Initial document, including any explicit
+channel omissions, source coordinates, index generation vector and authorization
+labels. On successful hydration, `phases[1].answer` is the ranked context document;
+its `retrieval` equals the first answer. The operation selects
+`context-weighted-rrf-q16-v1` when `context_selection` is omitted and rejects
+`raw-path-prefix`. Calls without `operation` retain their original document shape
+and raw-path default. `frankengit_agent_context` keeps its separate grant and
+schema.
+
+Clients should inspect `refinement_succeeded` and `complete`:
+
+| Outcome | `refinement_succeeded` | `complete` | MCP `isError` |
+| --- | --- | --- | --- |
+| Complete ranked context | `true` | `true` | `false` |
+| Ranked context with explicit omissions | `true` | `false` | `false` |
+| Refinement refused after Initial | `false` | `false` | `true` |
+
+A refinement refusal retains usable, nonempty Initial hits when the search found
+them, and `phases[1].code` identifies the native refusal. For example,
+`context_max_source_bytes: 1` can retain indexed hits while refusing source
+hydration with `resource_limit`. Missing indexes, invalid selectors and failed
+authorization refuse before Initial; they do not produce fabricated phases.
+Cancellation, expired response authority or a malformed/incomplete native stream
+also refuses delivery rather than converting it into an empty success.
+
+One 1 MiB encoded-result ceiling covers both records and their MCP wrapper.
+The adapter reserves framing space before the native read and checks final
+encoding. A response budget sufficient for Initial and its refusal record can
+retain Initial when the complete ranked context would exceed that budget.
+Queries keep the existing finite search, source-byte, file and excerpt bounds.
+The source grant is unchanged; sponsored calls additionally require a current
+canonical `source-read` credential whose original request deadline also governs
+buffering and response delivery. Result labels remain evidence, never credentials.
+
+Optional `index_source: "current-native-v1"` revalidates unchanged native source
+after metadata-only updates. Initial retains separate current and original index
+provenance, and refinement consumes that same authorized report. The operation
+never selects a replacement snapshot, refreshes indexes or publishes authority.
+

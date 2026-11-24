@@ -390,7 +390,10 @@ impl ReadTools for NodeTools {
             || (self.options.writes.pulls
                 && matches!(
                     name,
-                    pull_comments::WRITE | pull_comments::APPEND | pull_labels::WRITE | pull_labels::ADD
+                    pull_comments::WRITE
+                        | pull_comments::APPEND
+                        | pull_labels::WRITE
+                        | pull_labels::ADD
                 ))
             || (self.options.writes.source && source_writes::is_tool(name))
             || (self.options.writes.source && tags::is_write(name))
@@ -399,12 +402,13 @@ impl ReadTools for NodeTools {
             || queues::is_mutation(self.options.queues, self.options.writes.pulls, name)
     }
     fn result_is_error(&self, name: &str, value: &Value) -> bool {
-        self.is_mutation(name)
-            && value
-                .object()
-                .and_then(|v| v.get("outcome"))
-                .and_then(Value::text)
-                == Some("refused")
+        retrieval::result_is_error(name, value)
+            || (self.is_mutation(name)
+                && value
+                    .object()
+                    .and_then(|v| v.get("outcome"))
+                    .and_then(Value::text)
+                    == Some("refused"))
     }
     fn call(&mut self, name: &str, args: &Object) -> Result<Value, ToolError> {
         self.maintenance_checkpoint().map_err(ToolError::failed)?;

@@ -324,6 +324,31 @@ context, 3 for partial coverage and 2 for a refusal. This profile ranks the
 returned lexical, path and symbol rows. Semantic models and history expansion
 remain outside its scope.
 
+### Buffered MCP delivery
+
+`frankengit_source_context` accepts the explicit JSON selector
+`"operation": "progressive"` under its existing source grant. It calls this same
+native progressive implementation and returns the two original records in
+`phases`, with profile `source-context-progressive-mcp-v1` and
+`delivery: "buffered"`. The MCP response arrives after native work ends; the
+phase array is not live transport streaming. The original Initial answer and
+its immutable source/index labels are preserved exactly, including under
+`index_source: "current-native-v1"`.
+
+A `RefinementFailed` terminal record retains Initial in structured content,
+sets `refinement_succeeded: false`, `complete: false` and MCP `isError: true`.
+A successful `Refined` record sets `refinement_succeeded: true`; `complete` can
+still be false for explicit result/file omissions. Invalid or unauthorized
+Initial requests emit no phases. Cancellation and expired authenticated response
+authority refuse delivery. Both native records plus wrapper fit one 1 MiB result
+budget, with framing reserved before work and final encoding checked.
+
+Omitting `operation` retains the existing context document and raw-path default.
+Progressive defaults to and only accepts `context-weighted-rrf-q16-v1`. The
+separate `frankengit_agent_context` tool is unchanged. See
+[MCP_SOURCE_SEARCH.md](MCP_SOURCE_SEARCH.md#buffered-progressive-context) for an
+example and the result/error contract.
+
 ## Verification and scope
 
 Verification uses production-native imports, patch admission, indexes, source

@@ -219,6 +219,15 @@ fn reserve_one(
     ] {
         fields.push(value).map_err(|e| e.to_string())?;
     }
+    // Preserve existing request identities for the refusal profile. An explicit
+    // link-copy projection changes tool-visible inputs and must be bound before
+    // claiming execution custody, independently of the resulting Git edits.
+    if options.symlink_inputs != super::WorkspaceSymlinkInputs::Refuse {
+        fields.push(b"symlink-inputs").map_err(|e| e.to_string())?;
+        fields
+            .push(options.symlink_inputs.as_str().as_bytes())
+            .map_err(|e| e.to_string())?;
+    }
     let invocation = Invocation::create(root, &key, &fields.0).map_err(|e| e.to_string())?;
     eprintln!(
         "workspace invocation reserved: {}; request_sha256={}",

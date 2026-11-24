@@ -137,7 +137,7 @@ fn indexed_pages_match_uncached_history_and_survive_service_child_reopen() {
 }
 
 #[test]
-fn advancing_authority_rebuilds_the_index_and_stale_pins_never_use_it() {
+fn advancing_authority_extends_the_index_and_stale_pins_never_use_it() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let scratch = Scratch::new();
         let node = populated(&scratch, format, 3, CACHE_BYTES);
@@ -145,6 +145,7 @@ fn advancing_authority_rebuilds_the_index_and_stale_pins_never_use_it() {
         let cursor = coordinates(original.events[0].cursor);
         let before = node.event_history_index_cache().test_counts();
         assert_eq!(before.0, 1);
+        assert_eq!(node.event_history_index_cache().test_extension_count(), 0);
 
         let appended = publish(
             &node,
@@ -161,6 +162,16 @@ fn advancing_authority_rebuilds_the_index_and_stale_pins_never_use_it() {
             Err(ForgeEventReadRefusal::SnapshotMoved)
         ));
         assert_eq!(node.event_history_index_cache().test_counts(), before);
+        assert_eq!(node.event_history_index_cache().test_extension_count(), 0);
+
+        // A verified edge alone is insufficient: an invented event offset
+        // must refuse without retaining a partially useful successor index.
+        assert!(matches!(
+            page(&node, Some((cursor.0, u32::MAX)), 100, None),
+            Err(ForgeEventReadRefusal::Admission(_))
+        ));
+        assert_eq!(node.event_history_index_cache().test_counts(), before);
+        assert_eq!(node.event_history_index_cache().test_extension_count(), 0);
 
         let advanced = page(&node, Some(cursor), 100, None).unwrap();
         assert_ne!(advanced.source_head, original.source_head);
@@ -174,13 +185,15 @@ fn advancing_authority_rebuilds_the_index_and_stale_pins_never_use_it() {
                 .all(|pair| pair[0].cursor < pair[1].cursor)
         );
         assert!(advanced.next_after.is_none());
-        // An uncached resumed cursor keeps the bounded suffix reader. It
-        // must not trigger a new full-history scan merely to populate a cache.
+        // A direct successor verifies one edge and reuses the old prefix,
+        // including when the first read at that head resumes an old cursor.
         assert_eq!(node.event_history_index_cache().test_counts(), before);
+        assert_eq!(node.event_history_index_cache().test_extension_count(), 1);
         let full_advanced = page(&node, None, 100, None).unwrap();
         assert_eq!(&full_advanced.events[1..], advanced.events.as_slice());
         let refreshed = node.event_history_index_cache().test_counts();
-        assert_eq!(refreshed.0, before.0 + 1);
+        assert_eq!(refreshed.0, before.0);
+        assert!(refreshed.1 > before.1);
         assert_eq!(page(&node, Some(cursor), 100, None).unwrap(), advanced);
         assert!(node.event_history_index_cache().test_counts().1 > refreshed.1);
 
@@ -269,7 +282,8 @@ fn empty_history_and_an_undersized_cache_keep_the_scalar_results() {
         let first = page(&node, None, 1, None).unwrap();
         assert_eq!(first.events.len(), 1);
         assert_ne!(first.source_head, empty.source_head);
-        assert_eq!(node.event_history_index_cache().test_counts().0, 2);
+        assert_eq!(node.event_history_index_cache().test_counts().0, 1);
+        assert_eq!(node.event_history_index_cache().test_extension_count(), 1);
         let tiny_config = node
             .service_config
             .clone()
@@ -283,5 +297,218 @@ fn empty_history_and_an_undersized_cache_keep_the_scalar_results() {
         assert_eq!(page(&tiny, None, 1, None).unwrap(), first);
         assert_eq!(tiny.event_history_index_cache().test_counts(), (0, 0));
         tiny.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn refusal_and_checkpoint_edges_preserve_events_and_extend_the_exact_basis() {
+    use crate::outcome_checkpoint::OutcomeCheckpointLimits;
+
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let node = populated(&scratch, format, 3, CACHE_BYTES);
+        let original = page(&node, None, 100, None).unwrap();
+        let cursor = coordinates(original.events[0].cursor);
+
+        let request = node.request_context();
+        let refused = node
+            .runtime()
+            .block_on(node.admit_issue_durable_in(
+                &request,
+                &session("index-refusal-only"),
+                &change(1, IssueAction::Close),
+                AdmissionLimits::default(),
+            ))
+            .unwrap();
+        assert!(matches!(refused.1.outcome, DecisionOutcome::Refused { .. }));
+        let after_refusal = page(&node, Some(cursor), 100, None).unwrap();
+        assert_ne!(after_refusal.source_head, original.source_head);
+        assert_eq!(after_refusal.events, original.events[1..]);
+        assert_eq!(node.event_history_index_cache().test_counts().0, 1);
+        assert_eq!(node.event_history_index_cache().test_extension_count(), 1);
+
+        let request = node.request_context();
+        let checkpoint = node
+            .runtime()
+            .block_on(node.checkpoint_outcomes_in(
+                &request,
+                OutcomeCheckpointLimits {
+                    expected_head: Some(after_refusal.source_head),
+                    ..OutcomeCheckpointLimits::default()
+                },
+            ))
+            .unwrap();
+        assert!(checkpoint.published);
+        assert_eq!(checkpoint.source_head, after_refusal.source_head);
+        let after_checkpoint = page(&node, Some(cursor), 100, None).unwrap();
+        assert_eq!(after_checkpoint.source_head, checkpoint.published_head);
+        assert_eq!(after_checkpoint.events, after_refusal.events);
+        assert_eq!(after_checkpoint.next_after, after_refusal.next_after);
+        assert_eq!(node.event_history_index_cache().test_counts().0, 1);
+        assert_eq!(node.event_history_index_cache().test_extension_count(), 2);
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn nonadjacent_heads_keep_resumed_reads_on_the_canonical_suffix() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let node = populated(&scratch, format, 3, CACHE_BYTES);
+        let original = page(&node, None, 100, None).unwrap();
+        let before = node.event_history_index_cache().test_counts();
+        for version in 3..5 {
+            publish(
+                &node,
+                &change(
+                    version,
+                    IssueAction::Comment {
+                        body: format!("unobserved successor {version}"),
+                    },
+                ),
+                &format!("index-skip-{version}"),
+            );
+        }
+
+        let resumed = page(
+            &node,
+            Some(coordinates(original.events[2].cursor)),
+            100,
+            None,
+        )
+        .unwrap();
+        assert_eq!(resumed.events.len(), 2);
+        assert_ne!(resumed.source_head, original.source_head);
+        assert_eq!(node.event_history_index_cache().test_counts(), before);
+        assert_eq!(node.event_history_index_cache().test_extension_count(), 0);
+        let full = page(&node, None, 100, None).unwrap();
+        assert_eq!(full.events[3..], resumed.events);
+        assert_eq!(
+            node.event_history_index_cache().test_counts().0,
+            before.0 + 1
+        );
+        node.shutdown().unwrap();
+    }
+}
+
+fn copy_storage(from: &std::path::Path, to: &std::path::Path) {
+    fs::create_dir(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let destination = to.join(entry.file_name());
+        let kind = entry.file_type().unwrap();
+        if kind.is_dir() {
+            copy_storage(&entry.path(), &destination);
+        } else {
+            assert!(kind.is_file());
+            fs::copy(entry.path(), destination).unwrap();
+        }
+    }
+}
+
+#[test]
+fn an_identical_history_in_another_root_cannot_reuse_a_predecessor_index() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let source = Scratch::new();
+        let destination = Scratch::new();
+        let node = populated(&source, format, 3, CACHE_BYTES);
+        let original = page(&node, None, 100, None).unwrap();
+        let before = node.event_history_index_cache().test_counts();
+        let mut copied_config = node.service_config.clone();
+        let source_root = copied_config.storage_root.clone();
+        copied_config.storage_root = destination.0.join("copied-node");
+        node.shutdown().unwrap();
+        // Copy a closed native store so every identity and canonical head is
+        // identical, while deliberately retaining the source service's cache.
+        copy_storage(&source_root, &copied_config.storage_root);
+        let copied = reopened(copied_config);
+        let request = copied.request_context();
+        let basis = copied
+            .runtime()
+            .block_on(copied.event_read_basis_in(&request, None))
+            .unwrap();
+        assert_eq!(basis.basis.id(), original.source_head);
+        publish(
+            &copied,
+            &change(
+                3,
+                IssueAction::Comment {
+                    body: "only in the copied root".into(),
+                },
+            ),
+            "index-copied-root",
+        );
+        let resumed = page(
+            &copied,
+            Some(coordinates(original.events[2].cursor)),
+            1,
+            None,
+        )
+        .unwrap();
+        assert_eq!(resumed.events.len(), 1);
+        assert_eq!(copied.event_history_index_cache().test_counts(), before);
+        assert_eq!(copied.event_history_index_cache().test_extension_count(), 0);
+        let full = page(&copied, None, 100, None).unwrap();
+        assert_eq!(full.events[3..], resumed.events);
+        assert_eq!(
+            copied.event_history_index_cache().test_counts().0,
+            before.0 + 1
+        );
+        copied.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn exhausted_retention_uses_the_scalar_suffix_without_a_second_build() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let node = populated(&scratch, format, 1, 5120);
+        let first = page(&node, None, 1, None).unwrap();
+        assert_eq!(node.event_history_index_cache().test_counts().0, 1);
+        let mut events = first.events;
+        let mut budget_miss = false;
+        // This small real cache fills after a few committed descriptors. Read
+        // one fresh event each time, so falling back needs only the new suffix.
+        for version in 1..24 {
+            let prior_extensions = node.event_history_index_cache().test_extension_count();
+            let appended = publish(
+                &node,
+                &change(
+                    version,
+                    IssueAction::Comment {
+                        body: format!("bounded retention event {version}"),
+                    },
+                ),
+                &format!("index-budget-{version}"),
+            );
+            let next = page(
+                &node,
+                Some(coordinates(events.last().unwrap().cursor)),
+                1,
+                None,
+            )
+            .unwrap();
+            assert_eq!(next.events.len(), 1);
+            assert_eq!(next.events[0].tx_id, appended.0);
+            assert!(next.next_after.is_none());
+            events.extend(next.events);
+            assert_eq!(node.event_history_index_cache().test_counts().0, 1);
+            if node.event_history_index_cache().test_extension_count() == prior_extensions {
+                budget_miss = true;
+                break;
+            }
+        }
+        assert!(budget_miss, "the small retained-byte allowance must fill");
+        let counts = node.event_history_index_cache().test_counts();
+        let extensions = node.event_history_index_cache().test_extension_count();
+        assert!(extensions > 0);
+        let full = page(&node, None, 100, None).unwrap();
+        assert_eq!(full.events, events);
+        assert_eq!(node.event_history_index_cache().test_counts(), counts);
+        assert_eq!(
+            node.event_history_index_cache().test_extension_count(),
+            extensions
+        );
+        node.shutdown().unwrap();
     }
 }

@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use fgit_admission::merge::native::feed::VerifiedEventIndex;
 use fgit_authority::StoreInstanceId;
+use fgit_chronicle::PublicationBasis;
 use fgit_types::{
     GitHashAlgorithm, RepositoryAuthorityHeadId, RepositoryId, RepositoryIncarnationId, TenantId,
 };
@@ -55,6 +56,8 @@ pub(crate) struct EventHistoryIndexCache {
     #[cfg(test)]
     builds: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
+    extensions: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
     hits: std::sync::atomic::AtomicUsize,
 }
 
@@ -65,6 +68,8 @@ impl EventHistoryIndexCache {
             entry: Mutex::new(None),
             #[cfg(test)]
             builds: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            extensions: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             hits: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -94,12 +99,35 @@ impl EventHistoryIndexCache {
         if !entry.matches(node, head) {
             return None;
         }
-        #[cfg(test)]
-        self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Some(Arc::clone(&entry.index))
     }
 
+    /// Offer only the exact direct predecessor of this freshly selected head.
+    /// The admission reader must still verify the new canonical edge before
+    /// these coordinates can be reused. Probing never records a cache hit.
+    pub(crate) fn extension_candidate(
+        &self,
+        node: &OneNode,
+        basis: &PublicationBasis,
+    ) -> Option<Arc<VerifiedEventIndex>> {
+        self.lookup(node, basis.body().predecessor_head_id?)
+    }
+
+    pub(crate) fn record_hit(&self) {
+        #[cfg(test)]
+        self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub(crate) fn insert(&self, node: &OneNode, index: Arc<VerifiedEventIndex>) {
+        self.retain(node, index, false);
+    }
+
+    pub(crate) fn insert_extended(&self, node: &OneNode, index: Arc<VerifiedEventIndex>) {
+        self.retain(node, index, true);
+    }
+
+    fn retain(&self, node: &OneNode, index: Arc<VerifiedEventIndex>, extended: bool) {
+        let _ = extended;
         let root = node.fabric.root().to_path_buf();
         let Some(retained) = index
             .retained_bytes()
@@ -124,8 +152,13 @@ impl EventHistoryIndexCache {
             index,
         });
         #[cfg(test)]
-        self.builds
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if extended {
+            self.extensions
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            self.builds
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     #[cfg(test)]
@@ -135,5 +168,10 @@ impl EventHistoryIndexCache {
             self.builds.load(Ordering::Relaxed),
             self.hits.load(Ordering::Relaxed),
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_extension_count(&self) -> usize {
+        self.extensions.load(std::sync::atomic::Ordering::Relaxed)
     }
 }

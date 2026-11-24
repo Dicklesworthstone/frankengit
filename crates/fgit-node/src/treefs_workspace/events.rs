@@ -77,7 +77,7 @@ impl OneNode {
         }
         let cache = self.event_history_index_cache();
         if let Some(index) = cache.lookup(self, basis.id()) {
-            return index
+            let page = index
                 .read_page_at(
                     &self.authority,
                     request.authority(),
@@ -87,13 +87,69 @@ impl OneNode {
                     &cancelled,
                 )
                 .await
-                .map_err(|error| ForgeEventReadRefusal::Admission(Box::new(error)));
+                .map_err(|error| ForgeEventReadRefusal::Admission(Box::new(error)))?;
+            if cancelled() {
+                return Err(ForgeEventReadRefusal::Cancelled);
+            }
+            cache.record_hit();
+            return Ok(page);
+        }
+        let budget = cache.index_budget(self);
+        let predecessor = cache.extension_candidate(self, basis);
+        let extension_attempted = predecessor.is_some();
+        if budget != 0
+            && let Some(previous) = predecessor
+        {
+            // Reuse an old prefix only after verifying this exact new edge.
+            // This also serves resumed cursors without walking older history.
+            let extended = previous
+                .extend_at(
+                    &self.authority,
+                    request.authority(),
+                    basis,
+                    budget,
+                    &cancelled,
+                )
+                .await;
+            if cancelled() {
+                return Err(ForgeEventReadRefusal::Cancelled);
+            }
+            match extended {
+                Ok(Some(index)) => {
+                    let index = Arc::new(index);
+                    let page = index
+                        .read_page_at(
+                            &self.authority,
+                            request.authority(),
+                            basis,
+                            after,
+                            limit,
+                            &cancelled,
+                        )
+                        .await
+                        .map_err(|error| ForgeEventReadRefusal::Admission(Box::new(error)))?;
+                    if cancelled() {
+                        return Err(ForgeEventReadRefusal::Cancelled);
+                    }
+                    cache.insert_extended(self, index);
+                    return Ok(page);
+                }
+                Ok(None)
+                | Err(fgit_admission::AdmissionError::AsyncProjectionUnavailable(
+                    fgit_types::RefusalCode::ResourceBudgetExceeded,
+                )) => {}
+                Err(error) => {
+                    return Err(ForgeEventReadRefusal::Admission(Box::new(error)));
+                }
+            }
         }
         // A cold resumed cursor must not pay for an unrelated history prefix
         // merely to populate optional acceleration state. Initial reads already
         // verify the whole history and may retain its bounded metadata.
-        let budget = cache.index_budget(self);
-        if after.is_none()
+        // A bounded extension refusal goes straight to the canonical reader;
+        // a second optional build would spend more of the same request budget.
+        if !extension_attempted
+            && after.is_none()
             && budget != 0
             && feed::VerifiedEventIndex::fits_retention_budget(basis, budget)
         {

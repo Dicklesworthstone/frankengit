@@ -5,11 +5,11 @@
 //! payloads. This is neither persisted authority nor a disclosure decision.
 
 use super::{
-    AdmissionError, ForgeEventCursor, ForgeEventPage, PageRecord, checkpoint, history, page_limit,
-    read_records_page, storage, unavailable,
+    AdmissionError, ForgeEventCursor, ForgeEventPage, PageRecord, Record, checkpoint, history,
+    page_limit, read_records_page, storage, unavailable,
 };
 use fgit_authority::{AsyncAuthorityStore, StoreInstanceId, authority_head_identity};
-use fgit_chronicle::PublicationBasis;
+use fgit_chronicle::{HistoryStep, PublicationBasis, read_history_step_async};
 use fgit_forge::ForgeEventBatch;
 use fgit_types::{RefusalCode, RepositoryAuthorityHeadId, RepositoryId};
 
@@ -73,6 +73,137 @@ impl VerifiedEventIndex {
             history::read_records(store, cx, basis, None, history::Limits::DEFAULT, cancelled)
                 .await?;
 
+        Self::retain_at(
+            store,
+            cx,
+            basis,
+            &[],
+            records,
+            max_retained_bytes,
+            cancelled,
+        )
+        .await
+    }
+
+    /// Extend this verified prefix across exactly one canonical successor edge.
+    ///
+    /// A different predecessor returns `Ok(None)` without storage I/O, allowing
+    /// the host to use its canonical reader without searching unrelated history.
+    /// Even that fast path checks the supplied body identity and repository/store
+    /// binding. A matching edge verifies the actual predecessor body and complete
+    /// decision batch or checkpoint capsule; a matching ID alone is insufficient.
+    ///
+    /// Only new empty-event bodies are read here. Page reads still verify every
+    /// selected nonempty payload, including rows retained from this prefix.
+    /// Copying the immutable descriptor vector is O(retained rows), with explicit
+    /// cancellation checks; storage work is bounded to the one new history edge
+    /// and at most two empty schemas. The existing complete-history record and
+    /// predecessor-edge ceilings are preserved. All failures leave `self` intact.
+    pub async fn extend_at<S, C>(
+        &self,
+        store: &S,
+        cx: &S::Context,
+        basis: &PublicationBasis,
+        max_retained_bytes: usize,
+        cancelled: &C,
+    ) -> Result<Option<Self>, AdmissionError>
+    where
+        S: AsyncAuthorityStore + ?Sized,
+        C: Fn() -> bool + Sync,
+    {
+        checkpoint(cancelled)?;
+        self.check_binding(store, basis)?;
+        if basis.body().predecessor_head_id != Some(self.source_head) {
+            return Ok(None);
+        }
+        // Every verified decision/checkpoint advances generation by exactly one,
+        // starting at generation one. These are profile preflights, never proof
+        // that this successor is related to the cached prefix.
+        let total_edges = usize::try_from(basis.body().generation.get() - 1)
+            .map_err(|_| unavailable(RefusalCode::ResourceBudgetExceeded))?;
+        let total_records = usize::try_from(
+            basis
+                .body()
+                .latest_repository_sequence
+                .map_or(0, |sequence| sequence.get()),
+        )
+        .map_err(|_| unavailable(RefusalCode::ResourceBudgetExceeded))?;
+        if total_edges > history::Limits::DEFAULT.batches
+            || total_records > history::Limits::DEFAULT.records
+            || retained_bytes(self.records.len())? > max_retained_bytes
+        {
+            return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
+        }
+        let mut walked = 0;
+        let step = read_history_step_async(store, cx, basis.body(), &mut walked, 1, cancelled)
+            .await
+            .map_err(storage::history_step_refusal)?;
+        let (predecessor, committed) = match step {
+            HistoryStep::Genesis => return Err(unavailable(RefusalCode::EvidenceInvalid)),
+            HistoryStep::Checkpoint { predecessor, .. } => (predecessor, Vec::new()),
+            HistoryStep::Decision { predecessor, batch } => (predecessor, batch.committed_rcrs),
+        };
+        if predecessor.id() != self.source_head
+            || predecessor.body().repository_id != self.repository
+        {
+            return Err(unavailable(RefusalCode::EvidenceInvalid));
+        }
+        let previous_records = usize::try_from(
+            predecessor
+                .body()
+                .latest_repository_sequence
+                .map_or(0, |sequence| sequence.get()),
+        )
+        .map_err(|_| unavailable(RefusalCode::ResourceBudgetExceeded))?;
+        if previous_records.checked_add(committed.len()) != Some(total_records) {
+            return Err(unavailable(RefusalCode::EvidenceInvalid));
+        }
+        let mut records = Vec::new();
+        records
+            .try_reserve_exact(committed.len())
+            .map_err(|_| unavailable(RefusalCode::ResourceBudgetExceeded))?;
+        for record in committed {
+            checkpoint(cancelled)?;
+            if record.repository_id != self.repository {
+                return Err(unavailable(RefusalCode::EvidenceInvalid));
+            }
+            records.push(Record {
+                sequence: record.repository_sequence.get(),
+                tx_id: record.tx_id,
+                policy_epoch: record.policy_epoch,
+                principal_snapshot_id: record.principal_snapshot_id,
+                event_root: record.forge_event_batch_root,
+            });
+        }
+        Self::retain_at(
+            store,
+            cx,
+            basis,
+            &self.records,
+            records,
+            max_retained_bytes,
+            cancelled,
+        )
+        .await
+        .map(Some)
+    }
+
+    /// Retain a verified prefix and independently verified newly committed rows.
+    /// This helper never accepts rows from a public caller.
+    async fn retain_at<S, C>(
+        store: &S,
+        cx: &S::Context,
+        basis: &PublicationBasis,
+        prefix: &[PageRecord],
+        records: Vec<Record>,
+        max_retained_bytes: usize,
+        cancelled: &C,
+    ) -> Result<Self, AdmissionError>
+    where
+        S: AsyncAuthorityStore + ?Sized,
+        C: Fn() -> bool + Sync,
+    {
+        checkpoint(cancelled)?;
         // Native forge commits and ordinary ref-only commits use distinct
         // canonical empty schemas. Verify each referenced empty body once.
         // All other roots that pass storage::read_events must have an event:
@@ -100,7 +231,12 @@ impl VerifiedEventIndex {
                     .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
             }
         }
-        let bytes = retained_bytes(nonempty)?;
+        let retained = prefix
+            .len()
+            .checked_add(nonempty)
+            .filter(|count| *count <= history::Limits::DEFAULT.records)
+            .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
+        let bytes = retained_bytes(retained)?;
         if bytes > max_retained_bytes {
             return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
         }
@@ -117,10 +253,14 @@ impl VerifiedEventIndex {
         }
         let mut indexed = Vec::new();
         indexed
-            .try_reserve_exact(nonempty)
+            .try_reserve_exact(retained)
             .map_err(|_| unavailable(RefusalCode::ResourceBudgetExceeded))?;
         if retained_bytes(indexed.capacity())? > max_retained_bytes {
             return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
+        }
+        for record in prefix {
+            checkpoint(cancelled)?;
+            indexed.push(*record);
         }
         for record in records {
             checkpoint(cancelled)?;
@@ -135,6 +275,21 @@ impl VerifiedEventIndex {
             store_instance: store.instance_id(),
             records: indexed,
         })
+    }
+
+    fn check_binding<S>(&self, store: &S, basis: &PublicationBasis) -> Result<(), AdmissionError>
+    where
+        S: AsyncAuthorityStore + ?Sized,
+    {
+        if authority_head_identity(basis.body())
+            .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?
+            != basis.id()
+            || basis.body().repository_id != self.repository
+            || store.instance_id() != self.store_instance
+        {
+            return Err(unavailable(RefusalCode::EvidenceInvalid));
+        }
+        Ok(())
     }
 
     /// Exact verified authority head selected by this index.
@@ -170,14 +325,7 @@ impl VerifiedEventIndex {
     {
         let limit = page_limit(limit)?;
         checkpoint(cancelled)?;
-        if authority_head_identity(basis.body())
-            .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?
-            != basis.id()
-            || basis.body().repository_id != self.repository
-            || store.instance_id() != self.store_instance
-        {
-            return Err(unavailable(RefusalCode::EvidenceInvalid));
-        }
+        self.check_binding(store, basis)?;
         if basis.id() != self.source_head {
             return Err(unavailable(RefusalCode::EvidenceStale));
         }
