@@ -2,9 +2,9 @@
 //! No object is staged and no admission decision is made on this path.
 
 use super::{
-    BTreeMap, BTreeSet, Deadline, ExternalBase, ExternalBases, GitOid, ObjectBody, ObjectType,
-    PackError, ParsedDeltaBase, ProductionQuarantineValidator, QuarantinedPack, RefusalCode,
-    ResolutionBudget, StoreRefusal, checkpoint, copy_bytes, crypto_object_kind, map_pack_error,
+    BTreeMap, BTreeSet, Deadline, ExternalBase, ExternalBases, GitOid, ObjectType, PackError,
+    ParsedDeltaBase, ProductionQuarantineValidator, QuarantinedPack, RefusalCode, ResolutionBudget,
+    StoreRefusal, checkpoint, copy_bytes, crypto_object_kind, map_pack_error,
 };
 use crate::received_pack::{
     PendingReceivedPack, StreamedCaptureReservation, VerifiedReceivedObject,
@@ -157,85 +157,69 @@ impl ProductionQuarantineValidator<'_> {
 
         let bases =
             self.restored_pack_bases(pack, hints, authorized, resolution_budget, deadline, reads)?;
-        let (verified, ids_at_offset, mut spool) = self.verified_pack_objects_with_budget(
+        // Verify each reconstructed member against its independent canonical body
+        // before resolving the next. This earns the read budget at verified EOF
+        // and avoids retaining a second copy of the entire expanded pack.
+        let (_, ids_at_offset) = self.visit_resolved_pack(
             pack,
             &bases,
             resolution_budget,
             matches!(restoration, Restoration::Received(_)),
             deadline,
             restore_pack_refusal,
+            |id, kind, bytes, _, budget, deadline| {
+                let position = hints
+                    .binary_search_by_key(&id, |hint| hint.id)
+                    .map_err(|_| RefusalCode::EvidenceInvalid)?;
+                let hint = &hints[position];
+                if kind != hint.kind || bytes.len() != hint.bytes {
+                    return Err(RefusalCode::EvidenceInvalid);
+                }
+                // Charge hashing and the independent fabric scan up front.
+                let work = bytes
+                    .len()
+                    .checked_mul(2)
+                    .ok_or(RefusalCode::ResourceBudgetExceeded)?;
+                budget
+                    .charge_work(work, &self.pack_limits)
+                    .map_err(restore_pack_refusal)?;
+                let commitment = git_payload_commitment(
+                    crypto_object_kind(kind),
+                    &bytes,
+                    CANONICAL_CODEC_VERSION,
+                );
+                drop(bytes);
+                checkpoint(deadline)?;
+                if let Some(reads) = reads {
+                    reads.check_read()?;
+                }
+                let canonical = self.node.fabric.verify_object_integrity_bounded(
+                    id,
+                    hint.bytes as u64,
+                    &mut || deadline.checkpoint(),
+                );
+                checkpoint(deadline)?;
+                let matched = canonical.as_ref().is_ok_and(|object| {
+                    object.identity() == id
+                        && object.object_kind() == fabric_object_kind(kind)
+                        && object.payload_length() == hint.bytes as u64
+                        && object.payload_commitment().as_slice() == commitment.digest().as_bytes()
+                });
+                if let Some(reads) = reads {
+                    if matched {
+                        reads.verified_read(hint.bytes);
+                    }
+                    reads.check_read()?;
+                }
+                if matched {
+                    Ok(())
+                } else if matches!(canonical, Err(StoreRefusal::RuntimeCheckpointRejected)) {
+                    Err(RefusalCode::CancellationInProgress)
+                } else {
+                    Err(RefusalCode::EvidenceInvalid)
+                }
+            },
         )?;
-        // Resolution no longer needs these buffered canonical bases while
-        // the independent per-object integrity scans run.
-        drop(bases);
-        if verified.len() != hints.len() {
-            return Ok(None);
-        }
-        for ((id, object), hint) in verified.into_iter().zip(hints) {
-            checkpoint(deadline)?;
-            if id != hint.id || object.object_type != hint.kind {
-                return Ok(None);
-            }
-            let bytes = match object.body {
-                ObjectBody::Resident(bytes) => bytes,
-                ObjectBody::Spooled(handle) => {
-                    // A changed scratch body must still match the canonical
-                    // strong commitment below; spooling creates no new proof.
-                    let read = spool.read(handle);
-                    checkpoint(deadline)?;
-                    read.map_err(|_| RefusalCode::EvidenceInvalid)?
-                }
-            };
-            if bytes.len() != hint.bytes {
-                return Ok(None);
-            }
-            // Charge both hashing the reconstructed bytes and reading the
-            // canonical bytes before doing either. Failed candidates retain
-            // these charges in the caller's operation-wide work budget.
-            let work = bytes
-                .len()
-                .checked_mul(2)
-                .ok_or(RefusalCode::ResourceBudgetExceeded)?;
-            resolution_budget
-                .charge_work(work, &self.pack_limits)
-                .map_err(restore_pack_refusal)?;
-            let commitment = git_payload_commitment(
-                crypto_object_kind(object.object_type),
-                &bytes,
-                CANONICAL_CODEC_VERSION,
-            );
-            drop(bytes);
-            checkpoint(deadline)?;
-            if let Some(reads) = reads {
-                reads.check_read()?;
-            }
-            let canonical = self.node.fabric.verify_object_integrity_bounded(
-                id,
-                hint.bytes as u64,
-                &mut || deadline.checkpoint(),
-            );
-            checkpoint(deadline)?;
-            if let Some(reads) = reads {
-                if let Ok(verified) = &canonical {
-                    reads.verified_read(
-                        usize::try_from(verified.payload_length())
-                            .map_err(|_| RefusalCode::ResourceBudgetExceeded)?,
-                    );
-                }
-                reads.check_read()?;
-            }
-            let canonical = canonical.map_err(|error| match error {
-                StoreRefusal::RuntimeCheckpointRejected => RefusalCode::CancellationInProgress,
-                _ => RefusalCode::EvidenceInvalid,
-            })?;
-            if canonical.identity() != id
-                || canonical.object_kind() != fabric_object_kind(object.object_type)
-                || canonical.payload_length() != hint.bytes as u64
-                || canonical.payload_commitment().as_slice() != commitment.digest().as_bytes()
-            {
-                return Ok(None);
-            }
-        }
         // Only now do the originally untrusted hints describe independently
         // verified immutable native objects. This rebuilds spans, dependencies,
         // receipts and binding digests from the checked pack, never from disk.

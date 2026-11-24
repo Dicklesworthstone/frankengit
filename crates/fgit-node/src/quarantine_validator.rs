@@ -259,6 +259,7 @@ type VerifiedPackObjects = (
     BTreeMap<u64, GitOid>,
     ObjectSpool,
 );
+type ResolvedPackEntries<T> = (BTreeMap<GitOid, T>, BTreeMap<u64, GitOid>);
 
 #[cfg(test)]
 impl<'node> ProductionQuarantineValidator<'node> {
@@ -478,19 +479,13 @@ impl ProductionQuarantineValidator<'_> {
             .min(self.pack_limits.max_total_expanded_bytes)
     }
 
+    #[cfg(test)]
     fn verify_resolved_object(
         &self,
         object_type: ObjectType,
         body: Vec<u8>,
     ) -> Result<(GitOid, VerifiedObject), RefusalCode> {
-        let (id, parsed) = fgit_git_object::identify_object_body(
-            self.node.object_format,
-            object_type,
-            &body,
-            AcceptanceProfile::GitCompatibleImport,
-            &self.parse_limits,
-        )
-        .map_err(|error| map_pack_error(PackError::ObjectParse(error)))?;
+        let (id, parsed) = self.identify_resolved_object(object_type, &body)?;
         Ok((
             id,
             VerifiedObject {
@@ -499,6 +494,21 @@ impl ProductionQuarantineValidator<'_> {
                 parsed,
             },
         ))
+    }
+
+    fn identify_resolved_object(
+        &self,
+        object_type: ObjectType,
+        body: &[u8],
+    ) -> Result<(GitOid, Option<ParsedObject>), RefusalCode> {
+        fgit_git_object::identify_object_body(
+            self.node.object_format,
+            object_type,
+            body,
+            AcceptanceProfile::GitCompatibleImport,
+            &self.parse_limits,
+        )
+        .map_err(|error| map_pack_error(PackError::ObjectParse(error)))
     }
 
     /// Reconstructs and verifies every pack-local object identity before a
@@ -517,37 +527,60 @@ impl ProductionQuarantineValidator<'_> {
         bases: &ExternalBases,
         deadline: &mut impl Deadline,
     ) -> Result<VerifiedPackObjects, RefusalCode> {
-        self.verified_pack_objects_with_budget(
+        let mut spool = ObjectSpool::new(self.node.storage_root());
+        let mut resident_blob_bytes = 0;
+        let (verified, offsets) = self.visit_resolved_pack(
             pack,
             bases,
             &mut ResolutionBudget::new(),
             false,
             deadline,
             map_pack_error,
-        )
+            |_, object_type, body, parsed, _, deadline| {
+                let object = VerifiedObject {
+                    object_type,
+                    body: ObjectBody::Resident(body),
+                    parsed,
+                };
+                spool_blob(
+                    object,
+                    &mut spool,
+                    &mut resident_blob_bytes,
+                    self.resident.verified_blobs,
+                    deadline,
+                )
+            },
+        )?;
+        Ok((verified, offsets, spool))
     }
 
     /// A caller restoring several optional representations keeps one budget
     /// across all candidates, including work spent on a failed candidate.
-    fn verified_pack_objects_with_budget(
+    fn visit_resolved_pack<T, D: Deadline>(
         &self,
         pack: &QuarantinedPack,
         bases: &ExternalBases,
         budget: &mut ResolutionBudget,
         cold_custody: bool,
-        deadline: &mut impl Deadline,
+        deadline: &mut D,
         pack_refusal: fn(PackError) -> RefusalCode,
-    ) -> Result<VerifiedPackObjects, RefusalCode> {
+        mut consume: impl FnMut(
+            GitOid,
+            ObjectType,
+            Vec<u8>,
+            Option<ParsedObject>,
+            &mut ResolutionBudget,
+            &mut D,
+        ) -> Result<T, RefusalCode>,
+    ) -> Result<ResolvedPackEntries<T>, RefusalCode> {
         checkpoint(deadline)?;
         // An empty, checksum-verified pack is real wire evidence. It is not a
         // missing pack or an unresolved thin delta. Root reuse is established
         // separately from the exact authenticated visible-ref graph below.
-        let mut spool = ObjectSpool::new(self.node.storage_root());
         if pack.entries().is_empty() {
-            return Ok((BTreeMap::new(), BTreeMap::new(), spool));
+            return Ok((BTreeMap::new(), BTreeMap::new()));
         }
         let mut cache_spool = ObjectSpool::new(self.node.storage_root());
-        let mut resident_blob_bytes = 0_usize;
         let mut objects = pack
             .clone()
             .into_scalar_objects(|_| None)
@@ -606,15 +639,14 @@ impl ProductionQuarantineValidator<'_> {
                         Ok((object_type, body)) => {
                             // Verified as resolved, so a pass never holds every
                             // body it resolved (frankengit-88fk).
-                            let (id, object) = self.verify_resolved_object(object_type, body)?;
-                            let object = spool_blob(
-                                object,
-                                &mut spool,
-                                &mut resident_blob_bytes,
-                                self.resident.verified_blobs,
-                                deadline,
-                            )?;
-                            newly_resolved.push((entry.offset, id, object));
+                            let (id, parsed) = self.identify_resolved_object(object_type, &body)?;
+                            let std::collections::btree_map::Entry::Vacant(slot) =
+                                verified.entry(id)
+                            else {
+                                return Err(RefusalCode::PackFramingInvalid);
+                            };
+                            slot.insert(consume(id, object_type, body, parsed, budget, deadline)?);
+                            newly_resolved.push((entry.offset, id));
                         }
                         // The base may be a pack-local entry whose native ID
                         // is established in this or a later bounded pass.
@@ -627,10 +659,8 @@ impl ProductionQuarantineValidator<'_> {
             if newly_resolved.is_empty() {
                 break;
             }
-            for (offset, id, object) in newly_resolved {
-                if verified.insert(id, object).is_some()
-                    || ids_at_offset.insert(offset, id).is_some()
-                {
+            for (offset, id) in newly_resolved {
+                if ids_at_offset.insert(offset, id).is_some() {
                     return Err(RefusalCode::PackFramingInvalid);
                 }
                 let pack_object = positions
@@ -640,7 +670,7 @@ impl ProductionQuarantineValidator<'_> {
                 set_pack_object_id(pack_object, id);
             }
             if verified.len() == pack.entries().len() {
-                return Ok((verified, ids_at_offset, spool));
+                return Ok((verified, ids_at_offset));
             }
         }
 

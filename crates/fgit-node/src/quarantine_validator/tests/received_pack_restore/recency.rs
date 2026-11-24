@@ -66,6 +66,71 @@ struct History {
     depth: usize,
 }
 
+#[test]
+fn cold_restore_accounts_for_completed_canonical_reads_before_later_delta_work_runs_out() {
+    use crate::{
+        CeiledFabricSource, FabricReadCeiling, GitDaemonSessionDeadline, GitDaemonSessionTimeout,
+        GitDaemonSessionWorkScaling, VerifiedFabricPackSource,
+    };
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let (_scratch, node) = node_for(format);
+        let history = retained_history(&node);
+        let total: usize = history.hints.iter().map(|hint| hint.bytes).sum();
+        for (limit, complete) in [(16 * 1024, false), (history.limits.max_delta_work, true)] {
+            let mut limits = history.limits.clone();
+            limits.max_delta_work = limit;
+            let validator = ProductionQuarantineValidator::new(
+                &node,
+                selected_closure(history.authorized.clone()),
+                limits,
+                ParseLimits::default(),
+            )
+            .for_received_pack_restoration();
+            let session = GitDaemonSessionDeadline::new(
+                GitDaemonSessionTimeout::DEFAULT,
+                GitDaemonSessionWorkScaling::DEFAULT,
+            );
+            let context = node.upload_request_context(&session);
+            let exhausted = std::cell::Cell::new(None);
+            let source = VerifiedFabricPackSource {
+                fabric: &node.fabric,
+                object_format: format,
+                maximum_object_bytes: history.limits.max_object_bytes,
+                database_context: context.authority(),
+                database_exhaustion: &exhausted,
+                session_is_live: None,
+            };
+            let ceiling =
+                FabricReadCeiling::for_upload(&node, context.authority(), &session).unwrap();
+            let reads = CeiledFabricSource {
+                inner: &source,
+                ceiling: Some(&ceiling),
+            };
+            let result = validator.restore_received_pack_bounded(
+                &history.pack,
+                &history.hints,
+                &history.authorized,
+                &mut ResolutionBudget::new(),
+                &mut || true,
+                crate::quarantine_validator::Restoration::Received(Some(&reads)),
+            );
+            let credited = session.shared.verified_fabric_bytes.load(Ordering::Relaxed);
+            if complete {
+                assert!(result.unwrap().is_some());
+                assert_eq!(credited, total as u64);
+            } else {
+                assert!(matches!(result, Err(RefusalCode::ResourceBudgetExceeded)));
+                assert!(
+                    credited >= 2048 && credited < total as u64,
+                    "verified bytes {credited}"
+                );
+            }
+            assert_eq!(node.received_pack_cache().retained_entries(), 0);
+        }
+        node.shutdown().unwrap();
+    }
+}
+
 fn retained_history(node: &OneNode) -> History {
     let depth = 24;
     let mut raw = b"PACK".to_vec();

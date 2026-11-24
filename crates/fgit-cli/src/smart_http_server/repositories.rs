@@ -31,7 +31,7 @@ pub(super) const USAGE: &str = "usage: fg serve-http <numeric-loopback-address>
   [--processing-timeout-secs <1..3600>] [--continuous --stop-file <absent-path>]
   [--receive-max-input-mib <1..1024>] [--receive-max-expanded-mib <1..65536>]
   [--pack-max-expanded-mib <1..65536>] [--pack-max-blob-mib <non-zero>]
-  [--pack-cache-mib <0..65536>] [--received-pack-cache-mib <0..65536>]
+  [--pack-cache-mib <0..65536>] [--received-pack-cache-mib <0..65536>] [--enable-ref-in-want] [--enable-object-info]
   [--trusted-origin <origin>]
 
 The private table begins with frankengit-http-repositories-v1 and has eight fields:
@@ -248,6 +248,8 @@ fn parse(arguments: &[String]) -> Result<Options<'_>, String> {
                 | "--allow-pulls"
                 | "--allow-source"
                 | "--continuous"
+                | "--enable-ref-in-want"
+                | "--enable-object-info"
         );
         if !boolean
             && !matches!(
@@ -456,6 +458,7 @@ fn configuration(
             Some(bytes("--receive-max-expanded-mib", 4096, 65536)?),
         );
     config = crate::guarded_git_server::apply_session_work_scaling(config, flags)?;
+    config = crate::guarded_git_server::apply_upload_pack_features(config, flags);
     if flags.contains_key("--pack-max-expanded-mib") {
         config =
             config.with_selected_pack_byte_envelope(bytes("--pack-max-expanded-mib", 1, 65536)?);

@@ -3,6 +3,7 @@ use std::cell::RefCell;
 mod basename_ordering;
 mod incremental_walk;
 mod object_info;
+mod optional_extensions;
 mod projection_cache;
 mod received_pack_reuse;
 mod ref_in_want;
@@ -15,6 +16,7 @@ struct MemorySource {
     objects: BTreeMap<GitOid, (ObjectType, Vec<u8>)>,
     reads: RefCell<Vec<GitOid>>,
     header_reads: RefCell<Vec<GitOid>>,
+    advice: Option<RefCell<Vec<Vec<GitOid>>>>,
     polls: Cell<usize>,
     stop_at: Cell<usize>,
 }
@@ -25,6 +27,7 @@ impl MemorySource {
             objects: BTreeMap::new(),
             reads: RefCell::new(Vec::new()),
             header_reads: RefCell::new(Vec::new()),
+            advice: None,
             polls: Cell::new(0),
             stop_at: Cell::new(usize::MAX),
         }
@@ -45,6 +48,17 @@ impl MemorySource {
     }
 }
 impl VisibilitySource for MemorySource {
+    fn advise_pending(&self, pending: &mut BTreeMap<GitOid, bool>) {
+        if let Some(advice) = &self.advice {
+            let mut issued = Vec::new();
+            advise_pending_pages(pending, |id| {
+                issued.push(id);
+                true
+            });
+            advice.borrow_mut().push(issued);
+        }
+    }
+
     fn format(&self) -> GitHashAlgorithm {
         self.format
     }
@@ -110,6 +124,62 @@ fn expect_code<T>(result: Result<T, NodePackMaterializationRefusal>, code: Refus
     assert!(
         matches!(result, Err(NodePackMaterializationRefusal::DisclosureGraph(observed)) if observed == code)
     );
+}
+
+#[test]
+fn first_page_advice_preserves_reads_refusals_and_scope_in_native_oid_order() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut source = MemorySource::new(format);
+        let mut tip = None;
+        for n in 0..48_u8 {
+            let blob = source.put(ObjectType::Blob, vec![n]);
+            let tree = source.tree(&[(b"100644", b"file", blob)]);
+            tip = Some(source.commit(tree, tip.as_slice()));
+        }
+        let root = tip.unwrap();
+        let hidden = source.put(ObjectType::Blob, b"unreachable".to_vec());
+        let admitted = source.admitted();
+        let limits = PackLimits::default();
+        let reference = project_visible_graph(&source, &admitted, [root], &limits).unwrap();
+        let bodies = source.reads.take();
+        let headers = source.header_reads.take();
+        let polls = source.polls.replace(0);
+        source.advice = Some(RefCell::new(Vec::new()));
+        let actual = project_visible_graph(&source, &admitted, [root], &limits).unwrap();
+        assert_eq!(actual, reference);
+        assert_eq!(source.reads.take(), bodies);
+        assert_eq!(source.header_reads.take(), headers);
+        assert_eq!(source.polls.get(), polls);
+        let batches = source.advice.as_ref().unwrap().take();
+        assert!(batches.iter().all(|batch| batch.len() <= 16));
+        let advised: Vec<_> = batches.into_iter().flatten().collect();
+        let unique: BTreeSet<_> = advised.iter().copied().collect();
+        assert!(!advised.is_empty());
+        assert_eq!(unique.len(), advised.len());
+        assert!(!unique.contains(&hidden));
+        assert!(unique.is_subset(reference.closure.objects()));
+
+        let mut pending: BTreeMap<_, _> = headers.iter().map(|id| (*id, false)).collect();
+        let mut attempts = 0;
+        advise_pending_pages(&mut pending, |_| {
+            attempts += 1;
+            attempts == 1
+        });
+        assert_eq!(attempts, 2);
+        assert_eq!(pending.values().filter(|advised| **advised).count(), 1);
+
+        // Two independently missing keys still report the first actual
+        // ordered read. Advice neither diagnoses nor hides the later defect.
+        source.objects.remove(&headers[0]);
+        source.objects.remove(headers.last().unwrap());
+        let advised = project_visible_graph(&source, &admitted, [root], &limits).unwrap_err();
+        source.advice = None;
+        let reference = project_visible_graph(&source, &admitted, [root], &limits).unwrap_err();
+        let first: NodePackMaterializationRefusal =
+            PackWriteError::MissingCanonicalObject(headers[0]).into();
+        assert_eq!(advised.to_string(), first.to_string());
+        assert_eq!(reference.to_string(), first.to_string());
+    }
 }
 
 #[test]
@@ -471,24 +541,46 @@ fn fixture(format: GitHashAlgorithm) -> Fixture {
 }
 
 fn fixture_with_public_body(format: GitHashAlgorithm, public_body: Vec<u8>) -> Fixture {
-    fixture_with_public_blob(format, |node| {
-        node.put_git_object(ObjectType::Blob, public_body)
-            .unwrap()
-            .identity()
-    })
+    fixture_with_configuration(format, public_body, |config| config)
+}
+
+fn fixture_with_configuration(
+    format: GitHashAlgorithm,
+    public_body: Vec<u8>,
+    configure: impl FnOnce(NodeConfig) -> NodeConfig,
+) -> Fixture {
+    fixture_with_configured_public_blob(
+        format,
+        |node| {
+            node.put_git_object(ObjectType::Blob, public_body)
+                .unwrap()
+                .identity()
+        },
+        configure,
+    )
 }
 
 fn fixture_with_public_blob(
     format: GitHashAlgorithm,
     public_blob: impl FnOnce(&OneNode) -> GitOid,
 ) -> Fixture {
+    fixture_with_configured_public_blob(format, public_blob, |config| config)
+}
+
+fn fixture_with_configured_public_blob(
+    format: GitHashAlgorithm,
+    public_blob: impl FnOnce(&OneNode) -> GitOid,
+    configure: impl FnOnce(NodeConfig) -> NodeConfig,
+) -> Fixture {
     let scratch = Scratch::new();
-    let config = NodeConfig::new(
-        scratch.0.clone(),
-        TenantId::from_bytes([0x62; 16]),
-        RepositoryId::from_bytes([0x63; 16]),
-    )
-    .with_object_format(format);
+    let config = configure(
+        NodeConfig::new(
+            scratch.0.clone(),
+            TenantId::from_bytes([0x62; 16]),
+            RepositoryId::from_bytes([0x63; 16]),
+        )
+        .with_object_format(format),
+    );
     let (mut node, _) = OneNode::init(config.clone()).unwrap();
     node.bring_into_service(HeadGeneration::FIRST).unwrap();
     let put = |kind, body| node.put_git_object(kind, body).unwrap().identity();

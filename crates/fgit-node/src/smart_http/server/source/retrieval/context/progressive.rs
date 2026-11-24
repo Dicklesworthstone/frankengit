@@ -1,4 +1,5 @@
-//! Ranked context streaming over one exact, authorized Initial report.
+//! Ranked context streaming over one authorized Initial report, preserving
+//! either its strict source or its distinct current-source/index provenance.
 use super::{
     ApiError, OneNode, SourceReadContext, Status, command_fields, quote, ranked, run_context,
 };
@@ -45,7 +46,7 @@ impl ProgressOutput<'_> {
 }
 
 impl OneNode {
-    /// Flush the exact Initial answer to a host-authorized sink before ranking
+    /// Flush the original Initial answer to a host-authorized sink before ranking
     /// its original rows and reading selected excerpts. The second NDJSON record
     /// is Refined or RefinementFailed. Invalid Initial requests emit no record.
     /// A sink failure ends delivery. The single output budget covers both rows.

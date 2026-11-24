@@ -27,7 +27,7 @@ pub(super) const USAGE: &str = "usage: fg serve-ssh <listen-address>
   [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>]
   [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>]
   [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>]
-  [--pack-cache-mib <0..65536>] [--received-pack-cache-mib <0..65536>]
+  [--pack-cache-mib <0..65536>] [--received-pack-cache-mib <0..65536>] [--enable-ref-in-want] [--enable-object-info]
 
 The private table begins with frankengit-ssh-repositories-v1 and has eight fields:
   <tenant/repository.git> <absolute-storage-root> <tenant-id> <repository-id>
@@ -171,6 +171,12 @@ fn parse(arguments: &[String]) -> Result<Options<'_>, String> {
                 index += 1;
             }
             "--allow-receive" | "--continuous" => return Err(format!("duplicate {name}")),
+            value if crate::guarded_git_server::UPLOAD_PACK_FEATURE_FLAGS.contains(&value) => {
+                if flags.insert(name, "").is_some() {
+                    return Err(format!("duplicate {name}"));
+                }
+                index += 1;
+            }
             value if value.starts_with("--") => {
                 if !matches!(
                     name,

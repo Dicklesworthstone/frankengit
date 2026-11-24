@@ -933,6 +933,7 @@ dependencies = [
  "fgit-crypto",
  "fgit-resource",
  "fgit-types",
+ "rustix",
 ]
 
 [[package]]

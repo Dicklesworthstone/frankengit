@@ -6,7 +6,7 @@ use super::{
     SourceSearchReport, TreeCapability, TreePath, search_error, workspace_request_live,
 };
 use crate::source_retrieval::authorization::SourceReadContext;
-use crate::source_retrieval::context::ranked::RankedContext;
+use crate::source_retrieval::context::ranked::{RankedContext, RevalidatedRankedContext};
 use crate::source_retrieval::context::{
     Assembly, ContextLimits, InitialContext, Plan, RevalidatedInitialContext,
 };
@@ -143,13 +143,52 @@ impl OneNode {
         let plan = Plan::revalidated(&initial, limits, &|| {
             !workspace_request_live(request) || !read.is_live()
         })?;
+        self.hydrate_source_initial_revalidated_plan_local_in(request, read, initial, limits, &plan)
+            .await
+    }
+
+    /// Rank the original indexed rows after one explicit current-source
+    /// revalidation. Hydration remains pinned to that report's current head
+    /// and commit; metadata reuse cannot select a newer source, grant reads,
+    /// replace index provenance, or renew any result/source/request allowance.
+    /// The selected files and their labels use the same native verifier as
+    /// raw-path selection. An unavailable winner refuses the entire context.
+    pub async fn hydrate_source_initial_revalidated_ranked_local_in(
+        &self,
+        request: &NodeRequestContext,
+        read: &SourceReadContext,
+        initial: RevalidatedInitialReport,
+        limits: ContextLimits,
+    ) -> Result<RevalidatedRankedContext, RetrievalError> {
+        read.check_node(self)?;
+        initial.validate_authorization(read, &mut || crate::source_retrieval::live(request))?;
+        let (plan, ranking) = Plan::ranked_revalidated(&initial, limits, &|| {
+            !workspace_request_live(request) || !read.is_live()
+        })?;
+        let context = self
+            .hydrate_source_initial_revalidated_plan_local_in(request, read, initial, limits, &plan)
+            .await?;
+        RevalidatedRankedContext::finish(context, ranking)
+    }
+
+    async fn hydrate_source_initial_revalidated_plan_local_in(
+        &self,
+        request: &NodeRequestContext,
+        read: &SourceReadContext,
+        initial: RevalidatedInitialReport,
+        limits: ContextLimits,
+        plan: &Plan,
+    ) -> Result<RevalidatedInitialContext, RetrievalError> {
+        if !workspace_request_live(request) || !read.is_live() {
+            return Err(failure(SearchError::Cancelled));
+        }
         // The original Initial limit covers every additional lineage copy;
         // reserve it before consulting the native source or allocating blobs.
         initial.check_context_metadata(plan.lineage_metadata_bytes()?)?;
         let (assembled, file_limit) = self
-            .hydrate_source_context_plan_local_in(request, initial.current_source(), limits, &plan)
+            .hydrate_source_context_plan_local_in(request, initial.current_source(), limits, plan)
             .await?;
-        RevalidatedInitialContext::finish(initial, &plan, assembled, file_limit, &mut || {
+        RevalidatedInitialContext::finish(initial, plan, assembled, file_limit, &mut || {
             crate::source_retrieval::live(request)?;
             if read.is_live() {
                 Ok(())

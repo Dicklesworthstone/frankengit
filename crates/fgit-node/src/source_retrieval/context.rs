@@ -531,7 +531,26 @@ impl Plan {
         limits: ContextLimits,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<(Self, ranked::ContextRanking), RetrievalError> {
-        let ranking = ranked::ContextRanking::build(report, limits, cancelled)?;
+        let ranking = ranked::ContextRanking::build(
+            report.into(),
+            report.source().namespace.object_format,
+            limits,
+            cancelled,
+        )?;
+        let plan = Self::with_ranking(report.into(), limits, Some(&ranking), cancelled)?;
+        Ok((plan, ranking))
+    }
+    pub(crate) fn ranked_revalidated(
+        report: &RevalidatedInitialReport,
+        limits: ContextLimits,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(Self, ranked::ContextRanking), RetrievalError> {
+        let ranking = ranked::ContextRanking::build(
+            report.into(),
+            report.current_source().namespace.object_format,
+            limits,
+            cancelled,
+        )?;
         let plan = Self::with_ranking(report.into(), limits, Some(&ranking), cancelled)?;
         Ok((plan, ranking))
     }

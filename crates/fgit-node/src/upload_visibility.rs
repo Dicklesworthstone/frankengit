@@ -547,6 +547,11 @@ impl OneNode {
             deadline.clone(),
         ));
         repository.ref_in_want_deadline = Some(deadline.clone());
+        // The graph proof and ordinary negotiation deadline exist regardless
+        // of optional command enablement. Apply this service's ceilings only
+        // to its request-local adapter, after any shared projection lookup.
+        repository.ref_in_want_enabled = self.service_config.upload_pack_ref_in_want_enabled();
+        repository.object_info_enabled = self.service_config.upload_pack_object_info_enabled();
         Ok(VisibleUploadPack {
             basis: materialized.basis().clone(),
             closure,
@@ -563,9 +568,29 @@ const fn disclosure_refusal(code: RefusalCode) -> NodePackMaterializationRefusal
     NodePackMaterializationRefusal::DisclosureGraph(code)
 }
 
+// An eight-object stride bounds the extra opens. Each authorized frontier
+// entry carries one bit until its ordinary native-ID-ordered removal.
+const DISCLOSURE_ADVICE_STRIDE: usize = 8;
+#[cfg(any(target_os = "linux", test))]
+fn advise_pending_pages(
+    pending: &mut BTreeMap<GitOid, bool>,
+    mut advise: impl FnMut(GitOid) -> bool,
+) {
+    for (&id, advised) in pending.iter_mut().take(16) {
+        if !*advised {
+            if !advise(id) {
+                break;
+            }
+            *advised = true;
+        }
+    }
+}
+
 /// The production implementation always returns native-verified immutable
 /// bodies. The narrow seam allows budget and read-set assertions in tests.
 trait VisibilitySource {
+    fn advise_pending(&self, _pending: &mut BTreeMap<GitOid, bool>) {}
+
     fn format(&self) -> GitHashAlgorithm;
     fn parse_limits(&self) -> ParseLimits;
     fn checkpoint(&self) -> Result<(), NodePackMaterializationRefusal>;
@@ -610,6 +635,24 @@ impl VisibilitySource for VerifiedFabricPackSource<'_> {
 }
 
 impl VisibilitySource for CeiledFabricSource<'_, '_> {
+    #[cfg(target_os = "linux")]
+    fn advise_pending(&self, pending: &mut BTreeMap<GitOid, bool>) {
+        if let Some(ceiling) = self.ceiling {
+            advise_pending_pages(pending, |id| {
+                // Advice never earns time. Stop issuing opens at the armed
+                // Database deadline without spending another metered poll.
+                if std::time::Instant::now() >= ceiling.armed.get()
+                    || self.inner.database_context.is_cancel_requested()
+                    || self.inner.session_is_live.is_some_and(|live| !live())
+                {
+                    return false;
+                }
+                self.inner.fabric.advise_first_page(id);
+                true
+            });
+        }
+    }
+
     fn format(&self) -> GitHashAlgorithm {
         self.inner.format()
     }
@@ -769,7 +812,7 @@ fn walk_within_edge_budget_and_root_blobs(
     source.checkpoint()?;
     let maximum = usize::try_from(limits.max_entries).unwrap_or(usize::MAX);
     let mut required = BTreeMap::<GitOid, Option<ObjectType>>::new();
-    let mut pending = BTreeSet::new();
+    let mut pending = BTreeMap::new();
     let mut known = BTreeMap::<GitOid, ObjectType>::new();
     let mut tag_targets = BTreeMap::new();
     let mut objects = BTreeMap::new();
@@ -792,8 +835,11 @@ fn walk_within_edge_budget_and_root_blobs(
     let mut bytes = 0_usize;
     let mut edges_left = edge_budget;
     let parse_limits = source.parse_limits();
-    while let Some(id) = pending.pop_first() {
+    while let Some((id, _)) = pending.pop_first() {
         source.checkpoint()?;
+        if objects.len().is_multiple_of(DISCLOSURE_ADVICE_STRIDE) {
+            source.advise_pending(&mut pending);
+        }
         let remembered = memo.and_then(|memo| memo.objects.get(&id).map(|object| (memo, object)));
         let root_blob = if blob_root_headers && required.get(&id) == Some(&None) {
             let header = source.load_header(id);
@@ -993,7 +1039,7 @@ fn visit_edges(
     known: &mut BTreeMap<GitOid, ObjectType>,
     tag_targets: &mut BTreeMap<GitOid, GitOid>,
     required: &mut BTreeMap<GitOid, Option<ObjectType>>,
-    pending: &mut BTreeSet<GitOid>,
+    pending: &mut BTreeMap<GitOid, bool>,
 ) -> Result<(), NodePackMaterializationRefusal> {
     if kind == ObjectType::Tag {
         let [(target, _)] = edges else {
@@ -1090,7 +1136,7 @@ fn enqueue(
     expected: Option<ObjectType>,
     maximum: usize,
     required: &mut BTreeMap<GitOid, Option<ObjectType>>,
-    pending: &mut BTreeSet<GitOid>,
+    pending: &mut BTreeMap<GitOid, bool>,
 ) -> Result<(), NodePackMaterializationRefusal> {
     if id.is_zero() || id.algorithm() != format {
         return Err(disclosure_refusal(RefusalCode::ObjectHeaderInvalid));
@@ -1113,7 +1159,7 @@ fn enqueue(
         return Err(disclosure_refusal(RefusalCode::ResourceBudgetExceeded));
     }
     required.insert(id, expected);
-    pending.insert(id);
+    pending.insert(id, false);
     Ok(())
 }
 

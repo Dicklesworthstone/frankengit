@@ -12,6 +12,9 @@ fgit-crypto.workspace = true
 fgit-resource.workspace = true
 fgit-types.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix.workspace = true
+
 [dev-dependencies]
 fgit-benchmark.workspace = true
 

@@ -442,6 +442,15 @@ impl LocalFilesystemFabric {
         Ok(object)
     }
 
+    /// Advise the Linux page cache about the first page of one pending
+    /// immutable key. Callers must establish read scope first. This reveals no
+    /// bytes or presence and grants no work credit; a later verified read
+    /// establishes all evidence independently.
+    #[cfg(target_os = "linux")]
+    pub fn advise_first_page(&self, identity: GitOid) {
+        bounded_read::advise_first_page(&self.object_path(identity));
+    }
+
     /// Read one verified whole object under the caller's payload budget. The
     /// immutable file's framing is checked before allocating its body; envelope
     /// bytes are independently bounded by the configured envelope profile.

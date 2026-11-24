@@ -156,7 +156,7 @@ fn invalid_hydration_evidence_is_not_success_or_client_syntax_failure() {
 }
 
 #[test]
-fn revalidated_context_requires_explicit_raw_path_selection() {
+fn revalidated_context_supports_ranked_and_raw_selection_without_changing_strict_defaults() {
     let strict_ranked = format!("{BASE}&context_selection={}", ranked::PROFILE);
     let strict = command(strict_ranked.as_bytes(), GitHashAlgorithm::Sha1).unwrap();
     assert!(strict.ranked);
@@ -167,14 +167,45 @@ fn revalidated_context_requires_explicit_raw_path_selection() {
         assert_eq!(selected.initial.index_source, IndexSource::Current);
         assert!(!selected.ranked);
     }
-    assert_eq!(
-        command(
-            format!("{strict_ranked}&index_source=current-native-v1").as_bytes(),
-            GitHashAlgorithm::Sha1
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let current = format!(
+            "object_format={}&ref=refs/heads/main&term_hex=5468696e67&index_source=current-native-v1",
+            format.as_str()
+        );
+        let selected = command(
+            format!("{current}&context_selection={}", ranked::PROFILE).as_bytes(),
+            format,
         )
-        .err()
-        .unwrap()
-        .code,
-        "unsupported_context_selection"
-    );
+        .unwrap();
+        assert!(selected.ranked);
+        assert_eq!(selected.initial.index_source, IndexSource::Current);
+        assert_eq!(selected.limits, strict.limits);
+        assert_eq!(selected.initial.limits, strict.initial.limits);
+        for selection in ["", "semantic", "latest", "context-weighted-rrf-q16-v2"] {
+            assert_eq!(
+                command(
+                    format!("{current}&context_selection={selection}").as_bytes(),
+                    format
+                )
+                .err()
+                .unwrap()
+                .code,
+                "unsupported_context_selection"
+            );
+        }
+        assert_eq!(
+            command(
+                format!(
+                    "{current}&context_selection={0}&context_selection={0}",
+                    ranked::PROFILE
+                )
+                .as_bytes(),
+                format
+            )
+            .err()
+            .unwrap()
+            .code,
+            "duplicate_field"
+        );
+    }
 }

@@ -3,8 +3,8 @@
 //! Reciprocal-rank fusion rewards cross-channel agreement; it is advisory and
 //! never changes the source observation, evidence, visibility or read grants.
 use super::{
-    ContextChannel, ContextLimits, InitialContext, InitialReport, RetrievalError, SymbolChannel,
-    check,
+    ContextChannel, ContextFile, ContextLimits, InitialContext, ReportRows, RetrievalError,
+    RevalidatedInitialContext, SymbolChannel, check,
 };
 use fgit_treefs::TreePath;
 use fgit_types::{GitHashAlgorithm, GitOid};
@@ -94,18 +94,18 @@ impl ContextRanking {
     pub fn selected(&self) -> &[RankedFile] {
         &self.selected
     }
-    pub(crate) fn build(
-        report: &InitialReport,
+    pub(super) fn build(
+        report: ReportRows<'_>,
+        format: GitHashAlgorithm,
         limits: ContextLimits,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Self, RetrievalError> {
         limits.validate()?;
         check(cancelled)?;
         let mut accumulator = Accumulator::default();
-        let format = report.source().namespace.object_format;
         for (channel, hits) in [
-            (ContextChannel::Content, &report.content().results.hits),
-            (ContextChannel::Path, &report.path().results.hits),
+            (ContextChannel::Content, &report.content.results.hits),
+            (ContextChannel::Path, &report.path.results.hits),
         ] {
             accumulator.add(
                 channel,
@@ -114,7 +114,7 @@ impl ContextRanking {
                 cancelled,
             )?;
         }
-        if let SymbolChannel::Available(symbols) = report.symbols() {
+        if let SymbolChannel::Available(symbols) = report.symbols {
             accumulator.add(
                 ContextChannel::Symbol,
                 symbols
@@ -126,6 +126,25 @@ impl ContextRanking {
             )?;
         }
         accumulator.finish(limits.max_files, cancelled)
+    }
+
+    fn validate_context(
+        &self,
+        candidate_files: usize,
+        files: &[ContextFile],
+    ) -> Result<(), RetrievalError> {
+        if candidate_files != self.candidate_files || files.len() != self.selected.len() {
+            return Err(RetrievalError::Invalid("ranked context selection"));
+        }
+        for selected in &self.selected {
+            let at = files
+                .binary_search_by(|file| file.path().cmp(selected.path()))
+                .map_err(|_| RetrievalError::Invalid("ranked context path"))?;
+            if files[at].blob() != selected.blob {
+                return Err(RetrievalError::MixedSource);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -153,20 +172,37 @@ impl RankedContext {
         context: InitialContext,
         ranking: ContextRanking,
     ) -> Result<Self, RetrievalError> {
-        if context.candidate_files() != ranking.candidate_files
-            || context.files().len() != ranking.selected.len()
-        {
-            return Err(RetrievalError::Invalid("ranked context selection"));
-        }
-        for selected in &ranking.selected {
-            let at = context
-                .files()
-                .binary_search_by(|file| file.path().cmp(selected.path()))
-                .map_err(|_| RetrievalError::Invalid("ranked context path"))?;
-            if context.files()[at].blob() != selected.blob {
-                return Err(RetrievalError::MixedSource);
-            }
-        }
+        ranking.validate_context(context.candidate_files(), context.files())?;
+        Ok(Self { context, ranking })
+    }
+}
+
+/// Ranked context with separate current-source and original index provenance.
+/// Fusion changes only the selected paths; it neither replaces their original
+/// row labels nor upgrades incomplete channels or generation evidence.
+#[derive(Clone, Debug)]
+pub struct RevalidatedRankedContext {
+    context: RevalidatedInitialContext,
+    ranking: ContextRanking,
+}
+impl RevalidatedRankedContext {
+    #[must_use]
+    pub const fn context(&self) -> &RevalidatedInitialContext {
+        &self.context
+    }
+    #[must_use]
+    pub const fn ranking(&self) -> &ContextRanking {
+        &self.ranking
+    }
+    #[must_use]
+    pub fn into_parts(self) -> (RevalidatedInitialContext, ContextRanking) {
+        (self.context, self.ranking)
+    }
+    pub(crate) fn finish(
+        context: RevalidatedInitialContext,
+        ranking: ContextRanking,
+    ) -> Result<Self, RetrievalError> {
+        ranking.validate_context(context.candidate_files(), context.files())?;
         Ok(Self { context, ranking })
     }
 }

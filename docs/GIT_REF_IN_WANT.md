@@ -6,6 +6,15 @@ visible ref name with `want-ref`, alongside or instead of ordinary object-ID
 wants. This lets fetch select the ref at the serving request's own snapshot,
 rather than relying on an object ID observed by an earlier `ls-refs` request.
 
+This extension is disabled by default, matching Git's default
+`uploadpack.allowRefInWant` setting. Enable it with `--enable-ref-in-want` on
+`fg serve`, `fg serve-ssh` or `fg serve-http`, or with
+`NodeConfig::with_upload_pack_ref_in_want(true)` in an embedding. The selection
+is inherited by reopened service children and applies to catalog repositories.
+It requires the same current authorized view; a cached graph does not enable
+the feature. A `want-ref` request without the advertised extension is refused,
+while an ordinary permitted object-ID want remains supported.
+
 ## Selection and response
 
 The shared Rust wire machine resolves each name exclusively within the

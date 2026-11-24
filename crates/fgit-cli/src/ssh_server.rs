@@ -34,7 +34,7 @@ const USAGE: &str = "usage: fg serve-ssh <storage-root> <tenant-id> <repository-
   [--max-in-flight <1..16>]
   [--continuous --stop-file <absent-path>]
   [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>]
-  [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>] [--received-pack-cache-mib <0..65536>]
+  [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>] [--pack-max-blob-mib <non-zero>] [--pack-cache-mib <0..65536>] [--received-pack-cache-mib <0..65536>] [--enable-ref-in-want] [--enable-object-info]
 
 Deploy-key files retain the three-column legacy format. To limit native ref writes,
 start the file with frankengit-ssh-deploy-keys-v2 and give every row a fourth field:
@@ -140,6 +140,11 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
             index += 1;
         } else if argument == "--allow-receive" {
             allow_receive = true;
+            index += 1;
+        } else if crate::guarded_git_server::UPLOAD_PACK_FEATURE_FLAGS.contains(&argument) {
+            if flags.insert(argument, "").is_some() {
+                return Err(format!("duplicate {argument}"));
+            }
             index += 1;
         } else if argument.starts_with("--") {
             if !matches!(
@@ -437,6 +442,31 @@ mod tests {
             .collect()
         };
         let default = format!("{:?}", parse(&arguments(&[])).unwrap().configuration);
+        for (extra, want_ref, object_info) in [
+            (vec![], false, false),
+            (vec!["--enable-ref-in-want"], true, false),
+            (vec!["--enable-object-info"], false, true),
+            (
+                vec!["--enable-ref-in-want", "--enable-object-info"],
+                true,
+                true,
+            ),
+        ] {
+            let selected = parse(&arguments(&extra)).unwrap();
+            assert_eq!(
+                selected.configuration.upload_pack_ref_in_want_enabled(),
+                want_ref
+            );
+            assert_eq!(
+                selected.configuration.upload_pack_object_info_enabled(),
+                object_info
+            );
+            assert!(!selected.allow_receive);
+        }
+        for flag in crate::guarded_git_server::UPLOAD_PACK_FEATURE_FLAGS {
+            assert!(parse(&arguments(&[flag, flag])).is_err());
+            assert!(parse(&arguments(&[flag, "true"])).is_err());
+        }
         assert!(
             parse(&arguments(&[]))
                 .unwrap()
