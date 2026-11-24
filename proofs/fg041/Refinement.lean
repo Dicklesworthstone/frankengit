@@ -3,9 +3,8 @@ FG-041d: every exported reference-model history is a run of the Lean model.
 
 This is the refinement direction the bead asks for, code to model. Each vector in
 Vectors.lean is a history the executable reference model actually produced,
-projected onto the ordered residue. Replaying it here and requiring the head
-generation to agree at every step is what makes the proof a statement about the
-implementation's behaviour rather than about a model free to drift from it.
+projected onto the ordered residue. At every step the kernel compares the head
+generation, decision sequence, and repository sequence with the recorded values.
 Published batches now carry their decoded effect vectors, so a history that
 moves a ref or advances a forge stream exercises the atomic-visibility theorem's
 data path as well.
@@ -28,49 +27,84 @@ has no model coordinate. Natural-number subtraction alone would map it to zero. 
 def rebase (genesis value : Nat) : Option Nat :=
   if genesis ≤ value then some (value - genesis) else none
 
-/-- Translate one exported operation, checking each publication coordinate. -/
-def toOperation (genesis : Nat) : FgitBridge.Op → Option Operation
-  | .sealRequest target => some (.sealRequest target)
-  | .decide target committed =>
-      some (.decide target (if committed then TerminalOutcome.committed else TerminalOutcome.refused))
-  | .retry target committed =>
-      some (.retry target (if committed then TerminalOutcome.committed else TerminalOutcome.refused))
-  | .publish predecessor generation refEffects forgeEffects => do
-      return .publish { predecessor := ← rebase genesis predecessor
-                      , generation := ← rebase genesis generation
-                      , refEffects := refEffects
-                      , forgeEffects := forgeEffects }
-  | .interruptedPublication predecessor generation => do
-      return .interruptedPublication { predecessor := ← rebase genesis predecessor
-                                     , generation := ← rebase genesis generation
-                                     , refEffects := [], forgeEffects := [] }
+/-- Winning and interrupted publications use the same coordinate conversion. -/
+def toBatch (genesis predecessor generation : Nat) (refEffects forgeEffects : List Nat) :
+    Option Batch := do
+  return { predecessor := ← rebase genesis predecessor, generation := ← rebase genesis generation,
+           refEffects, forgeEffects }
 
-/-- One concrete step can be several abstract operations, applied in order. -/
-def applyStep (genesis : Nat) (state : State) (step : FgitBridge.Step) : Option State :=
-  step.ops.foldlM (fun current op => do return apply (← toOperation genesis op) current) state
+/-- A winning publication exposes new decisions in stream order. Check each
+target was sealed and undecided and that the model records the exported label. -/
+def applyDecision (progress : State × Nat) : FgitBridge.Op → Option (State × Nat)
+  | .decide target committed => do
+      let (current, commits) := progress
+      guard (current.sealed target && (current.outcomes target).isNone)
+      let label := if committed then TerminalOutcome.committed else TerminalOutcome.refused
+      let next := apply (.decide target label) current
+      guard (next.outcomes target == some label)
+      return (next, if committed then commits + 1 else commits)
+  | _ => none
 
-/-- Rebase each recorded observation only when it has a valid model coordinate. -/
-def checkSteps (genesis : Nat) : State → List FgitBridge.Step → Bool
-  | _, [] => true
-  | state, step :: rest =>
+/-- A retry observes an existing terminal. A fresh decision can only follow
+the winning publication that exposed it. Count new terminals and commits separately. -/
+def applyStep (genesis : Nat) (state : State) (step : FgitBridge.Step) : Option (State × Nat × Nat) := do
+  match step.ops with
+  | [] => return (state, 0, 0)
+  | .publish predecessor generation refs forge :: decisions =>
+      let batch ← toBatch genesis predecessor generation refs forge
+      guard (validSuccessor state batch)
+      let (next, commits) ← decisions.foldlM applyDecision (apply (.publish batch) state, 0)
+      return (next, decisions.length, commits)
+  | [.retry target committed] =>
+      let label := if committed then TerminalOutcome.committed else TerminalOutcome.refused
+      guard (state.outcomes target == some label)
+      return (apply (.retry target label) state, 0, 0)
+  | [.sealRequest target] => return (apply (.sealRequest target) state, 0, 0)
+  | [.interruptedPublication predecessor generation] =>
+      return (apply (.interruptedPublication (← toBatch genesis predecessor generation [] [])) state, 0, 0)
+  | _ => none
+
+/-- All three recorded head positions must match after each step, including stutters. -/
+def checkSteps (genesis : Nat) (state : State) (decisionSequence repositorySequence : Nat) :
+    List FgitBridge.Step → Bool
+  | [] => true
+  | step :: rest =>
       match applyStep genesis state step with
       | none => false
-      | some next =>
-          rebase genesis step.generationAfter == some next.generation && checkSteps genesis next rest
+      | some (next, added, commits) =>
+          let sequence := decisionSequence + added
+          let committed := repositorySequence + commits
+          rebase genesis step.generationAfter == some next.generation &&
+            step.decisionSequenceAfter == sequence && step.repositorySequenceAfter == committed &&
+            checkSteps genesis next sequence committed rest
 
-/-- A history refines the model when replaying it reproduces every generation. -/
+/-- The empty genesis head has no terminal decisions. -/
 def checkTrace (trace : FgitBridge.Trace) : Bool :=
-  checkSteps trace.genesisGeneration initial trace.steps
+  checkSteps trace.genesisGeneration initial 0 0 trace.steps
 
-/-- Regression witnesses for the origin of a trace. An unchanged head and an
-interrupted publication must validate their coordinates just as a winning CAS does. -/
 example :
-    checkSteps 1 initial [⟨0, [], 0⟩] = false ∧
-    checkSteps 1 initial [⟨0, [.publish 0 2], 2⟩] = false ∧
-    checkSteps 1 initial [⟨0, [.interruptedPublication 1 0], 1⟩] = false ∧
-    checkSteps 1 initial [⟨0, [], 1⟩] = true ∧
-    checkSteps 1 initial [⟨0, [.publish 1 2], 2⟩] = true ∧
-    checkSteps 1 initial [⟨0, [.interruptedPublication 1 2], 1⟩] = true := by decide
+    checkSteps 1 initial 0 0 [⟨0, [], 0, 0, 0⟩] = false ∧
+    checkSteps 1 initial 0 0 [⟨0, [.publish 0 2], 2, 0, 0⟩] = false ∧
+    checkSteps 1 initial 0 0 [⟨0, [.publish 2 3], 1, 0, 0⟩] = false ∧
+    checkSteps 1 initial 0 0 [⟨0, [.publish 1 3], 1, 0, 0⟩] = false ∧
+    checkSteps 1 initial 0 0 [⟨0, [.interruptedPublication 1 0], 1, 0, 0⟩] = false ∧
+    checkSteps 1 initial 0 0 [⟨0, [], 1, 0, 0⟩] = true ∧
+    checkSteps 1 initial 0 0 [⟨0, [.publish 1 2], 2, 0, 0⟩] = true ∧
+    checkSteps 1 initial 0 0 [⟨0, [.interruptedPublication 1 2], 1, 0, 0⟩] = true := by decide
+
+/-- A missing decision, a duplicate target, and an incorrect retry can all
+preserve generation. Only a valid publication may establish the recorded result. -/
+example :
+    let seals := [FgitBridge.Step.mk 0 [.sealRequest 0] 1 0 0, ⟨1, [.sealRequest 1], 1, 0, 0⟩]
+    let win := FgitBridge.Step.mk 2 [.publish 1 2, .decide 0 true, .decide 1 false] 2 2 1
+    checkSteps 1 initial 0 0 (seals ++ [win, ⟨3, [.retry 1 false], 2, 2, 1⟩]) = true ∧
+    checkSteps 1 initial 0 0 (seals ++ [win, ⟨3, [.retry 1 true], 2, 2, 1⟩]) = false ∧
+    checkSteps 1 initial 0 0 (seals ++ [⟨2, [.publish 1 2], 2, 2, 1⟩]) = false ∧
+    checkSteps 1 initial 0 0 (seals ++ [⟨2, [.decide 0 true], 1, 1, 1⟩]) = false ∧
+    checkSteps 1 initial 0 0 (seals ++ [⟨2, [.publish 1 2, .decide 0 true, .decide 0 false], 2, 2, 1⟩]) = false ∧
+    checkSteps 1 initial 0 0 [⟨0, [.publish 1 2, .decide 0 true], 2, 1, 1⟩] = false ∧
+    checkSteps 1 initial 0 0 (seals ++ [⟨2, [.publish 1 2, .decide 0 true, .decide 1 true], 2, 2, 1⟩]) = false ∧
+    checkSteps 1 initial 0 0 [⟨0, [.retry 0 false], 1, 0, 0⟩] = false := by decide
 
 /-- Every exported history is a run of the model.
 

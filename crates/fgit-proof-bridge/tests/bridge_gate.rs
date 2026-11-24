@@ -256,6 +256,8 @@ fn a_won_publication_publishes_before_it_decides() {
 #[test]
 fn mixed_batch_exports_both_ordered_terminal_decisions() {
     use fgit_proof_bridge::AbstractOutcome::{Committed, Refused};
+    use fgit_reference::machine::ModelInput;
+    use fgit_reference::trace::{TraceRecorder, decode};
 
     let corpus = project_corpus(&goldens()).expect("replayed corpus");
     let mixed = corpus
@@ -279,6 +281,29 @@ fn mixed_batch_exports_both_ordered_terminal_decisions() {
     ));
     assert_eq!(last.decision_sequence_after, 2);
     assert_eq!(last.repository_sequence_after, 1);
+
+    // Admission orders these decisions by transaction identity. Reversing
+    // the caller's capsule list must leave the published order intact.
+    let bytes = std::fs::read(goldens().join("multi_decision_batch.fgtrace")).unwrap();
+    let original = decode(&bytes).unwrap();
+    let mut recorder = TraceRecorder::new(original.genesis);
+    let mut reversed = 0;
+    for step in original.steps {
+        let mut input = step.input;
+        if let ModelInput::Stage(batch) = &mut input {
+            assert_eq!(batch.capsules.len(), 2);
+            batch.capsules.reverse();
+            reversed += 1;
+        }
+        let actual = recorder.apply(input).unwrap();
+        assert_eq!(actual.roots, step.roots);
+        assert_eq!(actual.head, step.head);
+    }
+    assert_eq!(reversed, 1);
+    assert_eq!(
+        &fgit_proof_bridge::project(&mixed.name, &recorder.finish()).unwrap(),
+        mixed
+    );
 }
 
 /// Stuttering steps keep their concrete index, so a divergence names a real step.

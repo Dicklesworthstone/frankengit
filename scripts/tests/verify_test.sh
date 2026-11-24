@@ -33,7 +33,7 @@ class NativeVerificationTools(unittest.TestCase):
                     "CARGO_MANIFEST_DIR": str(self.base / "remote checkout/tools/registry-check")}
         self.env.pop("RCH_CARGO_WRAPPER_BYPASS", None)
         self.env.pop("CARGO_BUILD_JOBS", None)
-        for name in ["scripts/verify.sh", "scripts/prepare_operator_native.py", "scripts/check_toolchain_bootstrap_links.sh",
+        for name in ["scripts/verify.sh", "scripts/verify_native_tools.sh", "scripts/prepare_operator_native.py", "scripts/check_toolchain_bootstrap_links.sh",
                      "rust-toolchain.toml", "tooling-rust-bootstrap-links.md"]:
             destination = self.root / name
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -503,6 +503,15 @@ OPERATOR_DISPATCH
                                            "--workspace-root", str(self.root)])
         tests = next(r for r in rows if r["kind"] == "cargo" and r["args"][0] == "test")
         self.assertEqual(tests["args"], ["test", "--workspace", "--all-targets", "--locked", "--no-fail-fast"])
+
+    def test_proof_lane_returns_the_selected_campaign_result(self):
+        self.shell("scripts/e2e/suites/proof/proof_lane.sh",
+                   'printf "%s\\n" "selected FG-041 campaign"\nexit "$TEST_PROOF_EXIT"\n')
+        for status in (0, 1, 2):
+            with self.subTest(status=status):
+                result, rows = self.invoke("proof", status, {"TEST_PROOF_EXIT": str(status)})
+                self.assertIn("selected FG-041 campaign", result.stdout)
+                self.assertEqual(rows, [])
 
     def test_fast_forwards_requested_jobs_to_every_compiler_without_losing_gate_arguments(self):
         for jobs in ["1", "3"]:

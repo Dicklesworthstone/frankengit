@@ -18,9 +18,7 @@ namespace FgitBridge
 
 /-- The abstract operations, mirroring `OrderedResidue.Operation` without
 importing it. `retry` mirrors that model's own retry operation; the effect
-lists on `publish` fill the corresponding fields of its `Batch`. Deliverable
-(2) of FG-041d is the checker that maps these onto those types and replays
-them; until it exists this file is data, and says so. -/
+lists on `publish` fill the corresponding fields of its `Batch`. -/
 inductive Op where
   | sealRequest (target : Nat)
   | decide (target : Nat) (committed : Bool)
@@ -30,14 +28,16 @@ inductive Op where
   | interruptedPublication (predecessor : Nat) (generation : Nat)
   deriving Repr
 
-/-- One concrete step's projection, paired with the head generation the
-reference model recorded after it. `ops` is empty for a stuttering step, and can
+/-- One concrete step's projection, paired with the generation and both sequence
+positions recorded by the reference head. `ops` is empty for a stuttering step, and can
 hold several operations: a won compare-and-swap both advances the head and makes
 every capsule in its batch terminal. -/
 structure Step where
   concreteIndex : Nat
   ops : List Op
   generationAfter : Nat
+  decisionSequenceAfter : Nat
+  repositorySequenceAfter : Nat
   deriving Repr
 
 /-- One projected history. -/
@@ -58,19 +58,19 @@ def trace_cas_loss_retry : Trace :=
   { name := "cas_loss_retry"
   , genesisGeneration := 1
   , steps :=
-    [ { concreteIndex := 0, ops := [Op.sealRequest 0], generationAfter := 1 }
-    , { concreteIndex := 1, ops := [], generationAfter := 1 }
-    , { concreteIndex := 2, ops := [], generationAfter := 1 }
-    , { concreteIndex := 3, ops := [], generationAfter := 1 }
-    , { concreteIndex := 4, ops := [Op.sealRequest 1], generationAfter := 1 }
-    , { concreteIndex := 5, ops := [], generationAfter := 1 }
-    , { concreteIndex := 6, ops := [], generationAfter := 1 }
-    , { concreteIndex := 7, ops := [], generationAfter := 1 }
-    , { concreteIndex := 8, ops := [Op.publish 1 2 [0] [], Op.decide 1 true], generationAfter := 2 }
-    , { concreteIndex := 9, ops := [Op.interruptedPublication 1 2], generationAfter := 2 }
-    , { concreteIndex := 10, ops := [], generationAfter := 2 }
-    , { concreteIndex := 11, ops := [], generationAfter := 2 }
-    , { concreteIndex := 12, ops := [Op.publish 2 3 [1] [], Op.decide 0 true], generationAfter := 3 }
+    [ { concreteIndex := 0, ops := [Op.sealRequest 0], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 1, ops := [], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 2, ops := [], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 3, ops := [], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 4, ops := [Op.sealRequest 1], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 5, ops := [], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 6, ops := [], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 7, ops := [], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 8, ops := [Op.publish 1 2 [0] [], Op.decide 1 true], generationAfter := 2, decisionSequenceAfter := 1, repositorySequenceAfter := 1 }
+    , { concreteIndex := 9, ops := [Op.interruptedPublication 1 2], generationAfter := 2, decisionSequenceAfter := 1, repositorySequenceAfter := 1 }
+    , { concreteIndex := 10, ops := [], generationAfter := 2, decisionSequenceAfter := 1, repositorySequenceAfter := 1 }
+    , { concreteIndex := 11, ops := [], generationAfter := 2, decisionSequenceAfter := 1, repositorySequenceAfter := 1 }
+    , { concreteIndex := 12, ops := [Op.publish 2 3 [1] [], Op.decide 0 true], generationAfter := 3, decisionSequenceAfter := 2, repositorySequenceAfter := 2 }
     ]
   }
 
@@ -81,14 +81,14 @@ def trace_duplicate_decide_terminal_uniqueness : Trace :=
   { name := "duplicate_decide_terminal_uniqueness"
   , genesisGeneration := 1
   , steps :=
-    [ { concreteIndex := 0, ops := [Op.sealRequest 0], generationAfter := 1 }
-    , { concreteIndex := 1, ops := [], generationAfter := 1 }
-    , { concreteIndex := 2, ops := [], generationAfter := 1 }
-    , { concreteIndex := 3, ops := [], generationAfter := 1 }
-    , { concreteIndex := 4, ops := [], generationAfter := 1 }
-    , { concreteIndex := 5, ops := [Op.publish 1 2 [0] [], Op.decide 0 true], generationAfter := 2 }
-    , { concreteIndex := 6, ops := [], generationAfter := 2 }
-    , { concreteIndex := 7, ops := [Op.retry 0 true], generationAfter := 2 }
+    [ { concreteIndex := 0, ops := [Op.sealRequest 0], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 1, ops := [], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 2, ops := [], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 3, ops := [], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 4, ops := [], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 5, ops := [Op.publish 1 2 [0] [], Op.decide 0 true], generationAfter := 2, decisionSequenceAfter := 1, repositorySequenceAfter := 1 }
+    , { concreteIndex := 6, ops := [], generationAfter := 2, decisionSequenceAfter := 1, repositorySequenceAfter := 1 }
+    , { concreteIndex := 7, ops := [Op.retry 0 true], generationAfter := 2, decisionSequenceAfter := 1, repositorySequenceAfter := 1 }
     ]
   }
 
@@ -109,13 +109,13 @@ def trace_idempotent_duplicate : Trace :=
   { name := "idempotent_duplicate"
   , genesisGeneration := 1
   , steps :=
-    [ { concreteIndex := 0, ops := [Op.sealRequest 0], generationAfter := 1 }
-    , { concreteIndex := 1, ops := [Op.sealRequest 0], generationAfter := 1 }
-    , { concreteIndex := 2, ops := [], generationAfter := 1 }
-    , { concreteIndex := 3, ops := [], generationAfter := 1 }
-    , { concreteIndex := 4, ops := [], generationAfter := 1 }
-    , { concreteIndex := 5, ops := [Op.publish 1 2 [0] [], Op.decide 0 true], generationAfter := 2 }
-    , { concreteIndex := 6, ops := [Op.sealRequest 0], generationAfter := 2 }
+    [ { concreteIndex := 0, ops := [Op.sealRequest 0], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 1, ops := [Op.sealRequest 0], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 2, ops := [], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 3, ops := [], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 4, ops := [], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 5, ops := [Op.publish 1 2 [0] [], Op.decide 0 true], generationAfter := 2, decisionSequenceAfter := 1, repositorySequenceAfter := 1 }
+    , { concreteIndex := 6, ops := [Op.sealRequest 0], generationAfter := 2, decisionSequenceAfter := 1, repositorySequenceAfter := 1 }
     ]
   }
 
@@ -127,13 +127,13 @@ def trace_multi_decision_batch : Trace :=
   { name := "multi_decision_batch"
   , genesisGeneration := 1
   , steps :=
-    [ { concreteIndex := 0, ops := [Op.sealRequest 0], generationAfter := 1 }
-    , { concreteIndex := 1, ops := [Op.sealRequest 1], generationAfter := 1 }
-    , { concreteIndex := 2, ops := [], generationAfter := 1 }
-    , { concreteIndex := 3, ops := [], generationAfter := 1 }
-    , { concreteIndex := 4, ops := [], generationAfter := 1 }
-    , { concreteIndex := 5, ops := [], generationAfter := 1 }
-    , { concreteIndex := 6, ops := [Op.publish 1 2 [0] []], generationAfter := 2 }
+    [ { concreteIndex := 0, ops := [Op.sealRequest 0], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 1, ops := [Op.sealRequest 1], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 2, ops := [], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 3, ops := [], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 4, ops := [], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 5, ops := [], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 6, ops := [Op.publish 1 2 [0] [], Op.decide 0 true, Op.decide 1 false], generationAfter := 2, decisionSequenceAfter := 2, repositorySequenceAfter := 1 }
     ]
   }
 
@@ -144,11 +144,11 @@ def trace_ref_forge_atomic_visibility : Trace :=
   { name := "ref_forge_atomic_visibility"
   , genesisGeneration := 1
   , steps :=
-    [ { concreteIndex := 0, ops := [Op.sealRequest 0], generationAfter := 1 }
-    , { concreteIndex := 1, ops := [], generationAfter := 1 }
-    , { concreteIndex := 2, ops := [], generationAfter := 1 }
-    , { concreteIndex := 3, ops := [], generationAfter := 1 }
-    , { concreteIndex := 4, ops := [Op.publish 1 2 [0] [0, 1], Op.decide 0 true], generationAfter := 2 }
+    [ { concreteIndex := 0, ops := [Op.sealRequest 0], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 1, ops := [], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 2, ops := [], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 3, ops := [], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 4, ops := [Op.publish 1 2 [0] [0, 1], Op.decide 0 true], generationAfter := 2, decisionSequenceAfter := 1, repositorySequenceAfter := 1 }
     ]
   }
 
@@ -159,10 +159,10 @@ def trace_refusal_only : Trace :=
   { name := "refusal_only"
   , genesisGeneration := 1
   , steps :=
-    [ { concreteIndex := 0, ops := [Op.sealRequest 0], generationAfter := 1 }
-    , { concreteIndex := 1, ops := [], generationAfter := 1 }
-    , { concreteIndex := 2, ops := [], generationAfter := 1 }
-    , { concreteIndex := 3, ops := [Op.publish 1 2 [] [], Op.decide 0 false], generationAfter := 2 }
+    [ { concreteIndex := 0, ops := [Op.sealRequest 0], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 1, ops := [], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 2, ops := [], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 3, ops := [Op.publish 1 2 [] [], Op.decide 0 false], generationAfter := 2, decisionSequenceAfter := 1, repositorySequenceAfter := 0 }
     ]
   }
 
@@ -173,11 +173,11 @@ def trace_simple_commit : Trace :=
   { name := "simple_commit"
   , genesisGeneration := 1
   , steps :=
-    [ { concreteIndex := 0, ops := [Op.sealRequest 0], generationAfter := 1 }
-    , { concreteIndex := 1, ops := [], generationAfter := 1 }
-    , { concreteIndex := 2, ops := [], generationAfter := 1 }
-    , { concreteIndex := 3, ops := [], generationAfter := 1 }
-    , { concreteIndex := 4, ops := [Op.publish 1 2 [0] [], Op.decide 0 true], generationAfter := 2 }
+    [ { concreteIndex := 0, ops := [Op.sealRequest 0], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 1, ops := [], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 2, ops := [], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 3, ops := [], generationAfter := 1, decisionSequenceAfter := 0, repositorySequenceAfter := 0 }
+    , { concreteIndex := 4, ops := [Op.publish 1 2 [0] [], Op.decide 0 true], generationAfter := 2, decisionSequenceAfter := 1, repositorySequenceAfter := 1 }
     ]
   }
 
