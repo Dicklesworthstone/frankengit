@@ -689,12 +689,39 @@ fn an_over_envelope_repository_is_refused_with_one_err_packet_naming_the_limit()
     }
 }
 
+/// The successful twin supplies the entire advertisement through its pkt-line flush.
+/// The only bytes permitted after that prefix on a selected resource refusal are
+/// the one public error packet, even for a client that never requested sideband.
+fn assert_selected_refusal_after_advertisement(
+    allowed: &[u8],
+    refused: &[u8],
+    version: u8,
+    message: &str,
+) {
+    let limits = WireLimits::default();
+    let mut decoder = fgit_wire::PktLineDecoder::new(limits.clone()).unwrap();
+    let advertisement = decoder.push_until_flush(allowed).unwrap();
+    assert!(advertisement.found_flush && advertisement.packets.len() > 1);
+    if version > 0 {
+        assert_eq!(
+            advertisement.packets[0],
+            Packet::Data(format!("version {version}\n").into_bytes())
+        );
+    }
+    let suffix = refused
+        .strip_prefix(&allowed[..advertisement.consumed])
+        .expect("refused and successful fetches must receive the same full advertisement");
+    let error =
+        fgit_wire::encode_packet(&Packet::Data(message.as_bytes().to_vec()), &limits).unwrap();
+    assert_eq!(suffix, error.as_slice(), "expected a single pre-pack ERR");
+}
+
 /// frankengit-8xyq: the disclosure walk charges commit, tree and tag bodies,
 /// not blobs. An envelope that holds exactly those bytes still advertises
-/// and negotiates; the full pack is refused by the writer, on the side band,
-/// with the sizes and the operator flag. The default envelope is the twin.
+/// the same capabilities. A selected pack that exceeds it gets one public ERR
+/// before the packfile section. The default envelope delivers the same request.
 #[test]
-fn an_envelope_holding_only_commits_and_trees_advertises_and_refuses_the_pack_on_the_side_band() {
+fn an_envelope_holding_only_commits_and_trees_reports_one_err_before_the_packfile() {
     let format = GitHashAlgorithm::Sha1;
     let Fixture {
         scratch: _scratch,
@@ -713,48 +740,40 @@ fn an_envelope_holding_only_commits_and_trees_advertises_and_refuses_the_pack_on
     let total = visible.iter().map(|id| size(*id)).sum::<usize>();
     let walked = total - blobs.iter().map(|id| size(*id)).sum::<usize>();
     node.shutdown().unwrap();
-    // The default envelope delivers the same request.
-    for (envelope, delivered) in [(Some(walked), false), (None, true)] {
-        let configured = match envelope {
-            Some(bytes) => config.clone().with_selected_pack_byte_envelope(bytes),
-            None => config.clone(),
-        };
-        let mut node = OneNode::open_existing(configured).unwrap();
-        node.bring_into_service(HeadGeneration::FIRST).unwrap();
-        let (node, result, response) = exchange_filtered(node, 2, &[public], None, None, false);
-        node.shutdown().unwrap();
-        let text = String::from_utf8_lossy(&response);
-        // The walk fits, so the v2 capability advertisement goes out first.
-        assert!(text.contains("version 2"), "{text}");
-        assert!(!text.contains("ERR "), "{text}");
-        if delivered {
-            assert!(result.is_ok(), "{result:?}");
-            assert_eq!(bodies(&response, 2, format).len(), visible.len());
-            continue;
-        }
-        assert!(
-            matches!(
-                &result,
-                Err(NodeGitDaemonServeRefusal::Pack(pack)) if matches!(
-                    &**pack,
-                    NodePackMaterializationRefusal::Pack(error) if matches!(
-                        **error,
-                        PackWriteError::Pack(PackError::TotalExpandedLimit { .. })
-                    )
+    let mut node = OneNode::open_existing(config.clone()).unwrap();
+    node.bring_into_service(HeadGeneration::FIRST).unwrap();
+    let (node, result, allowed) = exchange_filtered(node, 2, &[public], None, None, false);
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(bodies(&allowed, 2, format).len(), visible.len());
+    node.shutdown().unwrap();
+
+    let mut node = OneNode::open_existing(config.with_selected_pack_byte_envelope(walked)).unwrap();
+    node.bring_into_service(HeadGeneration::FIRST).unwrap();
+    let (node, result, refused) = exchange_filtered(node, 2, &[public], None, None, false);
+    node.shutdown().unwrap();
+    assert!(
+        matches!(
+            &result,
+            Err(NodeGitDaemonServeRefusal::Pack(pack)) if matches!(
+                &**pack,
+                NodePackMaterializationRefusal::Pack(error) if matches!(
+                    **error,
+                    PackWriteError::Pack(PackError::TotalExpandedLimit { actual, limit })
+                        if actual == total && limit == walked
                 )
-            ),
-            "{result:?}"
-        );
-        // The writer reports its running sum where it first crossed the limit.
-        assert!(text.contains("pack needs "), "{text}");
-        assert!(
-            text.contains(&format!(
-                " bytes of objects, over this server's upload envelope ({walked} bytes of \
-                 objects); the operator can raise it with fg serve --pack-max-expanded-mib"
-            )),
-            "{text}"
-        );
-    }
+            )
+        ),
+        "{result:?}"
+    );
+    assert_selected_refusal_after_advertisement(
+        &allowed,
+        &refused,
+        2,
+        &format!(
+            "ERR pack needs {total} bytes of objects, over this server's upload envelope \
+             ({walked} bytes of objects); the operator can raise it with fg serve --pack-max-expanded-mib\n"
+        ),
+    );
 }
 
 /// frankengit-8xyq: the walk reads a blob's header, so a blob whose stored
