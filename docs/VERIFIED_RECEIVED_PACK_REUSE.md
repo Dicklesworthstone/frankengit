@@ -708,6 +708,25 @@ witness and retain original source-change/cancellation failures with capture
 enabled or disabled. These are authored regressions; execution status must be
 reported separately.
 
-Full-history cold-clone measurements and broader restart/transport qualification
-remain separate work. Zero cache capacity is
-the runtime rollback and requires no canonical-state migration.
+### Cold clone of the FrankenGit history
+
+At `f5960537`, a stock Git 2.54.0 client mirror-cloned the SHA-1 history
+ending at `1dc3bcbae3d5ecea8271c748eb43b8268eb2afad` from a fresh
+server process on each transport. Its 45,661 objects expand to
+5,349,966,674 payload bytes. The measured server settings were
+`--pack-max-expanded-mib 8192 --session-timeout-secs 1800
+--received-pack-cache-mib 128 --pack-cache-mib 0`. Smart HTTP also used
+`--processing-timeout-secs 900`. The independent database deadline stayed
+at 15 seconds.
+
+Raw Git, smart HTTP and SSH took 80.326, 115.565 and 79.268 seconds,
+respectively. All three returned the identical 33,636,244-byte pack, matched
+the source ref and reachable object IDs, and passed `git fsck --strict`.
+Two stock Git daemon controls on the same host took 15.648 and 14.849 seconds.
+Quiet and ordinary clients on all three transports received the operator
+flag for both a short session and the default expanded-byte ceiling.
+Broader restart and selective-fetch coverage remains under `1tl9`.
+[Compatibility matrix](GIT_COMPATIBILITY_MATRIX.md) · [Project measurements](REALITY_CHECK_AND_BRIDGE_PLAN.md)
+
+Set `--received-pack-cache-mib 0` to disable received-pack capture and reuse.
+This requires no canonical-state migration.
