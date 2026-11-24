@@ -1202,6 +1202,9 @@ seven repository histories. The November 23 optimized run at `a184cab0`
 passed. The wide SHA-256 clone and v0 fetch exhausted the Database deadline.
 The v1 fetch connection reset, and the wide and push servers exceeded their
 60-second drain limit. The run recorded 571 passing checks out of 582.
+The same binary later passed all 80 checks in a replay of the affected
+SHA-256 histories on a lightly loaded worker. Both servers drained in
+under 0.13 seconds. The cause of the whole-suite failures remains open.
 At `665f9e36` the two v2 advertisement rows had failed across seven
 histories. At `a184cab0` the recorded differences concerned the wide
 history and server drain. The October 21 suite at `18f77336` passed all
