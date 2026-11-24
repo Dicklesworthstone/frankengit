@@ -500,7 +500,10 @@ pub fn validate_merge_objects_above<'a>(
 
 /// [`validate_fast_forward_objects`] above the selected closure: the candidate
 /// is the already-selected source tip, so the result names no new object, only
-/// the source and target tips. See [`validate_merge_objects_above`].
+/// the source and target tips. Both tips must belong to the supplied selected
+/// frontier before any object or cached parent metadata is read; physical
+/// presence and a valid native identity cannot expand that selection.
+/// See [`validate_merge_objects_above`].
 pub fn validate_fast_forward_objects_above<'a>(
     source: &impl CanonicalObjectSource,
     merge: &NativeMerge,
@@ -512,6 +515,19 @@ pub fn validate_fast_forward_objects_above<'a>(
     merge.validate().map_err(|_| invalid())?;
     if merge.merge_commit != merge.source_tip || merge.base_tip != merge.target_tip_before {
         return Err(invalid());
+    }
+    checkpoint(deadline)?;
+    // A fast-forward introduces no candidate commit. Otherwise the ordinary
+    // candidate walk can load an omitted historical tip from storage and put
+    // it in `walked`, where an ancestry query would mistake it for new verified
+    // work. Check both original tips before taking that path, even without a
+    // metadata provider or when the cache already contains their parents.
+    if !selected.objects.contains(&merge.source_tip)
+        || !selected.objects.contains(&merge.target_tip_before)
+    {
+        return Err(ProjectionFailure::Refuse(
+            RefusalCode::ObjectClosureIncomplete,
+        ));
     }
     validate_candidate_objects(
         source,
@@ -1292,13 +1308,19 @@ impl<S: CanonicalObjectSource> FrontierCommitGraph<'_, S> {
             if object.id() != *commit || object.object_type() != ObjectType::Commit {
                 return Err(invalid());
             }
-            let ParsedObject::Commit(parsed) = parse_object_body(
+            // A selected identity does not authenticate bytes supplied by a
+            // source. Keep the uncached path equivalent to verified metadata:
+            // enforce parser budgets, then check the native commit identity
+            // before its parent edges can participate in an ancestry decision.
+            let ParsedObject::Commit(parsed) = verify_native_object(
+                self.format,
                 ObjectType::Commit,
                 object.body(),
+                commit,
                 AcceptanceProfile::GitCompatibleImport,
                 self.parse_limits,
             )
-            .map_err(object_parse_failure)?
+            .map_err(native_parse_failure)?
             else {
                 return Err(invalid());
             };
