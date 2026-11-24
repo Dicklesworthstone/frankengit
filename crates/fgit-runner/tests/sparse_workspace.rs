@@ -889,8 +889,21 @@ fn gitlink_materializes_as_an_empty_directory_beside_a_regular_file_at_the_same_
             },
         )
         .unwrap();
-        let obligations = ledger();
+        // A permitted gitlink pins its directory descriptor for this lease.
+        // Fund this exact plan instead of the regular-file-only fixture pool.
+        let budget = workspace_plan.budget();
+        let descriptors = budget.get(Grade::FileDescriptors);
+        assert_eq!(descriptors > 0, gitlink);
+        let obligations =
+            ObligationLedger::root(RegionId::new(7), LeakDisposition::RecordAndContinue, budget);
         let w = create(&scratch, &obligations, workspace_plan, b"workspace");
+        assert_eq!(
+            obligations
+                .snapshot()
+                .reserved()
+                .get(Grade::FileDescriptors),
+            descriptors
+        );
         if gitlink {
             assert!(w.tool_directory().join("src").is_dir());
             assert_eq!(
@@ -908,6 +921,13 @@ fn gitlink_materializes_as_an_empty_directory_beside_a_regular_file_at_the_same_
             );
         }
         let _ = w.close().unwrap();
+        assert_eq!(
+            obligations
+                .snapshot()
+                .available()
+                .get(Grade::FileDescriptors),
+            descriptors
+        );
         quiescent(obligations);
     }
 }
