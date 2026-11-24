@@ -187,6 +187,14 @@ else
   cp "$PRF_REPO/crates/fgit-claim/src/lib.rs" "$prf_sb/crates/fgit-claim/src/"
   cp "$PRF_REPO/tools/registry-check/src/claims.rs" \
      "$PRF_REPO/tools/registry-check/src/main.rs" "$prf_sb/tools/registry-check/src/"
+  # The unmodified registry also checks the eight Git OID type judgements.
+  mkdir -p "$prf_sb/crates/fgit-types/src" "$prf_sb/crates/fgit-types/tests/fixtures"
+  cp "$PRF_REPO/rust-toolchain.toml" "$prf_sb/"
+  cp "$PRF_REPO/crates/fgit-types/Cargo.toml" "$prf_sb/crates/fgit-types/"
+  cp "$PRF_REPO/crates/fgit-types/src/"{lib,native}.rs "$prf_sb/crates/fgit-types/src/"
+  cp "$PRF_REPO/crates/fgit-types/tests/native.rs" "$prf_sb/crates/fgit-types/tests/"
+  cp "$PRF_REPO/crates/fgit-types/tests/fixtures/git_oid_domain_matrix.json" \
+     "$prf_sb/crates/fgit-types/tests/fixtures/"
 
   prf_check_sandbox() {
     if [[ -n ${FGIT_REGISTRY_CHECK_BIN:-} ]]; then

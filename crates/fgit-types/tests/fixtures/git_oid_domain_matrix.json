@@ -1,0 +1,129 @@
+{
+  "revision": "8c71b850cb2597ba94bc25c2c1f109d36e3477f4",
+  "compiler": [
+    "rustc 1.100.0-nightly (908501772 2026-08-30)",
+    "binary: rustc",
+    "commit-hash: 90850177249efe0321573c569aec5d12b257f8d6",
+    "commit-date: 2026-08-30",
+    "host: x86_64-unknown-linux-gnu",
+    "release: 1.100.0-nightly",
+    "LLVM version: 23.1.0"
+  ],
+  "rustc_sha256": "49f9fa06f3e2b93aba85273433fef67b984ddb4cacb4500de56e85f70ec2e339",
+  "rlib_sha256": "f7ce4758c86dfe2e91ec1dd0c6efa215e149e60974c0faacb41035f12eff48f7",
+  "rmeta_sha256": "c1c6d505663dad2a5ff730cbb7a9d7dbf488fa8776e911ebbc225f6a972e47a8",
+  "raw_matrix_sha256": "9770b7aaa52eec5ad8676e7f567888eb6d499a27f7df480781d00dce009d3ebe",
+  "bound": {
+    "operations": [
+      "equality",
+      "argument"
+    ],
+    "supplied_types": [
+      "GitOidSha1",
+      "GitOidSha256"
+    ],
+    "required_types": [
+      "GitOidSha1",
+      "GitOidSha256"
+    ]
+  },
+  "package_replay": "cargo test --locked -p fgit-types",
+  "case_replay_argv": [
+    "rustc",
+    "--edition=2024",
+    "--crate-type=lib",
+    "--crate-name",
+    "domain_case",
+    "--emit=metadata",
+    "--error-format=json",
+    "--extern",
+    "fgit_types=<package rlib>",
+    "--extern",
+    "fgit_types=<matching package rmeta>",
+    "case.rs",
+    "-o",
+    "case.rmeta"
+  ],
+  "cases": [
+    {
+      "operation": "equality",
+      "supplied": "GitOidSha1",
+      "required": "GitOidSha1",
+      "actual_exit": 0,
+      "actual_codes": [],
+      "primary_message": null,
+      "source": "use fgit_types::native::{GitOidSha1};\npub fn check(lhs: GitOidSha1, rhs: GitOidSha1) -> bool { lhs == rhs }\n"
+    },
+    {
+      "operation": "equality",
+      "supplied": "GitOidSha1",
+      "required": "GitOidSha256",
+      "actual_exit": 1,
+      "actual_codes": [
+        "E0308"
+      ],
+      "primary_message": "expected `GitOidSha256`, found `GitOidSha1`",
+      "source": "use fgit_types::native::{GitOidSha1, GitOidSha256};\npub fn check(lhs: GitOidSha256, rhs: GitOidSha1) -> bool { lhs == rhs }\n"
+    },
+    {
+      "operation": "equality",
+      "supplied": "GitOidSha256",
+      "required": "GitOidSha1",
+      "actual_exit": 1,
+      "actual_codes": [
+        "E0308"
+      ],
+      "primary_message": "expected `GitOidSha1`, found `GitOidSha256`",
+      "source": "use fgit_types::native::{GitOidSha1, GitOidSha256};\npub fn check(lhs: GitOidSha1, rhs: GitOidSha256) -> bool { lhs == rhs }\n"
+    },
+    {
+      "operation": "equality",
+      "supplied": "GitOidSha256",
+      "required": "GitOidSha256",
+      "actual_exit": 0,
+      "actual_codes": [],
+      "primary_message": null,
+      "source": "use fgit_types::native::{GitOidSha256};\npub fn check(lhs: GitOidSha256, rhs: GitOidSha256) -> bool { lhs == rhs }\n"
+    },
+    {
+      "operation": "argument",
+      "supplied": "GitOidSha1",
+      "required": "GitOidSha1",
+      "actual_exit": 0,
+      "actual_codes": [],
+      "primary_message": null,
+      "source": "use fgit_types::native::{GitOidSha1};\nfn takes(_value: GitOidSha1) {}\npub fn check(value: GitOidSha1) { takes(value) }\n"
+    },
+    {
+      "operation": "argument",
+      "supplied": "GitOidSha1",
+      "required": "GitOidSha256",
+      "actual_exit": 1,
+      "actual_codes": [
+        "E0308"
+      ],
+      "primary_message": "expected `GitOidSha256`, found `GitOidSha1`",
+      "source": "use fgit_types::native::{GitOidSha1, GitOidSha256};\nfn takes(_value: GitOidSha256) {}\npub fn check(value: GitOidSha1) { takes(value) }\n"
+    },
+    {
+      "operation": "argument",
+      "supplied": "GitOidSha256",
+      "required": "GitOidSha1",
+      "actual_exit": 1,
+      "actual_codes": [
+        "E0308"
+      ],
+      "primary_message": "expected `GitOidSha1`, found `GitOidSha256`",
+      "source": "use fgit_types::native::{GitOidSha1, GitOidSha256};\nfn takes(_value: GitOidSha1) {}\npub fn check(value: GitOidSha256) { takes(value) }\n"
+    },
+    {
+      "operation": "argument",
+      "supplied": "GitOidSha256",
+      "required": "GitOidSha256",
+      "actual_exit": 0,
+      "actual_codes": [],
+      "primary_message": null,
+      "source": "use fgit_types::native::{GitOidSha256};\nfn takes(_value: GitOidSha256) {}\npub fn check(value: GitOidSha256) { takes(value) }\n"
+    }
+  ]
+}
