@@ -18,6 +18,7 @@ use fgit_pack::{
 use fgit_resource::{
     LeakDisposition, ObligationLedger, RegionCloseOutcome, RegionId, TerminalEvidence,
 };
+pub use fgit_runner::sparse_workspace::SymlinkInputPolicy as WorkspaceSymlinkInputs;
 use fgit_runner::sparse_workspace::{
     HostClosed, HostRefusal, SharedInputCache, SharedInputCachePlan, SharedInputCacheStats,
     SharedInputPolicy, SparseWorkspace, SparseWorkspacePlan,
@@ -274,6 +275,43 @@ impl OneNode {
         timeout: Duration,
         commit_metadata: (&str, u64, &[u8]),
     ) -> Result<WorkspaceToolResult, WorkspaceToolFailure> {
+        self.run_trusted_workspace_tool_profiled_at_in(
+            request,
+            reference,
+            expected,
+            workspace_id,
+            parent,
+            read_prefixes,
+            output_paths,
+            sharing,
+            WorkspaceSymlinkInputs::Refuse,
+            command,
+            timeout,
+            commit_metadata,
+        )
+        .await
+    }
+
+    /// Execute with an explicit host input projection. Selected-file link
+    /// copies are ordinary private files copied from independently authorized,
+    /// selected regular inputs. No host symlink is created or followed, and
+    /// the original Git link identity is retained in the exported tree.
+    /// Link copies and their targets are immutable inputs, never output aliases.
+    pub async fn run_trusted_workspace_tool_profiled_at_in(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        expected: (Option<RepositoryAuthorityHeadId>, Option<AnyOid>),
+        workspace_id: [u8; 16],
+        parent: &Path,
+        read_prefixes: &[Vec<u8>],
+        output_paths: &[Vec<u8>],
+        sharing: WorkspaceInputSharing,
+        symlink_inputs: WorkspaceSymlinkInputs,
+        command: &mut Command,
+        timeout: Duration,
+        commit_metadata: (&str, u64, &[u8]),
+    ) -> Result<WorkspaceToolResult, WorkspaceToolFailure> {
         if expected
             .1
             .is_some_and(|commit| commit.algorithm() != self.object_format || commit.is_zero())
@@ -300,6 +338,7 @@ impl OneNode {
                     read_prefixes,
                     output_paths,
                     sharing,
+                    symlink_inputs,
                     command,
                     timeout,
                     commit_metadata,
@@ -316,6 +355,7 @@ impl OneNode {
                     read_prefixes,
                     output_paths,
                     sharing,
+                    symlink_inputs,
                     command,
                     timeout,
                     commit_metadata,
@@ -409,6 +449,7 @@ impl OneNode {
         reads: &[Vec<u8>],
         writes: &[Vec<u8>],
         sharing: WorkspaceInputSharing,
+        symlink_inputs: WorkspaceSymlinkInputs,
         command: &mut Command,
         timeout: Duration,
         metadata: (&str, u64, &[u8]),
@@ -452,8 +493,19 @@ impl OneNode {
                 usize::MAX,
                 |base, source, seed, _head, _metadata_bytes| {
                     let result = run_at_base(
-                        base, source, seed, request, parent, &reads, &writes, sharing, command,
-                        started, timeout, metadata,
+                        base,
+                        source,
+                        seed,
+                        request,
+                        parent,
+                        &reads,
+                        &writes,
+                        sharing,
+                        symlink_inputs,
+                        command,
+                        started,
+                        timeout,
+                        metadata,
                     );
                     *operation
                         .lock()
@@ -785,6 +837,7 @@ fn run_at_base<A: GitHashAlgorithm>(
     reads: &[TreePath],
     writes: &[TreePath],
     sharing: WorkspaceInputSharing,
+    symlink_inputs: WorkspaceSymlinkInputs,
     command: &mut Command,
     started: Instant,
     timeout: Duration,
@@ -820,8 +873,15 @@ fn run_at_base<A: GitHashAlgorithm>(
         SparseManifest::build(base, source, &mut tool, 0, limits)
             .map_err(|e| WorkspaceToolFailure::Node(NodeWorkspaceRefusal::Manifest(e)))?,
     );
-    let plan = SparseWorkspacePlan::new(manifest, writes.to_vec(), &tool, 0, limits)
-        .map_err(WorkspaceToolFailure::Host)?;
+    let plan = SparseWorkspacePlan::new_with_symlink_policy(
+        manifest,
+        writes.to_vec(),
+        &tool,
+        0,
+        limits,
+        symlink_inputs,
+    )
+    .map_err(WorkspaceToolFailure::Host)?;
     let parent_file = File::open(parent).map_err(|source| WorkspaceToolFailure::Io {
         operation: "open private workspace parent",
         source,

@@ -64,7 +64,7 @@ impl<A: GitHashAlgorithm> SparseWorkspacePlan<A> {
         inputs.sort_by(|a, b| a.path.cmp(&b.path));
         let mut files = BTreeSet::new();
         let mut dirs = BTreeSet::new();
-        let mut payload = self.manifest.receipt().payload_bytes();
+        let mut payload = self.file_links.input_payload_bytes();
         let mut bound = Encoder::new();
         bound.write_raw(b"frankengit/sparse-host/job-inputs/v1\0");
         frame(&mut bound, &self.marker)?;

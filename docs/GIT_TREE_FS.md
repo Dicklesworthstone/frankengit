@@ -365,6 +365,67 @@ exercise both native hash domains, absent foreign objects, canonical and
 candidate inputs, scope and budget boundaries, unchanged-pointer export,
 real-directory tampering, cancellation, reopen and shared-input reuse.
 
+### 10.5 Explicit selected-file copies for Git link inputs
+
+The Linux sparse-directory adapter offers the opt-in
+`selected-file-link-copies-v1` projection for trusted tools that only need the
+contents of file links. `SymlinkInputPolicy::SelectedFileCopies` is selected
+through `SparseWorkspacePlan::new_with_symlink_policy` or the input-only
+`for_candidate_with_symlink_policy`. Existing constructors retain `Refuse`,
+including their identity bytes and symlink refusal behavior. The native
+single-tool workspace command exposes this choice explicitly; workflow, batch
+and durable-dispatch entrypoints retain their existing refusal profile.
+
+For each selected Git `120000` entry, the projection interprets its relative
+link text against the already selected, verified manifest. Every intermediate
+non-dot component must be an admitted ordinary directory. The final path must
+independently be a selected and read-authorized regular or executable file.
+Missing or undisclosed targets, absolute or escaping paths, NULs, directory and
+gitlink targets, symlink chains and cycles refuse before host creation. A
+lexical `..` cannot erase traversal through a missing entry, regular file or
+another symlink. Planning performs no additional object lookup or fetch and
+grants no foreign-repository authority. `TreeCapability::SymlinkPolicy::Refuse`
+still denies the link; `DataOnly` remains inert data in the direct TreeFS API.
+
+The link path receives a distinct ordinary file containing the selected
+target's exact bytes and owner executable bit. No host symlink is created or
+followed. Both the copy and its original selected target are read-only inputs
+for this lease. This is an explicit content projection: `readlink`, POSIX link
+identity, directory-link navigation and writes through an alias are not
+supported. The original link text, source OID and Git mode stay in the source
+manifest. Reconciliation of unrelated declared edits exports that original
+Git link unchanged; it never imports the projected regular file as a link edit.
+
+Outputs and artifact selections cannot equal, replace an ancestor of, or lie
+beneath either a projected copy or its original target. After tools quiesce,
+`verify_opaque_inputs` verifies exact target bytes, read-only mode, single-link
+regular-file type and pinned device/inode identities for both paths. Import and
+artifact capture run these checks before and after their reads. Missing,
+modified, replaced, hardlinked or symlink-substituted files refuse the entire
+result while descriptor-confined cleanup remains available. Reopen checks the
+source-bound marker and exact expected files before pinning identities for its
+new lease. Retained descriptors are funded in the plan and released before
+cleanup settles it.
+
+The policy and exact alias inventory bind the plan and shared-source cache
+scope, even when an explicitly selected profile has no links. The existing
+source-manifest bounds still apply. Host planning additionally charges every
+expanded copy body against the finite entry and total payload limits before
+I/O. Multiple aliases of one large target therefore consume multiple logical
+write allowances. Supplemental job inputs cannot reuse that allowance.
+Shared materialization can use distinct-inode reflinks of the already selected
+regular source bodies; source-cache bytes are funded separately and each host
+workspace retains its full expanded logical budget. Receipts distinguish
+private-copy and verified-reflink bytes without claiming physical allocation.
+
+`fgit-runner --test sparse_file_links` covers both Git hash domains, exact
+untouched-link export, private regular/executable projections, missing and
+unauthorized targets, chain/escape refusals, output/artifact overlap, expanded
+payload and descriptor ceilings, final-check mutation, cancellation, reopen,
+candidate provenance, cache identity and cross-workspace isolation. These
+checks preserve the trusted-tool boundary; they do not add a hostile-code
+sandbox or permit host traversal through repository symlinks.
+
 ## 11. Build and test inputs
 
 A CI job receives a `BuildInputCapsule`:

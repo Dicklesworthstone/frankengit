@@ -121,6 +121,15 @@ pub fn fixture_with_text(
     config: NodeConfig,
     text: &[u8],
 ) -> (OneNode, GitOid) {
+    fixture_with_text_and_link(root, format, config, text, LINK)
+}
+pub fn fixture_with_text_and_link(
+    root: &Scratch,
+    format: GitHashAlgorithm,
+    config: NodeConfig,
+    text: &[u8],
+    link: &[u8],
+) -> (OneNode, GitOid) {
     let (mut node, _) = OneNode::init(config).unwrap();
     let selected = node
         .runtime()
@@ -168,7 +177,7 @@ pub fn fixture_with_text(
         ("100644", BINARY_PATH, blob(BINARY)),
         ("40000", b"dir".as_slice(), nested),
         ("100644", b"empty".as_slice(), blob(&[])),
-        ("120000", b"link".as_slice(), blob(LINK)),
+        ("120000", b"link".as_slice(), blob(link)),
         ("160000", b"module".as_slice(), base),
         ("100755", b"run".as_slice(), blob(b"#!/bin/sh\nneedle\n")),
     ] {

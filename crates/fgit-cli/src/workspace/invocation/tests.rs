@@ -98,3 +98,57 @@ fn canonical_field_boundaries_preserve_argv_order_and_empty_values() {
     assert_ne!(encode(vec![]), encode(vec![b""]));
     assert_eq!(frame(REQUEST_MAGIC, b"x"), frame(REQUEST_MAGIC, b"x"));
 }
+
+#[test]
+fn link_projection_is_bound_to_execution_custody_and_cannot_reuse_an_old_claim() {
+    let root = Root::new();
+    let location = root.0.to_str().unwrap();
+    let args = [
+        "run",
+        location,
+        "11111111111111111111111111111111",
+        "22222222222222222222222222222222",
+        "refs/heads/main",
+        location,
+        "33333333333333333333333333333333",
+        "candidate.bundle",
+        "--trusted-local",
+        "--read",
+        "src",
+        "--write",
+        "src/output",
+        "--author",
+        "Test <test@example.invalid>",
+        "--timestamp",
+        "0",
+        "--message",
+        "candidate",
+        "--",
+        "/usr/bin/true",
+    ]
+    .map(str::to_owned);
+    let mut options = super::super::parse(&args).unwrap();
+    let head = crate::commit_replay::parse_head(&format!("alg:2:{}", "11".repeat(32))).unwrap();
+    let commit = GitOid::from_hex(fgit_types::GitHashAlgorithm::Sha1, &"22".repeat(20)).unwrap();
+    let scope = [0x31; 32];
+    let first = reserve_one(&root.store(), &scope, head, commit, &options).unwrap();
+    options.symlink_inputs = super::super::WorkspaceSymlinkInputs::Refuse;
+    let explicit = reserve_one(&root.0.join("explicit"), &scope, head, commit, &options).unwrap();
+    assert_eq!(first.request_id, explicit.request_id);
+    assert_eq!(
+        fs::read(first.directory.join("request")).unwrap(),
+        fs::read(explicit.directory.join("request")).unwrap()
+    );
+    options.symlink_inputs = super::super::WorkspaceSymlinkInputs::SelectedFileCopies;
+    let selected = reserve_one(&root.0.join("copies"), &scope, head, commit, &options).unwrap();
+    assert_ne!(first.request_id, selected.request_id);
+    let bytes = fs::read(selected.directory.join("request")).unwrap();
+    assert!(
+        bytes
+            .windows(b"selected-file-link-copies-v1".len())
+            .any(|part| part == b"selected-file-link-copies-v1")
+    );
+    // A new projection cannot make an occupied invocation retryable.
+    assert!(reserve_one(&root.store(), &scope, head, commit, &options).is_err());
+    assert_eq!(fs::read_dir(root.store()).unwrap().count(), 1);
+}

@@ -178,7 +178,7 @@ the private broker parent still prevents disclosure. Setuid, setgid, sticky
 and owner-unreadable modes remain refused.
 
 The profile preserves case and Unicode byte distinctions when the host does;
-exclusive creation/alias checks refuse collisions. Symlink materialization,
+exclusive creation/alias checks refuse collisions. Host symlink creation,
 special files, cross-mount traversal, and shared host hardlinks are
 unsupported. The immutable `Arc<SparseManifest>` is shared between runs;
 each host workspace copies its input payloads and has private changes. The
@@ -196,6 +196,23 @@ representation. Ordinary edits preserve the untouched Git pointer. These
 checks add no host gitlink-edit or recursive checkout capability; see
 [`GIT_TREE_FS.md` §10.4](GIT_TREE_FS.md#104-opaque-submodules-in-sparse-directories)
 for the lifecycle and executable test boundaries.
+
+`selected-file-link-copies-v1` explicitly projects a selected Git file link as a
+distinct read-only ordinary file containing an independently selected and
+read-authorized regular target. Resolution uses verified manifest metadata;
+it performs no host symlink traversal or additional source lookup. The original
+Git link text, mode and OID remain the export basis. No directory link, chain,
+foreign or missing target, escape, or writable alias is admitted. Both alias
+and target are immutable for the lease, and outputs/artifacts cannot overlap
+either. Exact bytes/modes and pinned inode identity are checked at output
+acceptance and recovery. The explicit policy and alias inventory enter the
+plan/cache identities; expanded copied payload and retained descriptors must
+fit finite reservations before creation. Existing default APIs retain symlink
+refusal and unchanged identity encoding. This is a content-copy profile for
+trusted single-tool invocations, without POSIX symlink identity or an amendment
+to the normative no-host-traversal rule. See
+[`GIT_TREE_FS.md` §10.5](GIT_TREE_FS.md#105-explicit-selected-file-copies-for-git-link-inputs)
+for exact semantics and the `sparse_file_links` executable test boundary.
 
 ### Consumable resource accounting and interruption (v2, 2026-09-08)
 

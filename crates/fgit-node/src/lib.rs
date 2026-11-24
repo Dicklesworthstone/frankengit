@@ -99,7 +99,7 @@ pub use treefs_workspace::{
     TrustedWorkflowRebase, TrustedWorkflowRetainedArtifactInput,
     TrustedWorkflowRetainedArtifactProvenance, TrustedWorkflowRun, TrustedWorkflowStepLog,
     WorkspaceBatchJob, WorkspaceBatchResult, WorkspaceHostTelemetry, WorkspaceInputSharing,
-    WorkspaceToolFailure, WorkspaceToolResult,
+    WorkspaceSymlinkInputs, WorkspaceToolFailure, WorkspaceToolResult,
 };
 pub use treefs_workspace::{ForgeEventDisclosureProfile, ForgeEventReadGrants};
 pub use treefs_workspace::{

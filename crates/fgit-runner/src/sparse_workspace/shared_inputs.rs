@@ -88,12 +88,17 @@ impl SharedInputCachePlan {
                     max_bytes += body.len() as u64;
                     max_entries += 1;
                 }
-                // Valid host plans already reject symlink materialization.
+                // Link-text bytes remain source metadata; an explicit host
+                // projection can copy only an already-selected regular body.
                 SparseEntryKind::Symlink { .. } => hash.update(&[3]),
                 // Identity and kind are bound above; no foreign bytes enter
                 // the source cache or receive a sharing allowance.
                 SparseEntryKind::Gitlink => hash.update(&[4]),
             }
+        }
+        if let Some(binding) = plan.file_links.binding() {
+            frame(&mut hash, plan.file_links.policy().as_str().as_bytes());
+            frame(&mut hash, binding);
         }
         Self {
             reservation: SharedInputCacheReservation {

@@ -65,6 +65,45 @@ carry one JSON result. Unselected inputs are not materialized. This is a sparse
 working directory, not an OS access boundary: a trusted tool still has ordinary
 host-user filesystem/network privileges.
 
+## Explicit copies for linked file inputs
+
+The default `--symlink-inputs refuse` retains the existing refusal of selected
+Git symlink entries. A single `workspace run` can instead select:
+
+```text
+--symlink-inputs selected-file-link-copies-v1
+```
+
+This profile projects each admitted link as a distinct, private ordinary file
+containing an independently selected regular target's bytes. For example, a
+Git entry `settings.toml -> config/default.toml` can be read by a tool when both
+`--read settings.toml` and `--read config` are present. The materializer resolves
+the link text against selected manifest metadata and reauthorizes the target;
+it never follows a host symlink or fetches an unselected target. The tool sees
+an ordinary file at `settings.toml`, so this profile does not provide `readlink`
+or `test -L` semantics.
+
+Only selected regular or executable file targets are admitted. Missing or
+unselected targets, directory links, link chains, gitlink targets, absolute
+targets and repository escapes refuse before the tool starts. Both the copied
+link path and its source target are immutable: declared outputs cannot replace
+either, their ancestors, or descendants. A tool that changes either input
+cannot produce a candidate. Unrelated declared file outputs remain available.
+
+The exported Git tree retains the original `120000` mode, exact link text and
+blob identity. Expanded copies consume the finite materialization allowance,
+including repeated copies of the same target. Profile and link inventory bind
+the workspace/cache identity. The CLI also binds the explicit profile into its
+durable execution request and records `symlink_inputs` in its saved receipt;
+changing the profile never makes an occupied invocation retryable. Existing
+default request identities remain unchanged.
+
+Native callers use `run_trusted_workspace_tool_profiled_at_in` with
+`WorkspaceSymlinkInputs::SelectedFileCopies`. Existing native entrypoints,
+`workspace run-batch` and workflow dispatch retain the refusal profile. The
+copy profile does not modify TreeFS's `DataOnly` policy or authorize host
+traversal through repository symlinks.
+
 ## Candidate output and review
 
 Successful stdout is one JSON object with:
