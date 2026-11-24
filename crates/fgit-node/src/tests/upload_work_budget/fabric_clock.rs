@@ -229,21 +229,25 @@ fn fabric_credit_cannot_revive_a_cancelled_or_exhausted_native_context() {
             .with_runtime_budgets(BudgetPolicy::finite_defaults()),
     )
     .unwrap();
-    for (limits, dimension) in [
-        (
-            ClassLimits::finite(Duration::ZERO, 100, 100),
-            Exhaustion::Deadline,
-        ),
-        (
-            ClassLimits::finite(Duration::from_secs(30), 0, 100),
-            Exhaustion::PollQuota,
-        ),
-        (
-            ClassLimits::finite(Duration::from_secs(30), 100, 0),
-            Exhaustion::CostQuota,
-        ),
+    let expired = FsqliteCx::new();
+    expired.set_native_cx(node.runtime.request_cx_with_budget(
+        ClassLimits::finite(Duration::ZERO, 100, 100).at(node.runtime.now()),
+    ));
+    assert!(FabricReadCeiling::for_upload(&node, &expired, &session_deadline()).is_none());
+    assert!(matches!(
+        checkpoint_pack_context(&expired),
+        PackContextCheckpoint::Stopped {
+            budget_exhaustion: Some(Exhaustion::Deadline)
+        }
+    ));
+
+    for (polls, cost, dimension) in [
+        (100, 100, Exhaustion::Deadline),
+        (0, 100, Exhaustion::PollQuota),
+        (100, 0, Exhaustion::CostQuota),
     ] {
         let context = FsqliteCx::new();
+        let limits = ClassLimits::finite(Duration::from_secs(2), polls, cost);
         context.set_native_cx(
             node.runtime
                 .request_cx_with_budget(limits.at(node.runtime.now())),
@@ -251,16 +255,27 @@ fn fabric_credit_cannot_revive_a_cancelled_or_exhausted_native_context() {
         let session = session_deadline();
         assert!(session.note_selected_upload_work(10_000));
         let ceiling = FabricReadCeiling::for_upload(&node, &context, &session).unwrap();
-        assert!(matches!(
-            checkpoint_pack_context(&context),
-            PackContextCheckpoint::Stopped { budget_exhaustion: Some(found) } if found == dimension
-        ));
         let before = context.attached_native_cx().unwrap().budget();
+        if dimension == Exhaustion::Deadline {
+            // Let the originally attached deadline expire without a checkpoint
+            // setting its cancellation bit before the verified read returns.
+            std::thread::sleep(
+                before
+                    .remaining_time(node.runtime.now())
+                    .unwrap_or_default(),
+            );
+            assert!(before.is_past_deadline(node.runtime.now()));
+        }
         ceiling.note_read(usize::MAX);
         ceiling.rearm(&context);
         assert_eq!(
-            context.attached_native_cx().unwrap().budget().deadline,
-            before.deadline
+            context.attached_native_cx().unwrap().budget(),
+            before,
+            "{dimension:?}"
+        );
+        assert_eq!(
+            session.shared.verified_fabric_bytes.load(Ordering::Relaxed),
+            0
         );
         assert!(matches!(
             checkpoint_pack_context(&context),
@@ -282,6 +297,10 @@ fn fabric_credit_cannot_revive_a_cancelled_or_exhausted_native_context() {
             .budget()
             .deadline,
         before.deadline
+    );
+    assert_eq!(
+        session.shared.verified_fabric_bytes.load(Ordering::Relaxed),
+        0
     );
     assert!(request.authority().is_cancel_requested());
     node.shutdown().unwrap();
