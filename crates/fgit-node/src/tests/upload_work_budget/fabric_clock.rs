@@ -23,7 +23,7 @@ fn verified_fabric_credit_cannot_exceed_the_original_transport_allowance() {
 
     // The class can earn more time than the transport allows. This credit
     // cannot extend the outer session or the native request past its clock.
-    ceiling.note_read(40_000);
+    ceiling.note_read(request.authority(), 40_000);
     ceiling.rearm(request.authority());
     assert_eq!(session.budget(), Duration::from_secs(10));
     assert_eq!(
@@ -39,6 +39,12 @@ fn verified_fabric_credit_cannot_exceed_the_original_transport_allowance() {
     // A real selected-work allowance can raise the outer ceiling. Database
     // credit is still capped there, including in a newly minted read phase.
     assert!(session.note_selected_upload_work(10_000));
+    // An independent upper bound projects the wall deadline using the
+    // opposite sample order, allowing preemption in either measurement.
+    let wall_lower = Instant::now();
+    let native_upper = node.runtime.now();
+    let remaining_cap = (session.started + session.budget()).saturating_duration_since(wall_lower);
+    let absolute_cap = before.with_timeout(native_upper, remaining_cap).deadline;
     ceiling.rearm(request.authority());
     assert_eq!(session.budget(), Duration::from_secs(20));
     assert_eq!(
@@ -48,12 +54,13 @@ fn verified_fabric_credit_cannot_exceed_the_original_transport_allowance() {
     let left = wall_time(&node, request.authority());
     assert!(left > Duration::from_secs(15) && left <= Duration::from_secs(20));
     let after = request.authority().attached_native_cx().unwrap().budget();
+    assert!(after.deadline <= absolute_cap);
     assert_eq!(after.poll_quota, before.poll_quota);
     assert_eq!(after.cost_quota, before.cost_quota);
     assert_eq!(after.priority, before.priority);
 
     // More verified bytes cannot compound the already capped allowance.
-    ceiling.note_read(usize::MAX);
+    ceiling.note_read(request.authority(), usize::MAX);
     for _ in 0..2 {
         ceiling.rearm(request.authority());
         assert_eq!(
@@ -209,7 +216,7 @@ fn fabric_clock_extension_preserves_remaining_quotas_and_caller_priority() {
             < before.priority
     );
     let ceiling = FabricReadCeiling::for_upload(&node, &context, &session).unwrap();
-    ceiling.note_read(2_000);
+    ceiling.note_read(&context, 2_000);
     ceiling.rearm(&context);
     let after = context.attached_native_cx().unwrap().budget();
     assert!(wall_time(&node, &context) > base);
@@ -229,21 +236,25 @@ fn fabric_credit_cannot_revive_a_cancelled_or_exhausted_native_context() {
             .with_runtime_budgets(BudgetPolicy::finite_defaults()),
     )
     .unwrap();
-    for (limits, dimension) in [
-        (
-            ClassLimits::finite(Duration::ZERO, 100, 100),
-            Exhaustion::Deadline,
-        ),
-        (
-            ClassLimits::finite(Duration::from_secs(30), 0, 100),
-            Exhaustion::PollQuota,
-        ),
-        (
-            ClassLimits::finite(Duration::from_secs(30), 100, 0),
-            Exhaustion::CostQuota,
-        ),
+    let expired = FsqliteCx::new();
+    expired.set_native_cx(node.runtime.request_cx_with_budget(
+        ClassLimits::finite(Duration::ZERO, 100, 100).at(node.runtime.now()),
+    ));
+    assert!(FabricReadCeiling::for_upload(&node, &expired, &session_deadline()).is_none());
+    assert!(matches!(
+        checkpoint_pack_context(&expired),
+        PackContextCheckpoint::Stopped {
+            budget_exhaustion: Some(Exhaustion::Deadline)
+        }
+    ));
+
+    for (polls, cost, dimension) in [
+        (100, 100, Exhaustion::Deadline),
+        (0, 100, Exhaustion::PollQuota),
+        (100, 0, Exhaustion::CostQuota),
     ] {
         let context = FsqliteCx::new();
+        let limits = ClassLimits::finite(Duration::from_secs(2), polls, cost);
         context.set_native_cx(
             node.runtime
                 .request_cx_with_budget(limits.at(node.runtime.now())),
@@ -251,16 +262,27 @@ fn fabric_credit_cannot_revive_a_cancelled_or_exhausted_native_context() {
         let session = session_deadline();
         assert!(session.note_selected_upload_work(10_000));
         let ceiling = FabricReadCeiling::for_upload(&node, &context, &session).unwrap();
-        assert!(matches!(
-            checkpoint_pack_context(&context),
-            PackContextCheckpoint::Stopped { budget_exhaustion: Some(found) } if found == dimension
-        ));
         let before = context.attached_native_cx().unwrap().budget();
-        ceiling.note_read(usize::MAX);
+        if dimension == Exhaustion::Deadline {
+            // Let the originally attached deadline expire without a checkpoint
+            // setting its cancellation bit before the verified read returns.
+            std::thread::sleep(
+                before
+                    .remaining_time(node.runtime.now())
+                    .unwrap_or_default(),
+            );
+            assert!(before.is_past_deadline(node.runtime.now()));
+        }
+        ceiling.note_read(&context, usize::MAX);
         ceiling.rearm(&context);
         assert_eq!(
-            context.attached_native_cx().unwrap().budget().deadline,
-            before.deadline
+            context.attached_native_cx().unwrap().budget(),
+            before,
+            "{dimension:?}"
+        );
+        assert_eq!(
+            session.shared.verified_fabric_bytes.load(Ordering::Relaxed),
+            0
         );
         assert!(matches!(
             checkpoint_pack_context(&context),
@@ -272,7 +294,7 @@ fn fabric_credit_cannot_revive_a_cancelled_or_exhausted_native_context() {
     let ceiling = FabricReadCeiling::for_upload(&node, request.authority(), &session).unwrap();
     request.cancel();
     let before = request.authority().attached_native_cx().unwrap().budget();
-    ceiling.note_read(usize::MAX);
+    ceiling.note_read(request.authority(), usize::MAX);
     ceiling.rearm(request.authority());
     assert_eq!(
         request
@@ -282,6 +304,10 @@ fn fabric_credit_cannot_revive_a_cancelled_or_exhausted_native_context() {
             .budget()
             .deadline,
         before.deadline
+    );
+    assert_eq!(
+        session.shared.verified_fabric_bytes.load(Ordering::Relaxed),
+        0
     );
     assert!(request.authority().is_cancel_requested());
     node.shutdown().unwrap();

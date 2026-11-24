@@ -3973,7 +3973,7 @@ impl VerifiedFabricPackSource<'_> {
         }
         let read = read(maximum as u64);
         if let (Some(ceiling), Ok(verified)) = (ceiling, &read) {
-            ceiling.note_read(verified.payload().len());
+            ceiling.note_read(self.database_context, verified.payload().len());
             ceiling.rearm(self.database_context);
         }
         self.session_checkpoint()?;
@@ -4281,6 +4281,7 @@ impl CanonicalBlobReader for VerifiedFabricBlobReader<'_, '_> {
             if matches!(read, Ok(0)) && self.stream.is_verified() && !self.credited {
                 if let Some(ceiling) = self.ceiling {
                     ceiling.note_read(
+                        self.source.database_context,
                         usize::try_from(self.stream.declared_length()).unwrap_or(usize::MAX),
                     );
                     ceiling.rearm(self.source.database_context);
@@ -4346,8 +4347,11 @@ impl<'n> FabricReadCeiling<'n> {
         scaling: GitDaemonSessionWorkScaling,
     ) -> Option<Self> {
         let native = context.attached_native_cx()?;
-        let left = native.budget().remaining(node.runtime.now()).deadline?;
-        let base = Instant::now().checked_add(left)?;
+        // Sample the destination clock first. A scheduling delay between
+        // clocks may shorten this projection but cannot add work time.
+        let wall_now = Instant::now();
+        let left = native.budget().remaining_time(node.runtime.now())?;
+        let base = wall_now.checked_add(left)?;
         Some(Self {
             node,
             scaling,
@@ -4373,7 +4377,27 @@ impl<'n> FabricReadCeiling<'n> {
         Some(ceiling)
     }
 
-    fn note_read(&self, bytes: usize) {
+    // A read can complete after its deadline, before a checkpoint has
+    // published cancellation. Sampling the native budget consumes no quota.
+    fn live_budget(&self, context: &FsqliteCx) -> Option<(asupersync::Budget, asupersync::Time)> {
+        let native = context.attached_native_cx()?;
+        let budget = native.budget();
+        let native_now = self.node.runtime.now();
+        if context.is_cancel_requested()
+            || native.is_cancel_requested()
+            || budget.is_exhausted()
+            || budget.is_past_deadline(native_now)
+        {
+            return None;
+        }
+        Some((budget, native_now))
+    }
+
+    fn note_read(&self, context: &FsqliteCx, bytes: usize) {
+        // Late bytes cannot give a subsequent phase fresh Database time.
+        if self.live_budget(context).is_none() {
+            return;
+        }
         let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
         if let Some(session) = self.session {
             let _ = session.shared.verified_fabric_bytes.try_update(
@@ -4405,29 +4429,22 @@ impl<'n> FabricReadCeiling<'n> {
         {
             earned = earned.min(outer);
         }
-        let now = Instant::now();
-        if earned <= self.armed.get() || earned <= now || context.is_cancel_requested() {
+        if earned <= self.armed.get() {
             return;
         }
-        let Some(native) = context.attached_native_cx() else {
+        let Some((budget, native_now)) = self.live_budget(context) else {
             return;
         };
-        if native.is_cancel_requested() {
+        // Project into native time from the same tick that checked the
+        // original budget. Sampling wall time second keeps the result inside
+        // the earned ceiling even if this thread is descheduled.
+        let Some(left) = earned.checked_duration_since(Instant::now()) else {
             return;
+        };
+        let extended = budget.with_timeout(native_now, left);
+        if extended.deadline > budget.deadline {
+            context.set_native_cx(self.node.runtime.request_cx_with_budget(extended));
         }
-        let budget = native.budget();
-        let left = budget.remaining(self.node.runtime.now());
-        let limits = ClassLimits {
-            timeout: Some(earned - now),
-            poll_quota: left.polls.unwrap_or(u32::MAX),
-            cost_quota: left.cost,
-            priority: budget.priority,
-        };
-        context.set_native_cx(
-            self.node
-                .runtime
-                .request_cx_with_budget(limits.at(self.node.runtime.now())),
-        );
         self.armed.set(earned);
     }
 }
@@ -4472,7 +4489,7 @@ impl CeiledFabricSource<'_, '_> {
 
     fn verified_read(&self, bytes: usize) {
         if let Some(ceiling) = self.ceiling {
-            ceiling.note_read(bytes);
+            ceiling.note_read(self.inner.database_context, bytes);
             ceiling.rearm(self.inner.database_context);
         }
     }
@@ -13827,7 +13844,7 @@ mod tests {
         let polls_before = remaining(&working).polls;
         let ceiling =
             super::FabricReadCeiling::new(&node, &working, scaling).expect("finite deadline");
-        ceiling.note_read(20_000_000);
+        ceiling.note_read(&working, 20_000_000);
         ceiling.rearm(&working);
         let rearmed = remaining(&working);
         assert!(
@@ -13847,7 +13864,7 @@ mod tests {
         let stalled = context(Duration::from_millis(100));
         let ceiling =
             super::FabricReadCeiling::new(&node, &stalled, scaling).expect("finite deadline");
-        ceiling.note_read(200_000);
+        ceiling.note_read(&stalled, 200_000);
         ceiling.rearm(&stalled);
         std::thread::sleep(Duration::from_millis(700));
         ceiling.rearm(&stalled);
