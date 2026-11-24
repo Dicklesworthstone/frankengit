@@ -23,7 +23,7 @@ fn verified_fabric_credit_cannot_exceed_the_original_transport_allowance() {
 
     // The class can earn more time than the transport allows. This credit
     // cannot extend the outer session or the native request past its clock.
-    ceiling.note_read(40_000);
+    ceiling.note_read(request.authority(), 40_000);
     ceiling.rearm(request.authority());
     assert_eq!(session.budget(), Duration::from_secs(10));
     assert_eq!(
@@ -53,7 +53,7 @@ fn verified_fabric_credit_cannot_exceed_the_original_transport_allowance() {
     assert_eq!(after.priority, before.priority);
 
     // More verified bytes cannot compound the already capped allowance.
-    ceiling.note_read(usize::MAX);
+    ceiling.note_read(request.authority(), usize::MAX);
     for _ in 0..2 {
         ceiling.rearm(request.authority());
         assert_eq!(
@@ -209,7 +209,7 @@ fn fabric_clock_extension_preserves_remaining_quotas_and_caller_priority() {
             < before.priority
     );
     let ceiling = FabricReadCeiling::for_upload(&node, &context, &session).unwrap();
-    ceiling.note_read(2_000);
+    ceiling.note_read(&context, 2_000);
     ceiling.rearm(&context);
     let after = context.attached_native_cx().unwrap().budget();
     assert!(wall_time(&node, &context) > base);
@@ -266,7 +266,7 @@ fn fabric_credit_cannot_revive_a_cancelled_or_exhausted_native_context() {
             );
             assert!(before.is_past_deadline(node.runtime.now()));
         }
-        ceiling.note_read(usize::MAX);
+        ceiling.note_read(&context, usize::MAX);
         ceiling.rearm(&context);
         assert_eq!(
             context.attached_native_cx().unwrap().budget(),
@@ -287,7 +287,7 @@ fn fabric_credit_cannot_revive_a_cancelled_or_exhausted_native_context() {
     let ceiling = FabricReadCeiling::for_upload(&node, request.authority(), &session).unwrap();
     request.cancel();
     let before = request.authority().attached_native_cx().unwrap().budget();
-    ceiling.note_read(usize::MAX);
+    ceiling.note_read(request.authority(), usize::MAX);
     ceiling.rearm(request.authority());
     assert_eq!(
         request
