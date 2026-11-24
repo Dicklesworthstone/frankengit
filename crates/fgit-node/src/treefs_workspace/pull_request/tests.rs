@@ -17,6 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod aggregate_cache;
 mod append_comments;
 mod labels;
 mod notifications;

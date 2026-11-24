@@ -216,6 +216,7 @@ pub use smart_http::{
     NodeSmartHttpUploadReceipt,
 };
 pub use termination::TerminationSignals;
+mod aggregate_history;
 mod ancestry_metadata;
 mod event_history;
 mod quarantine_validator;
@@ -8113,6 +8114,9 @@ pub struct NodeConfig {
     /// Disposable event-history index. Readers still authenticate their own
     /// exact head, disclosure policy, grants, and selected event payloads.
     event_history_index_cache: Arc<event_history::EventHistoryIndexCache>,
+    /// Verified PR/issue history coordinates; every page rechecks selected
+    /// payloads and current disclosure policy at its authenticated head.
+    aggregate_history_index_cache: Arc<aggregate_history::AggregateHistoryIndexCache>,
     /// Verified historical closure prefix, shared across service children but
     /// revalidated against each request's exact authority basis before reuse.
     admission_closure_cache: Arc<closure_selection::AdmissionClosureCache>,
@@ -8234,6 +8238,11 @@ impl NodeConfig {
             event_history_index_cache: Arc::new(event_history::EventHistoryIndexCache::new(
                 event_history::DEFAULT_CACHE_BYTES,
             )),
+            aggregate_history_index_cache: Arc::new(
+                aggregate_history::AggregateHistoryIndexCache::new(
+                    aggregate_history::DEFAULT_CACHE_BYTES,
+                ),
+            ),
             admission_closure_cache: Arc::new(closure_selection::AdmissionClosureCache::default()),
             upload_visibility_cache: Arc::default(),
             upload_pack_ref_in_want: false,
@@ -8825,6 +8834,24 @@ impl NodeConfig {
     #[must_use]
     pub fn event_history_index_cache_bytes(&self) -> usize {
         self.event_history_index_cache.max_bytes()
+    }
+
+    /// Retained verified PR/issue history coordinates, shared by service children.
+    /// The default 16 MiB is split equally between PR and issue reads. Zero
+    /// disables retention. Cold reads perform the ordinary validated replay;
+    /// a warm read still verifies selected payloads and current authorization.
+    /// This allowance is separate from per-request replay and page budgets.
+    #[must_use]
+    pub fn with_aggregate_history_index_cache_bytes(mut self, max_bytes: usize) -> Self {
+        self.aggregate_history_index_cache =
+            Arc::new(aggregate_history::AggregateHistoryIndexCache::new(max_bytes));
+        self
+    }
+
+    /// Total byte ceiling for cached PR and issue history metadata.
+    #[must_use]
+    pub fn aggregate_history_index_cache_bytes(&self) -> usize {
+        self.aggregate_history_index_cache.max_bytes()
     }
 
     /// The byte ceiling for verified received-pack representations.
@@ -9562,6 +9589,12 @@ impl OneNode {
 
     pub(crate) fn event_history_index_cache(&self) -> &event_history::EventHistoryIndexCache {
         &self.service_config.event_history_index_cache
+    }
+
+    pub(crate) fn aggregate_history_index_cache(
+        &self,
+    ) -> &aggregate_history::AggregateHistoryIndexCache {
+        &self.service_config.aggregate_history_index_cache
     }
 
     pub(crate) fn received_pack_cache(&self) -> &received_pack::ReceivedPackCache {

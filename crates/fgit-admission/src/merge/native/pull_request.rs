@@ -24,7 +24,10 @@ use fgit_forge::event::pull_request::{
 use fgit_forge::event::{ForgeEvent, ForgeEventBatch, ForgeEventPayload};
 use fgit_types::{AsciiSlug, PrincipalId, RefName, RefusalCode, RepositoryAuthorityHeadId};
 
-use super::{NativeMergeProjection, PreparationFailure, delivery, storage, unavailable};
+use super::{
+    NativeMergeProjection, PreparationFailure, VerifiedAggregateHistory, delivery, storage,
+    unavailable,
+};
 use crate::{
     AdmissionContext, AdmissionError, AdmissionLimits, ProjectionFailure, ValidatedClosure,
 };
@@ -273,6 +276,44 @@ where
     V: Fn(&RefName, &RefName) -> bool + Sync,
     C: Fn() -> bool + Sync,
 {
+    read_page_filtered_indexed_at(
+        store,
+        cx,
+        basis,
+        after,
+        limit,
+        required_labels,
+        visible,
+        None,
+        0,
+        cancelled,
+    )
+    .await
+    .map(|(page, _)| page)
+}
+
+/// Read the same canonical PR page with optional verified history coordinates.
+/// The index never caches payloads or disclosure decisions. It may cover a
+/// superset of the selected PRs, but reuse requires this exact authenticated
+/// head and store. A cold read can return newly verified metadata within the
+/// optional retention budget; the caller retains it only after this succeeds.
+pub async fn read_page_filtered_indexed_at<S, V, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    after: u64,
+    limit: u16,
+    required_labels: &[String],
+    visible: &V,
+    prior: Option<&VerifiedAggregateHistory>,
+    max_retained_bytes: usize,
+    cancelled: &C,
+) -> Result<(PullRequestPage, Option<VerifiedAggregateHistory>), AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    V: Fn(&RefName, &RefName) -> bool + Sync,
+    C: Fn() -> bool + Sync,
+{
     fgit_forge::event::pull_request_labels::validate_labels(required_labels)
         .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
     if limit == 0 || limit > MAX_PAGE {
@@ -393,7 +434,7 @@ where
         (AggregateVersion, NativePullRequestEvent, usize),
     > = BTreeMap::new();
     let mut openers = BTreeMap::new();
-    super::event_history::visit_selected_at(
+    let (_, index) = super::event_history::visit_selected_indexed_at(
         store,
         cx,
         basis,
@@ -404,6 +445,8 @@ where
             events: MAX_READ_EVENTS,
             scan_bytes: MAX_SCAN_BYTES,
         },
+        prior,
+        max_retained_bytes,
         &mut |event: &ForgeEvent, size: usize| {
             let AggregateId::PullRequest(number) = event.aggregate else {
                 return Err(unavailable(RefusalCode::EvidenceInvalid));
@@ -477,11 +520,14 @@ where
     } else {
         None
     };
-    Ok(PullRequestPage {
-        source_head: basis.id(),
-        pull_requests: selected,
-        next_after,
-    })
+    Ok((
+        PullRequestPage {
+            source_head: basis.id(),
+            pull_requests: selected,
+            next_after,
+        },
+        index,
+    ))
 }
 
 fn charge_event(event: &ForgeEvent, bytes: &mut usize) -> Result<(), AdmissionError> {

@@ -2,7 +2,10 @@
 //! Reads rebuild from immutable accepted events; no issue table or cursor cache
 //! is authoritative. A missing history or exceeded replay budget is a refusal.
 use super::super::NativeMergeBasis;
-use super::{NativeMergeProjection, PreparationFailure, delivery, metadata, storage, unavailable};
+use super::{
+    NativeMergeProjection, PreparationFailure, VerifiedAggregateHistory, delivery, metadata,
+    storage, unavailable,
+};
 use crate::{
     AdmissionContext, AdmissionError, AdmissionLimits, AdmissionSnapshot, PermittedObjectClosure,
     ProjectionFailure, ValidatedClosure,
@@ -218,12 +221,35 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
+    read_page_indexed_at(store, cx, basis, after, page_limit, None, 0, cancelled)
+        .await
+        .map(|(page, _)| page)
+}
+
+/// Read canonical issue rows using optional exact-head history coordinates.
+/// Every selected payload and current issue fold is still verified. A miss
+/// performs the ordinary replay once and may retain its metadata as a result;
+/// an insufficient optional retention allowance does not change the page.
+pub async fn read_page_indexed_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    after: u64,
+    page_limit: u16,
+    prior: Option<&VerifiedAggregateHistory>,
+    max_retained_bytes: usize,
+    cancelled: &C,
+) -> Result<(IssuePage, Option<VerifiedAggregateHistory>), AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
     limit(page_limit)?;
     let state = delivery::read_roots_in(store, cx, basis, cancelled).await?;
     // Select numeric page keys before retaining or folding any issue history.
     // The lookahead key determines the cursor but does not consume replay state.
     let (wanted, more) = page_numbers(&state.forge, after, page_limit, cancelled)?;
-    let all = replay_selected(
+    let (all, index) = replay_selected_indexed(
         store,
         cx,
         basis,
@@ -231,6 +257,8 @@ where
         &state.outbox,
         &wanted,
         None,
+        prior,
+        max_retained_bytes,
         cancelled,
     )
     .await?;
@@ -241,11 +269,14 @@ where
         None
     };
     checkpoint(cancelled)?;
-    Ok(IssuePage {
-        source_head: basis.id(),
-        issues,
-        next_after,
-    })
+    Ok((
+        IssuePage {
+            source_head: basis.id(),
+            issues,
+            next_after,
+        },
+        index,
+    ))
 }
 
 /// Complete versioned action/comment history, paged by event version. The
@@ -263,9 +294,34 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
+    read_history_indexed_at(
+        store, cx, basis, number, after, page_limit, None, 0, cancelled,
+    )
+    .await
+    .map(|(page, _)| page)
+}
+
+/// Read a current issue and its requested timeline window with optional
+/// verified history coordinates. Changing the requested window does not grant
+/// access to a different head or bypass any selected event validation.
+pub async fn read_history_indexed_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    number: IssueNumber,
+    after: u64,
+    page_limit: u16,
+    prior: Option<&VerifiedAggregateHistory>,
+    max_retained_bytes: usize,
+    cancelled: &C,
+) -> Result<(IssueHistoryPage, Option<VerifiedAggregateHistory>), AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
     limit(page_limit)?;
     let state = delivery::read_roots_in(store, cx, basis, cancelled).await?;
-    let mut timelines = replay_selected(
+    let (mut timelines, index) = replay_selected_indexed(
         store,
         cx,
         basis,
@@ -273,16 +329,21 @@ where
         &state.outbox,
         &BTreeSet::from([number]),
         Some((after, page_limit)),
+        prior,
+        max_retained_bytes,
         cancelled,
     )
     .await?;
     let Some(timeline) = timelines.remove(&number) else {
-        return Ok(IssueHistoryPage {
-            source_head: basis.id(),
-            issue: None,
-            events: Vec::new(),
-            next_after: None,
-        });
+        return Ok((
+            IssueHistoryPage {
+                source_head: basis.id(),
+                issue: None,
+                events: Vec::new(),
+                next_after: None,
+            },
+            index,
+        ));
     };
     let mut events = Vec::new();
     let mut more = false;
@@ -303,12 +364,15 @@ where
         None
     };
     checkpoint(cancelled)?;
-    Ok(IssueHistoryPage {
-        source_head: basis.id(),
-        issue: Some(timeline.issue),
-        events,
-        next_after,
-    })
+    Ok((
+        IssueHistoryPage {
+            source_head: basis.id(),
+            issue: Some(timeline.issue),
+            events,
+            next_after,
+        },
+        index,
+    ))
 }
 
 async fn replay_selected<S, C>(
@@ -325,6 +389,29 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
+    replay_selected_indexed(
+        store, cx, basis, forge, outbox, wanted, history_window, None, 0, cancelled,
+    )
+    .await
+    .map(|(timelines, _)| timelines)
+}
+
+async fn replay_selected_indexed<S, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    forge: &CanonicalForgePositionState,
+    outbox: &CanonicalOutboxState,
+    wanted: &BTreeSet<IssueNumber>,
+    history_window: Option<(u64, u16)>,
+    prior: Option<&VerifiedAggregateHistory>,
+    max_retained_bytes: usize,
+    cancelled: &C,
+) -> Result<(BTreeMap<IssueNumber, Timeline>, Option<VerifiedAggregateHistory>), AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
     checkpoint(cancelled)?;
     let repository = basis.body().repository_id;
     let frontiers = issue_frontiers(forge, cancelled)?;
@@ -335,7 +422,7 @@ where
         .collect();
     let mut events = BTreeMap::<(IssueNumber, AggregateVersion), ForgeEvent>::new();
     let mut retained_bytes = 0usize;
-    super::event_history::visit_selected_at(
+    let (_, index) = super::event_history::visit_selected_indexed_at(
         store,
         cx,
         basis,
@@ -346,6 +433,8 @@ where
             events: MAX_SCAN_EVENTS,
             scan_bytes: MAX_SCAN_BYTES,
         },
+        prior,
+        max_retained_bytes,
         &mut |event: &ForgeEvent, size: usize| {
             let AggregateId::Issue(number) = event.aggregate else {
                 return Err(unavailable(RefusalCode::EvidenceInvalid));
@@ -411,7 +500,7 @@ where
         }
     }
     checkpoint(cancelled)?;
-    Ok(timelines)
+    Ok((timelines, index))
 }
 
 /// Parse the canonical labels once, retaining numeric (not lexical) order.
