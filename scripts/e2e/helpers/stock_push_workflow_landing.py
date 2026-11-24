@@ -150,6 +150,14 @@ def lifecycle(campaign, fmt):
         assert status == 200 and former["source_current"] is False, former
         assert former["source_tip"] == f.tips[0] and int(former["pull_request_version"]) == 1, former
         assert former["complete"] and former["checks"] == [], former
+        stale_detail = json.loads(campaign.invoke("stale-pr-with-checks", [
+            "pr", "show", *f.scope, 1, "--trusted-local", "--checks", "--object-format", fmt,
+            "--expected-head", former["snapshot_token"]]))
+        stale_page = stale_detail["workflow_checks"]
+        assert stale_detail["source_head"] == stale_page["source_head"] == former["source_head"]
+        assert stale_detail["pull_request"]["version"] == int(stale_page["pull_request_version"]) == 1
+        assert stale_page["source_tip"] == former["source_tip"] and not stale_page["source_current"]
+        assert stale_page["complete"] and stale_page["checks"] == []
         updated = json.loads(campaign.invoke("refresh-existing-pull", [
             "pr", "update", *f.scope, 1, "--trusted-local", "--principal", PRINCIPAL,
             "--idempotency-key", "refresh-pushed-subject", "--expected-version", 1,
@@ -163,6 +171,10 @@ def lifecycle(campaign, fmt):
         empty = json.loads(body)
         assert status == 200 and empty["source_current"] and empty["source_tip"] == tip, empty
         assert int(empty["pull_request_version"]) == 2 and empty["complete"] and empty["checks"] == [], empty
+        detail_args = ["pr", "show", *f.scope, 1, "--trusted-local", "--checks", "--object-format", fmt]
+        historical = json.loads(campaign.invoke("prior-pr-with-checks", [
+            *detail_args, "--expected-head", former["snapshot_token"]]))
+        assert historical == stale_detail, historical
         queue(f, "enqueue", 0, "enqueue-pushed-tip", ["--priority", 0], True)
         stale = queue(f, "land", 1, "prior-success-cannot-land", ["--expected-policy-epoch", epoch], False)
         assert refs(f)[TARGET] == f.base
@@ -192,6 +204,16 @@ def lifecycle(campaign, fmt):
         assert checks["source_head"] == pull["source_head"] and checks["node_closed"], checks
         assert int(checks["pull_request_version"]) == 3 and checks["source_current"], checks
         assert checks["source_tip"] == tip and checks["complete"] and checks["checks"] == [checked], checks
+        joined = json.loads(campaign.invoke("merged-pr-with-checks", detail_args))
+        joined_page = joined.pop("workflow_checks")
+        assert joined == pull and joined_page["checks"] == [checked], joined
+        fields = ("found", "source_head", "snapshot_token", "pull_request_version", "source_ref_hex",
+                  "target_ref_hex", "source_tip", "target_tip", "source_current", "next_after",
+                  "complete", "checks")
+        assert joined_page == {field: checks[field] for field in fields}, joined_page
+        missing = json.loads(campaign.invoke("absent-pr-with-checks", [
+            "pr", "show", *f.scope, 99, "--trusted-local", "--checks", "--object-format", fmt], code=4))
+        assert not missing["found"] and missing["pull_request"] is None and missing["workflow_checks"] is None
         drained, _ = server.stop()
         assert not drained["requires_reconciliation"] and not drained["execution_retried"], drained
     campaign.record(fmt, "stock-push-http-check-protected-fast-forward", source=tip,
@@ -204,6 +226,41 @@ def lifecycle(campaign, fmt):
                     landing_sequence=landed["decision_sequence"], executions=f.effects_count())
 
 
+def check_pagination(campaign, fmt):
+    jobs = [f"job-{index:02}" for index in range(21)]
+    workflow = "name: paginated-checks\non: push\njobs:\n" + "".join(
+        f"  {job}:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: printf {job}\n"
+        for job in jobs)
+    f = Fixture(campaign, fmt, "check-pages", workflow_source=workflow)
+    credentials(f)
+    f.open_pull()
+    args = [*f.scope, 1, "--trusted-local", "--object-format", fmt]
+    with Server(f, "check-pages", publish=True) as server:
+        server.ready()
+        server.wait(lambda _: any((e / "reported").is_file() for e in event_directories(f)))
+        status, body = server.request("GET", "/api/v1/pulls/1/checks?limit=100")
+        whole = json.loads(body)
+        assert status == 200 and whole["complete"] and len(whole["checks"]) == len(jobs), whole
+        rows = whole["checks"]
+        assert {row["job"] for row in rows} == set(jobs)
+        assert all(row["conclusion"] == "success" and row["publisher"] == PRINCIPAL for row in rows)
+        assert len({row["id"] for row in rows}) == len(jobs)
+        detail = json.loads(campaign.invoke("first-twenty-checks", [
+            "pr", "show", *args, "--checks", "--expected-head", whole["snapshot_token"]]))
+        page = detail["workflow_checks"]
+        assert detail["source_head"] == page["source_head"] == whole["source_head"]
+        assert page["checks"] == rows[:20] and not page["complete"]
+        assert page["next_after"] == rows[19]["id"] and page["snapshot_token"] == whole["snapshot_token"]
+        last = json.loads(campaign.invoke("remaining-checks", [
+            "pr", "checks", *args, "--after", page["next_after"], "--expected-head", page["snapshot_token"]]))
+        assert last["source_head"] == page["source_head"] and last["checks"] == rows[20:]
+        assert last["complete"] and last["next_after"] is None
+        drained, _ = server.stop()
+        assert drained["checks_committed"] == len(jobs) and drained["checks_refused"] == 0, drained
+    campaign.record(fmt, "pr-detail-check-continuation", first_page=len(page["checks"]),
+                    final_page=len(last["checks"]), published=len(rows), snapshot=page["snapshot_token"])
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
@@ -212,3 +269,4 @@ if __name__ == "__main__":
     campaign = Campaign(args.binary.resolve(), args.output.resolve())
     for fmt in ("sha1", "sha256"):
         lifecycle(campaign, fmt)
+        check_pagination(campaign, fmt)

@@ -43,20 +43,26 @@ pub(super) struct ReadOptions {
 }
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Selection {
-    List { after: u64, limit: u16 },
-    Show(PullRequestNumber),
+    List {
+        after: u64,
+        limit: u16,
+    },
+    Show {
+        number: PullRequestNumber,
+        checks: bool,
+    },
 }
 impl ReadOptions {
     pub const fn after(&self) -> u64 {
         match self.selection {
             Selection::List { after, .. } => after,
-            Selection::Show(number) => number.get() - 1,
+            Selection::Show { number, .. } => number.get() - 1,
         }
     }
     pub const fn limit(&self) -> u16 {
         match self.selection {
             Selection::List { limit, .. } => limit,
-            Selection::Show(_) => 1,
+            Selection::Show { .. } => 1,
         }
     }
 }
@@ -90,6 +96,7 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
     let mut flags = BTreeMap::new();
     let mut labels = Vec::new();
     let mut trusted = false;
+    let mut checks = false;
     let mut cursor = if action == "list" { 4 } else { 5 };
     while cursor < arguments.len() {
         let supplied = arguments[cursor].as_str();
@@ -107,6 +114,13 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
                 return Err("duplicate --trusted-local".to_owned());
             }
             trusted = true;
+            continue;
+        }
+        if action == "show" && flag == "--checks" {
+            if checks {
+                return Err("duplicate --checks".into());
+            }
+            checks = true;
             continue;
         }
         let allowed = flag == "--object-format"
@@ -254,7 +268,10 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
                 limit: u16::try_from(limit).map_err(|_| "invalid page size")?,
             }
         } else {
-            Selection::Show(number.ok_or("missing PR number")?)
+            Selection::Show {
+                number: number.ok_or("missing PR number")?,
+                checks,
+            }
         };
         (
             Operation::Read(ReadOptions {

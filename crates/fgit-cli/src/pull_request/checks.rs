@@ -11,6 +11,8 @@ use fgit_types::{GitHashAlgorithm, RepositoryAuthorityHeadId, RepositoryId, Tena
 use super::options::{decimal, head_token, hex, parse_head};
 use crate::publication_support::quote;
 
+pub(super) const DEFAULT_LIMIT: u16 = 20;
+
 const USAGE: &str = "\
 usage: fg pr checks <storage-root> <tenant-id> <repository-id> <number> --trusted-local
   [--object-format sha1|sha256] [--limit <1..100>]
@@ -19,8 +21,8 @@ usage: fg pr checks <storage-root> <tenant-id> <repository-id> <number> --truste
 Read immutable workflow observations for the PR's recorded source commit at one
 authenticated snapshot. Continue with both next_after and snapshot_token.
 source_current=false means the source branch moved without a matching PR refresh;
-that page contains no current checks. Local success is action_required, not an
-independent successful check or permission to merge. Evidence is summarized by
+that page contains no current checks. Each row retains its published conclusion.
+Merge policy evaluates required checks separately. Evidence is summarized by
 SHA-256 and byte length; raw execution evidence is not included.
 Exit 0: complete page; 4: PR absent or hidden; 2: input/read/cleanup/output error.";
 
@@ -78,7 +80,11 @@ fn parse(args: &[String]) -> Result<Options, String> {
         "sha256" => GitHashAlgorithm::Sha256,
         _ => return Err("unsupported object format".into()),
     };
-    let limit = decimal(flags.get("--limit").copied().unwrap_or("20"))?;
+    let limit = flags
+        .get("--limit")
+        .map(|value| decimal(value))
+        .transpose()?
+        .unwrap_or(u64::from(DEFAULT_LIMIT));
     if !(1..=100).contains(&limit) {
         return Err("check limit must be 1..100".into());
     }
@@ -178,11 +184,28 @@ fn render(
             "{{{scope},\"found\":false,\"source_head\":null,\"snapshot_token\":null,\"pull_request_version\":null,\"source_ref_hex\":null,\"target_ref_hex\":null,\"source_tip\":null,\"target_tip\":null,\"source_current\":null,\"next_after\":null,\"complete\":true,\"checks\":[]}}"
         ));
     };
-    page.validate_window(options.number, options.after, options.limit, options.head)
+    let fields = page_fields(
+        page,
+        options.format,
+        options.number,
+        options.after,
+        options.limit,
+        options.head,
+    )?;
+    Ok(format!("{{{scope},{fields}}}"))
+}
+
+pub(super) fn page_fields(
+    page: &PullRequestChecksPage,
+    format: GitHashAlgorithm,
+    number: PullRequestNumber,
+    after: Option<WorkflowCheckId>,
+    limit: u16,
+    head: Option<RepositoryAuthorityHeadId>,
+) -> Result<String, String> {
+    page.validate_window(number, after, limit, head)
         .map_err(|_| "workflow check page binding/order mismatch")?;
-    if page.source_tip.algorithm() != options.format
-        || page.target_tip.algorithm() != options.format
-    {
+    if page.source_tip.algorithm() != format || page.target_tip.algorithm() != format {
         return Err("workflow check page binding/order mismatch".into());
     }
     let rows = page
@@ -192,7 +215,7 @@ fn render(
         .collect::<Vec<_>>()
         .join(",");
     Ok(format!(
-        "{{{scope},\"found\":true,\"source_head\":{},\"snapshot_token\":{},\"pull_request_version\":{},\"source_ref_hex\":{},\"target_ref_hex\":{},\"source_tip\":{},\"target_tip\":{},\"source_current\":{},\"next_after\":{},\"complete\":{},\"checks\":[{rows}]}}",
+        "\"found\":true,\"source_head\":{},\"snapshot_token\":{},\"pull_request_version\":{},\"source_ref_hex\":{},\"target_ref_hex\":{},\"source_tip\":{},\"target_tip\":{},\"source_current\":{},\"next_after\":{},\"complete\":{},\"checks\":[{rows}]",
         quote(&page.source_head.to_string()),
         quote(&head_token(page.source_head)),
         quote(&page.pull_request_version.get().to_string()),

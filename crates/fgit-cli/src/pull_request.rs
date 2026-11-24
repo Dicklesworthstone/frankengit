@@ -38,7 +38,8 @@ usage: fg pr list <storage-root> <tenant-id> <repository-id> --trusted-local
   [--label <text> ...; require every selected label before pagination]
   [--object-format sha1|sha256]
 usage: fg pr show <storage-root> <tenant-id> <repository-id> <number> --trusted-local
-  [--expected-head <snapshot-token>] [--object-format sha1|sha256]
+  [--checks] [--expected-head <snapshot-token>] [--object-format sha1|sha256]
+  --checks includes the first page of workflow observations at this same snapshot.
 usage: fg pr search --help
   Search visible PR metadata with state, author, branch and literal text filters.
 
@@ -185,8 +186,32 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
                         labels_actor: view.labels_actor,
                     })
                     .collect();
-                output::read_receipt(&options, read, page.source_head, page.next_after, &rows)
-                    .map(|(receipt, exit)| Completed::Read(receipt, exit))
+                let checks = match read.selection {
+                    options::Selection::Show {
+                        number,
+                        checks: true,
+                    } if rows.first().is_some_and(|row| row.number == number) => node
+                        .runtime()
+                        .block_on(node.read_pull_request_checks_in(
+                            &request,
+                            &Default::default(),
+                            number,
+                            None,
+                            checks::DEFAULT_LIMIT,
+                            Some(page.source_head),
+                        ))
+                        .map_err(|error| error.to_string())?,
+                    _ => None,
+                };
+                output::read_receipt(
+                    &options,
+                    read,
+                    page.source_head,
+                    page.next_after,
+                    checks.as_ref(),
+                    &rows,
+                )
+                .map(|(receipt, exit)| Completed::Read(receipt, exit))
             }
         }
     })();

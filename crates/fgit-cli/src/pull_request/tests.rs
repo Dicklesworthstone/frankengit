@@ -291,8 +291,8 @@ fn head_tokens_roundtrip_and_list_continuations_cannot_mix_snapshots() {
     assert_eq!(read.after(), 2);
     assert_eq!(read.limit(), 2);
     assert_eq!(read.expected_head, Some(head(1)));
-    assert!(read_receipt(&parsed, read, head(2), None, &[]).is_err());
-    assert!(read_receipt(&parsed, read, head(1), None, &[]).is_ok());
+    assert!(read_receipt(&parsed, read, head(2), None, None, &[]).is_err());
+    assert!(read_receipt(&parsed, read, head(1), None, None, &[]).is_ok());
 }
 
 #[test]
@@ -310,6 +310,7 @@ fn exact_show_does_not_disclose_a_different_next_number() {
         read_options(&options),
         head(1),
         Some(8),
+        None,
         &[row(&event, value)],
     )
     .unwrap();
@@ -323,12 +324,75 @@ fn exact_show_does_not_disclose_a_different_next_number() {
         read_options(&options),
         head(1),
         None,
+        None,
         &[row(&event, value)],
     )
     .unwrap();
     assert_eq!(exit, 0);
     assert!(text.contains("\"found\":true"));
     assert!(text.contains("A reviewed change"));
+}
+
+#[test]
+fn show_checks_selects_a_single_visible_subject_at_the_metadata_head() {
+    let opened = parse(&args(40)).unwrap();
+    let mutation = mutation(&opened);
+    let event = mutation
+        .command
+        .proposed_event(mutation.principal, opened.format)
+        .unwrap();
+    let data = &mutation.command.data;
+    let mut input = read_args("show");
+    input.push("--checks".into());
+    let options = parse(&input).unwrap();
+    let read = read_options(&options);
+    let original = fgit_node::PullRequestChecksPage {
+        source_head: head(1),
+        number: mutation.command.number,
+        pull_request_version: event.version,
+        source_ref: data.source_ref.clone(),
+        target_ref: data.target_ref.clone(),
+        source_tip: data.source_tip,
+        target_tip: data.target_tip,
+        source_current: false,
+        checks: Vec::new(),
+        next_after: None,
+    };
+    let render = |page: Option<&fgit_node::PullRequestChecksPage>| {
+        read_receipt(
+            &options,
+            read,
+            head(1),
+            None,
+            page,
+            &[row(&event, mutation)],
+        )
+    };
+    let (receipt, exit) = render(Some(&original)).unwrap();
+    assert_eq!(exit, 0);
+    assert!(receipt.contains(r#""workflow_checks":{"found":true"#));
+    assert!(receipt.contains(r#""source_current":false"#));
+    let (withheld, exit) = render(None).unwrap();
+    assert_eq!(exit, 4);
+    assert!(withheld.contains(r#""found":false,"pull_request":null,"workflow_checks":null"#));
+    assert!(!withheld.contains(&data.title));
+
+    let mut different = original.clone();
+    different.source_head = head(2);
+    assert!(render(Some(&different)).is_err());
+    different = original.clone();
+    different.pull_request_version = event.version.next().unwrap();
+    assert!(render(Some(&different)).is_err());
+    different = original;
+    different.source_tip = data.target_tip;
+    assert!(render(Some(&different)).is_err());
+
+    input.push("--checks".into());
+    assert!(parse(&input).unwrap_err().contains("duplicate"));
+    for mut invalid in [read_args("list"), args(40)] {
+        invalid.push("--checks".into());
+        assert!(parse(&invalid).unwrap_err().contains("inapplicable"));
+    }
 }
 
 #[test]
@@ -347,15 +411,34 @@ fn page_order_cursor_and_row_binding_are_checked_before_disclosure() {
             read,
             head(1),
             None,
+            None,
             &[row(&event, value), row(&event, value)]
         )
         .is_err()
     );
-    assert!(read_receipt(&options, read, head(1), Some(999), &[row(&event, value)]).is_err());
+    assert!(
+        read_receipt(
+            &options,
+            read,
+            head(1),
+            Some(999),
+            None,
+            &[row(&event, value)]
+        )
+        .is_err()
+    );
     let mut invalid = row(&event, value);
     invalid.number = PullRequestNumber::FIRST;
-    assert!(read_receipt(&options, read, head(1), None, &[invalid]).is_err());
-    let (text, _) = read_receipt(&options, read, head(1), Some(7), &[row(&event, value)]).unwrap();
+    assert!(read_receipt(&options, read, head(1), None, None, &[invalid]).is_err());
+    let (text, _) = read_receipt(
+        &options,
+        read,
+        head(1),
+        Some(7),
+        None,
+        &[row(&event, value)],
+    )
+    .unwrap();
     assert!(text.contains("\"count\":1,\"has_more\":true,\"next_after\":7"));
 }
 
@@ -387,7 +470,15 @@ fn merge_only_receipts_do_not_invent_an_opener_or_metadata() {
         labels_actor: None,
     };
     let options = parse(&read_args("list")).unwrap();
-    let (text, _) = read_receipt(&options, read_options(&options), head(1), None, &[row]).unwrap();
+    let (text, _) = read_receipt(
+        &options,
+        read_options(&options),
+        head(1),
+        None,
+        None,
+        &[row],
+    )
+    .unwrap();
     assert!(text.contains("\"kind\":\"merge_receipt\",\"state\":\"merged\""));
     assert!(text.contains("\"data\":null,\"opened_by\":null,\"last_metadata_actor\":null"));
     assert!(text.contains(&"c".repeat(40)));
@@ -513,20 +604,27 @@ fn label_filters_are_exact_and_checked_again_before_rendering() {
     assert_eq!(read.labels, ["bug", "urgent"]);
     let opened = parse(&args(40)).unwrap();
     let mutation = mutation(&opened);
-    let event = mutation.command.proposed_event(mutation.principal, opened.format).unwrap();
+    let event = mutation
+        .command
+        .proposed_event(mutation.principal, opened.format)
+        .unwrap();
     let mut value = row(&event, mutation);
-    assert!(read_receipt(&options, read, head(1), None, &[value]).is_err());
+    assert!(read_receipt(&options, read, head(1), None, None, &[value]).is_err());
     let labels = vec!["bug".into(), "urgent".into()];
     value = row(&event, mutation);
     value.labels = &labels;
     value.labels_version = Some(AggregateVersion::try_new(9_007_199_254_740_993).unwrap());
     value.labels_actor = Some(mutation.principal);
-    let (report, exit) = read_receipt(&options, read, head(1), None, &[value]).unwrap();
+    let (report, exit) = read_receipt(&options, read, head(1), None, None, &[value]).unwrap();
     assert_eq!(exit, 0);
     assert!(report.contains("\"label_filter\":[\"bug\",\"urgent\"]"));
     assert!(report.contains("\"labels_version\":\"9007199254740993\""));
     for action in ["show", "open"] {
-        let mut input = if action == "show" { read_args(action) } else { args(40) };
+        let mut input = if action == "show" {
+            read_args(action)
+        } else {
+            args(40)
+        };
         input.extend(["--label".into(), "bug".into()]);
         assert!(parse(&input).is_err());
     }
