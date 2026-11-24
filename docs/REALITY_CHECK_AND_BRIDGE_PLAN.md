@@ -2,6 +2,17 @@
 
 **On November 23, two Linux workers completed sponsored publication and remote inbox reads in both Git hash formats. Across two machines, signed repository backups restored a Git ref, its exact file contents and modes, and an issue that a fresh HTTP listener served with the original history. A supported team deployment, independent whole-installation recovery and a qualified release remain open.**
 
+At `a2b7bd4c`, a release-proof check now catches a lost transaction outcome in
+a mixed batch. The original exporter showed only the advancing head. The same
+reference history now carries both the commit and the refusal, and the kernel
+checks that the decision sequence advanced by two and the repository sequence
+by one. On the clean revision, `./scripts/verify.sh proof` passed all 23
+assertions across eight retained histories, both scheduled writer orders and
+the claim checks. Removing the decisions, flipping the refusal or repeating a
+transaction each failed the kernel check. Bead `.4.81`, comment 6284, records
+the native generator and exact inputs. The 16 specified release-blocking
+invariants still need their production evidence. [Release-proof checker](../proofs/fg041/README.md)
+
 A sandboxed stock Git 2.54.0 client pushed a fresh commit to the source branch of an existing PR over the native receive service. The HTTP checks endpoint reported the PR's recorded tip as stale. After an explicit version-checked refresh of the same PR, the protected queue refused the old success and a success for the wrong required job. The exact job at the new tip allowed the fast-forward. A native read returned the pushed bytes and the PR advanced to merged version 3. The campaign ran for SHA-1 and SHA-256 on two Linux workers, using the `8ab3cd0c` executable and harness revisions `5464793b` and `2a1a400d`. [Stock-push campaign](../scripts/e2e/suites/workflow/stock_push_landing.sh)
 
 At harness `d2c2be33` with the `f5960537` release executable, both Git formats ran the workflow at the pushed commit before anyone refreshed the PR. Each of the two settled runner reports named its executed commit, one original and one pushed. The HTTP checks view still selected the original coordinates at PR version 1 and correctly returned an empty page. The explicit refresh updated those coordinates. The protected queue then refused the stale success and wrong job, accepted the matching check, and landed the pushed bytes. Bead `.4.12`, comment 6272, retains both runs. At harness `ab1d7be1`, `fg pr show` and `fg pr checks` read the same authenticated snapshot after the landing. Both formats showed merged PR version 3 and exactly the full check record the HTTP client had observed for the pushed commit. [Stock push and recorded execution](../scripts/e2e/helpers/stock_push_workflow_landing.py)
