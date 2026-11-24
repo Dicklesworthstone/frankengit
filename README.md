@@ -1197,24 +1197,21 @@ FrankenGit does **not** claim a fictional standardized “protocol v2 push” co
 Compatibility is differential against pinned upstream Git versions and source-derived/adversarial corpora. “Clone worked once” is not evidence of compatibility.
 
 Tier A covers pinned Git 2.54.0 over `git://` in SHA-1 and SHA-256 across
-seven repository histories. The November 23 optimized run at `a184cab0`
-**passed 10 of 18 rows**. All nine SHA-1 rows and the SHA-256 import row
-passed. The wide SHA-256 clone and v0 fetch exhausted the Database deadline.
-The v1 fetch connection reset, and the wide and push servers exceeded their
-60-second drain limit. The run recorded 571 passing checks out of 582.
-The same binary later passed all 80 checks in a replay of the affected
-SHA-256 histories on a lightly loaded worker. Both servers drained in
-under 0.13 seconds. The cause of the whole-suite failures remains open.
-At `665f9e36` the two v2 advertisement rows had failed across seven
-histories. At `a184cab0` the recorded differences concerned the wide
-history and server drain. The October 21 suite at `18f77336` passed all
-624 checks in its then-current suite.
+seven repository histories. On November 24, the optimized `a184cab0`
+binary **passed all 18 rows and all 624 checks** on a lightly loaded Linux
+worker. All 18 servers drained. The longest interval from stop-file
+creation to final server output was 0.133 seconds.
+
+An earlier complete run with the same binary passed 10 of 18 rows and
+571 of 582 checks. The wide SHA-256 clone and v0 fetch reached the Database
+deadline, the v1 connection reset, and two servers exceeded their drain
+limit. The cause of the difference remains open.
 
 `./scripts/verify.sh tier-a` builds the executable and writes a
-`tier_a_receipt.json`. The November comparisons used the same declared
-rows and receipt generator with separately built release-profile executables.
-The `a184cab0` receipt SHA-256 is
-`34eb7741b9ac48c8cd05cde201a1e8b3657e90550cbb8c14075d5a1642ea1a13`.
+`tier_a_receipt.json`. Both comparisons used the declared suite and receipt
+generator with the same separately built release executable. The passing
+receipt has SHA-256
+`a16678cb9e32eae3b53a26e4dcc69e2c3419d4f5ad71bfa7aeb4f7351ad3bd45`.
 [Declared rows](registries/compatibility_tiers.tsv) ·
 [Compatibility matrix](docs/GIT_COMPATIBILITY_MATRIX.md#tier-a-the-declared-differential-tier) ·
 [Dated assessment](docs/REALITY_CHECK_AND_BRIDGE_PLAN.md)
