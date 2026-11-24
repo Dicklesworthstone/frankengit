@@ -48,9 +48,11 @@ hidden-ref policy still apply to both PR branches, even for historical reads.
 
 ## Response contract
 
-All interfaces return `type: "pull_request_checks"`, `schema_version: 1`, repository
-and incarnation bindings, `object_format`, and the decimal-string PR `number`.
-For a visible native PR, the response includes:
+The standalone checks readers return `type: "pull_request_checks"`, `schema_version: 1`,
+repository and incarnation bindings, `object_format`, and the decimal-string PR
+`number`. The optional checks in `fg pr show` use the enclosing PR detail response
+and carry their own subject, head and continuation. For a visible native PR,
+the standalone checks response includes:
 
 - `source_head` and continuation `snapshot_token`;
 - `pull_request_version` as a decimal string;
@@ -160,11 +162,12 @@ The conclusions are `action_required`, `success`, `failure`, `cancelled` and
 `timed_out`. The canonical publisher retains the actual mapped job outcome;
 older observations can retain `action_required`. A `success` observation by
 itself does not establish independent execution verification or authorize a
-merge. Every checks response has `scope: "trusted_workflow_observations"` and
+merge. Every standalone checks response has `scope: "trusted_workflow_observations"` and
 `merge_permission: null`.
 This read capability neither schedules workflows nor publishes check results.
-Independent runner attestation and automatic PR/push-triggered CI remain separate
-work in the broader CI integration bead `frankengit-root-doctrine-x2mv.4.12`.
+The native workflow service can execute trusted jobs after a push and publish
+checks for the selected commit. Independent runner attestation and delivery for
+all declared events remain open in `frankengit-root-doctrine-x2mv.4.12`.
 
 The explicit selected-event scan is capped at 65,536 events and 128 MiB of frames,
 with pages capped at 100 summaries. These are additional reader bounds, not a

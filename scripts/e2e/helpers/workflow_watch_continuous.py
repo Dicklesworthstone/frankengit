@@ -172,7 +172,7 @@ class Watcher:
 
 
 class Fixture:
-    def __init__(self, campaign, fmt, label, active=False):
+    def __init__(self, campaign, fmt, label, active=False, *, workflow_source=None):
         self.campaign, self.format = campaign, fmt
         self.root = campaign.root / f"{fmt}-{label}"
         self.root.mkdir()
@@ -201,6 +201,8 @@ class Fixture:
                      f"      - run: printf 'independent' >> {late}\n")
         workflow = ("name: native-continuous\non: push\njobs:\n  a:\n"
                     f"    runs-on: fgit-trusted-local\n    steps:\n      - run: {action}\n{later}")
+        if workflow_source is not None:
+            workflow = workflow_source
         blob = write_object(self.source, fmt, "blob", workflow.encode())
         ci = write_object(self.source, fmt, "tree", tree([(b"100644", b"build.yml", blob)]))
         root_tree = write_object(self.source, fmt, "tree", tree([(b"40000", b"ci", ci)]))
