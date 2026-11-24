@@ -64,6 +64,27 @@ fn only_public_resource_causes_are_exposed_in_git_errors() {
 }
 
 #[test]
+fn only_reviewed_fetch_grammar_is_public_in_direct_and_nested_git_errors() {
+    for (feature, public) in [
+        ("zero shallow depth", true),
+        ("sparse filter requires a visible ref:path blob", true),
+        ("POSIX named, collating or equivalence class", true),
+        ("sparse filter context required", false),
+        ("zero shallow depth: private implementation detail", false),
+    ] {
+        let expected =
+            public.then(|| format!("ERR unsupported fetch feature: {feature}\n").into_bytes());
+        let refusal = || NodePackMaterializationRefusal::UnsupportedFetch(feature);
+        for error in [
+            NodeSmartHttpRefusal::from(refusal()),
+            NodeSmartHttpRefusal::from(NodeGitDaemonServeRefusal::from(refusal())),
+        ] {
+            assert_eq!(line(&error), expected, "feature {feature:?}");
+        }
+    }
+}
+
+#[test]
 fn work_timeout_has_a_bounded_operator_actionable_git_diagnostic() {
     let refusal =
         NodeGitDaemonServeRefusal::from(GitDaemonTransportRefusal::SessionDeadlineExceeded {

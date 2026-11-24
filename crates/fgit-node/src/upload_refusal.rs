@@ -1,4 +1,4 @@
-//! Bounded Git diagnostics for public resource failures before pack output.
+//! Bounded Git diagnostics for public resource and grammar failures before pack output.
 //!
 //! Git, SSH and HTTP use the same allowlist. Storage errors, object identities,
 //! authority internals and arbitrary pack-builder diagnostics stay local.
@@ -20,9 +20,27 @@ pub(super) fn pack_line(refusal: &NodePackMaterializationRefusal) -> Option<Vec<
             refusal.to_string()
         }
         NodePackMaterializationRefusal::BudgetClassExhausted { .. } => refusal.to_string(),
-        // These grammar/profile labels are static server-owned strings. In
-        // particular a sparse pattern refusal contains no client bytes or OID.
-        NodePackMaterializationRefusal::UnsupportedFetch(_) => refusal.to_string(),
+        // UnsupportedFetch can also carry internal explanations. Only these
+        // request grammar and profile labels are part of the public Git error.
+        NodePackMaterializationRefusal::UnsupportedFetch(
+            "shallow history"
+            | "zero shallow depth"
+            | "nonpositive shallow timestamp"
+            | "shallow cutoffs select no commits"
+            | "depth and time/ref cutoffs cannot be combined"
+            | "relative deepening requires a positive bounded depth"
+            | "relative deepening cannot combine time/ref boundaries"
+            | "sparse filters"
+            | "sparse filter requires a visible blob OID"
+            | "sparse filter requires a visible ref:path blob"
+            | "NUL in pattern"
+            | "trailing escape"
+            | "escaped path separator"
+            | "unclosed byte class"
+            | "reversed byte range"
+            | "trailing class escape"
+            | "POSIX named, collating or equivalence class",
+        ) => refusal.to_string(),
         _ => return None,
     };
     Some(bounded_line(&message))
