@@ -3,7 +3,9 @@
 //! canonical data is still written and reread through FrankenSQLite.
 
 use super::*;
-use crate::evidence_staging::{EvidenceBatch, stage_commit_in, stage_decision_in};
+use crate::evidence_staging::{
+    EvidenceBatch, PendingRefEvidence, prepare_commit_in, stage_commit_in, stage_decision_in,
+};
 use crate::{
     ADMISSION_FORGE_EVENT_BATCH_KEY_PREFIX, ADMISSION_INVARIANT_EVIDENCE_KEY_PREFIX,
     ADMISSION_OUTBOX_EFFECT_BATCH_KEY_PREFIX, ADMISSION_RETENTION_DELTA_KEY_PREFIX,
@@ -187,6 +189,13 @@ fn bodies(node: &OneNode, authenticated: bool) -> DecisionEvidenceBodies {
 }
 
 fn prepared_ref_commit(node: &OneNode) -> (DecisionEvidenceBodies, PreparedCanonicalCommit) {
+    prepared_ref_commit_named(node, b"refs/tags/grouped-staging")
+}
+
+fn prepared_ref_commit_named(
+    node: &OneNode,
+    name: &[u8],
+) -> (DecisionEvidenceBodies, PreparedCanonicalCommit) {
     let oid = node
         .put_git_object(ObjectType::Blob, b"grouped ref commit object\n".to_vec())
         .unwrap()
@@ -200,7 +209,7 @@ fn prepared_ref_commit(node: &OneNode) -> (DecisionEvidenceBodies, PreparedCanon
     request.statements = vec![fgit_reference::intent::Statement {
         intents: vec![fgit_reference::intent::Intent::Ref(
             fgit_reference::intent::RefIntent::Update {
-                name: RefName::try_new(b"refs/tags/grouped-staging").unwrap(),
+                name: RefName::try_new(name).unwrap(),
                 expected: fgit_reference::refs::ExpectedRefState::Absent,
                 new: oid,
                 force: false,
@@ -497,6 +506,197 @@ fn prepared_commit_batches_eight_exact_bodies_under_every_live_layout() {
             );
             node.shutdown().unwrap();
         }
+    }
+}
+
+#[test]
+fn separate_commits_share_only_physical_puts_and_preserve_every_eager_frame() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for layout in [
+            RootLayoutVersion::LegacyWholeBody,
+            RootLayoutVersion::AuthorityBoundObjectClosureMerkleV2,
+        ] {
+            let scratch = ScratchDirectory::new();
+            let (node, _) = OneNode::init(
+                test_config(scratch.path().to_path_buf())
+                    .with_object_format(format)
+                    .with_root_layout(layout),
+            )
+            .unwrap();
+            let request = node.request_context();
+            let eager = Observe::new(&node);
+            let grouped = Observe::new(&node);
+            let mut pending = PendingRefEvidence::default();
+            for n in 0..9 {
+                let name = format!("refs/tags/grouped-{n}");
+                let (bodies, mut prepared) = prepared_ref_commit_named(&node, name.as_bytes());
+                let mut reference = prepared.clone();
+                node.runtime().block_on(async {
+                    prepare_commit_in(
+                        &grouped,
+                        request.authority(),
+                        &bodies,
+                        &mut prepared,
+                        &|| false,
+                        Some(&mut pending),
+                    )
+                    .await
+                    .unwrap();
+                    stage_commit_in(
+                        &eager,
+                        request.authority(),
+                        &bodies,
+                        &mut reference,
+                        &|| false,
+                    )
+                    .await
+                    .unwrap();
+                });
+                assert_eq!(
+                    prepared.into_materialization(),
+                    reference.into_materialization()
+                );
+                if n < 8 {
+                    assert!(grouped.batches.lock().unwrap().is_empty());
+                } else {
+                    assert_eq!(*grouped.batches.lock().unwrap(), [64]);
+                }
+            }
+            node.runtime()
+                .block_on(pending.flush(&grouped, request.authority(), &|| false))
+                .unwrap();
+            assert_eq!(*grouped.batches.lock().unwrap(), [64, 8]);
+            assert_eq!(*eager.batches.lock().unwrap(), [8; 9]);
+            assert_eq!(grouped.singles.load(Ordering::Relaxed), 0);
+            let grouped_frames = grouped.frames.lock().unwrap();
+            assert_eq!(*grouped_frames, *eager.frames.lock().unwrap());
+            assert_ne!(
+                grouped_frames[6].0, grouped_frames[14].0,
+                "successive ref-state commitments are distinct"
+            );
+            assert_eq!(
+                grouped_frames[7], grouped_frames[15],
+                "shared closure is an identical immutable retry"
+            );
+            drop(grouped_frames);
+            node.shutdown().unwrap();
+        }
+    }
+}
+
+#[test]
+fn a_lost_or_cancelled_cross_commit_write_leaves_an_unpublished_retryable_prefix() {
+    for fault in [Fault::LostAfter(8), Fault::CancelAfter, Fault::Conflict(14)] {
+        let scratch = ScratchDirectory::new();
+        let (node, _) = OneNode::init(test_config(scratch.path().to_path_buf())).unwrap();
+        let request = node.request_context();
+        let before = node
+            .runtime()
+            .block_on(node.authenticate_authority_head())
+            .unwrap();
+        let mut commits = [
+            prepared_ref_commit_named(&node, b"refs/tags/one"),
+            prepared_ref_commit_named(&node, b"refs/tags/two"),
+        ];
+        let mut observer = Observe::new(&node);
+        observer.fault = fault;
+        let failed = node.runtime().block_on(async {
+            let mut pending = PendingRefEvidence::default();
+            for (bodies, prepared) in &mut commits {
+                prepare_commit_in(
+                    &observer,
+                    request.authority(),
+                    bodies,
+                    prepared,
+                    &|| false,
+                    Some(&mut pending),
+                )
+                .await
+                .unwrap();
+            }
+            assert!(observer.frames.lock().unwrap().is_empty());
+            pending
+                .flush(&observer, request.authority(), &|| {
+                    observer.cancelled.load(Ordering::SeqCst)
+                })
+                .await
+                .unwrap_err()
+        });
+        assert_eq!(*observer.batches.lock().unwrap(), [16]);
+        let frames = observer.frames.lock().unwrap().clone();
+        let ref_state = |index: usize| {
+            node.runtime()
+                .block_on(AsyncAuthorityStore::read_immutable(
+                    &node.authority,
+                    request.authority(),
+                    &frames[index].0,
+                ))
+                .unwrap()
+        };
+        match fault {
+            Fault::LostAfter(8) => {
+                assert!(matches!(
+                    failed,
+                    AdmissionMaterializationRefusal::ImmutableBatch(
+                        ImmutableBatchFailure::Interrupted { completed: 8, .. }
+                    )
+                ));
+                assert_eq!(ref_state(6), ImmutableRead::Present(frames[6].1.clone()));
+                assert_eq!(ref_state(14), ImmutableRead::Absent);
+            }
+            Fault::CancelAfter => {
+                assert!(matches!(failed, AdmissionMaterializationRefusal::Cancelled));
+                assert_eq!(ref_state(14), ImmutableRead::Present(frames[14].1.clone()));
+            }
+            Fault::Conflict(14) => {
+                assert!(matches!(
+                    failed,
+                    AdmissionMaterializationRefusal::ImmutableConflict
+                ));
+                assert_eq!(
+                    ref_state(14),
+                    ImmutableRead::Present(b"pre-existing conflicting bytes".to_vec())
+                );
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            node.runtime()
+                .block_on(node.authenticate_authority_head())
+                .unwrap(),
+            before
+        );
+        if !matches!(fault, Fault::Conflict(_)) {
+            let retry = Observe::new(&node);
+            node.runtime().block_on(async {
+                let mut pending = PendingRefEvidence::default();
+                for (bodies, prepared) in &mut commits {
+                    prepare_commit_in(
+                        &retry,
+                        request.authority(),
+                        bodies,
+                        prepared,
+                        &|| false,
+                        Some(&mut pending),
+                    )
+                    .await
+                    .unwrap();
+                }
+                pending
+                    .flush(&retry, request.authority(), &|| false)
+                    .await
+                    .unwrap();
+            });
+            assert_eq!(*retry.frames.lock().unwrap(), frames);
+            assert_eq!(ref_state(14), ImmutableRead::Present(frames[14].1.clone()));
+            assert_eq!(
+                node.runtime()
+                    .block_on(node.authenticate_authority_head())
+                    .unwrap(),
+                before
+            );
+        }
+        node.shutdown().unwrap();
     }
 }
 

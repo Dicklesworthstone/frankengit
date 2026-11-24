@@ -41,6 +41,54 @@ pub const MAX_BATCH_DECISIONS: usize = 64;
 /// Maximum canonical decision-batch bytes staged for one receive publication.
 pub const MAX_BATCH_BYTES: usize = 1024 * 1024;
 
+/// Private staging lifecycle for one unpublished ref chunk and one CAS attempt.
+/// Preparations may retain bounded immutable frames. A semantic refusal applies
+/// only to its own command. A failed storage flush stops publication of the
+/// attempt and must never be turned into a sibling's terminal refusal.
+pub trait RefBatchStaging: Send {
+    /// Prepare one committing fold in wire order. Its returned roots may enter
+    /// the private overlay; they are publishable only after the final flush.
+    fn prepare<'a>(
+        &'a mut self,
+        state: &'a BatchRefState,
+        request: &'a TransactionRequest,
+        fold: &'a TransactionFoldReport,
+        closure: &'a ValidatedClosure,
+    ) -> impl Future<Output = Result<CommitMaterialization, ProjectionFailure>> + Send + 'a;
+
+    /// Settle every pending immutable placement before the next refusal's
+    /// evidence, or before attempting the one authority-head publication.
+    fn flush(&mut self) -> impl Future<Output = Result<(), RefusalCode>> + Send;
+}
+
+pub(super) struct ImmediateRefBatch<'a, S: AsyncAuthorityStore + ?Sized, P: ?Sized> {
+    pub(super) projection: &'a P,
+    pub(super) store: &'a S,
+    pub(super) cx: &'a S::Context,
+}
+
+impl<S, P> RefBatchStaging for ImmediateRefBatch<'_, S, P>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    P: AsyncAdmissionProjection<S> + ?Sized,
+{
+    async fn prepare<'a>(
+        &'a mut self,
+        state: &'a BatchRefState,
+        request: &'a TransactionRequest,
+        fold: &'a TransactionFoldReport,
+        closure: &'a ValidatedClosure,
+    ) -> Result<CommitMaterialization, ProjectionFailure> {
+        self.projection
+            .materialize_batch_commit_async(self.store, self.cx, state, request, fold, closure)
+            .await
+    }
+
+    async fn flush(&mut self) -> Result<(), RefusalCode> {
+        Ok(())
+    }
+}
+
 /// Ref state derived from an authenticated basis and accepted earlier folds.
 ///
 /// Construction and advancement are private to the admission driver. A
@@ -901,6 +949,7 @@ where
                 input.closure.object_closure_root
             };
             let mut attempt = BatchAttempt::new(basis.clone(), snapshot, expected_closure_root)?;
+            let mut staging = projection.begin_ref_batch(store, cx);
             for index in start..end {
                 if known[index].is_some() {
                     continue;
@@ -911,10 +960,8 @@ where
                     PublicationPreparation::Refuse(code) => code,
                     PublicationPreparation::Commit(prepared) => {
                         match complete_async_commit_materialization(
-                            projection
-                                .materialize_batch_commit_async(
-                                    store,
-                                    cx,
+                            staging
+                                .prepare(
                                     attempt.state()?,
                                     &prepared.request,
                                     &prepared.fold,
@@ -935,6 +982,10 @@ where
                         }
                     }
                 };
+                staging
+                    .flush()
+                    .await
+                    .map_err(AdmissionError::AsyncProjectionUnavailable)?;
                 let refusal = attempt.stamp_refusal(
                     prepare_refusal_record_async(
                         projection,
@@ -951,6 +1002,11 @@ where
                 require_staged_refusal(store.put_if_absent(cx, &key, &bytes).await?)?;
                 attempt.refuse(&refusal)?;
             }
+            staging
+                .flush()
+                .await
+                .map_err(AdmissionError::AsyncProjectionUnavailable)?;
+            drop(staging);
             let publication = attempt.seal(&cumulative, receipt.token())?;
             let (resolved, published) = match publication_resolution(
                 fgit_chronicle::publish_with_cumulative_async(
