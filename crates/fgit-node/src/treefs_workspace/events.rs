@@ -1,6 +1,7 @@
 //! Repository-wide canonical forge event feed for local integrations.
 mod scoped;
 mod selection;
+mod wait;
 pub use scoped::{ForgeEventDisclosureProfile, ForgeEventReadGrants};
 
 use super::workspace_request_live;
@@ -15,6 +16,7 @@ use std::sync::Arc;
 pub enum ForgeEventReadRefusal {
     InvalidLimit,
     InvalidCursor,
+    InvalidWait,
     SnapshotMoved,
     NoReadScope,
     ResponseLimit,
@@ -202,6 +204,7 @@ impl OneNode {
 #[cfg(test)]
 mod tests {
     mod cache;
+    mod wait;
 
     use super::*;
     use crate::{LoopbackReceiveSession, NodeConfig};
