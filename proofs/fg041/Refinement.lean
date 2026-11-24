@@ -23,53 +23,54 @@ namespace FrankenGit.Proof.Refinement
 
 open FrankenGit.Proof.OrderedResidue
 
-/-- The abstraction function's only numeric content.
+/-- The model starts at zero. A concrete generation below this history's genesis
+has no model coordinate. Natural-number subtraction alone would map it to zero. -/
+def rebase (genesis value : Nat) : Option Nat :=
+  if genesis ≤ value then some (value - genesis) else none
 
-The reference model's head generations begin at its genesis generation; the Lean
-model's begin at zero. The vectors carry the concrete numbers so they stay
-traceable to the histories they came from, and the offset is applied here, where
-a reader of the proof will look for it. -/
-def rebase (genesis value : Nat) : Nat := value - genesis
-
-/-- One exported operation as a model operation. -/
-def toOperation (genesis : Nat) : FgitBridge.Op → Operation
-  | .sealRequest target => .sealRequest target
+/-- Translate one exported operation, checking each publication coordinate. -/
+def toOperation (genesis : Nat) : FgitBridge.Op → Option Operation
+  | .sealRequest target => some (.sealRequest target)
   | .decide target committed =>
-      .decide target (if committed then TerminalOutcome.committed else TerminalOutcome.refused)
+      some (.decide target (if committed then TerminalOutcome.committed else TerminalOutcome.refused))
   | .retry target committed =>
-      .retry target (if committed then TerminalOutcome.committed else TerminalOutcome.refused)
-  | .publish predecessor generation refEffects forgeEffects =>
-      .publish { predecessor := rebase genesis predecessor
-               , generation := rebase genesis generation
-               , refEffects := refEffects
-               , forgeEffects := forgeEffects }
-  | .interruptedPublication predecessor generation =>
-      .interruptedPublication { predecessor := rebase genesis predecessor
-                              , generation := rebase genesis generation
-                              , refEffects := []
-                              , forgeEffects := [] }
+      some (.retry target (if committed then TerminalOutcome.committed else TerminalOutcome.refused))
+  | .publish predecessor generation refEffects forgeEffects => do
+      return .publish { predecessor := ← rebase genesis predecessor
+                      , generation := ← rebase genesis generation
+                      , refEffects := refEffects
+                      , forgeEffects := forgeEffects }
+  | .interruptedPublication predecessor generation => do
+      return .interruptedPublication { predecessor := ← rebase genesis predecessor
+                                     , generation := ← rebase genesis generation
+                                     , refEffects := [], forgeEffects := [] }
 
-/-- One concrete step can be several abstract ones, applied in order. -/
-def applyStep (genesis : Nat) (state : State) (step : FgitBridge.Step) : State :=
-  step.ops.foldl (fun current op => apply (toOperation genesis op) current) state
+/-- One concrete step can be several abstract operations, applied in order. -/
+def applyStep (genesis : Nat) (state : State) (step : FgitBridge.Step) : Option State :=
+  step.ops.foldlM (fun current op => do return apply (← toOperation genesis op) current) state
 
-/-- Replays a history, refusing at the first step whose generation disagrees.
-
-Returning at the first divergence rather than at the end is deliberate: a check
-that reported only a final mismatch would say a history diverges without saying
-where, and the step index is the whole value of a trace. -/
+/-- Rebase each recorded observation only when it has a valid model coordinate. -/
 def checkSteps (genesis : Nat) : State → List FgitBridge.Step → Bool
   | _, [] => true
   | state, step :: rest =>
-      let next := applyStep genesis state step
-      if next.generation = rebase genesis step.generationAfter then
-        checkSteps genesis next rest
-      else
-        false
+      match applyStep genesis state step with
+      | none => false
+      | some next =>
+          rebase genesis step.generationAfter == some next.generation && checkSteps genesis next rest
 
 /-- A history refines the model when replaying it reproduces every generation. -/
 def checkTrace (trace : FgitBridge.Trace) : Bool :=
   checkSteps trace.genesisGeneration initial trace.steps
+
+/-- Regression witnesses for the origin of a trace. An unchanged head and an
+interrupted publication must validate their coordinates just as a winning CAS does. -/
+example :
+    checkSteps 1 initial [⟨0, [], 0⟩] = false ∧
+    checkSteps 1 initial [⟨0, [.publish 0 2], 2⟩] = false ∧
+    checkSteps 1 initial [⟨0, [.interruptedPublication 1 0], 1⟩] = false ∧
+    checkSteps 1 initial [⟨0, [], 1⟩] = true ∧
+    checkSteps 1 initial [⟨0, [.publish 1 2], 2⟩] = true ∧
+    checkSteps 1 initial [⟨0, [.interruptedPublication 1 2], 1⟩] = true := by decide
 
 /-- Every exported history is a run of the model.
 

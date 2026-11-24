@@ -17,7 +17,8 @@ concurrency lab schedule its two competing staged batches at the common head.
 For each order the reference model executes both conditional updates. Exactly
 one must win, and the losing update must preserve the winner’s head and roots.
 The bridge exports both executions to fresh Lean modules. The pinned kernel
-checks the head generation at every projected step. It also checks that the
+checks the head generation at every projected step. A recorded head, publication
+predecessor or proposed generation below the trace genesis fails replay. It also checks that the
 same two writers sealed in both histories and that each won exactly once.
 This covers a single two-writer model race. Production storage, native crash recovery, and the
 other schedule spaces have separate verification requirements.
