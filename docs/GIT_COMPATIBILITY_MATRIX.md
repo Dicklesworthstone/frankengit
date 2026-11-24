@@ -340,9 +340,11 @@ Tier A rows until the oracle has a constrained mode for them. Shallow and
 partial clone, LFS, signed push, bundle URI and notes are outside Tier A. This
 section states no result; the receipt does.
 
-Last observed receipt (an observation, not a standing claim): 2026-10-21 at
-`18f77336`, clean tree, receipt sha256 `b98bfaa2…`, `fg` sha256 `a298e9ce…`.
-Verdict **pass**: 18 of 18 rows and 624 of 624 checks, over seven corpora,
+The November 24 repeat on clean `a184cab07524fa3f3daf41d53c02f852f359beb6` passed all 18 declared rows and all 624 checks in 24 minutes 43 seconds. The optimized `fg` SHA-256 was `998f7390f1a9b28488cfb5789ac78106d4682296cc7db0eb81d3c39601349b0b`. The official receipt SHA-256 was `a16678cb9e32eae3b53a26e4dcc69e2c3419d4f5ad71bfa7aeb4f7351ad3bd45`. All 18 servers drained within the original 60-second allowance.
+
+On another host the same executable passed 10 of 18 rows and 571 of 582 checks. The wide SHA-256 repository reached the Database deadline on clone and v0 fetch, v1 fetch reset, and two servers exceeded the drain limit. That receipt has SHA-256 `34eb7741b9ac48c8cd05cde201a1e8b3657e90550cbb8c14075d5a1642ea1a13`. Both complete runs used the declared suite and the official receipt generator with the same Git 2.54.0 installation digest. The cause of their different outcomes remains open. [Dated assessment](REALITY_CHECK_AND_BRIDGE_PLAN.md)
+
+The October 21 receipt at `18f77336` (clean tree, receipt SHA-256 `b98bfaa2…`, `fg` SHA-256 `a298e9ce…`) recorded 18 of 18 rows and 624 of 624 checks, over seven corpora,
 with the push node at `fg serve`'s default budgets. The 20,100-object import
 took about 15 s, the 20,000-object push about 17 s, and the 1,200-commit
 import 4.0 s. Pinned git-2.54.0 clones that 1,200-commit corpus in 0.08 s on
