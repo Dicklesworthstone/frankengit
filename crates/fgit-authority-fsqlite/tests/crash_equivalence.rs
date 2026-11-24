@@ -1264,8 +1264,9 @@ fn an_abandoned_store_releases_its_descriptors_too() {
 // fixtures cannot encode a domain/algorithm pairing the registry forbids.
 
 use fgit_authority::{
-    DuplicateScan, authority_head_identity, decision_batch_identity, outcome_key,
-    publish_decisions_async, scan_for_existing_decisions_async,
+    DuplicateScan, OutcomeLookup, TerminalOutcome, authority_head_identity,
+    decision_batch_identity, indexed_outcome_async, outcome_key, publish_decisions_async,
+    scan_for_existing_decisions_async,
 };
 use fgit_codec::RepositoryDecision;
 use fgit_codec::{
@@ -1436,6 +1437,27 @@ fn a_kill_around_the_atomic_publication_leaves_head_and_outcomes_agreeing() {
          without it this test passes down the did-not-move branch and proves nothing about \
          atomicity: {published:?}"
     );
+    let decision = &batch.decisions[0];
+    let before = store.store.body_cache_stats();
+    let indexed = node
+        .block_on(indexed_outcome_async(
+            &store.store,
+            &store.cx,
+            tenant_id(),
+            repository_id(),
+            decision.tx_id,
+        ))
+        .expect("the published outcome reconciles");
+    assert_eq!(
+        indexed,
+        OutcomeLookup::Decided(TerminalOutcome {
+            decision_sequence: decision.decision_sequence,
+            outcome: decision.outcome,
+        })
+    );
+    let after = store.store.body_cache_stats();
+    assert_eq!(after.hits, before.hits + 1);
+    assert_eq!(after.misses, before.misses);
     store.kill();
 
     let reopened = Crashable::open(&node, scratch.as_str(), StoreInstanceId::from_raw(1));
@@ -1476,6 +1498,93 @@ fn a_kill_around_the_atomic_publication_leaves_head_and_outcomes_agreeing() {
             "an acknowledged publication must not be absent after reopen"
         );
     }
+}
+
+#[test]
+fn a_duplicate_outcome_is_cached_only_if_all_its_bytes_commit() {
+    publish_duplicate_outcomes("atomic-publish-duplicate-outcomes", 2, 3, true);
+}
+
+#[test]
+fn the_immutable_batch_cache_limits_do_not_refuse_larger_atomic_publications() {
+    use fgit_authority::{MAX_IMMUTABLE_BATCH_BYTES, MAX_IMMUTABLE_BATCH_ITEMS};
+
+    publish_duplicate_outcomes("publish-at-cache-count", MAX_IMMUTABLE_BATCH_ITEMS, 1, true);
+    publish_duplicate_outcomes(
+        "publish-above-cache-count",
+        MAX_IMMUTABLE_BATCH_ITEMS + 1,
+        1,
+        false,
+    );
+    // The two keys take this pair over the byte budget even though the
+    // combined values alone fit exactly.
+    publish_duplicate_outcomes(
+        "publish-above-cache-bytes",
+        2,
+        MAX_IMMUTABLE_BATCH_BYTES / 2,
+        false,
+    );
+}
+
+fn publish_duplicate_outcomes(label: &str, count: usize, body_bytes: usize, expect_cached: bool) {
+    let scratch = Scratch::new(label);
+    let node = node();
+    let key = head_key();
+    let genesis = genesis_head_body();
+    let store = Crashable::open(&node, scratch.as_str(), StoreInstanceId::from_raw(1));
+    let genesis_bytes = encode_body(&genesis).expect("genesis encodes");
+    store.init_head(&key, HeadGeneration::FIRST, &genesis_bytes);
+    let token = store.token(&key);
+    let tx = tx_of(0xd1);
+    let DuplicateScan::Absent(witness) = node
+        .block_on(scan_for_existing_decisions_async(
+            &store.store,
+            &store.cx,
+            &key,
+            &[tx],
+        ))
+        .expect("genesis reads")
+    else {
+        panic!("genesis already decided the transaction");
+    };
+    let outcome_key = outcome_key(tenant_id(), repository_id(), tx).expect("the key derives");
+    let next = successor_of(&genesis, batch_body_id(&batch_for(&genesis)));
+    let next_bytes = encode_body(&next).expect("the successor encodes");
+    let publish = |entries: &[(ImmutableKey, Vec<u8>)]| {
+        node.block_on(store.store.publish_head_with_outcomes(
+            &store.cx,
+            &key,
+            token,
+            next.generation,
+            &next_bytes,
+            entries,
+            &witness,
+        ))
+    };
+    // A conflicting second entry must roll back the first insertion, including
+    // any in-process copy. The storage primitive accepts opaque outcome bytes.
+    let value = vec![1; body_bytes];
+    let mut entries = vec![(outcome_key.clone(), value.clone()); count];
+    entries[1].1[0] = 2;
+    assert!(matches!(
+        publish(&entries),
+        Err(EngineError::Contract(
+            fgit_authority::AuthorityRefusal::TokenBodyMismatch
+        ))
+    ));
+    assert_eq!(store.token(&key), token);
+    assert_eq!(store.read_body(&outcome_key), Ok(ImmutableRead::Absent));
+
+    entries[1].1[0] = 1;
+    assert!(matches!(publish(&entries), Ok(CasOutcome::Committed(_))));
+    let before = store.store.body_cache_stats();
+    assert_eq!(
+        store.read_body(&outcome_key),
+        Ok(ImmutableRead::Present(value))
+    );
+    let after = store.store.body_cache_stats();
+    assert_eq!(after.hits - before.hits, u64::from(expect_cached));
+    assert_eq!(after.misses - before.misses, u64::from(!expect_cached));
 }
 
 #[test]

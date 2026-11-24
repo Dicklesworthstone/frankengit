@@ -246,6 +246,9 @@ struct Projection {
     snapshots: AtomicUsize,
     materializations: AtomicUsize,
     interrupt_at: AtomicUsize,
+    flushes: AtomicUsize,
+    fail_flush_at: usize,
+    refusals: AtomicUsize,
     protected: Option<RefName>,
     equivalent_authority: bool,
     authority_tracks_refs: bool,
@@ -315,7 +318,44 @@ impl AdmissionProjection for Projection {
         self.inner.materialize_refusal(basis, tx, code)
     }
 }
+struct ObservedRefBatch<'a> {
+    projection: &'a Projection,
+    store: &'a AsyncMemory,
+}
+
+impl crate::microbatch::RefBatchStaging for ObservedRefBatch<'_> {
+    async fn prepare<'a>(
+        &'a mut self,
+        state: &'a crate::microbatch::BatchRefState,
+        request: &'a TransactionRequest,
+        fold: &'a TransactionFoldReport,
+        closure: &'a ValidatedClosure,
+    ) -> Result<CommitMaterialization, ProjectionFailure> {
+        self.projection
+            .materialize_batch_commit_async(self.store, &(), state, request, fold, closure)
+            .await
+    }
+
+    async fn flush(&mut self) -> Result<(), RefusalCode> {
+        let ordinal = self.projection.flushes.fetch_add(1, Ordering::SeqCst) + 1;
+        if ordinal == self.projection.fail_flush_at {
+            return Err(RefusalCode::CancellationInProgress);
+        }
+        Ok(())
+    }
+}
+
 impl AsyncAdmissionProjection<AsyncMemory> for Projection {
+    fn begin_ref_batch<'a>(
+        &'a self,
+        store: &'a AsyncMemory,
+        _: &'a (),
+    ) -> impl crate::microbatch::RefBatchStaging + 'a {
+        ObservedRefBatch {
+            projection: self,
+            store,
+        }
+    }
     fn supports_ref_microbatching(&self) -> bool {
         true
     }
@@ -395,8 +435,11 @@ impl AsyncAdmissionProjection<AsyncMemory> for Projection {
     ) -> impl Future<Output = Result<RefusalMaterialization, ProjectionFailure>> + Send + 'a {
         std::future::poll_fn(move |_| {
             std::task::Poll::Ready(
-                self.materialize_refusal(basis, tx, code)
-                    .map_err(ProjectionFailure::Refuse),
+                {
+                    self.refusals.fetch_add(1, Ordering::SeqCst);
+                    self.materialize_refusal(basis, tx, code)
+                }
+                .map_err(ProjectionFailure::Refuse),
             )
         })
     }
@@ -427,6 +470,9 @@ fn setup(initial: &[(&[u8], u8)]) -> (AsyncMemory, SharedCanonical, Projection) 
         snapshots: AtomicUsize::new(0),
         materializations: AtomicUsize::new(0),
         interrupt_at: AtomicUsize::new(0),
+        flushes: AtomicUsize::new(0),
+        fail_flush_at: 0,
+        refusals: AtomicUsize::new(0),
         protected: None,
         equivalent_authority: true,
         authority_tracks_refs: false,
@@ -706,6 +752,55 @@ fn cancelled_later_chunk_keeps_the_verified_prefix_and_retry_recovers_it() {
             run(&store, &projection, &validated(&store, commands, false)).unwrap(),
             retried
         );
+    }
+}
+
+#[test]
+fn a_failed_staging_flush_never_decides_a_sibling_and_retry_preserves_its_seal() {
+    for fail_flush_at in [1, 2] {
+        let (store, staging, mut projection) = setup(&[]);
+        projection.fail_flush_at = fail_flush_at;
+        projection.protected = Some(RefName::try_new(b"refs/heads/protected").unwrap());
+        let commands = vec![
+            command("refs/heads/a", 0, 1),
+            command("refs/heads/protected", 0, 2),
+            command("refs/heads/b", 0, 1),
+        ];
+        let receive = validated(&store, commands, false);
+        let interrupted = run(&store, &projection, &receive).unwrap_err();
+        assert!(matches!(
+            interrupted.admission_error(),
+            AdmissionError::AsyncProjectionUnavailable(RefusalCode::CancellationInProgress)
+        ));
+        assert!(interrupted.completed_commands().is_empty());
+        assert_eq!(
+            projection.refusals.load(Ordering::SeqCst),
+            fail_flush_at - 1,
+            "prior committed frames flush before any independent refusal evidence"
+        );
+        assert_eq!(store.publications.load(Ordering::SeqCst), 0);
+        assert!(current_refs(&store, &staging).is_empty());
+        let retried = run(&store, &projection, &receive).unwrap();
+        assert_eq!(Some(&retried.session), interrupted.session());
+        assert!(matches!(
+            retried.commands[0].terminal.outcome,
+            DecisionOutcome::Committed { .. }
+        ));
+        assert!(matches!(
+            retried.commands[1].terminal.outcome,
+            DecisionOutcome::Refused {
+                code: RefusalCode::ProtectedRefTransitionDenied,
+                ..
+            }
+        ));
+        assert!(matches!(
+            retried.commands[2].terminal.outcome,
+            DecisionOutcome::Committed { .. }
+        ));
+        assert_eq!(current_refs(&store, &staging).len(), 2);
+        assert_eq!(store.publications.load(Ordering::SeqCst), 1);
+        assert_eq!(run(&store, &projection, &receive).unwrap(), retried);
+        assert_eq!(store.publications.load(Ordering::SeqCst), 1);
     }
 }
 
