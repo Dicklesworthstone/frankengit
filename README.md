@@ -1197,17 +1197,21 @@ FrankenGit does **not** claim a fictional standardized “protocol v2 push” co
 Compatibility is differential against pinned upstream Git versions and source-derived/adversarial corpora. “Clone worked once” is not evidence of compatibility.
 
 Tier A covers pinned Git 2.54.0 over `git://` in SHA-1 and SHA-256 across
-seven repository histories. The latest observed optimized run on November 23,
-2026, at `665f9e36` **failed two of 18 rows**. Import, clone, fetch, push and
-the other advertisement rows passed. Across 652 checks, the 28 failures came
-from v2 advertisement. FrankenGit offered `ref-in-want` and `object-info`
-where the pinned stock default omitted them. The earlier October 21 run at
-`18f77336` passed all 624 checks in its then-current suite.
+seven repository histories. The November 23 optimized run at `a184cab0`
+**passed 10 of 18 rows**. All nine SHA-1 rows and the SHA-256 import row
+passed. The wide SHA-256 clone and v0 fetch exhausted the Database deadline.
+The v1 fetch connection reset, and the wide and push servers exceeded their
+60-second drain limit. The run recorded 571 passing checks out of 582.
+At `665f9e36` the two v2 advertisement rows had failed across seven
+histories. At `a184cab0` the recorded differences concerned the wide
+history and server drain. The October 21 suite at `18f77336` passed all
+624 checks in its then-current suite.
 
-`./scripts/verify.sh tier-a` builds the native executable, runs the declared
-rows and writes `tier_a_receipt.json`. The November comparison ran those same
-rows and the receipt generator with the separately built release-profile
-executable. Its receipt SHA-256 is `488d1d375a3b58f1fc217387d46ac166c4a0b0025288ea7b5f53b3c15c5f79ae`.
+`./scripts/verify.sh tier-a` builds the executable and writes a
+`tier_a_receipt.json`. The November comparisons used the same declared
+rows and receipt generator with separately built release-profile executables.
+The `a184cab0` receipt SHA-256 is
+`34eb7741b9ac48c8cd05cde201a1e8b3657e90550cbb8c14075d5a1642ea1a13`.
 [Declared rows](registries/compatibility_tiers.tsv) ·
 [Compatibility matrix](docs/GIT_COMPATIBILITY_MATRIX.md#tier-a-the-declared-differential-tier) ·
 [Dated assessment](docs/REALITY_CHECK_AND_BRIDGE_PLAN.md)
