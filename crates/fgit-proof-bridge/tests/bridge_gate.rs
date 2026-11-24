@@ -111,14 +111,22 @@ fn corpus_replay_checks_the_full_recorded_head_before_projection() {
     let bytes = std::fs::read(goldens().join("simple_commit.fgtrace")).unwrap();
     std::fs::write(&path, &bytes).unwrap();
     let expected = project_corpus(&dir).unwrap();
+    assert_eq!(
+        project("simple_commit", &decode(&bytes).unwrap()).unwrap(),
+        expected[0]
+    );
 
     let mut changed = decode(&bytes).unwrap();
     let last = changed.steps.len() - 1;
     let decision = &mut changed.steps[last].head.latest_decision_sequence;
     assert_eq!(*decision, Some(DecisionSequence::FIRST));
     *decision = Some(DecisionSequence::try_new(2).unwrap());
-    // The Lean residue observes generation, so both recordings render identically.
-    assert_eq!(project("simple_commit", &changed).unwrap(), expected[0]);
+    assert!(matches!(
+        project("simple_commit", &changed),
+        Err(fgit_proof_bridge::ProjectionRefusal::Diverged {
+            concrete_index, kind: DivergenceKind::Head,
+        }) if concrete_index == last
+    ));
     std::fs::write(&path, encode(&changed).unwrap()).unwrap();
     assert_eq!(
         project_corpus(&dir),
@@ -241,6 +249,35 @@ fn a_won_publication_publishes_before_it_decides() {
         checked > 0,
         "the corpus must contain a won publication that decided something"
     );
+}
+
+/// Both labels must survive one atomic publication, even when the batch's
+/// repository sequence advanced by one and its decision sequence by two.
+#[test]
+fn mixed_batch_exports_both_ordered_terminal_decisions() {
+    use fgit_proof_bridge::AbstractOutcome::{Committed, Refused};
+
+    let corpus = project_corpus(&goldens()).expect("replayed corpus");
+    let mixed = corpus
+        .iter()
+        .find(|trace| trace.name == "multi_decision_batch")
+        .unwrap();
+    let last = mixed.steps.last().unwrap();
+    assert!(matches!(
+        last.operations.as_slice(),
+        [
+            AbstractOp::Publish { .. },
+            AbstractOp::Decide {
+                target: 0,
+                outcome: Committed
+            },
+            AbstractOp::Decide {
+                target: 1,
+                outcome: Refused
+            }
+        ]
+    ));
+    assert_eq!(last.decision_sequence_after, 2);
 }
 
 /// Stuttering steps keep their concrete index, so a divergence names a real step.

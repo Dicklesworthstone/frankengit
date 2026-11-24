@@ -16,13 +16,16 @@
 
 use std::collections::BTreeMap;
 
+use fgit_reference::decision::PublishedDecision;
 use fgit_reference::intent::{ForgeStreamId, ForgeStreamPosition};
 use fgit_reference::machine::ModelInput;
 use fgit_reference::state::RepositoryRoots;
-use fgit_reference::trace::{GoldenTrace, ObservedOutcome, decode_roots};
-use fgit_types::TxId;
+use fgit_reference::trace::{
+    DivergenceKind, GoldenTrace, ObservedOutcome, TraceError, decode_roots, replay,
+};
 use fgit_types::native::GitOid;
 use fgit_types::refs::RefName;
+use fgit_types::{DecisionOutcome, DecisionSequence, TxId};
 
 /// The Lean model's terminal outcomes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -31,6 +34,15 @@ pub enum AbstractOutcome {
     Committed,
     /// `TerminalOutcome.refused`.
     Refused,
+}
+
+impl From<DecisionOutcome> for AbstractOutcome {
+    fn from(outcome: DecisionOutcome) -> Self {
+        match outcome {
+            DecisionOutcome::Committed { .. } => Self::Committed,
+            DecisionOutcome::Refused { .. } => Self::Refused,
+        }
+    }
 }
 
 impl AbstractOutcome {
@@ -117,6 +129,8 @@ pub struct ProjectedStep {
     pub operations: Vec<AbstractOp>,
     /// Head generation the reference model recorded after this step.
     pub generation_after: u64,
+    /// Final decision sequence recorded by this head, zero at genesis.
+    pub decision_sequence_after: u64,
 }
 
 /// A whole history, projected.
@@ -146,6 +160,20 @@ pub struct ProjectedTrace {
 /// Why a history could not be projected.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProjectionRefusal {
+    /// An input could not be run by the reference model.
+    ReplayFailed(TraceError),
+    /// A recorded observation differs from a fresh execution.
+    Diverged {
+        /// Position of the first mismatch.
+        concrete_index: usize,
+        /// Observable that differed.
+        kind: DivergenceKind,
+    },
+    /// A published decision disagrees with its recorded root or has no prior seal.
+    DecisionMismatch {
+        /// Winning publication that contains the decision.
+        concrete_index: usize,
+    },
     /// A decide named a capsule no earlier step prepared.
     ///
     /// Not recoverable by guessing: attributing an outcome to the wrong
@@ -196,21 +224,26 @@ pub enum ProjectionRefusal {
 /// [`ProjectionRefusal`] when an identity cannot be resolved from the history
 /// itself. The projection never invents one.
 pub fn project(name: &str, trace: &GoldenTrace) -> Result<ProjectedTrace, ProjectionRefusal> {
-    let mut capsules: BTreeMap<Vec<u8>, TxId> = BTreeMap::new();
+    let report = replay(trace).map_err(ProjectionRefusal::ReplayFailed)?;
+    if let Some(divergence) = report.divergence {
+        return Err(ProjectionRefusal::Diverged {
+            concrete_index: divergence.step_index,
+            kind: divergence.kind,
+        });
+    }
+    project_replayed(name, trace, report.state.decisions())
+}
+
+pub(crate) fn project_replayed(
+    name: &str,
+    trace: &GoldenTrace,
+    published: &[PublishedDecision],
+) -> Result<ProjectedTrace, ProjectionRefusal> {
+    let mut decisions = published.iter().peekable();
+    let mut capsules = BTreeMap::new();
     let mut indices: BTreeMap<TxId, u64> = BTreeMap::new();
     let mut order: Vec<(u64, String)> = Vec::new();
-    let mut decided: BTreeMap<u64, AbstractOutcome> = BTreeMap::new();
-    // batch identity -> the capsules it staged. A decision becomes canonical at
-    // the head CAS, not at staging, so this is what lets the CAS step say which
-    // transactions it just made terminal.
-    let mut batches: BTreeMap<Vec<u8>, Vec<Vec<u8>>> = BTreeMap::new();
     let mut steps = Vec::with_capacity(trace.steps.len());
-    // A refusal consumes decision sequence but does NOT advance repository
-    // sequence (NORMATIVE_PROTOCOL_CONTRACTS.md line 285). That is the only
-    // thing a recorded trace carries which distinguishes a batch that committed
-    // from one that refused: DecisionBodyIdentity holds both a commit id and a
-    // refusal-record id without saying which one applies.
-    let mut repository_sequence: Option<u64> = None;
     // Decoded roots of the previous step, kept so a won compare-and-swap can
     // report exactly which authenticated positions its publication moved.
     let mut previous_roots: Option<RepositoryRoots> = None;
@@ -243,39 +276,13 @@ pub fn project(name: &str, trace: &GoldenTrace) -> Result<ProjectedTrace, Projec
                 target: index_of(request.request.tx_id, &mut indices, &mut order),
             }),
             (ModelInput::Prepare(request), _) => {
-                capsules.insert(
-                    request
-                        .capsule_id
-                        .as_internal_object_id()
-                        .digest()
-                        .as_bytes()
-                        .to_vec(),
-                    request.request.tx_id,
-                );
-                None
-            }
-            (ModelInput::Stage(request), _) => {
-                batches.insert(
-                    request
-                        .batch_id
-                        .as_internal_object_id()
-                        .digest()
-                        .as_bytes()
-                        .to_vec(),
-                    request
-                        .capsules
-                        .iter()
-                        .map(|capsule| capsule.as_internal_object_id().digest().as_bytes().to_vec())
-                        .collect(),
-                );
+                capsules.insert(request.capsule_id, request.request.tx_id);
                 None
             }
             (ModelInput::Decide { capsule }, observed) => {
-                let key = capsule.as_internal_object_id().digest().as_bytes().to_vec();
-                let tx = *capsules
-                    .get(&key)
+                let tx = capsules
+                    .get(capsule)
                     .ok_or(ProjectionRefusal::UnknownCapsule { concrete_index })?;
-                let target = index_of(tx, &mut indices, &mut order);
                 match observed {
                     // §10.14: deciding revalidates and concludes WITHOUT
                     // changing state. Emitting an abstract decide here would
@@ -289,12 +296,14 @@ pub fn project(name: &str, trace: &GoldenTrace) -> Result<ProjectedTrace, Projec
                     // recorded outcome without changing anything, which is
                     // precisely the Lean model's retry: `apply` preserves an
                     // existing outcome and refuses to overwrite it.
-                    ObservedOutcome::DecidedAlreadyTerminal => Some(AbstractOp::Retry {
-                        target,
-                        outcome: *decided.get(&target).ok_or(
-                            ProjectionRefusal::AlreadyTerminalWithoutDecision { concrete_index },
-                        )?,
-                    }),
+                    ObservedOutcome::DecidedAlreadyTerminal => {
+                        let missing =
+                            || ProjectionRefusal::AlreadyTerminalWithoutDecision { concrete_index };
+                        Some(AbstractOp::Retry {
+                            target: *indices.get(tx).ok_or_else(missing)?,
+                            outcome: (*roots_now.outcome_index.get(tx).ok_or_else(missing)?).into(),
+                        })
+                    }
                     _ => None,
                 }
             }
@@ -322,46 +331,24 @@ pub fn project(name: &str, trace: &GoldenTrace) -> Result<ProjectedTrace, Projec
                             ref_effects,
                             forge_effects,
                         });
-                        let key = request
-                            .batch
-                            .as_internal_object_id()
-                            .digest()
-                            .as_bytes()
-                            .to_vec();
-                        let staged = batches.get(&key).cloned().unwrap_or_default();
-                        let advanced = step
-                            .head
-                            .latest_repository_sequence
-                            .map(fgit_types::RepositorySequence::get);
-                        let committed_count = match (repository_sequence, advanced) {
-                            (Some(before), Some(after)) => after.saturating_sub(before),
-                            (None, Some(after)) => after,
-                            _ => 0,
-                        };
-                        // Attribute an outcome only where the trace determines
-                        // one. A batch that advanced the repository sequence by
-                        // exactly as many positions as it staged capsules
-                        // committed all of them; one that advanced it by none
-                        // refused all of them. Anything between is a mixed batch
-                        // whose per-capsule fate this recording does not state,
-                        // and guessing there would put a fabricated outcome into
-                        // a proof artifact.
-                        let outcome = if committed_count == 0 {
-                            Some(AbstractOutcome::Refused)
-                        } else if usize::try_from(committed_count) == Ok(staged.len()) {
-                            Some(AbstractOutcome::Committed)
-                        } else {
-                            None
-                        };
-                        if let Some(outcome) = outcome {
-                            for capsule in staged {
-                                let tx = *capsules
-                                    .get(&capsule)
-                                    .ok_or(ProjectionRefusal::UnknownCapsule { concrete_index })?;
-                                let target = index_of(tx, &mut indices, &mut order);
-                                decided.insert(target, outcome);
-                                operations.push(AbstractOp::Decide { target, outcome });
+                        // The replayed decision stream supplies actual terminal identities
+                        // and ordering. The position in this recorded head bounds the
+                        // batch, including refusals and excluding deferred requests.
+                        while let Some(decision) = decisions.next_if(|decision| {
+                            Some(decision.decision_sequence) <= step.head.latest_decision_sequence
+                        }) {
+                            let mismatch =
+                                || ProjectionRefusal::DecisionMismatch { concrete_index };
+                            let target = *indices.get(&decision.tx_id).ok_or_else(mismatch)?;
+                            if roots_now.outcome_index.get(&decision.tx_id)
+                                != Some(&decision.outcome)
+                            {
+                                return Err(mismatch());
                             }
+                            operations.push(AbstractOp::Decide {
+                                target,
+                                outcome: decision.outcome.into(),
+                            });
                         }
                         None
                     }
@@ -380,17 +367,16 @@ pub fn project(name: &str, trace: &GoldenTrace) -> Result<ProjectedTrace, Projec
             }
             _ => None,
         };
-        repository_sequence = step
-            .head
-            .latest_repository_sequence
-            .map(fgit_types::RepositorySequence::get)
-            .or(repository_sequence);
         previous_roots = Some(roots_now);
         operations.extend(projected);
         steps.push(ProjectedStep {
             concrete_index,
             operations,
             generation_after,
+            decision_sequence_after: step
+                .head
+                .latest_decision_sequence
+                .map_or(0, DecisionSequence::get),
         });
     }
 
