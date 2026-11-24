@@ -280,6 +280,120 @@ fn cached_parent_metadata_cannot_extend_the_selected_frontier() {
 }
 
 #[test]
+fn fast_forward_requires_both_original_tips_before_reading_or_reusing_objects() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        // An absent provider, a provider declining metadata, a cold cache and
+        // a warm cache must enforce the same authority-selected boundary.
+        for cache_mode in 0..4 {
+            for remove_source in [false, true] {
+                let mut fixture = fixture(format);
+                let removed = if remove_source {
+                    fixture.forward.source_tip
+                } else {
+                    fixture.forward.target_tip_before
+                };
+                let expected = [
+                    fixture.forward.source_tip,
+                    fixture.forward.target_tip_before,
+                ]
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+                let permitted = validate_fast_forward_objects_above(
+                    &fixture.objects,
+                    &fixture.forward,
+                    &fixture.selected,
+                    MergeObjectLimits::default(),
+                    &mut || true,
+                )
+                .unwrap();
+                assert_eq!(permitted.objects, expected);
+
+                fixture.selected.remove(&removed);
+                fixture.objects.reads.borrow_mut().clear();
+                let cache = Metadata::new(&fixture.objects, cache_mode >= 2);
+                if cache_mode == 3 {
+                    // The omitted commit remains physically present and has a
+                    // verified cached parse. Neither is selection authority.
+                    cache.warm();
+                }
+                let selected = if cache_mode == 0 {
+                    ObjectFrontier::from(&fixture.selected)
+                } else {
+                    ObjectFrontier::with_headers(&fixture.selected, &cache)
+                };
+                assert_eq!(
+                    validate_fast_forward_objects_above(
+                        &fixture.objects,
+                        &fixture.forward,
+                        selected,
+                        MergeObjectLimits::default(),
+                        &mut || true,
+                    )
+                    .unwrap_err(),
+                    ProjectionFailure::Refuse(RefusalCode::ObjectClosureIncomplete),
+                );
+                assert!(fixture.objects.reads.borrow().is_empty());
+                assert!(cache.lookups.borrow().is_empty());
+                assert!(cache.observed.borrow().is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn selected_fast_forward_keeps_native_verification_with_warm_metadata() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for enabled in [false, true] {
+            let mut fixture = fixture(format);
+            let rows = {
+                let cache = Metadata::new(&fixture.objects, enabled);
+                cache.warm();
+                cache.rows.into_inner()
+            };
+            fixture
+                .objects
+                .bodies
+                .get_mut(&fixture.forward.source_tip)
+                .unwrap()
+                .1
+                .push(b'x');
+            let cache = Metadata::new(&fixture.objects, enabled);
+            *cache.rows.borrow_mut() = rows;
+            assert_eq!(
+                validate(&fixture, &cache, 2, MergeObjectLimits::default()).unwrap_err(),
+                ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid),
+            );
+            assert_eq!(
+                fixture.objects.reads.borrow().as_slice(),
+                &[fixture.forward.source_tip],
+            );
+            assert!(cache.lookups.borrow().is_empty());
+        }
+    }
+}
+
+#[test]
+fn fast_forward_selection_preflight_honors_cancellation_without_reads() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for selected_target in [false, true] {
+            let mut fixture = fixture(format);
+            if !selected_target {
+                fixture.selected.remove(&fixture.forward.target_tip_before);
+            }
+            let cache = Metadata::new(&fixture.objects, true);
+            cache.warm();
+            cache.cancelled.set(true);
+            assert_eq!(
+                validate(&fixture, &cache, 2, MergeObjectLimits::default()).unwrap_err(),
+                ProjectionFailure::Unavailable(RefusalCode::CancellationInProgress),
+            );
+            assert!(fixture.objects.reads.borrow().is_empty());
+            assert!(cache.lookups.borrow().is_empty());
+        }
+    }
+}
+
+#[test]
 fn native_metadata_rejects_fabricated_identity_bytes_and_parent_edges() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let fixture = fixture(format);
