@@ -340,6 +340,8 @@ Tier A rows until the oracle has a constrained mode for them. Shallow and
 partial clone, LFS, signed push, bundle URI and notes are outside Tier A. This
 section states no result; the receipt does.
 
+On November 24, clean `f59605374201c4ac6692655741d0142786509040` passed all 18 rows and 624 checks against pinned Git 2.54.0. The suite and official receipt generator exited zero. The receipt SHA-256 was `f6bfd526758883e9c50fc383e9467e11d7ebce110788dbd23cd2b13163f1a7b5`. The optimized executable had SHA-256 `dbb210bc5a064f95ac1ee10923ee26ac1659694b1eed6f7112b0cbe3e55260a8`. The same executable served the original-corpus smart HTTP, raw Git and SSH mirrors. [Clone measurements](REALITY_CHECK_AND_BRIDGE_PLAN.md)
+
 The November 24 repeat on clean `a184cab07524fa3f3daf41d53c02f852f359beb6` passed all 18 declared rows and all 624 checks in 24 minutes 43 seconds. The optimized `fg` SHA-256 was `998f7390f1a9b28488cfb5789ac78106d4682296cc7db0eb81d3c39601349b0b`. The official receipt SHA-256 was `a16678cb9e32eae3b53a26e4dcc69e2c3419d4f5ad71bfa7aeb4f7351ad3bd45`. All 18 servers drained within the original 60-second allowance.
 
 On another host the same executable passed 10 of 18 rows and 571 of 582 checks. The wide SHA-256 repository reached the Database deadline on clone and v0 fetch, v1 fetch reset, and two servers exceeded the drain limit. That receipt has SHA-256 `34eb7741b9ac48c8cd05cde201a1e8b3657e90550cbb8c14075d5a1642ea1a13`. Both complete runs used the declared suite and the official receipt generator with the same Git 2.54.0 installation digest. The cause of their different outcomes remains open. [Dated assessment](REALITY_CHECK_AND_BRIDGE_PLAN.md)
