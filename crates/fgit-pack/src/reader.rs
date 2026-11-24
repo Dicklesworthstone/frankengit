@@ -341,9 +341,13 @@ fn inflate_one_member(
                 .push_with_bounded_output(
                     supplied,
                     crate::STREAM_PACK_CHUNK_BYTES,
-                    &mut DeadlineProbe(deadline),
+                    &mut DeadlineProbe {
+                        deadline,
+                        remaining: 0,
+                    },
                 )
                 .map_err(PackError::Inflate)?;
+            checkpoint(deadline)?;
             append_inflated(&mut output, inflater.take_output(), declared_size)?;
             match progress {
                 BoundedStreamProgress::Finished => {
@@ -407,14 +411,30 @@ fn append_inflated(
     Ok(())
 }
 
-struct DeadlineProbe<'a, D>(&'a mut D);
+// The inflater charges every decode work unit, including individual Huffman
+// bits. Poll the external runtime on the first unit and every 64 units during
+// pure CPU work. Each bounded push is checked again before accepting output.
+// A single RFC 1951 match emits at most 258 bytes; the output limit also
+// forces a return to the caller independently of the work-unit interval.
+const INFLATE_POLL_INTERVAL: u8 = 64;
+
+struct DeadlineProbe<'a, D> {
+    deadline: &'a mut D,
+    remaining: u8,
+}
 
 impl<D> CancellationProbe for DeadlineProbe<'_, D>
 where
     D: Deadline,
 {
     fn is_cancelled(&mut self) -> bool {
-        !self.0.checkpoint()
+        if self.remaining == 0 {
+            self.remaining = INFLATE_POLL_INTERVAL - 1;
+            !self.deadline.checkpoint()
+        } else {
+            self.remaining -= 1;
+            false
+        }
     }
 }
 
@@ -556,6 +576,35 @@ mod tests {
                 fgit_deflate::InflateRefusal::Adler32Mismatch { .. }
             ))
         ));
+    }
+
+    #[test]
+    fn buffered_inflate_keeps_the_work_limit_and_polls_during_a_single_chunk() {
+        let body = vec![42; 4_096];
+        let member = zlib_stored(&body);
+        let mut limits = limits();
+        limits.max_inflate_work = 20;
+        assert!(matches!(
+            inflate_one_member(&member, body.len(), &limits, &mut always),
+            Err(PackError::Inflate(
+                fgit_deflate::InflateRefusal::ResourceLimit {
+                    resource: fgit_deflate::Resource::WorkUnits,
+                    limit: 20,
+                    observed: 21,
+                }
+            ))
+        ));
+        limits.max_inflate_work = 10_000;
+        let mut polls = 0;
+        let result = inflate_one_member(&member, body.len(), &limits, &mut || {
+            polls += 1;
+            polls < 5
+        });
+        assert_eq!(
+            result,
+            Err(PackError::Inflate(fgit_deflate::InflateRefusal::Cancelled))
+        );
+        assert_eq!(polls, 5);
     }
 
     #[test]
