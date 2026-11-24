@@ -186,10 +186,16 @@ def lifecycle(campaign, fmt):
         pull = json.loads(campaign.invoke("merged-pr", [
             "pr", "show", *f.scope, 1, "--trusted-local", "--object-format", fmt]))
         assert pull["pull_request"]["state"] == "merged" and pull["pull_request"]["version"] == 3, pull
+        checks = json.loads(campaign.invoke("merged-pr-checks", [
+            "pr", "checks", *f.scope, 1, "--trusted-local", "--object-format", fmt,
+            "--expected-head", pull["snapshot_token"]]))
+        assert checks["source_head"] == pull["source_head"] and checks["node_closed"], checks
+        assert int(checks["pull_request_version"]) == 3 and checks["source_current"], checks
+        assert checks["source_tip"] == tip and checks["complete"] and checks["checks"] == [checked], checks
         drained, _ = server.stop()
         assert not drained["requires_reconciliation"] and not drained["execution_retried"], drained
     campaign.record(fmt, "stock-push-http-check-protected-fast-forward", source=tip,
-                    executed_before_pr_refresh=sorted(reports),
+                    executed_before_pr_refresh=sorted(reports), merged_check_snapshot=pull["snapshot_token"],
                     former_target=f.base, pull_request=1, refreshed_version=2,
                     former_check=prior["id"], check=checked["id"],
                     workflow_graph=graph, publisher=checked["publisher"], job=checked["job"],
