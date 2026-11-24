@@ -35,7 +35,9 @@ connection, retry, shutdown and verification obligations are in
 
 ## Current one-node integration boundary
 
-As of November 23, a stock Git push can feed an existing pull request, and a protected fast-forward can require a successful check for the exact refreshed tip. Two Linux machines exercised this workflow in both Git hash formats. A signed repository backup restored the original Git files and issue history on a second machine. Supported team deployment, independent whole-installation recovery and release qualification remain open. The [dated reality check and bridge plan](docs/REALITY_CHECK_AND_BRIDGE_PLAN.md) records revisions, failures and remaining work.
+As of November 24, a stock Git push can feed an existing pull request, and a protected fast-forward can require a successful check for the exact refreshed tip. Two Linux machines exercised this workflow in both Git hash formats. A signed repository backup restored the original Git files and issue history on a second machine. Supported team deployment, independent whole-installation recovery and release qualification remain open. The [dated reality check and bridge plan](docs/REALITY_CHECK_AND_BRIDGE_PLAN.md) records revisions, failures and remaining work.
+
+Pinned stock Git 2.54.0 also mirrored this project’s 5.35 GB history over raw Git, smart HTTP and SSH at `f5960537`. With the expanded-object limit set to 8,192 MiB, all three transports returned the original pack and all 45,661 object IDs. Each mirror passed strict `fsck`. Raw Git took 80 seconds, smart HTTP 116 seconds and SSH 79 seconds on the Linux test host. The default size limit and a short session deadline each produced an actionable error with both quiet and ordinary clients. [Measured clone costs and flags](docs/REALITY_CHECK_AND_BRIDGE_PLAN.md)
 
 For source search, `fg search --progressive` and the authenticated HTTP endpoint stream authorized lexical, path and symbol matches first, followed by ranked excerpts from the same snapshot. Clients retain the initial matches when refinement exhausts its budget. See [progressive source context](docs/SOURCE_CONTEXT.md#progressive-ranked-context) for the command, endpoint and response format.
 
@@ -1197,21 +1199,19 @@ FrankenGit does **not** claim a fictional standardized “protocol v2 push” co
 Compatibility is differential against pinned upstream Git versions and source-derived/adversarial corpora. “Clone worked once” is not evidence of compatibility.
 
 Tier A covers pinned Git 2.54.0 over `git://` in SHA-1 and SHA-256 across
-seven repository histories. On November 24, the optimized `a184cab0`
-binary **passed all 18 rows and all 624 checks** on a lightly loaded Linux
-worker. All 18 servers drained. The longest interval from stop-file
-creation to final server output was 0.133 seconds.
+seven repository histories. On November 24 the optimized `f5960537` binary
+**passed all 18 rows and all 624 checks**. The same executable served the
+45,661-object mirrors over all three transports. Its official Tier A receipt
+has SHA-256 `f6bfd526758883e9c50fc383e9467e11d7ebce110788dbd23cd2b13163f1a7b5`.
 
-An earlier complete run with the same binary passed 10 of 18 rows and
-571 of 582 checks. The wide SHA-256 clone and v0 fetch reached the Database
-deadline, the v1 connection reset, and two servers exceeded their drain
-limit. The cause of the difference remains open.
+The earlier `a184cab0` binary passed 18 of 18 rows on one Linux worker
+and 10 of 18 on another. The latter run encountered SHA-256 deadlines,
+a connection reset and two late drains. Both affected histories subsequently
+passed on both workers. The original discrepancy remains unresolved.
 
 `./scripts/verify.sh tier-a` builds the executable and writes a
-`tier_a_receipt.json`. Both comparisons used the declared suite and receipt
-generator with the same separately built release executable. The passing
-receipt has SHA-256
-`a16678cb9e32eae3b53a26e4dcc69e2c3419d4f5ad71bfa7aeb4f7351ad3bd45`.
+`tier_a_receipt.json`. These comparisons ran the declared suite and
+official receipt generator with separately built release executables.
 [Declared rows](registries/compatibility_tiers.tsv) ·
 [Compatibility matrix](docs/GIT_COMPATIBILITY_MATRIX.md#tier-a-the-declared-differential-tier) ·
 [Dated assessment](docs/REALITY_CHECK_AND_BRIDGE_PLAN.md)
