@@ -1151,6 +1151,17 @@ impl FsqliteAuthorityStore {
                 if let Err(cause) = self.commit(cx, &mut lease).await {
                     return Err(self.rollback_after(cx, &mut lease, cause).await);
                 }
+                // The head and these exact write-once outcomes committed
+                // together. Admission immediately reads the entries back to
+                // reconcile each decision; the ordinary body cache can serve
+                // those reads only after the transaction has succeeded.
+                // Larger primitive calls still publish, without unbounded
+                // cache work between COMMIT and its acknowledgement.
+                if fgit_authority::validate_immutable_batch(outcomes, self.limits).is_ok() {
+                    for (outcome_key, bytes) in outcomes {
+                        self.bodies.insert(outcome_key.as_bytes(), bytes);
+                    }
+                }
                 Ok(outcome)
             }
             Ok(CasOutcome::PredecessorMismatch) => {

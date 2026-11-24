@@ -1623,6 +1623,20 @@ where
         false
     }
 
+    /// Open a fresh physical staging scope for this private CAS attempt. The
+    /// default delegates each command to the eager single-fold entry point.
+    fn begin_ref_batch<'a>(
+        &'a self,
+        authority: &'a Authority,
+        cx: &'a Authority::Context,
+    ) -> impl microbatch::RefBatchStaging + 'a {
+        microbatch::ImmediateRefBatch {
+            projection: self,
+            store: authority,
+            cx,
+        }
+    }
+
     /// Stages one fold from the driver's private, authority-derived batch state.
     /// The original head remains the only publication basis; the ref overlay
     /// contains accepted earlier decisions in this same unpublished chunk.
