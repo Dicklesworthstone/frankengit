@@ -3,8 +3,8 @@
   "$id": "https://frankengit.invalid/schemas/mcp_tools.json",
   "title": "FrankenGit MCP tool registry",
   "description": "Single-source registry of all FrankenGit MCP tools, resources, and prompts with capability requirements and budget boundaries.",
-  "total_count": 106,
-  "active_count": 102,
+  "total_count": 107,
+  "active_count": 103,
   "unsupported_count": 4,
   "tools": [
     {
@@ -1520,6 +1520,34 @@
       "rest_api_path": "GET /repos/{id}/protection"
     },
     {
+      "name": "frankengit_pull_add_labels",
+      "version": 1,
+      "kind": "tool",
+      "owner_subsystem": "forge",
+      "support_profile": "active",
+      "description": "Add literal labels to an existing visible PR while preserving the current set and concurrent additions. No expected version or clear is accepted. The complete union must fit 32 labels. Retry the identical additions and original key; original terminal recovery cannot undo later replacements. Labels grant no authority.",
+      "read_mutation": "mutation",
+      "capability": "mutate_forge_entity",
+      "principal": "operator_bound",
+      "idempotency": "required_durable_key",
+      "authority_root": "server_selected_head",
+      "budget": {
+        "max_input_bytes": 65536,
+        "max_output_bytes": 32768,
+        "max_depth": 16,
+        "max_items": 64,
+        "max_fan_out": 4,
+        "max_duration_ms": 60000
+      },
+      "pagination": "unpaginated",
+      "disclosure": "untrusted_content_data",
+      "receipt": "canonical_decision_digest",
+      "cancellation": "non_preemptive_terminal_commit",
+      "refusal_codes": ["tool_not_granted", "principal_not_bound", "required_argument_missing", "expected_string", "unknown_argument", "invalid_decimal_string", "positive_pull_number_required", "invalid_idempotency_key", "labels_required", "labels_must_be_array", "too_many_labels", "label_must_be_string", "invalid_pull_labels", "nonempty_label_additions_required", "mutation_outcome_unknown"],
+      "cli_command": "fg pr add-labels",
+      "rest_api_path": "POST /{repository}/api/v1/pulls/{number}/labels/add"
+    },
+    {
       "name": "frankengit_pull_append_comment",
       "version": 1,
       "kind": "tool",
@@ -2477,7 +2505,7 @@
       "kind": "tool",
       "owner_subsystem": "search",
       "support_profile": "active",
-      "description": "Initial search plus exact source excerpts (a context packet), raw-path or ranked selection, in one snapshot and index generation vector. Explicit current-native-v1 index reuse preserves original index provenance after metadata-only changes and supports raw-path-prefix selection.",
+      "description": "Initial search plus exact source excerpts (a context packet), raw-path or ranked selection, in one snapshot and index generation vector. Explicit current-native-v1 index reuse preserves original index provenance after metadata-only changes. Optional operation progressive returns the native Initial and Refined or RefinementFailed records in one buffered MCP response; it uses ranked selection, retains usable Initial on refinement failure and marks isError without claiming live streaming. The original source grant, authenticated request lifetime and combined output allowance cover both phases.",
       "read_mutation": "read_only",
       "capability": "read_derived_generation",
       "principal": "none",
@@ -2495,7 +2523,7 @@
       "disclosure": "untrusted_content_data",
       "receipt": "none",
       "cancellation": "immediate_quiescent",
-      "refusal_codes": ["invalid_initial_query", "unsupported_index_source", "symbol_options_without_name", "source_index_uninitialized", "source_index_stale", "source_snapshot_mismatch", "index_generation_mismatch", "invalid_retrieval_report", "unsupported_context_selection", "invalid_context_limits"],
+      "refusal_codes": ["invalid_initial_query", "unsupported_index_source", "symbol_options_without_name", "source_index_uninitialized", "source_index_stale", "source_snapshot_mismatch", "index_generation_mismatch", "invalid_retrieval_report", "unsupported_context_selection", "invalid_context_limits", "unsupported_context_operation", "invalid_progressive_report", "progressive_context_cancelled", "resource_limit"],
       "cli_command": "fg search --context",
       "rest_api_path": "/api/v1/source/context-initial"
     },

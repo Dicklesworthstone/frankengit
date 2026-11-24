@@ -2267,6 +2267,38 @@
       },
       "additionalProperties": false
     },
+    "frankengit_pull_add_labels": {
+      "title": "frankengit_pull_add_labels",
+      "description": "Add literal labels to an existing visible PR while preserving the current set and concurrent additions. No expected version or clear is accepted. The complete union must fit 32 labels. Retry the identical additions and original key; original terminal recovery cannot undo later replacements. Labels grant no authority.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive canonical decimal PR number bounded by u64.",
+              "x-classification": "selector_position",
+              "maxLength": 20
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Original durable printable ASCII key, reused only with the identical complete command.",
+              "x-classification": "selector_position",
+              "maxLength": 256
+            },
+            "labels": {
+              "type": "array",
+              "description": "1..32 unique nonblank literal additions, each at most 64 UTF-8 bytes without controls. Order is canonicalized; spelling is preserved.",
+              "x-classification": "untrusted_content"
+            }
+          },
+          "required": ["number", "idempotency_key", "labels"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "frankengit_pull_append_comment": {
       "title": "frankengit_pull_append_comment",
       "description": "Append literal PR discussion without expected_version. Admission chooses the discussion predecessor at each authority-head attempt while the number, body and optional exact source anchor remain fixed. Retry the identical intent and original durable key for one historical terminal outcome.",
@@ -4361,12 +4393,19 @@
     },
     "frankengit_source_context": {
       "title": "frankengit_source_context",
-      "description": "Initial search plus exact source excerpts (a context packet), raw-path or ranked selection, in one snapshot and index generation vector. Explicit current-native-v1 index reuse preserves original index provenance after metadata-only changes and supports raw-path-prefix selection.",
+      "description": "Initial search plus exact source excerpts (a context packet), raw-path or ranked selection, in one snapshot and index generation vector. Explicit current-native-v1 index reuse preserves original index provenance after metadata-only changes. Optional operation progressive returns the native Initial and Refined or RefinementFailed records in one buffered MCP response; it uses ranked selection, retains usable Initial on refinement failure and marks isError without claiming live streaming. The original source grant, authenticated request lifetime and combined output allowance cover both phases.",
       "type": "object",
       "properties": {
         "parameters": {
           "type": "object",
           "properties": {
+            "operation": {
+              "type": "string",
+              "description": "Omit for the original context-initial document; progressive returns buffered native phases under the same source read grant. Only progressive is accepted when supplied.",
+              "x-classification": "selector_position",
+              "maxLength": 16,
+              "pattern": "^progressive$"
+            },
             "reference": {
               "type": "string",
               "description": "Full visible ref (e.g. refs/heads/main).",
@@ -4420,7 +4459,7 @@
             },
             "context_selection": {
               "type": "string",
-              "description": "raw-path-prefix or the ranked weighted-fusion profile.",
+              "description": "raw-path-prefix (ordinary default) or context-weighted-rrf-q16-v1. operation progressive requires the ranked profile and selects it when omitted.",
               "x-classification": "selector_position",
               "maxLength": 64
             }

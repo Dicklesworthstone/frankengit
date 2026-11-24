@@ -13,6 +13,8 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+mod progressive;
+
 fn args<const N: usize>(values: [(&str, Value); N]) -> Object {
     let Value::Object(value) = object(values) else {
         unreachable!()

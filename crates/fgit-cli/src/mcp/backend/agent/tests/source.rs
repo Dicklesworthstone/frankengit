@@ -8,6 +8,7 @@ use fgit_types::{DecisionOutcome, GitOid, RefName};
 
 mod indexed;
 mod maintenance;
+mod progressive;
 mod revalidated;
 
 const REFERENCE: &str = "refs/heads/source";
