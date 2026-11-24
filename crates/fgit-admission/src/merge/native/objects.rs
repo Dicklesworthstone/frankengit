@@ -1308,13 +1308,19 @@ impl<S: CanonicalObjectSource> FrontierCommitGraph<'_, S> {
             if object.id() != *commit || object.object_type() != ObjectType::Commit {
                 return Err(invalid());
             }
-            let ParsedObject::Commit(parsed) = parse_object_body(
+            // A selected identity does not authenticate bytes supplied by a
+            // source. Keep the uncached path equivalent to verified metadata:
+            // enforce parser budgets, then check the native commit identity
+            // before its parent edges can participate in an ancestry decision.
+            let ParsedObject::Commit(parsed) = verify_native_object(
+                self.format,
                 ObjectType::Commit,
                 object.body(),
+                commit,
                 AcceptanceProfile::GitCompatibleImport,
                 self.parse_limits,
             )
-            .map_err(object_parse_failure)?
+            .map_err(native_parse_failure)?
             else {
                 return Err(invalid());
             };

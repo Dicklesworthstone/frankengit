@@ -566,3 +566,72 @@ fn cached_candidate_metadata_never_replaces_the_supplied_candidate_bytes() {
         assert!(!cache.lookups.borrow().contains(&fixture.merge.merge_commit));
     }
 }
+
+#[test]
+fn uncached_historical_parents_require_their_native_identity() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut fixture = fixture(format);
+        let base = fixture.forward.target_tip_before;
+        let tree = git_object_id(format, ObjectType::Tree, b"");
+        let middle = fixture.objects.commit(tree, &[base], 50, "middle");
+        let tip = fixture.objects.commit(tree, &[middle], 60, "tip");
+        fixture.selected.extend([middle, tip]);
+        fixture.forward.source_tip = tip;
+        fixture.forward.merge_commit = tip;
+        let expected = validate_fast_forward_objects_above(
+            &fixture.objects,
+            &fixture.forward,
+            &fixture.selected,
+            MergeObjectLimits::default(),
+            &mut || true,
+        )
+        .unwrap();
+        let original = fixture.objects.bodies[&base].1.clone();
+
+        // The ordinary closure walk stops at the selected immediate parent.
+        // This grandparent is first read by the ancestry fallback, including
+        // when no optional header or commit-metadata provider is installed.
+        for corrupted in [true, false] {
+            let mut bytes = original.clone();
+            if corrupted {
+                bytes.extend_from_slice(b"changed storage bytes\n");
+            }
+            fixture.objects.bodies.get_mut(&base).unwrap().1 = bytes;
+            fixture.objects.reads.borrow_mut().clear();
+            let check = |result: Result<ValidatedClosure, ProjectionFailure>| {
+                if corrupted {
+                    assert_eq!(
+                        result.unwrap_err(),
+                        ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid),
+                    );
+                } else {
+                    let actual = result.unwrap();
+                    assert_eq!(actual.objects, expected.objects);
+                    assert_eq!(actual.object_closure_root, expected.object_closure_root);
+                }
+            };
+            check(validate_fast_forward_objects_above(
+                &fixture.objects,
+                &fixture.forward,
+                &fixture.selected,
+                MergeObjectLimits::default(),
+                &mut || true,
+            ));
+            assert!(fixture.objects.reads.borrow().contains(&base));
+
+            // Header-only and empty enabled caches must enforce the same
+            // native identity before any parsed parents can be retained.
+            for enabled in [false, true] {
+                let cache = Metadata::new(&fixture.objects, enabled);
+                check(validate(&fixture, &cache, 2, MergeObjectLimits::default()));
+                assert!(cache.lookups.borrow().contains(&base));
+                if corrupted {
+                    assert!(!cache.observed.borrow().contains(&base));
+                    assert!(!cache.rows.borrow().contains_key(&base));
+                } else {
+                    assert!(cache.observed.borrow().contains(&base));
+                }
+            }
+        }
+    }
+}
