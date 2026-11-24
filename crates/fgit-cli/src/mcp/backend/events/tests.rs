@@ -25,6 +25,7 @@ fn cursor_input_is_exact_and_does_not_require_a_snapshot_for_append_polling() {
     let first = parse(&Object::new()).unwrap();
     assert_eq!(first.after, None);
     assert_eq!(first.limit, 20);
+    assert_eq!(first.wait_ms, 0);
     assert_eq!(first.expected_head, None);
     let last = parse(&fields([
         ("after", text("18446744073709551615:4294967295")),
@@ -70,7 +71,6 @@ fn unknown_authority_fields_and_out_of_profile_requests_never_become_options() {
         "reviews_read",
         "discussions_read",
         "kind",
-        "wait_ms",
     ] {
         assert!(
             parse(&fields([(name, text("anything"))])).is_err(),
@@ -119,6 +119,53 @@ fn unknown_authority_fields_and_out_of_profile_requests_never_become_options() {
     assert_eq!(
         schema.object().unwrap()["additionalProperties"],
         Value::Bool(false)
+    );
+}
+
+#[test]
+fn event_wait_is_a_strict_bounded_integer_and_schema_uses_the_native_limit() {
+    for wait_ms in [0, 1, OneNode::MAX_FORGE_EVENT_WAIT_MS] {
+        assert_eq!(
+            parse(&fields([("wait_ms", json::number(u64::from(wait_ms)))]))
+                .unwrap()
+                .wait_ms,
+            wait_ms,
+        );
+    }
+    for value in [
+        json::number(u64::from(OneNode::MAX_FORGE_EVENT_WAIT_MS) + 1),
+        json::number(u64::MAX),
+        Value::Number("18446744073709551616".into()),
+        Value::Number("-1".into()),
+        Value::Number("-0".into()),
+        Value::Number("1.0".into()),
+        Value::Number("1e3".into()),
+        text("1"),
+        Value::Null,
+        Value::Bool(false),
+        Value::Array(vec![]),
+        object([]),
+    ] {
+        assert_eq!(
+            parse(&fields([("wait_ms", value)])).err().unwrap().code,
+            "invalid_event_wait",
+        );
+    }
+    let tool = tool();
+    let properties = tool.schema.object().unwrap()["properties"]
+        .object()
+        .unwrap();
+    let wait = properties["wait_ms"].object().unwrap();
+    assert_eq!(wait["type"], text("integer"));
+    assert_eq!(wait["minimum"], json::number(0));
+    assert_eq!(
+        wait["maximum"],
+        json::number(u64::from(OneNode::MAX_FORGE_EVENT_WAIT_MS)),
+    );
+    assert_eq!(wait["default"], json::number(0));
+    assert_eq!(
+        tool.schema.object().unwrap()["additionalProperties"],
+        Value::Bool(false),
     );
 }
 
@@ -333,6 +380,131 @@ fn persisted_protocol_feed_matches_canonical_frames_and_resumes_after_restart_an
 }
 
 #[test]
+fn bounded_event_wait_preserves_ready_pages_tail_cursors_and_exact_snapshot_pins() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let mut backend = open(&scratch, format, "event wait source");
+        let ready = backend.call(NAME, &Object::new()).unwrap();
+        assert_eq!(events(&ready).len(), 2);
+        let ready_with_wait = backend
+            .call(NAME, &fields([("wait_ms", json::number(2000))]))
+            .unwrap();
+        assert_eq!(ready_with_wait, ready);
+        let after = ready.object().unwrap()["resume_after"].clone();
+        let pin = ready.object().unwrap()["snapshot_token"].clone();
+        let tail = backend
+            .call(
+                NAME,
+                &fields([("after", after.clone()), ("expected_head", pin.clone())]),
+            )
+            .unwrap();
+        let timeout = backend
+            .call(
+                NAME,
+                &fields([
+                    ("after", after.clone()),
+                    ("expected_head", pin.clone()),
+                    ("wait_ms", json::number(10)),
+                ]),
+            )
+            .unwrap();
+        assert_eq!(timeout, tail);
+        assert!(events(&timeout).is_empty());
+        assert_eq!(timeout.object().unwrap()["resume_after"], after);
+        assert_eq!(timeout.object().unwrap()["next_after"], Value::Null);
+
+        publish(
+            &backend.node,
+            &command(2, "after wait"),
+            "append-after-wait",
+        );
+        assert_eq!(
+            backend
+                .call(
+                    NAME,
+                    &fields([
+                        ("after", after.clone()),
+                        ("expected_head", pin),
+                        ("wait_ms", json::number(2000)),
+                    ]),
+                )
+                .unwrap_err()
+                .code,
+            "snapshot_moved",
+        );
+        let appended = backend
+            .call(
+                NAME,
+                &fields([("after", after), ("wait_ms", json::number(2000))]),
+            )
+            .unwrap();
+        assert_eq!(events(&appended).len(), 1);
+        assert_eq!(
+            events(&appended)[0].object().unwrap()["aggregate_version"].text(),
+            Some("3"),
+        );
+        backend.close().unwrap();
+    }
+}
+
+#[test]
+fn waiting_mcp_reader_observes_a_later_append_from_an_independent_node() {
+    use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::time::Duration;
+
+    let scratch = Scratch::new();
+    let mut writer = open(&scratch, GitHashAlgorithm::Sha256, "delayed append source");
+    let tail = writer.call(NAME, &Object::new()).unwrap();
+    let after = tail.object().unwrap()["resume_after"].clone();
+    let options = writer.options.clone();
+    let (started_tx, started_rx) = mpsc::sync_channel(1);
+    let (page_tx, page_rx) = mpsc::sync_channel(1);
+    let (pending_before_append, page, closed) = std::thread::scope(|scope| {
+        scope.spawn(move || {
+            // Construct a separately opened node on the reader's own thread;
+            // neither the authority snapshot nor the event cache is shared.
+            let mut reader = NodeTools::open(options).unwrap();
+            started_tx.send(()).unwrap();
+            let page = reader.call(
+                NAME,
+                &fields([("after", after), ("wait_ms", json::number(2000))]),
+            );
+            let closed = reader.close();
+            page_tx.send((page, closed)).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Observe that the request remains pending with no new events. This
+        // bounded channel wait is a barrier, not a guessed publication delay.
+        let early = match page_rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(page) => Some(page),
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(error) => panic!("reader exited before publication: {error}"),
+        };
+        publish(
+            &writer.node,
+            &command(2, "published during wait"),
+            "delayed-append",
+        );
+        let pending = early.is_none();
+        let (page, closed) =
+            early.unwrap_or_else(|| page_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+        (pending, page, closed)
+    });
+    writer.close().unwrap();
+    closed.unwrap();
+    assert!(
+        pending_before_append,
+        "the tail read returned before any append"
+    );
+    let page = page.unwrap();
+    assert_eq!(events(&page).len(), 1);
+    assert_eq!(
+        events(&page)[0].object().unwrap()["aggregate_version"].text(),
+        Some("3"),
+    );
+}
+
+#[test]
 fn independent_read_grants_filter_before_disclosure_and_do_not_break_the_full_registry() {
     let scratch = Scratch::new();
     let mut backend = open(&scratch, GitHashAlgorithm::Sha1, "private issue text");
@@ -342,7 +514,10 @@ fn independent_read_grants_filter_before_disclosure_and_do_not_break_the_full_re
     backend.options.issues = false;
     backend.options.pulls = true;
     let hidden = backend
-        .call(NAME, &fields([("limit", json::number(1))]))
+        .call(
+            NAME,
+            &fields([("limit", json::number(1)), ("wait_ms", json::number(2000))]),
+        )
         .unwrap();
     assert!(events(&hidden).is_empty());
     assert_eq!(

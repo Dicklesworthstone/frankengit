@@ -351,7 +351,7 @@ fn refusal_and_checkpoint_edges_preserve_events_and_extend_the_exact_basis() {
 }
 
 #[test]
-fn nonadjacent_heads_keep_resumed_reads_on_the_canonical_suffix() {
+fn skipped_publications_catch_up_once_for_resumed_and_initial_reads() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let scratch = Scratch::new();
         let node = populated(&scratch, format, 3, CACHE_BYTES);
@@ -380,12 +380,213 @@ fn nonadjacent_heads_keep_resumed_reads_on_the_canonical_suffix() {
         assert_eq!(resumed.events.len(), 2);
         assert_ne!(resumed.source_head, original.source_head);
         assert_eq!(node.event_history_index_cache().test_counts(), before);
-        assert_eq!(node.event_history_index_cache().test_extension_count(), 0);
+        assert_eq!(node.event_history_index_cache().test_extension_count(), 1);
         let full = page(&node, None, 100, None).unwrap();
         assert_eq!(full.events[3..], resumed.events);
+        assert_eq!(node.event_history_index_cache().test_counts().0, before.0);
+        assert_eq!(node.event_history_index_cache().test_extension_count(), 1);
+
+        // A reader starting from the beginning also reuses its verified
+        // prefix after more than one publication, without a new full build.
+        for version in 5..8 {
+            publish(
+                &node,
+                &change(
+                    version,
+                    IssueAction::Comment {
+                        body: format!("initial-page successor {version}"),
+                    },
+                ),
+                &format!("index-initial-skip-{version}"),
+            );
+        }
+        let advanced = page(&node, None, 100, None).unwrap();
+        assert_eq!(advanced.events.len(), 8);
+        assert_eq!(advanced.events[..5], full.events);
+        assert_eq!(node.event_history_index_cache().test_counts().0, before.0);
+        assert_eq!(node.event_history_index_cache().test_extension_count(), 2);
+        let scalar_config = node
+            .service_config
+            .clone()
+            .with_event_history_index_cache_bytes(0);
+        node.shutdown().unwrap();
+        let scalar = reopened(scalar_config);
+        assert_eq!(page(&scalar, None, 100, None).unwrap(), advanced);
         assert_eq!(
-            node.event_history_index_cache().test_counts().0,
-            before.0 + 1
+            page(
+                &scalar,
+                Some(coordinates(original.events[2].cursor)),
+                2,
+                None,
+            )
+            .unwrap()
+            .events,
+            resumed.events
+        );
+        scalar.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn skipped_refusals_and_checkpoints_preserve_cursors_grants_and_cancellation() {
+    use crate::outcome_checkpoint::OutcomeCheckpointLimits;
+
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let node = populated(&scratch, format, 3, CACHE_BYTES);
+        let original = page(&node, None, 100, None).unwrap();
+        let before = node.event_history_index_cache().test_counts();
+        let cursor = coordinates(original.events.last().unwrap().cursor);
+
+        let request = node.request_context();
+        let refused = node
+            .runtime()
+            .block_on(node.admit_issue_durable_in(
+                &request,
+                &session("index-skipped-refusal"),
+                &change(1, IssueAction::Close),
+                AdmissionLimits::default(),
+            ))
+            .unwrap();
+        assert!(matches!(refused.1.outcome, DecisionOutcome::Refused { .. }));
+        let request = node.request_context();
+        let checkpoint = node
+            .runtime()
+            .block_on(node.checkpoint_outcomes_in(&request, OutcomeCheckpointLimits::default()))
+            .unwrap();
+        assert!(checkpoint.published);
+        let mut appended = Vec::new();
+        for version in 3..5 {
+            appended.push(
+                publish(
+                    &node,
+                    &change(
+                        version,
+                        IssueAction::Comment {
+                            body: format!("after unobserved checkpoint {version}"),
+                        },
+                    ),
+                    &format!("index-checkpoint-skip-{version}"),
+                )
+                .0,
+            );
+        }
+
+        assert!(matches!(
+            page(&node, Some(cursor), 100, Some(original.source_head)),
+            Err(ForgeEventReadRefusal::SnapshotMoved)
+        ));
+        assert!(matches!(
+            page(&node, Some((cursor.0, u32::MAX)), 100, None),
+            Err(ForgeEventReadRefusal::Admission(_))
+        ));
+        let denied = node.request_context();
+        assert!(matches!(
+            scoped(&node, &denied, false, false),
+            Err(ForgeEventReadRefusal::NoReadScope)
+        ));
+        let cancelled = node.request_context();
+        cancelled.cancel();
+        assert!(matches!(
+            node.runtime()
+                .block_on(node.read_forge_events_in(&cancelled, Some(cursor), 100, None,)),
+            Err(ForgeEventReadRefusal::Cancelled)
+        ));
+        assert_eq!(node.event_history_index_cache().test_counts(), before);
+        assert_eq!(node.event_history_index_cache().test_extension_count(), 0);
+
+        let resumed = page(&node, Some(cursor), 100, None).unwrap();
+        assert_eq!(
+            resumed
+                .events
+                .iter()
+                .map(|event| event.tx_id)
+                .collect::<Vec<_>>(),
+            appended
+        );
+        assert_eq!(node.event_history_index_cache().test_counts(), before);
+        assert_eq!(node.event_history_index_cache().test_extension_count(), 1);
+        let request = node.request_context();
+        let omitted = scoped(&node, &request, false, true).unwrap();
+        assert!(omitted.events().is_empty());
+        assert_eq!(omitted.source_head(), resumed.source_head);
+        let request = node.request_context();
+        assert_eq!(
+            scoped(&node, &request, true, false).unwrap().events().len(),
+            2
+        );
+        let full = page(&node, None, 100, None).unwrap();
+        assert_eq!(full.events[..3], original.events);
+        assert_eq!(full.events[3..], resumed.events);
+        assert_eq!(
+            full.events.len(),
+            5,
+            "refusals and checkpoints add no events"
+        );
+        assert_eq!(node.event_history_index_cache().test_counts().0, before.0);
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn late_older_read_cannot_replace_newer_metadata_in_the_same_scope() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let node = populated(&scratch, format, 3, CACHE_BYTES);
+        let original = page(&node, None, 100, None).unwrap();
+        let older = node
+            .event_history_index_cache()
+            .lookup(&node, original.source_head)
+            .unwrap();
+        for version in 3..5 {
+            publish(
+                &node,
+                &change(
+                    version,
+                    IssueAction::Comment {
+                        body: format!("newer cache owner {version}"),
+                    },
+                ),
+                &format!("index-newer-owner-{version}"),
+            );
+        }
+        let current = page(&node, None, 100, None).unwrap();
+        let counts = node.event_history_index_cache().test_counts();
+        let extensions = node.event_history_index_cache().test_extension_count();
+        let newer = node
+            .event_history_index_cache()
+            .lookup(&node, current.source_head)
+            .unwrap();
+        assert!(newer.source_generation() > older.source_generation());
+
+        // Deterministically finish both possible older in-flight reader paths
+        // after the newer read: a cold build and an incremental extension.
+        node.event_history_index_cache()
+            .insert(&node, Arc::clone(&older));
+        node.event_history_index_cache()
+            .insert_extended(&node, older);
+        node.event_history_index_cache()
+            .insert(&node, Arc::clone(&newer));
+        assert_eq!(node.event_history_index_cache().test_counts(), counts);
+        assert_eq!(
+            node.event_history_index_cache().test_extension_count(),
+            extensions
+        );
+        let retained = node
+            .event_history_index_cache()
+            .lookup(&node, current.source_head)
+            .unwrap();
+        assert!(Arc::ptr_eq(&retained, &newer));
+        assert!(
+            node.event_history_index_cache()
+                .lookup(&node, original.source_head)
+                .is_none()
+        );
+        assert_eq!(page(&node, None, 100, None).unwrap(), current);
+        assert_eq!(node.event_history_index_cache().test_counts().0, counts.0);
+        assert_eq!(
+            node.event_history_index_cache().test_extension_count(),
+            extensions
         );
         node.shutdown().unwrap();
     }
@@ -407,7 +608,7 @@ fn copy_storage(from: &std::path::Path, to: &std::path::Path) {
 }
 
 #[test]
-fn an_identical_history_in_another_root_cannot_reuse_a_predecessor_index() {
+fn an_identical_history_in_another_root_cannot_reuse_an_older_index() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let source = Scratch::new();
         let destination = Scratch::new();
@@ -428,24 +629,26 @@ fn an_identical_history_in_another_root_cannot_reuse_a_predecessor_index() {
             .block_on(copied.event_read_basis_in(&request, None))
             .unwrap();
         assert_eq!(basis.basis.id(), original.source_head);
-        publish(
-            &copied,
-            &change(
-                3,
-                IssueAction::Comment {
-                    body: "only in the copied root".into(),
-                },
-            ),
-            "index-copied-root",
-        );
+        for version in 3..5 {
+            publish(
+                &copied,
+                &change(
+                    version,
+                    IssueAction::Comment {
+                        body: format!("only in the copied root {version}"),
+                    },
+                ),
+                &format!("index-copied-root-{version}"),
+            );
+        }
         let resumed = page(
             &copied,
             Some(coordinates(original.events[2].cursor)),
-            1,
+            100,
             None,
         )
         .unwrap();
-        assert_eq!(resumed.events.len(), 1);
+        assert_eq!(resumed.events.len(), 2);
         assert_eq!(copied.event_history_index_cache().test_counts(), before);
         assert_eq!(copied.event_history_index_cache().test_extension_count(), 0);
         let full = page(&copied, None, 100, None).unwrap();
@@ -459,7 +662,7 @@ fn an_identical_history_in_another_root_cannot_reuse_a_predecessor_index() {
 }
 
 #[test]
-fn exhausted_retention_uses_the_scalar_suffix_without_a_second_build() {
+fn exhausted_catch_up_retention_uses_the_scalar_suffix_without_a_second_build() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let scratch = Scratch::new();
         let node = populated(&scratch, format, 1, 5120);
@@ -467,29 +670,42 @@ fn exhausted_retention_uses_the_scalar_suffix_without_a_second_build() {
         assert_eq!(node.event_history_index_cache().test_counts().0, 1);
         let mut events = first.events;
         let mut budget_miss = false;
-        // This small real cache fills after a few committed descriptors. Read
-        // one fresh event each time, so falling back needs only the new suffix.
-        for version in 1..24 {
+        // This small real cache fills after a few committed descriptors. Skip
+        // two publications between reads, then fall back to that same suffix
+        // without attempting a redundant full-history index build.
+        for version in (1..24).step_by(2) {
             let prior_extensions = node.event_history_index_cache().test_extension_count();
-            let appended = publish(
-                &node,
-                &change(
-                    version,
-                    IssueAction::Comment {
-                        body: format!("bounded retention event {version}"),
-                    },
-                ),
-                &format!("index-budget-{version}"),
-            );
+            let mut appended = Vec::new();
+            for version in version..version + 2 {
+                appended.push(
+                    publish(
+                        &node,
+                        &change(
+                            version,
+                            IssueAction::Comment {
+                                body: format!("bounded retention event {version}"),
+                            },
+                        ),
+                        &format!("index-budget-{version}"),
+                    )
+                    .0,
+                );
+            }
             let next = page(
                 &node,
                 Some(coordinates(events.last().unwrap().cursor)),
-                1,
+                2,
                 None,
             )
             .unwrap();
-            assert_eq!(next.events.len(), 1);
-            assert_eq!(next.events[0].tx_id, appended.0);
+            assert_eq!(next.events.len(), 2);
+            assert_eq!(
+                next.events
+                    .iter()
+                    .map(|event| event.tx_id)
+                    .collect::<Vec<_>>(),
+                appended
+            );
             assert!(next.next_after.is_none());
             events.extend(next.events);
             assert_eq!(node.event_history_index_cache().test_counts().0, 1);

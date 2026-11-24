@@ -1,6 +1,7 @@
 use super::super::credentials::{Binding, CredentialSource};
 use super::super::{RepositoryHttpService, RepositoryHttpServices};
 use super::*;
+mod wait;
 use crate::node_lanes::NodeLanes;
 use crate::{GitDaemonSessionTimeout, MAX_CONCURRENT_WRITERS, NodeConfig, PushQuota, WriterGate};
 use fgit_crypto::sha256_digest;

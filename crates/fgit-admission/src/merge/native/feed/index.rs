@@ -9,9 +9,11 @@ use super::{
     page_limit, read_records_page, storage, unavailable,
 };
 use fgit_authority::{AsyncAuthorityStore, StoreInstanceId, authority_head_identity};
-use fgit_chronicle::{HistoryStep, PublicationBasis, read_history_step_async};
+use fgit_chronicle::PublicationBasis;
 use fgit_forge::ForgeEventBatch;
-use fgit_types::{RefusalCode, RepositoryAuthorityHeadId, RepositoryId};
+use fgit_types::{HeadGeneration, RefusalCode, RepositoryAuthorityHeadId, RepositoryId};
+
+mod catch_up;
 
 /// Verified metadata for one complete canonical history at one exact head.
 ///
@@ -28,6 +30,8 @@ use fgit_types::{RefusalCode, RepositoryAuthorityHeadId, RepositoryId};
 #[derive(Debug)]
 pub struct VerifiedEventIndex {
     source_head: RepositoryAuthorityHeadId,
+    source_generation: HeadGeneration,
+    repository_sequence: u64,
     repository: RepositoryId,
     store_instance: StoreInstanceId,
     records: Vec<PageRecord>,
@@ -116,76 +120,15 @@ impl VerifiedEventIndex {
         if basis.body().predecessor_head_id != Some(self.source_head) {
             return Ok(None);
         }
-        // Every verified decision/checkpoint advances generation by exactly one,
-        // starting at generation one. These are profile preflights, never proof
-        // that this successor is related to the cached prefix.
-        let total_edges = usize::try_from(basis.body().generation.get() - 1)
-            .map_err(|_| unavailable(RefusalCode::ResourceBudgetExceeded))?;
-        let total_records = usize::try_from(
-            basis
-                .body()
-                .latest_repository_sequence
-                .map_or(0, |sequence| sequence.get()),
-        )
-        .map_err(|_| unavailable(RefusalCode::ResourceBudgetExceeded))?;
-        if total_edges > history::Limits::DEFAULT.batches
-            || total_records > history::Limits::DEFAULT.records
-            || retained_bytes(self.records.len())? > max_retained_bytes
-        {
-            return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
-        }
-        let mut walked = 0;
-        let step = read_history_step_async(store, cx, basis.body(), &mut walked, 1, cancelled)
-            .await
-            .map_err(storage::history_step_refusal)?;
-        let (predecessor, committed) = match step {
-            HistoryStep::Genesis => return Err(unavailable(RefusalCode::EvidenceInvalid)),
-            HistoryStep::Checkpoint { predecessor, .. } => (predecessor, Vec::new()),
-            HistoryStep::Decision { predecessor, batch } => (predecessor, batch.committed_rcrs),
-        };
-        if predecessor.id() != self.source_head
-            || predecessor.body().repository_id != self.repository
-        {
+        let extended = self
+            .catch_up_at(store, cx, basis, max_retained_bytes, cancelled)
+            .await?;
+        // A caller asserting this exact predecessor must supply a valid edge,
+        // not turn a malformed generation into an optional cache miss.
+        if extended.is_none() {
             return Err(unavailable(RefusalCode::EvidenceInvalid));
         }
-        let previous_records = usize::try_from(
-            predecessor
-                .body()
-                .latest_repository_sequence
-                .map_or(0, |sequence| sequence.get()),
-        )
-        .map_err(|_| unavailable(RefusalCode::ResourceBudgetExceeded))?;
-        if previous_records.checked_add(committed.len()) != Some(total_records) {
-            return Err(unavailable(RefusalCode::EvidenceInvalid));
-        }
-        let mut records = Vec::new();
-        records
-            .try_reserve_exact(committed.len())
-            .map_err(|_| unavailable(RefusalCode::ResourceBudgetExceeded))?;
-        for record in committed {
-            checkpoint(cancelled)?;
-            if record.repository_id != self.repository {
-                return Err(unavailable(RefusalCode::EvidenceInvalid));
-            }
-            records.push(Record {
-                sequence: record.repository_sequence.get(),
-                tx_id: record.tx_id,
-                policy_epoch: record.policy_epoch,
-                principal_snapshot_id: record.principal_snapshot_id,
-                event_root: record.forge_event_batch_root,
-            });
-        }
-        Self::retain_at(
-            store,
-            cx,
-            basis,
-            &self.records,
-            records,
-            max_retained_bytes,
-            cancelled,
-        )
-        .await
-        .map(Some)
+        Ok(extended)
     }
 
     /// Retain a verified prefix and independently verified newly committed rows.
@@ -271,6 +214,11 @@ impl VerifiedEventIndex {
         checkpoint(cancelled)?;
         Ok(Self {
             source_head: basis.id(),
+            source_generation: basis.body().generation,
+            repository_sequence: basis
+                .body()
+                .latest_repository_sequence
+                .map_or(0, |sequence| sequence.get()),
             repository: basis.body().repository_id,
             store_instance: store.instance_id(),
             records: indexed,
@@ -296,6 +244,12 @@ impl VerifiedEventIndex {
     #[must_use]
     pub const fn source_head(&self) -> RepositoryAuthorityHeadId {
         self.source_head
+    }
+
+    /// Generation of the exact authenticated head that supplied these rows.
+    #[must_use]
+    pub const fn source_generation(&self) -> HeadGeneration {
+        self.source_generation
     }
 
     /// Inline index value plus the allocated descriptor capacity. All nested

@@ -39,6 +39,46 @@ the repository incarnation, disclosure profile **and** the effective read grants
 not retroactively return events already skipped by that cursor; restart from
 `0` to backfill newly authorized history.
 
+## Bounded waits for new events
+
+HTTP and MCP accept optional `wait_ms`, an integer from 0 through 30000. The
+default is 0 and preserves the existing immediate page read. A positive value
+waits only when the requested cursor is already at an empty tail:
+
+```json
+{"name":"frankengit_events","arguments":{"profile":"collaboration-v2","after":"12:0","limit":20,"wait_ms":30000}}
+```
+
+Any scanned cursor progress returns immediately, including a page whose events
+are all hidden by the caller's grants or the canonical ref policy. Continue
+using `next_after` and retain `resume_after` exactly as for immediate reads;
+waiting never scans extra pages to fill a visible-event quota. If no progress
+arrives before the wait expires, the response is a successful empty page with
+the same resume cursor. Publications from another node instance are visible.
+
+The optional snapshot pin remains active throughout a wait. Supplying
+`expected_head` returns `snapshot_moved` if authority advances; omit the pin
+when waiting for new events across later publications. The original request
+deadline, cancellation state and work budgets apply to all probes and reads.
+Idle probes use the native runtime timer at intervals of at most 50 ms and
+reauthenticate the current head and disclosure policy. An unchanged head does
+not replay history or reread the canonical event page. No background task or
+separate event authority is created.
+
+`wait_ms` bounds idle waiting, not a hard transport completion time. An
+in-flight canonical read is awaited through completion rather than abandoned
+when the wait expires, and the original request deadline can end a wait
+earlier. MCP processes calls serially, so a waiting call occupies that session
+until it completes. HTTP waits occupy an admitted request slot; disconnects
+are detected at response write, and listener shutdown drains accepted waits
+under the existing request ownership rules.
+
+HTTP also reloads credentials before disclosing a waited-on response. A revoked
+token refuses as unauthorized. A changed principal or effective event grant
+refuses with `event_grant_changed`; the client must obtain a fresh grant and
+choose whether to restart from `0` to backfill newly authorized families. The
+MCP process uses its fixed launch-time grants.
+
 ## Disclosure and exact bytes
 
 The profiles disclose the following native event families. HTTP scopes are
@@ -121,17 +161,19 @@ response reports the intersection. Static Git tokens, source reads, metadata
 writes, merge and outcome-recovery permissions never substitute for read scopes.
 
 ```text
-GET /repo.git/api/v1/events?profile=collaboration-v2&after=12%3A0&limit=20 HTTP/1.1
+GET /repo.git/api/v1/events?profile=collaboration-v2&after=12%3A0&limit=20&wait_ms=30000 HTTP/1.1
 Host: 127.0.0.1:9419
 Authorization: Bearer <operator-provisioned-token>
 ```
 
 Use the repository URL from the service's readiness receipt, not the example
-route. `after`, `limit`, `expected_head` and `profile` are the only query fields.
+route. `after`, `limit`, `expected_head`, `profile` and `wait_ms` are the only query fields.
 Omitting `profile` selects `issues-pulls-v1`; unknown or empty profiles refuse.
 The handler rejects duplicate decoded fields, malformed decimal cursors,
 unknown parameters, request bodies, `Expect: 100-continue`, and Git protocol
 headers. The endpoint accepts GET only and advertises `Allow: GET` on 405.
+Malformed or out-of-range waits refuse with `invalid_event_wait`; decimal
+fractions, exponents, signs, leading zeros and duplicate fields are rejected.
 Unauthorized responses challenge Bearer only; cached browser Basic credentials
 are not accepted. Existing cross-site and connection-lifetime handling remains
 unchanged, and no CORS permission or TLS implementation is introduced.
@@ -165,8 +207,10 @@ The discovered suite calls `scripts/e2e/scoped_events_smoke.py` and drives only
 the supplied prebuilt binary. For SHA-1 and SHA-256 it creates and retries native
 issue events, compares exact CLI/HTTP/MCP frames, walks hidden pages, checks
 independent credential grants and malformed-query refusals with permitted twins,
-restarts both transports, polls after an append, refuses an old snapshot pin,
-and checks every HTTP service's drain accounting. Commands and HTTP operations
+restarts both transports, checks ready and empty-tail waits, holds concurrent
+HTTP readers while a native CLI command appends, refuses both a waiting and an
+old snapshot pin, and checks every HTTP service's drain accounting. The wait
+cases also check the live MCP schema and malformed wait bounds. Commands and HTTP operations
 record their paths, durations, outcomes and retained transcripts; the shared
 harness emits `EVENT-FEED-001` through `EVENT-FEED-005` acceptance records.
 Missing tooling is a non-pass disposition, never a mock replacement. The
@@ -180,16 +224,16 @@ The shared node read uses one authenticated head for configuration, disclosure
 policy and event history, without materializing unrelated source/outbox state.
 Recent-cursor cache misses walk only the verified decision suffix through that
 cursor. At a retained exact head, the shared verified metadata index seeks to
-the cursor and rereads the required nonempty event batches. An immediate
-successor can extend that index after verifying the new canonical history edge,
+the cursor and rereads the required nonempty event batches. A later head can
+extend that index across at most 64 intervening publications after verifying
+every canonical history edge and the exact retained ancestor,
 including refusal-only decisions and checkpoints. Cold initial reads
 and uncached old-cursor backfills can still be **O(history)**. See
 [the cursor-read contract](FORGE_EVENT_CURSOR_READS.md) for required-body checks,
 work bounds and explicit non-claims. No second event database or canonical
 schema is added. The warm event-batch bound does not include V2's separate
-canonical visibility readers. Persistent indexing, extension across multiple
-unobserved publications and optional long-poll remain outstanding. These changes
-do not close the bead.
+canonical visibility readers. Persistent indexing and arbitrary-age cold lookup
+remain outstanding. These changes do not close the bead.
 
 Authored tests cover exact cursors, independent grants, hidden-ref filtering, filtering before
 encoding, empty-page progression, byte-budget continuation, cancellation,
@@ -204,16 +248,23 @@ native milestone/discussion/PR/conversation histories, exact frame parity,
 credential rotation and reopening in both Git object formats. The canonical
 conversation reader's existing retired-history regression covers hidden
 historical anchors outside the returned window.
+Bounded-wait tests cover immediate visible and hidden progress, empty-tail
+timeouts, delayed publication, independent reader nodes, snapshot movement,
+original request cancellation/deadlines, unchanged-head page-read avoidance,
+strict bounds, and HTTP credential revocation, reassignment and grant changes.
 
 Focused native test targets are:
 
 ```bash
 cargo test -p fgit-node --lib treefs_workspace::events::scoped
+cargo test -p fgit-node --lib treefs_workspace::events::tests::wait
 cargo test -p fgit-node --lib smart_http::server::events
-cargo test -p fgit-cli --bin fg mcp::backend::events
+cargo test -p fgit-cli --lib mcp::backend::events
 cargo test -p fgit-admission --lib retired_conversation_still_refuses_gaps_and_hides_older_private_anchors
 ```
 
-The real-binary campaign above retains its v1 profile. Unit and native fixture
-coverage does not substitute for that transport campaign or establish indexed
-lookup, long-poll, or closure of the broader event-feed bead.
+The real-binary campaign above retains its v1 profile. Its bounded-wait cases
+cover HTTP and MCP request contracts, with delayed publication exercised
+through concurrent HTTP readers. The independent MCP reader also has a native
+regression test. Authored tests do not themselves establish a passing campaign,
+indexed lookup or closure of the broader event-feed bead.

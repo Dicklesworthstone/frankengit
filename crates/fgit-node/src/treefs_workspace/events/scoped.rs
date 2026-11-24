@@ -237,6 +237,7 @@ impl ForgeEventReadRefusal {
         match self {
             Self::InvalidLimit => "invalid_event_limit",
             Self::InvalidCursor => "invalid_event_cursor",
+            Self::InvalidWait => "invalid_event_wait",
             Self::SnapshotMoved => "snapshot_moved",
             Self::NoReadScope => "events_not_granted",
             Self::ResponseLimit => "event_response_limit",
@@ -294,7 +295,8 @@ impl OneNode {
     /// empty page can have `next_after`. Persist `resume_after` even at EOF.
     /// At an already verified exact head, bounded metadata permits seeking to
     /// the cursor without replaying history. Cold reads retain bounded replay;
-    /// long-poll, delivery acknowledgement and publication are not provided.
+    /// [`Self::read_profiled_forge_events_wait_in`] optionally waits at the
+    /// tail. Delivery acknowledgement and publication are not provided.
     pub async fn read_scoped_forge_events_in(
         &self,
         request: &NodeRequestContext,
