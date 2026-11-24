@@ -165,13 +165,30 @@ fn ordinary_failed_jobs_report_failure_but_unresolved_execution_is_not_publishab
     assert_eq!(result.committed, 1);
     assert!(output.contains("\"conclusion\":\"failure\""));
     let event = polled.dispatch().unwrap().run_directory.parent().unwrap();
-    fs::remove_file(event.join("settled")).unwrap();
-    assert!(
-        report!(f, |_: &str| panic!("unresolved must not submit"))
-            .error
-            .unwrap()
-            .contains("unresolved")
-    );
+    let published = head(&f);
+    let settled = event.join("settled");
+    let original = fs::read(&settled).unwrap();
+    fs::remove_file(&settled).unwrap();
+    let recovered = report!(f, |_: &str| panic!(
+        "reported failure must not submit again"
+    ));
+    assert!(recovered.error.is_none(), "{recovered:?}");
+    assert_eq!(recovered.previously_reported, 1);
+    assert_eq!((recovered.committed, recovered.refused), (0, 0));
+    assert_eq!(fs::read(&settled).unwrap(), original);
+    assert_eq!(head(&f), published);
+
+    // Even the original reported acknowledgement and completed child journal
+    // cannot reconstruct settlement without the execution handoff.
+    fs::remove_file(&settled).unwrap();
+    fs::remove_file(event.join("check-sources")).unwrap();
+    let unresolved = report!(f, |_: &str| panic!("unresolved must not submit"));
+    assert!(unresolved.error.as_deref().unwrap().contains("unresolved"));
+    assert_eq!((unresolved.committed, unresolved.refused), (0, 0));
+    assert_eq!(unresolved.previously_reported, 0);
+    assert!(!settled.exists());
+    assert_eq!(head(&f), published);
+    assert_eq!(f.count(), "x");
 }
 #[test]
 fn pre_cancelled_reporting_and_foreign_journal_pins_have_no_canonical_effect() {
