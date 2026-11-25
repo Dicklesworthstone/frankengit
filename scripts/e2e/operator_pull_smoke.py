@@ -451,8 +451,8 @@ def run_case(campaign: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
             pr = readback(7)
             expected_target = metadata.get("target_ref_hex", TARGET.encode().hex())
             require(pr["version"] == version + 1 and pr["state"] == ("closed" if action == "close" else "open")
-                    and pr["data"]["source_ref"] is None and pr["data"]["source_ref_hex"] == raw_source
-                    and pr["data"]["target_ref"] == metadata.get("target_ref") and pr["data"]["target_ref_hex"] == expected_target
+                    and pr["data"]["source_reference_hex"] == raw_source
+                    and pr["data"]["target_reference_hex"] == expected_target
                     and all(pr["data"][key] == metadata[key] for key in ("source_tip", "target_tip", "title", "body")),
                     "durable PR command changed its selected branch, state, tips or metadata")
         require(len(transactions) == 5 and campaign.run("at", root, TENANT, REPOSITORY, "latest", "refs") == before_raw,
