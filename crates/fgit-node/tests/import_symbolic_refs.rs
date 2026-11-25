@@ -279,8 +279,16 @@ fn packed_byte_names_remain_distinct_and_symbolic_targets_resolve_in_both_hash_d
         let config = scratch.config(format, "node", 0x72);
         let imported = node(config.clone());
         let before = snapshot(&imported);
-        for malformed in [b"# \xff\n".as_slice(), b"^\xff\n", b"\xff refs/heads/invalid\n"] {
-            write(&source.root, "packed-refs", [lines.as_slice(), malformed].concat());
+        for malformed in [
+            b"# \xff\n".as_slice(),
+            b"^\xff\n",
+            b"\xff refs/heads/invalid\n",
+        ] {
+            write(
+                &source.root,
+                "packed-refs",
+                [lines.as_slice(), malformed].concat(),
+            );
             assert!(matches!(
                 staging(import(&imported, &source.root).unwrap_err()),
                 LooseGitImportRefusal::PackedRefContents(_)

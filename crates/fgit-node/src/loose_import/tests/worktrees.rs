@@ -325,6 +325,56 @@ fn linked_source_revalidation_detects_controls_head_refs_and_alternates_changes(
 }
 
 #[test]
+fn bare_and_ordinary_worktree_sources_recheck_their_selected_snapshot() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for bare in [false, true] {
+            let scratch = ScratchDirectory::new();
+            let source = linked_source(&scratch.0, format);
+            let root = if bare {
+                source.common.as_path()
+            } else {
+                source.common.parent().unwrap()
+            };
+            let mut live = || true;
+            let control = ImportControl::new(&mut live);
+            let layout = SourceLayout::resolve(root, &control).unwrap();
+            let refs = CanonicalRefState::new_with_head_target(
+                layout.read_refs(format, 3, &control).unwrap(),
+                layout.read_head(&control).unwrap(),
+            )
+            .unwrap();
+            let revalidate = || layout.revalidate(format, 3, &refs, &control);
+            revalidate().unwrap();
+
+            let main = source.common.join("refs/heads/main");
+            fs::write(&main, format!("{}\n", source.topic)).unwrap();
+            assert!(matches!(
+                revalidate(),
+                Err(LooseGitImportRefusal::SourceLayoutChanged(_))
+            ));
+            fs::write(&main, format!("{}\n", source.main)).unwrap();
+
+            let head = source.common.join("HEAD");
+            fs::write(&head, "ref: refs/heads/topic\n").unwrap();
+            assert!(matches!(
+                revalidate(),
+                Err(LooseGitImportRefusal::SourceLayoutChanged(_))
+            ));
+            fs::write(&head, "ref: refs/heads/main\n").unwrap();
+            revalidate().unwrap();
+
+            let info = source.common.join("objects/info");
+            fs::create_dir_all(&info).unwrap();
+            fs::write(info.join("alternates"), "other\n").unwrap();
+            assert!(matches!(
+                revalidate(),
+                Err(LooseGitImportRefusal::ObjectAlternatesUnsupported(_))
+            ));
+        }
+    }
+}
+
+#[test]
 fn shared_and_private_refs_use_one_limit_and_cancelled_discovery_stays_cancelled() {
     let scratch = ScratchDirectory::new();
     let source = linked_source(&scratch.0, GitHashAlgorithm::Sha256);

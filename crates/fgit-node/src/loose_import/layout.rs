@@ -155,9 +155,6 @@ impl SourceLayout {
         refs: &CanonicalRefState,
         control: &ImportControl<'_>,
     ) -> Result<(), LooseGitImportRefusal> {
-        if self.gitfile.is_none() && self.commondir.is_none() {
-            return control.checkpoint();
-        }
         let observed = Self::resolve(&self.source, control)?;
         if observed != *self
             || Some(&observed.read_head(control)?) != refs.head_target()

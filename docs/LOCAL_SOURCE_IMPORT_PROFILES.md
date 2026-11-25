@@ -84,11 +84,13 @@ refuse before object placement. Directory indirection does not weaken object,
 pack, ref, graph, or caller cancellation limits.
 
 Keep the source stable during import. After the reachable graph verifies and
-before placement, an indirect source's gitfile, commondir, HEAD and selected
-refs are read again. A changed layout or ref set refuses; retry after source
-activity stops. This detects ordinary concurrent source changes and does not
-provide filesystem snapshot isolation against a malicious local host. Once
-placement begins, object bytes come exclusively from verified quarantine.
+before placement, the importer resolves the source directory again and compares
+its HEAD target and selected ref names and IDs with those used to validate the
+graph. This applies to bare repositories, ordinary checkouts and linked
+worktrees. The same check compares any gitfile and commondir and rejects newly
+introduced object alternates. If the two observations differ, retry once the
+source is stable. Writers can still change the source between or after these
+observations. Placement reads object bytes from the verified quarantine.
 Equivalent source paths and control-file spellings used in separate completed
 attempts do not change transaction identity or the original idempotency result.
 
