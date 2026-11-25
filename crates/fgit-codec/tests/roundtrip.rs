@@ -27,6 +27,39 @@ fn fingerprint(bytes: &[u8]) -> String {
     corpus_digest(bytes).to_string()
 }
 
+#[test]
+fn ordered_git_oid_sets_match_the_generic_canonical_encoding() {
+    use fgit_types::{GitOid, GitOidSha1, GitOidSha256};
+    use std::collections::BTreeSet;
+
+    let mut objects = BTreeSet::new();
+    let mut rng = SplitMix64::new(SEED);
+    for count in [0, 1, 2, 31, 4096] {
+        while objects.len() < count {
+            let mut digest = [0_u8; 32];
+            digest[..8].copy_from_slice(&rng.next_u64().to_be_bytes());
+            // Adjacent SHA-1/SHA-256 values share their digest prefix.
+            objects.insert(GitOid::Sha1(GitOidSha1::from_bytes(
+                digest[..20].try_into().unwrap(),
+            )));
+            if objects.len() < count {
+                objects.insert(GitOid::Sha256(GitOidSha256::from_bytes(digest)));
+            }
+        }
+        let reversed: Vec<_> = objects.iter().rev().copied().collect();
+        let mut reference = Encoder::new();
+        reference
+            .write_canonical_set("objects", &reversed, |out, oid| {
+                out.write_git_oid(oid);
+                Ok(())
+            })
+            .unwrap();
+        let mut actual = Encoder::new();
+        actual.write_git_oid_set("objects", &objects).unwrap();
+        assert_eq!(actual.as_bytes(), reference.as_bytes());
+    }
+}
+
 /// Encodes, decodes, and re-encodes, asserting both round-trip directions.
 fn assert_round_trips<B>(label: &str, body: &B)
 where

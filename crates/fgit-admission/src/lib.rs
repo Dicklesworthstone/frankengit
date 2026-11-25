@@ -1982,15 +1982,7 @@ impl CanonicalBody for PermittedObjectClosure {
     const SCHEMA_MINOR: u16 = 0;
 
     fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
-        let objects = self.objects.iter().copied().collect::<Vec<_>>();
-        out.write_canonical_set(
-            "permitted-object-closure.objects",
-            &objects,
-            |encoder, oid| {
-                encoder.write_git_oid(oid);
-                Ok(())
-            },
-        )
+        out.write_git_oid_set("permitted-object-closure.objects", &self.objects)
     }
 
     fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {

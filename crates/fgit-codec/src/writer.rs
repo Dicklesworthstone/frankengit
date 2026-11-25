@@ -10,6 +10,7 @@ use fgit_types::hash::{Digest, DigestBytes};
 use fgit_types::identity::InternalObjectId;
 use fgit_types::numeric::{CanonicalScalar, CodecVersion};
 use fgit_types::{DomainTag, GitHashAlgorithm, GitOid, OPAQUE_ID_LEN, RefName, SchemaId};
+use std::collections::BTreeSet;
 
 use crate::error::CodecRefusal;
 
@@ -289,6 +290,21 @@ impl Encoder {
     pub fn write_git_oid(&mut self, oid: &GitOid) {
         self.write_scalar(oid.algorithm().code_point());
         self.out.extend_from_slice(oid.as_bytes());
+    }
+
+    /// Writes the canonical set of native object IDs without a scratch encoder
+    /// per object. GitOid orders SHA-1 before SHA-256, then compares the raw
+    /// fixed-width digest. That is exactly the byte order of `write_git_oid`.
+    pub fn write_git_oid_set(
+        &mut self,
+        field: &'static str,
+        objects: &BTreeSet<GitOid>,
+    ) -> Result<(), CodecRefusal> {
+        self.write_count(field, objects.len())?;
+        for oid in objects {
+            self.write_git_oid(oid);
+        }
+        Ok(())
     }
 
     /// Writes a validated reference name as a length-prefixed byte string.
