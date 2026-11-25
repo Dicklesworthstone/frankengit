@@ -13,6 +13,11 @@ Publish a retained job result with
 any of the interfaces below. Publication requires the reporting branch to name
 the exact executed commit.
 
+For a branch followed by the native CI publisher, the PR tip watcher can keep
+this view current after stock Git pushes. It updates the PR to the observed
+source tip. The existing job then appears when its source ref and commit match
+at the selected snapshot. [Running CI and PR tip synchronization together](PR_TIP_SYNC_SERVICE.md#show-ci-for-a-pushed-commit-on-its-existing-pr)
+
 ## Interfaces
 
 - HTTP: `GET /<repository-route>/api/v1/pulls/<number>/checks`. Enable the existing

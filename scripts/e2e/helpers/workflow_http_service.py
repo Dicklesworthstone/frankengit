@@ -57,13 +57,16 @@ def event_directories(fixture):
 
 
 class Server:
-    def __init__(self, fixture, label, *, publish=False, attempt=30):
+    def __init__(self, fixture, label, *, publish=False, attempt=30, source_reads=False):
         self.fixture = fixture
+        self.source_reads = source_reads
         self.stop_file = fixture.root / f"{label}.stop"
         self.output = fixture.root / f"{label}.out"
         self.diagnostic = fixture.root / f"{label}.err"
         self.endpoint = None
         args = arguments(fixture, self.stop_file, publish=publish, attempt=attempt)
+        if source_reads:
+            args.append("--allow-source")
         with self.output.open("wb") as stdout, self.diagnostic.open("wb") as stderr:
             self.child = subprocess.Popen(
                 [str(fixture.campaign.binary), *map(str, args)], stdout=stdout, stderr=stderr
@@ -91,7 +94,7 @@ class Server:
         ready = next(row for row in observed if row.get("type") == "smart_http_listening")
         assert ready["schema_version"] == 1 and ready["workflow_enabled"] is True
         assert ready["lifetime"] == "continuous" and ready["credential_mode"] == "reloadable"
-        assert not ready["receive_enabled"] and not ready["source_enabled"]
+        assert not ready["receive_enabled"] and ready["source_enabled"] is self.source_reads
         assert ready["pulls_enabled"] and ready["repository_incarnation"] == self.fixture.incarnation
         self.endpoint = urlsplit(ready["url"])
         assert self.endpoint.scheme == "http" and self.endpoint.hostname == "127.0.0.1"

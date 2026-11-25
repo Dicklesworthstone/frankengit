@@ -74,6 +74,24 @@ For per-batch manual review and confirmation, use `fg_pull_sync.mjs` instead.
 HTTPS uses certificate verification; an optional private `--ca-file` is passed to
 both discovery and publication. Cleartext HTTP is restricted to numeric loopback.
 
+### Show CI for a pushed commit on its existing PR
+
+Run the native HTTP workflow service on the PR's source branch with
+`--workflow-publish-checks --workflow-principal PUBLISHER`. Enable
+`--allow-source --allow-pulls` on the endpoint used by the tip watcher. Give
+the watcher its own credential with `read,pulls-read,pulls-write`, configure
+the PR selection above, and start its `serve` command before the push. The
+check publisher and the metadata watcher keep their own permissions and state.
+[Native HTTP workflow service](NATIVE_HTTP_WORKFLOW_SERVICE.md)
+
+After a stock Git push, CI executes the changed branch and publishes the job
+result. The watcher advances the existing PR's recorded tips through an
+exact-version update. Once both have settled, the PR checks endpoint returns
+the job at the pushed commit. A watcher started after the push can also catch
+up to the observed tip. Restart with the same configuration and custody directory
+to reuse its recorded decision. A poll with unchanged tips leaves the PR version
+untouched. [PR checks and snapshot semantics](PULL_REQUEST_WORKFLOW_CHECKS.md)
+
 ## Retained requests and decisions
 
 One manager owns `state_directory/owner.lock`. A byte-exact `binding.json` fixes
@@ -157,6 +175,9 @@ Only transient discovery failures (transport/timeouts and HTTP 408, 409, 429,
 502, 503, 504) receive bounded polling backoff, stopping after three consecutive
 failures. Authentication, schema, custody, publication, and output failures do not
 enter that retry path. Files and final observations survive later output failure.
+If discovery is still unavailable on the final allowed poll, the command exits
+2 with the read error. An earlier completed sweep and any committed updates
+remain visible in the observations and the retained batch.
 Output is bounded JSON/NDJSON; status contains counts, paths, and plan identities,
 not credentials or PR text. Publication events retain native terminal identities.
 
@@ -175,9 +196,13 @@ serialized receipt-capacity boundary. Run it with the unchanged one-off suites:
 node --test tests/operator/pull_sync*.test.mjs
 ```
 
-The remote node in these tests is explicitly a native-schema contract fixture,
-not Rust `fg`. These are client orchestration tests, not native authorization,
-CAS, review-freshness, live-deployment, hardware-power-loss, or full-workspace
-acceptance. No server permission is inferred from local checks. The broader
-`frankengit-root-doctrine-x2mv.4.20` and CI product-loop acceptance remain open;
-no required-green check, merge permission, or approval-survival rule is added.
+The loopback peer in those tests implements the native HTTP schema. The
+[stock-push campaign](../scripts/e2e/suites/workflow/stock_push_landing.sh)
+runs the operator against a native node with its own scoped token. It pushes
+with pinned Git 2.54.0 while CI and PR synchronization are running, checks the
+PR version and published job, and exercises a non-UTF-8 branch name at a page
+boundary in both Git hash formats. A second case restarts the operator after
+a refresh and exercises protected landing at the exact pushed tip.
+
+Deployment qualification, hardware power loss, the CI product-loop acceptance
+and `frankengit-root-doctrine-x2mv.4.20` remain open.

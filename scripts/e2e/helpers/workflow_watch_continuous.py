@@ -172,7 +172,7 @@ class Watcher:
 
 
 class Fixture:
-    def __init__(self, campaign, fmt, label, active=False, *, workflow_source=None):
+    def __init__(self, campaign, fmt, label, active=False, *, workflow_source=None, packed_refs=()):
         self.campaign, self.format = campaign, fmt
         self.root = campaign.root / f"{fmt}-{label}"
         self.root.mkdir()
@@ -217,6 +217,9 @@ class Fixture:
                 (self.source / f"refs/heads/future-{index}").write_text(parent + "\n")
         (self.source / TARGET).write_text(self.base + "\n")
         (self.source / REF).write_text(self.tips[0] + "\n")
+        if packed_refs:
+            (self.source / "packed-refs").write_bytes(b"".join(
+                self.base.encode("ascii") + b" " + name + b"\n" for name in sorted(packed_refs)))
         self.current = 0
         self.scope = [self.node, TENANT, REPOSITORY]
         campaign.invoke("init", ["init", *self.scope, fmt])

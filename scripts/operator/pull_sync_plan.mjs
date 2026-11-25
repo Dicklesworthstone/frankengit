@@ -2,8 +2,9 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { outcomeEndpoint, outcomeScope } from './transaction_outcome.mjs';
 import { exactKeys, fail, syncRequest, tokenValue } from './pull_sync_transport.mjs';
-import { integer, listReply, showReply, pinned, reference, oid, branch, metadataCommand, hex, utf8, opaque, snapshot }
+import { integer, listReply, showReply, oid, metadataCommand, opaque, snapshot }
   from '../../crates/fgit-node/src/smart_http/server/browser/pulls-core.mjs';
+import { refsPage } from '../../crates/fgit-node/src/smart_http/server/browser/branches.mjs';
 
 export const LIMITS = Object.freeze({ pulls: 4096, changes: 128, pages: 256, metadata: 16 * 1024 * 1024, plan: 20 * 1024 * 1024 });
 export const encode = value => Buffer.from(`${JSON.stringify(value)}\n`);
@@ -46,22 +47,6 @@ function priorFields(row, format) {
     source_ref: data.source_ref, target_ref: data.target_ref, source_tip: oid(data.source_tip, format), target_tip: oid(data.target_tip, format),
     title: data.title, body: data.body });
 }
-function refsPage(reply, dest, head, sourceHead, after) {
-  pinned(reply, browserScope(dest), head);
-  if (reply.type !== 'source_refs' || reply.namespace !== 'branches' || reply.source_head !== sourceHead || reply.after !== after || reply.limit !== 50 ||
-      reply.read_only !== true || reply.transaction_created !== false || reply.published !== false || reply.direct_refs_only !== true ||
-      !Array.isArray(reply.refs) || reply.refs.length > 50) fail('invalid_sync_reference_page');
-  let previous = after === null ? '' : hex(utf8.encode(after));
-  for (const row of reply.refs) {
-    exactKeys(row, ['ref', 'ref_hex', 'object_id']); reference(row, 'ref'); oid(row.object_id, dest.object_format);
-    // Byte-only unrelated names are data, not a reason to replace the cursor.
-    if (!row.ref_hex.startsWith('726566732f68656164732f') || row.ref_hex <= previous) fail('invalid_sync_ref_order');
-    previous = row.ref_hex;
-  }
-  if (reply.next_after !== null && (branch(reply.next_after) === null || reply.refs.length !== 50 ||
-      hex(utf8.encode(reply.next_after)) !== previous)) fail('invalid_sync_ref_continuation');
-  return reply;
-}
 export async function discover(dest, token, selected, options = {}) {
   dest = destination(dest); tokenValue(token); selected = selection(selected);
   const cx = operationContext(options), rows = [], scope = browserScope(dest);
@@ -102,8 +87,14 @@ export async function discover(dest, token, selected, options = {}) {
   let after = null;
   while (needed.size > tips.size) {
     const raw = await request({ kind: 'refs', after, head, format: dest.object_format });
-    const page = refsPage(raw.value, dest, head, sourceHead, after);
-    for (const row of page.refs) if (needed.has(row.ref)) tips.set(row.ref, oid(row.object_id, dest.object_format));
+    const page = raw.value;
+    refsPage(page, { object_format: dest.object_format, namespace: 'branches', cursor_encoding: 'hex', limit: 50,
+      expected_head: head, ...(after === null ? {} : { after }) }, scope);
+    if (page.source_head !== sourceHead) fail('sync_source_head_changed');
+    for (const row of page.refs) {
+      exactKeys(row, ['ref', 'ref_hex', 'object_id']);
+      if (needed.has(row.ref)) tips.set(row.ref, oid(row.object_id, dest.object_format));
+    }
     after = page.next_after;
     if (after === null) break;
   }

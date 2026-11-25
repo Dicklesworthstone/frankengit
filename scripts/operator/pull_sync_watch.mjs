@@ -189,6 +189,7 @@ export async function serve(config, token, supplied = {}) {
         failures++;
         await emit(selected, { type: 'pull_sync_watch_read_unavailable', code: error.code, status: error.status,
           consecutive_failures: consecutive, mutations_sent: 0 });
+        if (polls === selected.maxPolls) throw error;
       }
       if (polls === selected.maxPolls || selected.signal?.aborted) break;
       try { await sleep(Math.min(60000, selected.pollMs * 2 ** consecutive), undefined, { signal: selected.signal }); }

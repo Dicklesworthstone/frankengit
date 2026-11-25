@@ -78,10 +78,12 @@ all continuations retain the first authority snapshot. A moved snapshot refuses
 rather than mixing pages or refreshing implicitly. Unchanged PRs remain visible
 in the report. A plan is bounded by 20 MiB; an over-budget plan is not saved.
 
-The current native metadata/form profile takes UTF-8 branch names. Selected
-byte-only refs refuse; unrelated byte-only names remain data, but an unencodable
-native pagination cursor also refuses rather than skipping a page. Git SHA-1
-and SHA-256 are separate domains. PR/version counters above JavaScript's exact
+Branch discovery requests hex cursors on every page. It compares exact native
+ref bytes and checks the continuation against the last returned name. A branch
+whose name contains non-UTF-8 bytes may end a page. Discovery resumes at the
+next branch in the same snapshot. The native PR metadata update form requires
+UTF-8 names for the selected source and target branches.
+Git SHA-1 and SHA-256 are separate domains. PR/version counters above JavaScript's exact
 safe integer range refuse before publication; unquoted native decision counters
 are handled separately without precision loss.
 
