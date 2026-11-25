@@ -112,6 +112,29 @@ test('persistent transient read failures stop after three attempts', async t => 
   await assert.rejects(serve(f.config, TOKEN, { maxPolls: 10, pollMs: 100 }), error => error.status === 503);
   assert.equal(f.calls.length, 3); assert.equal(writes(f).length, 0);
 });
+for (const polls of [1, 2]) test(`discovery unavailable on the last of ${polls} polls exits as a read failure`, async t => {
+  const f = await setup(t, 'sha1', 1);
+  let discoveries = 0;
+  f.state.hook = (call, _req, res) => {
+    if (call.path.endsWith('/api/v1/pulls') && ++discoveries === polls) {
+      res.writeHead(503); res.end(); return true;
+    }
+  };
+  const run = await child(f, 'serve', ['--max-polls', String(polls), '--poll-millis', '100']).done;
+  assert.equal(run.code, 2, run.out);
+  const error = JSON.parse(run.err);
+  assert.match(error.message, /sync_http_refused/);
+  assert.equal(error.publication_unknown, false);
+  assert.equal(discoveries, polls);
+  const observations = run.out.trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(observations.filter(row => row.type === 'pull_sync_watch_sweep').length, polls - 1);
+  assert.equal(observations.at(-1).type, 'pull_sync_watch_read_unavailable');
+  assert.equal(observations.at(-1).mutations_sent, 0);
+  assert.equal(writes(f).length, polls - 1);
+  const retained = await status(f.config);
+  assert.equal(retained.owner_present, false);
+  assert.deepEqual(retained.batches.map(batch => batch.committed), polls === 1 ? [] : [1]);
+});
 test('unrelated malformed source responses and missing branches stop rather than widening selection', async t => {
   const f = await setup(t); f.state.tips.delete('refs/heads/topic-1');
   await assert.rejects(serve(f.config, TOKEN, { maxPolls: 3, pollMs: 100 }), /branch_unavailable/);

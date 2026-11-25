@@ -3,18 +3,23 @@
 
 import argparse
 from contextlib import contextmanager
+import hashlib
 import json
+import os
 from pathlib import Path
+import secrets
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 from workflow_http_service import Server, credentials, event_directories
-from workflow_watch_continuous import Campaign, Fixture, PRINCIPAL, REF, REPOSITORY, TARGET, read_rows
+from workflow_watch_continuous import Campaign, Fixture, PRINCIPAL, REF, REPOSITORY, TARGET, TENANT, read_rows
 
 PIN = "git-2.54.0"
 ORACLE = Path(__file__).resolve().parents[1] / "oracle/oracle.sh"
+PR_SYNC = Path(__file__).resolve().parents[2] / "fg_pull_sync_watch.mjs"
 
 
 def upstream(*args, data=None):
@@ -79,6 +84,53 @@ def refs(f):
     return dict(line.strip().split(" -> ", 1) for line in raw.splitlines() if " -> " in line)
 
 
+def grant_tip_sync(f):
+    token = secrets.token_hex(32)
+    with f.credentials.open("a") as grants:
+        digest = hashlib.sha256(token.encode()).hexdigest()
+        grants.write(f"{digest} {PRINCIPAL} read,pulls-read,pulls-write\n")
+    return token
+
+
+@contextmanager
+def tip_sync_command(f, server, token):
+    state = f.root / "pr-sync"
+    state.mkdir(mode=0o700)
+    destination = dict(endpoint=server.endpoint.geturl(), tenant_id=TENANT, repository_id=REPOSITORY,
+                       repository_incarnation=f.incarnation, principal_id=PRINCIPAL, object_format=f.format)
+    config = dict(schema="frankengit-pr-sync-watch-v1", destination=destination, selected=[1],
+                  state_directory=str(state), max_batches=2, state_bytes=1048576, policy="recorded-tips-only")
+    with tempfile.TemporaryDirectory() as private:
+        config_path, token_path = (Path(private) / name for name in ("watch.json", "token"))
+        for path, value in ((config_path, json.dumps(config)), (token_path, token)):
+            with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as out:
+                out.write(value)
+        yield [os.environ.get("FGE_NODE", "node"), PR_SYNC, "serve", "--config", config_path,
+               "--token-file", token_path, "--allow-tip-updates", "--poll-millis", "100"]
+
+
+def watch_pushed_tip(f, server, token):
+    with tip_sync_command(f, server, token) as command:
+
+        def run(label, polls):
+            log = f.root / f"pr-sync-{label}.ndjson"
+            with log.open("xb") as out:
+                subprocess.run([*command, "--max-polls", str(polls)], stdout=out, timeout=45, check=True)
+            return read_rows(log)
+
+        published, first, idle, summary = run("after-push", 2)
+        assert published["type"] == "pull_sync_observed" and published["outcome"] == "committed"
+        assert published["number"] == 1 and published["tx_id"]
+        assert first["type"] == "pull_sync_watch_sweep" and first["updates"] == first["committed"] == 1
+        assert idle["unchanged"] == [1] and idle["updates"] == 0
+        assert summary["updates"] == 1 and summary["refused"] == summary["read_failures"] == 0
+        assert not summary["refs_changed"] and not summary["approvals_carried_forward"]
+        resumed, finish = run("restart", 1)
+        assert resumed["unchanged"] == [1] and resumed["updates"] == finish["updates"] == 0
+        assert resumed["batches"] == idle["batches"] and finish["read_failures"] == 0
+        return published
+
+
 def policy(f, graph, job, version, epoch):
     pub = f.campaign.invoke("require-" + job, [
         "protection", "set", *f.scope, "--trusted-local", "--principal", PRINCIPAL,
@@ -109,6 +161,7 @@ def queue(f, action, version, key, flags, expected):
 def lifecycle(campaign, fmt):
     f = Fixture(campaign, fmt, "push-landing")
     credentials(f)
+    sync_token = grant_tip_sync(f)
     f.open_pull()
     run, tip = fresh_push_source(f)
     initial = refs(f)
@@ -124,7 +177,7 @@ def lifecycle(campaign, fmt):
         server.stop()
     graph = prior["graph_root"]
     epoch = policy(f, graph, "a", 0, 1)
-    with Server(f, "receive-with-publication-disabled") as server:
+    with Server(f, "receive-with-publication-disabled", source_reads=True) as server:
         server.ready()
         with receive_listener(f) as address:
             upstream("push-loopback", PIN, run, "push", address, f"/{REPOSITORY}.git",
@@ -158,20 +211,18 @@ def lifecycle(campaign, fmt):
         assert stale_detail["pull_request"]["version"] == int(stale_page["pull_request_version"]) == 1
         assert stale_page["source_tip"] == former["source_tip"] and not stale_page["source_current"]
         assert stale_page["complete"] and stale_page["checks"] == []
-        updated = json.loads(campaign.invoke("refresh-existing-pull", [
-            "pr", "update", *f.scope, 1, "--trusted-local", "--principal", PRINCIPAL,
-            "--idempotency-key", "refresh-pushed-subject", "--expected-version", 1,
-            "--source-ref", REF, "--target-ref", TARGET, "--expected-source", tip,
-            "--expected-target", f.base, "--title", "Continuous native check",
-            "--body", "Actual retained workflow evidence", "--object-format", fmt,
-        ]))
-        assert updated["command_committed"] and not updated["refs_changed"], updated
+        updated = watch_pushed_tip(f, server, sync_token)
+        assert refs(f) == {**initial, REF: tip} and f.effects_count() == 2
         f.tips[0] = tip
         status, body = server.request("GET", "/api/v1/pulls/1/checks")
         empty = json.loads(body)
         assert status == 200 and empty["source_current"] and empty["source_tip"] == tip, empty
         assert int(empty["pull_request_version"]) == 2 and empty["complete"] and empty["checks"] == [], empty
         detail_args = ["pr", "show", *f.scope, 1, "--trusted-local", "--checks", "--object-format", fmt]
+        synced = json.loads(campaign.invoke("auto-refreshed-pr", [
+            *detail_args, "--expected-head", empty["snapshot_token"]]))["pull_request"]
+        assert synced["version"] == 2 and synced["state"] == "open"
+        assert synced["data"] == {**stale_detail["pull_request"]["data"], "source_tip": tip}
         historical = json.loads(campaign.invoke("prior-pr-with-checks", [
             *detail_args, "--expected-head", former["snapshot_token"]]))
         assert historical == stale_detail, historical
@@ -219,11 +270,74 @@ def lifecycle(campaign, fmt):
     campaign.record(fmt, "stock-push-http-check-protected-fast-forward", source=tip,
                     executed_before_pr_refresh=sorted(reports), merged_check_snapshot=pull["snapshot_token"],
                     former_target=f.base, pull_request=1, refreshed_version=2,
+                    sync_transaction=updated["tx_id"], sync_decision_sequence=updated["decision_sequence"],
                     former_check=prior["id"], check=checked["id"],
                     workflow_graph=graph, publisher=checked["publisher"], job=checked["job"],
                     old_tip_refusal=stale["refusal_code"],
                     wrong_job_refusal=wrong["refusal_code"], oracle_pin=PIN,
                     landing_sequence=landed["decision_sequence"], executions=f.effects_count())
+
+
+def push_with_both_services_running(campaign, fmt):
+    f = Fixture(campaign, fmt, "live-push")
+    credentials(f)
+    sync_token = grant_tip_sync(f)
+    f.open_pull()
+    run, tip = fresh_push_source(f)
+    initial = refs(f)
+    log = f.root / "live-pr-sync.ndjson"
+    with Server(f, "live-push", publish=True, source_reads=True) as server:
+        server.ready()
+        prior = server.check()
+        with tip_sync_command(f, server, sync_token) as command, log.open("xb") as output:
+            watcher = subprocess.Popen([*command, "--max-polls", "600"], stdout=output)
+            try:
+                def watch_observed(_):
+                    assert watcher.poll() is None, read_rows(log)
+                    return any(row.get("unchanged") == [1] for row in read_rows(log))
+
+                server.wait(watch_observed)
+                with receive_listener(f) as address:
+                    upstream("push-loopback", PIN, run, "push", address, f"/{REPOSITORY}.git",
+                             "client", "plain", f"{REF}:{REF}")
+
+                def has_check_at_new_tip(_):
+                    assert watcher.poll() is None, read_rows(log)
+                    status, body = server.request("GET", "/api/v1/pulls/1/checks")
+                    page = json.loads(body)
+                    assert status == 200, page
+                    return page["source_current"] and page["source_tip"] == tip and bool(page["checks"])
+
+                server.wait(has_check_at_new_tip)
+            finally:
+                if watcher.poll() is None:
+                    watcher.terminate()
+                try:
+                    watcher.wait(timeout=35)
+                except subprocess.TimeoutExpired:
+                    watcher.kill()
+                    watcher.wait(timeout=5)
+                    raise
+        assert watcher.returncode == 0
+        observations = read_rows(log)
+        update, = [row for row in observations if row["type"] == "pull_sync_observed"]
+        assert update["outcome"] == "committed" and update["number"] == 1
+        summary = observations[-1]
+        assert summary["type"] == "pull_sync_watch_service" and summary["stopped"]
+        assert summary["updates"] == 1 and summary["refused"] == 0
+        status, body = server.request("GET", "/api/v1/pulls/1/checks")
+        page = json.loads(body)
+        assert status == 200 and int(page["pull_request_version"]) == 2 and page["complete"], page
+        assert page["source_current"] and page["source_tip"] == tip and page["target_tip"] == f.base
+        check, = page["checks"]
+        assert check["id"] != prior["id"] and check["job"] == "a" and check["conclusion"] == "success"
+        assert check["publisher"] == PRINCIPAL and check["graph_root"] == prior["graph_root"]
+        assert refs(f) == {**initial, REF: tip} and f.effects_count() == 2
+        drained, _ = server.stop()
+        assert not drained["requires_reconciliation"] and drained["checks_committed"] == 2
+    campaign.record(fmt, "unattended-stock-push-visible-on-existing-pr", source=tip,
+                    sync_transaction=update["tx_id"], before_push=prior["id"], check=check["id"],
+                    pull_request_version=2, executions=f.effects_count(), oracle_pin=PIN)
 
 
 def check_pagination(campaign, fmt):
@@ -269,4 +383,5 @@ if __name__ == "__main__":
     campaign = Campaign(args.binary.resolve(), args.output.resolve())
     for fmt in ("sha1", "sha256"):
         lifecycle(campaign, fmt)
+        push_with_both_services_running(campaign, fmt)
         check_pagination(campaign, fmt)

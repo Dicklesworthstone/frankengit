@@ -74,6 +74,24 @@ For per-batch manual review and confirmation, use `fg_pull_sync.mjs` instead.
 HTTPS uses certificate verification; an optional private `--ca-file` is passed to
 both discovery and publication. Cleartext HTTP is restricted to numeric loopback.
 
+### Show CI for a pushed commit on its existing PR
+
+Run the native HTTP workflow service on the PR's source branch with
+`--workflow-publish-checks --workflow-principal PUBLISHER`. Enable
+`--allow-source --allow-pulls` on the endpoint used by the tip watcher. Give
+the watcher its own credential with `read,pulls-read,pulls-write`, configure
+the PR selection above, and start its `serve` command before the push. The
+check publisher and the metadata watcher keep their own permissions and state.
+[Native HTTP workflow service](NATIVE_HTTP_WORKFLOW_SERVICE.md)
+
+After a stock Git push, CI executes the changed branch and publishes the job
+result. The watcher advances the existing PR's recorded tips through an
+exact-version update. Once both have settled, the PR checks endpoint returns
+the job at the pushed commit. A watcher started after the push can also catch
+up to the observed tip. Restart with the same configuration and custody directory
+to reuse its recorded decision. A poll with unchanged tips leaves the PR version
+untouched. [PR checks and snapshot semantics](PULL_REQUEST_WORKFLOW_CHECKS.md)
+
 ## Retained requests and decisions
 
 One manager owns `state_directory/owner.lock`. A byte-exact `binding.json` fixes
@@ -157,6 +175,9 @@ Only transient discovery failures (transport/timeouts and HTTP 408, 409, 429,
 502, 503, 504) receive bounded polling backoff, stopping after three consecutive
 failures. Authentication, schema, custody, publication, and output failures do not
 enter that retry path. Files and final observations survive later output failure.
+If discovery is still unavailable on the final allowed poll, the command exits
+2 with the read error. An earlier completed sweep and any committed updates
+remain visible in the observations and the retained batch.
 Output is bounded JSON/NDJSON; status contains counts, paths, and plan identities,
 not credentials or PR text. Publication events retain native terminal identities.
 
