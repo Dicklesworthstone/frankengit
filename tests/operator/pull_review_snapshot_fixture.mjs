@@ -39,7 +39,7 @@ export function fixture(selected, { count = 3, byteOnly = false, found = true, s
   } };
 }
 export function wire(value) {
-  const counters = new Set(['number', 'version', 'pull_request_version', 'policy_epoch']);
+  const counters = new Set(['number', 'version', 'pull_request_version', 'policy_epoch', 'labels_version']);
   return JSON.stringify(value, (key, value) => counters.has(key) && typeof value === 'string' ? JSON.rawJSON(value) : value);
 }
 export function respond(res, value, status = 200) { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(wire(value)); }
