@@ -703,3 +703,6 @@ fn symbolic_git_ref_support_does_not_follow_a_host_filesystem_symlink() {
         destination.shutdown().unwrap();
     }
 }
+
+#[path = "import_symbolic_refs/raw_names.rs"]
+mod raw_names;

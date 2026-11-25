@@ -70,6 +70,9 @@ before object placement. All aliases count toward the existing ref-count
 ceiling. Packed ref names and symbolic targets preserve their exact Git name bytes,
 including non-UTF-8 names. On Unix, loose ref filenames preserve the same bytes,
 so packing or unpacking a ref leaves its import identity unchanged.
+Other hosts refuse loose filenames that cannot be represented as UTF-8 rather
+than replacing bytes. Packed names do not need to be representable as local
+filenames. The same Git name and resource limits apply to all representations.
 A direct loose ref keeps its native hex-line byte bound; a symbolic
 line may contain `ref: `, at most 1,024 target-name bytes, and one final LF. The
 same caller cancellation control covers file reads and every resolution step.
@@ -228,6 +231,12 @@ missing-target refusals, per-file bounds and cancellation. Durable import tests
 compare alias and direct-ref retries, remove the original source, reopen the
 node and export the exact snapshot into a fresh node. These are authored cases;
 their execution must be reported separately at the tested source revision.
+
+The raw-name cases also cover exact source revalidation, unchanged transaction
+identity after repacking, cancellation before publication, duplicate and invalid
+name refusals, source deletion, full-bundle byte preservation and source-free
+outcome recovery in both Git hash formats. These cases are checked in but require
+execution on the source revision being qualified.
 
 ## Packed-source regression campaign
 

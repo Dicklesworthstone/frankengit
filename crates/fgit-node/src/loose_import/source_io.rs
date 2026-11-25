@@ -844,3 +844,6 @@ pub(super) fn io_refusal(
         source: Box::new(source),
     }
 }
+
+#[cfg(test)]
+mod raw_refs_tests;
