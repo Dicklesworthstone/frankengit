@@ -1,6 +1,25 @@
-# FrankenGit reality check and bridge plan — November 24, 2026
+# FrankenGit reality check and bridge plan — November 25, 2026
 
 **On November 23, two Linux workers completed sponsored publication and remote inbox reads in both Git hash formats. Across two machines, signed repository backups restored a Git ref, its exact file contents and modes, and an issue that a fresh HTTP listener served with the original history. A supported team deployment, independent whole-installation recovery and a qualified release remain open.**
+
+With the opt-in PR synchronizer and publishing CI already running, a push from
+stock Git 2.54.0 refreshed an existing PR to version 2 and exposed the successful
+job at the pushed commit. One PR update occurred in each Git hash format, even
+with an unrelated non-UTF-8 branch at a page boundary. A second scenario
+restarted the synchronizer, refused landing on a stale success or a wrong job,
+then landed the exact pushed bytes at merged PR version 3. All six native
+cases passed with the operator and harness at `9581ea70` and the Linux
+executable from `aba5fc05`. The Node operator suite passed 5,976 tests with
+ten skips. All nine optional native tests passed separately. Delivery of every
+intermediate push and durable reuse of an exact build capsule remain open on
+`.4.12`. [Stock-push campaign](../scripts/e2e/suites/workflow/stock_push_landing.sh)
+
+A separate local-import comparison exposed a Git compatibility gap. Pinned Git
+created, enumerated and packed a branch ending in byte FF. The native importer
+refused the loose and packed versions before publication in both hash formats.
+All four corresponding ASCII-name imports succeeded. Bead `.4.60`, comment
+6286, records the eight inputs, original ref bytes and outcomes.
+[Native import reader](../crates/fgit-node/src/loose_import/source_io.rs)
 
 At `a2b7bd4c`, a release-proof check now catches a lost transaction outcome in
 a mixed batch. The original exporter showed only the advancing head. The same
@@ -218,7 +237,7 @@ The plan’s team envelope is 1,000 active operations per second and 5,000 concu
 
 ## Beads intake and subsequent verification
 
-At 10:35 UTC on November 24, the authoritative inventory contained 166 unresolved Beads. Of these, 26 were ready and unassigned, 20 were in progress and 11 awaited independent batch verification. The remaining state counts were 92 open, 26 in rework, 12 blocked and five deferred. Ready and unassigned is a subset of the open and rework records. The tracker refused the ordinary claim for the ready ancestry Bead `.4.36` at 09:03 UTC because all 20 implementation slots were occupied.
+At 07:01 UTC on November 25, the authoritative inventory contained 166 unresolved Beads. Of these, 26 were ready and unassigned, 20 were in progress and 11 awaited independent batch verification. The remaining state counts were 92 open, 26 in rework, 12 blocked and five deferred. Ready and unassigned is a subset of the open and rework records. The tracker refused the ordinary claim for the ready ancestry Bead `.4.36` at 09:03 UTC because all 20 implementation slots were occupied.
 
 At the initial intake, `br list --status all --no-db --limit 0 --json` returned 715 live records. Of these, 556 were closed, 100 open, 26 in rework, 15 in progress, 12 blocked, five deferred and one batch-pending. The wrapped graph accounted for 740 source records including tombstones, with 715 live nodes and 843 edges. It found zero cycles. Wrapped triage ranked 51 actionable records. The authoritative unassigned-ready query returned 34. The top-ranked lexical search task and the open team/agent exit tests answer different questions. The direct holder of the remaining batch-pending state was the verified-read transport bead, `.4.41`.
 
