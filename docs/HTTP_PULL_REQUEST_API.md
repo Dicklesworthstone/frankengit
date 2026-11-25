@@ -44,7 +44,7 @@ read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write
 ```
 
 `pulls-read` permits PR list, search and individual reads. `pulls-write` permits open,
-update and close. Write does not imply read. Neither PR scope grants Git fetch,
+update, close, reopen and retarget. Write does not imply read. Neither PR scope grants Git fetch,
 Git push, issue access, recovery, reviews, or merge publication. Conversely, no
 existing scope implicitly grants PR access. The deployment ceiling and the
 credential's grant must both permit an operation.
@@ -78,12 +78,14 @@ GET  {REPO_URL}/api/v1/pulls/{number}
 POST {REPO_URL}/api/v1/pulls/{number}/open
 POST {REPO_URL}/api/v1/pulls/{number}/update
 POST {REPO_URL}/api/v1/pulls/{number}/close
+POST {REPO_URL}/api/v1/pulls/{number}/reopen
+POST {REPO_URL}/api/v1/pulls/{number}/retarget
 ```
 
-The number is a caller-selected positive canonical decimal. This API does not
-allocate numbers, create cross-repository/fork PRs, reopen closed PRs, submit
-reviews, prepare merge candidates, or merge code. Unsupported actions are refused;
-there is no fallback that turns a metadata command into a ref update.
+The caller selects a positive canonical decimal PR number within the repository.
+Reopen requires a closed native PR. Retarget requires an open native PR and a
+different target branch. Both preserve the source branch identity and require the
+exact predecessor version. [Reopen](PULL_REQUEST_REOPEN.md) · [Retarget](PULL_REQUEST_RETARGET.md)
 
 Every POST requires an explicit `Idempotency-Key` header and a complete
 `application/x-www-form-urlencoded` body, optionally declaring `charset=utf-8`.
@@ -96,7 +98,7 @@ Every command contains all eight fields:
 
 | Field | Meaning |
 |---|---|
-| `expected_version` | `0` for open; exact positive predecessor aggregate version for update/close. |
+| `expected_version` | `0` for open. Every other metadata command requires the exact positive predecessor version. |
 | `object_format` | Exactly `sha1` or `sha256`, matching the repository. |
 | `source_ref` or `source_ref_hex` | Full source branch, supplied as UTF-8 text or the lowercase hex encoding of its exact Git name bytes. |
 | `target_ref` or `target_ref_hex` | Full target branch in either encoding. Its decoded bytes must differ from the source. |
