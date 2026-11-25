@@ -15,6 +15,7 @@ import tempfile
 import time
 
 from workflow_http_service import Server, credentials, event_directories
+from workflow_pull_request_collection import CollectionServer
 from workflow_watch_continuous import Campaign, Fixture, PRINCIPAL, REF, REPOSITORY, TARGET, TENANT, read_rows
 
 PIN = "git-2.54.0"
@@ -354,7 +355,7 @@ def push_with_both_services_running(campaign, fmt):
 
 
 def selected_byte_refs(campaign, fmt):
-    f = Fixture(campaign, fmt, "selected-byte-refs")
+    f = Fixture(campaign, fmt, "selected-byte-refs", triggers="[push, pull_request]")
     credentials(f)
     token = grant_tip_sync(f)
     target = b"refs/heads/raw-\xff"
@@ -366,11 +367,13 @@ def selected_byte_refs(campaign, fmt):
             "--ref-hex", name.hex(), "--target", oid]))
         assert receipt["command_committed"], receipt
 
-    for number, selector in ((1, ["--source-ref", REF]), (2, ["--source-ref-hex", source.hex()])):
+    raw_source, raw_target = ["--source-ref-hex", source.hex()], ["--target-ref-hex", target.hex()]
+    subjects = ((["--source-ref", REF], raw_target), (raw_source, raw_target), (raw_source, ["--target-ref", TARGET]))
+    for number, (source_selector, target_selector) in enumerate(subjects, 1):
         campaign.invoke("open-byte-pr", [
             "pr", "open", *f.scope, number, "--trusted-local", "--principal", PRINCIPAL,
             "--idempotency-key", f"byte-pr-{number}", "--expected-version", 0,
-            *selector, "--target-ref-hex", target.hex(), "--expected-source", f.tips[0],
+            *source_selector, *target_selector, "--expected-source", f.tips[0],
             "--expected-target", f.base, "--object-format", fmt,
             "--title", f"Byte PR {number}", "--body", "Keep both branch names and this metadata."])
     run, tip = fresh_push_source(f)
@@ -381,11 +384,14 @@ def selected_byte_refs(campaign, fmt):
             status, body = server.request("GET", f"/api/v1/pulls/{number}")
             assert status == 200, (status, body)
             return json.loads(body)["pull_request"]
-        before = [detail(1), detail(2)]
-        assert all(row["version"] == 1 and row["data"]["target_ref"] is None
-                   and row["data"]["target_ref_hex"] == target.hex() for row in before)
+        before = [detail(number) for number in (1, 2, 3)]
+        assert all(row["version"] == 1 for row in before)
+        assert all(row["data"]["target_ref"] is None and row["data"]["target_ref_hex"] == target.hex()
+                   for row in before[:2])
+        assert before[2]["data"]["target_ref"] == TARGET
         assert before[0]["data"]["source_ref"] == REF
-        assert before[1]["data"]["source_ref"] is None and before[1]["data"]["source_ref_hex"] == source.hex()
+        assert all(row["data"]["source_ref"] is None and row["data"]["source_ref_hex"] == source.hex()
+                   for row in before[1:])
         with receive_listener(f) as address:
             upstream("push-loopback", PIN, run, "push", address, f"/{REPOSITORY}.git",
                      "client", "plain", f"{REF}:{REF}")
@@ -400,7 +406,7 @@ def selected_byte_refs(campaign, fmt):
         # synchronizer's pinned snapshot. The live-push case races both services.
         server.wait(lambda _: sum((e / "reported").is_file() for e in event_directories(f)) == 2)
         branches = refs(f)
-        with tip_sync_command(f, server, token, (1, 2)) as command:
+        with tip_sync_command(f, server, token, (1, 2, 3)) as command:
             for label in ("first", "restart"):
                 log = f.root / f"byte-pr-sync-{label}.ndjson"
                 with log.open("xb") as output:
@@ -408,17 +414,18 @@ def selected_byte_refs(campaign, fmt):
                 events = read_rows(log)
                 publications = [event for event in events if event["type"] == "pull_sync_observed"]
                 if label == "first":
-                    assert [event["number"] for event in publications] == [1, 2], events
+                    assert [event["number"] for event in publications] == [1, 2, 3], events
                     assert all(event["outcome"] == "committed" for event in publications)
                     transactions = [event["tx_id"] for event in publications]
-                    assert len(set(transactions)) == 2
+                    assert len(set(transactions)) == 3
                 else:
                     assert not publications and events[-1]["updates"] == 0, events
-                assert any(event.get("unchanged") == [1, 2] for event in events), events
-        for row, number, expected in zip(before, (1, 2), (tip, f.tips[2]), strict=True):
+                assert any(event.get("unchanged") == [1, 2, 3] for event in events), events
+        expected_tips = ((tip, f.tips[1]), (f.tips[2], f.tips[1]), (f.tips[2], f.base))
+        for number, (row, (source_tip, target_tip)) in enumerate(zip(before, expected_tips, strict=True), 1):
             current = detail(number)
             assert current["version"] == 2 and current["state"] == "open", current
-            assert current["data"] == {**row["data"], "source_tip": expected, "target_tip": f.tips[1]}, current
+            assert current["data"] == {**row["data"], "source_tip": source_tip, "target_tip": target_tip}, current
         def visible(_):
             status, body = server.request("GET", "/api/v1/pulls/1/checks")
             page = json.loads(body)
@@ -428,9 +435,24 @@ def selected_byte_refs(campaign, fmt):
         assert refs(f) == branches and f.effects_count() == 2
         drained, _ = server.stop()
         assert drained["checks_committed"] == 2 and not drained["requires_reconciliation"], drained
+    # The collection watches TARGET. Only the third PR targets that branch.
+    # It must execute and publish at the same byte-named source the operator refreshed.
+    with CollectionServer(f, "byte-source-collection") as server:
+        server.ready()
+        server.wait(lambda _: bool(server.page(3)["checks"]))
+        page = server.page(3)
+        assert int(page["pull_request_version"]) == 2 and page["source_current"]
+        assert page["source_ref_hex"] == source.hex() and page["source_tip"] == f.tips[2]
+        assert page["target_ref_hex"] == TARGET.encode().hex() and page["target_tip"] == f.base
+        check, = page["checks"]
+        assert check["job"] == "a" and check["publisher"] == PRINCIPAL and check["conclusion"] == "success"
+        drained, _ = server.stop()
+        assert drained["checks_committed"] == 1 and not drained["requires_reconciliation"], drained
+        assert refs(f) == branches and f.effects_count() == 3
     campaign.record(fmt, "selected-byte-refs-and-stock-push", source_ref_hex=source.hex(),
                     target_ref_hex=target.hex(), pushed_tip=tip, raw_tip=f.tips[2],
-                    target_tip=f.tips[1], transactions=transactions, executions=f.effects_count())
+                    target_tip=f.tips[1], transactions=transactions, executions=f.effects_count(),
+                    byte_source_check=check["id"])
 
 
 def check_pagination(campaign, fmt):
