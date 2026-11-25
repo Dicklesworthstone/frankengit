@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
@@ -517,17 +518,26 @@ def ordered_push_restart(campaign, fmt):
             shutil.copyfile(transcript / "receipt.tsv", f.root / f"{label}.tsv")
             assert refs(f)[REF] == tip
         push("ordered-first", first)
+        workflow = (f"name: second-snapshot\non: push\njobs:\n  a:\n"
+                    f"    runs-on: fgit-trusted-local\n    steps:\n"
+                    f"      - run: printf 'second-snapshot\\n' >> {shlex.quote(str(f.effects))}\n").encode()
         stream = (f"commit {REF}\ncommitter CI Source <source@example.test> 1720000001 +0000\n"
                   f"data 6\nsecond\nfrom {first}\nM 100644 inline pushed.txt\n"
-                  "data 10\nnext bytes\n\ndone\n").encode()
+                  f"data 10\nnext bytes\nM 100644 inline ci/build.yml\ndata {len(workflow)}\n").encode()
+        stream += workflow + b"\n\ndone\n"
         upstream("run", PIN, run, "client", "--", "fast-import", "--quiet", data=stream)
         second = upstream("run", PIN, run, "client", "--", "rev-parse", REF)
         assert upstream("run", PIN, run, "client", "--", "rev-parse", REF + "^") == first
         push("ordered-second", second)
     final_refs = refs(f)
     assert run_watch("resumed") == [first, second]
+    historical, = [event for event in event_directories(f)
+                   if json.loads((event / "event.json").read_bytes())["commit"] == first]
+    (historical / "settled").rename(f.root / "recovered-proof-original-settled")
     assert run_watch("repeat") == []
-    assert refs(f) == final_refs and f.effects_count() == 3
+    assert (historical / "settled").read_bytes() == (f.root / "recovered-proof-original-settled").read_bytes()
+    assert refs(f) == final_refs
+    assert f.effects.read_text().splitlines() == ["executed", "executed", "second-snapshot"]
     execution_reports = [json.loads(next(event.glob("dispatch-*/workflow-*/report.json")).read_bytes())
                          for event in event_directories(f)]
     assert {report["executed_commit"] for report in execution_reports} == {f.tips[0], first, second}
