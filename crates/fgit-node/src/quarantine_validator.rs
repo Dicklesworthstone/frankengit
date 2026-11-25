@@ -39,7 +39,7 @@ use crate::pack_spool::ObjectSpool;
 use crate::receive_staging::ReceiveStaging;
 use crate::{
     AuthoritySelectedClosure, MaterializedAdmission, NodeReceiveTransportRefusal, NodeRefusal,
-    OneNode, crypto_object_kind,
+    OneNode,
 };
 
 /// Preserves the receive core's single refusal vocabulary when an asynchronous

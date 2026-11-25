@@ -285,6 +285,51 @@ const NATIVE_KINDS: [ObjectKind; 4] = [
 ];
 
 #[test]
+fn reconstructed_payload_matches_only_the_exact_verified_object() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for kind in NATIVE_KINDS {
+            for body in [Vec::new(), vec![83; CHUNK_BYTES * 2 + 7]] {
+                let fixture = Fixture::for_kind(format, kind, body);
+                let matches = |kind, bytes: &[u8]| {
+                    fixture.fabric.matches_object_payload_bounded(
+                        fixture.id,
+                        kind,
+                        bytes,
+                        &mut || true,
+                    )
+                };
+                assert_eq!(matches(kind, &fixture.body), Ok(true));
+                assert_eq!(matches(ObjectKind::Internal, &fixture.body), Ok(false));
+                let mut appended = fixture.body.clone();
+                appended.push(83);
+                assert_eq!(matches(kind, &appended), Ok(false));
+                if !fixture.body.is_empty() {
+                    for index in [0, CHUNK_BYTES, fixture.body.len() - 1] {
+                        let mut other = fixture.body.clone();
+                        other[index] ^= 1;
+                        assert_eq!(matches(kind, &other), Ok(false));
+                    }
+                    assert!(matches!(
+                        matches(kind, &fixture.body[1..]),
+                        Err(StoreRefusal::StreamingBudgetExceeded { .. })
+                    ));
+                }
+
+                // Byte equality alone cannot establish custody of a damaged
+                // canonical record. Even an empty body must reach verified EOF.
+                let mut damaged = fixture.envelope.clone();
+                damaged.payload_commitment[0] ^= 1;
+                fixture.store(&damaged, &fixture.body);
+                assert_eq!(
+                    matches(kind, &fixture.body),
+                    Err(StoreRefusal::PayloadCommitmentMismatch)
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn integrity_scan_matches_whole_object_verification_for_every_native_kind_and_format() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         for kind in NATIVE_KINDS {

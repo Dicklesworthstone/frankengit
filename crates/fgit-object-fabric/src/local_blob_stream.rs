@@ -131,6 +131,35 @@ impl LocalFilesystemFabric {
         maximum_payload_bytes: u64,
         live: &mut impl FnMut() -> bool,
     ) -> Result<VerifiedObjectIntegrity, StoreRefusal> {
+        self.scan_object_integrity(identity, maximum_payload_bytes, live, |_| {})
+    }
+
+    /// Compare an independently reconstructed object with the canonical bytes
+    /// while authenticating both stored commitments on the same descriptor.
+    /// Only verified EOF can establish a match, including for an empty object.
+    /// The expected payload's length also bounds this scan.
+    pub fn matches_object_payload_bounded(
+        &self,
+        identity: GitOid,
+        kind: ObjectKind,
+        expected: &[u8],
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<bool, StoreRefusal> {
+        let mut remaining = Some(expected);
+        let verified =
+            self.scan_object_integrity(identity, expected.len() as u64, live, |chunk| {
+                remaining = remaining.and_then(|suffix| suffix.strip_prefix(chunk));
+            })?;
+        Ok(verified.object_kind() == kind && remaining.is_some_and(<[u8]>::is_empty))
+    }
+
+    fn scan_object_integrity(
+        &self,
+        identity: GitOid,
+        maximum_payload_bytes: u64,
+        live: &mut impl FnMut() -> bool,
+        mut inspect: impl FnMut(&[u8]),
+    ) -> Result<VerifiedObjectIntegrity, StoreRefusal> {
         integrity_checkpoint(live)?;
         let opened = self.open_native_stream_bounded(identity, maximum_payload_bytes, None);
         integrity_checkpoint(live)?;
@@ -149,7 +178,7 @@ impl LocalFilesystemFabric {
                         payload_commitment: stream.payload_commitment(),
                     });
                 }
-                Ok(_) => {}
+                Ok(count) => inspect(&buffer[..count]),
                 Err(StoreRefusal::StorageIo {
                     kind: std::io::ErrorKind::Interrupted,
                     ..

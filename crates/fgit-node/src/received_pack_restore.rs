@@ -74,8 +74,8 @@ impl OneNode {
             authorized.insert(*id);
         }
         let mut restore_limits = limits.clone();
-        // Native delta reconstruction charges base/result work; strong hashing
-        // and canonical integrity verification each read every result again.
+        // Native delta reconstruction charges base/result work; exact byte
+        // comparison and canonical integrity verification consume both inputs.
         // This one finite budget survives failed and overlapping candidates.
         restore_limits.max_delta_work = crate::receive_delta_work_limit(
             restore_limits.max_total_expanded_bytes,

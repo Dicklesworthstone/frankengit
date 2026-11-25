@@ -4,14 +4,12 @@
 use super::{
     BTreeMap, BTreeSet, Deadline, ExternalBase, ExternalBases, GitOid, ObjectType, PackError,
     ParsedDeltaBase, ProductionQuarantineValidator, QuarantinedPack, RefusalCode, ResolutionBudget,
-    StoreRefusal, checkpoint, copy_bytes, crypto_object_kind, map_pack_error,
+    StoreRefusal, checkpoint, copy_bytes, map_pack_error,
 };
 use crate::received_pack::{
     PendingReceivedPack, StreamedCaptureReservation, VerifiedReceivedObject,
 };
 use crate::{CeiledFabricSource, fabric_object_kind};
-use fgit_crypto::git_payload_commitment;
-use fgit_types::CANONICAL_CODEC_VERSION;
 
 pub(crate) enum Restoration<'a> {
     Received(Option<&'a CeiledFabricSource<'a, 'a>>),
@@ -175,7 +173,7 @@ impl ProductionQuarantineValidator<'_> {
                 if kind != hint.kind || bytes.len() != hint.bytes {
                     return Err(RefusalCode::EvidenceInvalid);
                 }
-                // Charge hashing and the independent fabric scan up front.
+                // Charge both inputs to the exact comparison before canonical I/O.
                 let work = bytes
                     .len()
                     .checked_mul(2)
@@ -183,28 +181,19 @@ impl ProductionQuarantineValidator<'_> {
                 budget
                     .charge_work(work, &self.pack_limits)
                     .map_err(restore_pack_refusal)?;
-                let commitment = git_payload_commitment(
-                    crypto_object_kind(kind),
-                    &bytes,
-                    CANONICAL_CODEC_VERSION,
-                );
-                drop(bytes);
                 checkpoint(deadline)?;
                 if let Some(reads) = reads {
                     reads.check_read()?;
                 }
-                let canonical = self.node.fabric.verify_object_integrity_bounded(
+                let canonical = self.node.fabric.matches_object_payload_bounded(
                     id,
-                    hint.bytes as u64,
+                    fabric_object_kind(kind),
+                    &bytes,
                     &mut || deadline.checkpoint(),
                 );
+                drop(bytes);
                 checkpoint(deadline)?;
-                let matched = canonical.as_ref().is_ok_and(|object| {
-                    object.identity() == id
-                        && object.object_kind() == fabric_object_kind(kind)
-                        && object.payload_length() == hint.bytes as u64
-                        && object.payload_commitment().as_slice() == commitment.digest().as_bytes()
-                });
+                let matched = matches!(canonical, Ok(true));
                 if let Some(reads) = reads {
                     if matched {
                         reads.verified_read(hint.bytes);

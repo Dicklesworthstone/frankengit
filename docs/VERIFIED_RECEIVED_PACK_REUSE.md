@@ -405,8 +405,11 @@ candidates are worth reading; they do not establish membership or native
 identity. Before promotion to the live cache, the node reparses the actual
 pack, verifies its native trailer, resolves and hashes its objects, and checks
 that the reconstructed identities, types and lengths exactly match the hints.
-It also verifies the corresponding canonical objects through the fabric,
-including their strong payload commitments. The selected objects and any
+During the canonical fabric scan, the node compares each reconstructed body
+byte-for-byte with the stored payload as it reads it. A match requires the
+same type and exact length, verified native identity and strong commitment
+at end of file. This avoids a separate strong hash of the reconstructed body.
+The selected objects and any
 permitted held bases must belong to the authenticated cumulative closure.
 Persisted bytes cannot supply a private or deleted-ref object merely because
 they once accompanied a public push.
