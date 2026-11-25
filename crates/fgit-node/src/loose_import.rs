@@ -54,7 +54,7 @@ use fgit_pack::{
     Deadline, IdxV2, NativeChecksumVerifier, PackError, PackLimits, ParsedDeltaBase,
     ResolutionBudget, StreamPackEntry, StreamPackError, apply_delta_to_charged_base_with_budget,
     object_type_from_base_entry, parse_pack_header, read_streamed_pack, validate_idx_pack_count,
-    verify_native_object,
+    verify_native_object_structure,
 };
 use fgit_types::{GitHashAlgorithm, GitOid, MAX_REF_NAME_LEN, RefName, TypeRefusal};
 

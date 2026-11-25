@@ -26,7 +26,7 @@ use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits, ParsedObject};
 use fgit_object_fabric::fabric::{StoreRefusal, VerifiedObject as FabricObject};
 use fgit_pack::{
     CachedResolver, Deadline, ExternalBaseLookup, ObjectId, PackError, PackLimits, PackObject,
-    ParsedDeltaBase, QuarantinedPack, ResolutionBudget, verify_native_object,
+    ParsedDeltaBase, QuarantinedPack, ResolutionBudget, verify_native_object_structure,
 };
 #[cfg(test)]
 use fgit_types::GitHashAlgorithm;
@@ -412,7 +412,7 @@ impl ProductionQuarantineValidator<'_> {
             fgit_object_fabric::ObjectKind::Internal => return Err(RefusalCode::EvidenceInvalid),
         };
         let body = copy_bytes(verified.payload(), deadline)?;
-        verify_native_object(
+        verify_native_object_structure(
             self.node.object_format,
             object_type,
             &body,

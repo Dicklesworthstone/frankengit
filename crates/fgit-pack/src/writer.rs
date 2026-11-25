@@ -36,7 +36,7 @@ use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits};
 
 use crate::{
     Deadline, ObjectFormat, ObjectId, PackError, PackLimits, checkpoint, object_id_from_bytes,
-    verify_native_object,
+    verify_native_object_structure,
 };
 
 const PACK_HEADER_BYTES: usize = 12;
@@ -702,7 +702,7 @@ impl PackPlanner {
                 }
                 .into());
             }
-            verify_native_object(
+            verify_native_object_structure(
                 self.format,
                 object.object_type,
                 &object.body,
@@ -826,7 +826,7 @@ impl PackPlanner {
                 }
                 .into());
             }
-            verify_native_object(
+            verify_native_object_structure(
                 self.format,
                 object.object_type,
                 &object.body,
@@ -998,7 +998,7 @@ impl PackPlanner {
                 selector.advance_streamed_blob()?;
                 continue;
             }
-            verify_native_object(
+            verify_native_object_structure(
                 self.format,
                 object.object_type,
                 &object.body,
@@ -1201,7 +1201,7 @@ impl PackPlanner {
             }
             .into());
         }
-        verify_native_object(
+        verify_native_object_structure(
             self.format,
             object.object_type,
             &object.body,

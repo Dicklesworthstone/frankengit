@@ -28,7 +28,9 @@
 //! that only ever failed one guard at a time could not tell the orders apart.
 
 use fgit_git_object::{AcceptanceProfile, ObjectError, ObjectType, ParseLimits, ParsedObject};
-use fgit_pack::{ObjectFormat, ObjectId, PackError, verify_native_object};
+use fgit_pack::{
+    ObjectFormat, ObjectId, PackError, verify_native_object, verify_native_object_structure,
+};
 use fgit_types::native::{GitOidSha1, GitOidSha256};
 
 /// A well-formed blob body and the SHA-1 identity it really has.
@@ -72,14 +74,17 @@ fn verify_with(
     expected: &ObjectId,
     profile: AcceptanceProfile,
 ) -> Result<ParsedObject, PackError> {
-    verify_native_object(
-        format,
-        object_type,
-        content,
-        expected,
-        profile,
-        &ParseLimits::default(),
-    )
+    let limits = ParseLimits::default();
+    let owned = verify_native_object(format, object_type, content, expected, profile, &limits);
+    let structure =
+        verify_native_object_structure(format, object_type, content, expected, profile, &limits);
+    match (&owned, structure) {
+        (Ok(ParsedObject::Blob(body)), Ok(None)) => assert_eq!(body, content),
+        (Ok(parsed), Ok(Some(other))) => assert_eq!(parsed, &other),
+        (Err(error), Err(other)) => assert_eq!(error, &other),
+        (owned, structure) => panic!("native verification disagreed: {owned:?} vs {structure:?}"),
+    }
+    owned
 }
 
 /// An identity from the wrong hash domain is refused, and named as such.
@@ -193,4 +198,33 @@ fn a_well_formed_object_named_by_the_wrong_identity_is_refused_last() {
     .expect_err("a blob that is not the named blob must refuse");
 
     assert_eq!(refusal, PackError::NativeObjectIdMismatch);
+}
+
+#[test]
+fn borrowing_verifier_checks_blob_size_and_keeps_structured_fields_in_both_hash_domains() {
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let id = fgit_crypto::git_object_id(format, ObjectType::Blob, BODY);
+        let limits = ParseLimits {
+            max_object_bytes: BODY.len() - 1,
+            ..ParseLimits::default()
+        };
+        assert_eq!(
+            verify_native_object_structure(
+                format,
+                ObjectType::Blob,
+                BODY,
+                &id,
+                AcceptanceProfile::GitCompatibleImport,
+                &limits
+            ),
+            Err(PackError::ObjectParse(ObjectError::ObjectTooLarge {
+                limit: BODY.len() - 1
+            }))
+        );
+        let empty_tree = fgit_crypto::git_object_id(format, ObjectType::Tree, b"");
+        assert_eq!(
+            verify(format, ObjectType::Tree, b"", &empty_tree).unwrap(),
+            ParsedObject::Tree(vec![])
+        );
+    }
 }

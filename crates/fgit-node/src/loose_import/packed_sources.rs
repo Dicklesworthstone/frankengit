@@ -12,7 +12,7 @@ use super::{
     import_pack_limits, io_refusal, is_ignored_pack_accelerator, object_type_from_base_entry,
     open_regular_bounded, pack_input_limit, pack_refusal, parse_limits, parse_pack_header,
     path_metadata, profile, read_regular_bounded, read_streamed_pack, spool,
-    validate_idx_pack_count, verify_native_object,
+    validate_idx_pack_count, verify_native_object_structure,
 };
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
@@ -627,7 +627,7 @@ impl StreamedPack<'_> {
         depth: usize,
         control: &ImportControl<'_>,
     ) -> Result<(), LooseGitImportRefusal> {
-        let verified = verify_native_object(
+        let verified = verify_native_object_structure(
             self.format,
             kind,
             &body,

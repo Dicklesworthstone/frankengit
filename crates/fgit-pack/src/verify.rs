@@ -1,4 +1,4 @@
-use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits, ParsedObject};
+use fgit_git_object::{AcceptanceProfile, ObjectError, ObjectType, ParseLimits, ParsedObject};
 
 use crate::{
     EntryKind, IdxChecksumVerifier, ObjectFormat, ObjectId, PackError, PackTrailerVerifier,
@@ -54,6 +54,36 @@ pub fn verify_native_object(
     profile: AcceptanceProfile,
     limits: &ParseLimits,
 ) -> Result<ParsedObject, PackError> {
+    authenticate(format, expected_oid, || {
+        let parsed = fgit_git_object::parse_object_body(object_type, content, profile, limits)?;
+        Ok((
+            fgit_crypto::git_object_id(format, object_type, content),
+            parsed,
+        ))
+    })
+}
+
+/// Verify native format, structure and identity while borrowing the payload.
+/// Blobs have no structural fields and return `None` without copying their
+/// bytes. Other objects return the same parsed view as [`verify_native_object`].
+pub fn verify_native_object_structure(
+    format: ObjectFormat,
+    object_type: ObjectType,
+    content: &[u8],
+    expected_oid: &ObjectId,
+    profile: AcceptanceProfile,
+    limits: &ParseLimits,
+) -> Result<Option<ParsedObject>, PackError> {
+    authenticate(format, expected_oid, || {
+        fgit_git_object::identify_object_body(format, object_type, content, profile, limits)
+    })
+}
+
+fn authenticate<T>(
+    format: ObjectFormat,
+    expected_oid: &ObjectId,
+    identify: impl FnOnce() -> Result<(ObjectId, T), ObjectError>,
+) -> Result<T, PackError> {
     let actual_format = expected_oid.algorithm();
     if actual_format != format {
         return Err(PackError::ObjectFormatMismatch {
@@ -61,9 +91,7 @@ pub fn verify_native_object(
             actual: actual_format,
         });
     }
-    let parsed = fgit_git_object::parse_object_body(object_type, content, profile, limits)
-        .map_err(PackError::ObjectParse)?;
-    let actual = fgit_crypto::git_object_id(format, object_type, content);
+    let (actual, parsed) = identify().map_err(PackError::ObjectParse)?;
     if &actual != expected_oid {
         return Err(PackError::NativeObjectIdMismatch);
     }

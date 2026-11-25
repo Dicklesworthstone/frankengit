@@ -78,6 +78,7 @@ pub use stream::{
 };
 pub use verify::{
     NativeChecksumVerifier, object_type_from_base_entry, verify_base_entry, verify_native_object,
+    verify_native_object_structure,
 };
 pub use writer::{
     CanonicalBlobReader, CanonicalBlobStream, CanonicalObjectSource, CanonicalPackObject,

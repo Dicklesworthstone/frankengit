@@ -19,7 +19,7 @@ use fgit_object_fabric::artifact::storage::{ArtifactOperation, ArtifactStorageEr
 use super::{
     AcceptanceProfile, BTreeMap, BTreeSet, Deadline, GitOid, ObjectBody, ObjectSpool, ObjectType,
     ProductionQuarantineValidator, ReceiveRequest, RefusalCode, StoreRefusal, VerifiedObject,
-    checkpoint, map_pack_error, verify_native_object,
+    checkpoint, map_pack_error, verify_native_object_structure,
 };
 
 const POINTER_BYTES: usize = 1024;
@@ -222,7 +222,7 @@ impl ProductionQuarantineValidator<'_> {
                         .read(*handle)
                         .map_err(|_| RefusalCode::DurabilityProfileUnavailable)?;
                     // The spool is private scratch, not verified custody.
-                    verify_native_object(
+                    verify_native_object_structure(
                         self.node.object_format,
                         object.object_type,
                         &body,
