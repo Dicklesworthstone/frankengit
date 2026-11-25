@@ -50,7 +50,24 @@ fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg041c-proof-refinement-wuy
 fge_context scope 'ordered-residue model, registered reference vectors and two DPOR head-publication schedules'
 
-PRF_TOOLCHAIN=leanprover/lean4:v4.32.0
+# Resolve tools on the caller host before handing them temporary local paths.
+prf_have_pinned_lean=0
+if command -v elan >/dev/null 2>&1 &&
+    elan toolchain list | rg -Fx -- "$(<"$PRF_REPO/proofs/fg041/lean-toolchain")" >/dev/null; then
+  prf_have_pinned_lean=1
+fi
+if command -v cargo >/dev/null 2>&1; then
+  # shellcheck source=../../../verify_native_tools.sh
+  source "$PRF_REPO/scripts/verify_native_tools.sh"
+  if [[ -z ${FGIT_REGISTRY_CHECK_BIN:-} ]]; then
+    FGIT_REGISTRY_CHECK_BIN=$(cd "$PRF_REPO" && verified_tool_path fgit-registry-check fgit-registry-check)
+  fi
+  if [[ -z ${FGIT_PROOF_BRIDGE_BIN:-} && $prf_have_pinned_lean == 1 ]]; then
+    FGIT_PROOF_BRIDGE_BIN=$(cd "$PRF_REPO" && verified_tool_path fgit-proof-bridge fgit-proof-bridge-gen)
+  fi
+fi
+export FGIT_REGISTRY_CHECK_BIN FGIT_PROOF_BRIDGE_BIN
+
 PRF_CHECK="$PRF_REPO/proofs/fg041/check.sh"
 PRF_MAIN="$PRF_REPO/proofs/fg041/OrderedResidue.lean"
 PRF_CONTROL="$PRF_REPO/proofs/fg041/FalseVariant.lean"
@@ -126,8 +143,8 @@ else
   # own invocation error as a broken proof is worse than one that does not run.
   bash "$PRF_CHECK" >"$FGE_ARTIFACT_DIR/fg041-check.log" 2>&1 || prf_exit=$?
   fge_field proof_check_exit "$prf_exit"
-  if [ "$prf_exit" -eq 2 ]; then
-    fge_skip fg041-proof-check "checker issued its typed refusal (exit 2); see fg041-check.log"
+  if [ "$prf_exit" -eq 2 ] && rg -Fq "is not installed; refusing network installation" "$FGE_ARTIFACT_DIR/fg041-check.log"; then
+    fge_skip fg041-proof-check "the pinned toolchain is unavailable; see fg041-check.log"
   else
     fge_assert_eq fg041-proof-check 0 "$prf_exit" \
       "the FG-041 Lean lane proves every theorem and rejects the planted false variant"
@@ -175,7 +192,7 @@ else
   cp "$PRF_REPO/proofs/fg041/ASSUMPTIONS.md" "$PRF_REPO/proofs/fg041/FalseVariant.lean" \
      "$PRF_REPO/proofs/fg041/OrderedResidue.lean" "$PRF_REPO/proofs/fg041/check.sh" \
      "$PRF_REPO/proofs/fg041/toolchain.json" "$prf_sb/proofs/fg041/"
-  # CLM-004 binds the bridge artifacts too, so the baseline needs them or it
+  # The bounded refinement rows bind the bridge artifacts, so the baseline needs them or it
   # would fail for an unavailable artifact rather than for anything the drill did.
   mkdir -p "$prf_sb/proofs/fg041/generated"
   cp "$PRF_REPO/proofs/fg041/Refinement.lean" "$prf_sb/proofs/fg041/"
@@ -197,11 +214,7 @@ else
      "$prf_sb/crates/fgit-types/tests/fixtures/"
 
   prf_check_sandbox() {
-    if [[ -n ${FGIT_REGISTRY_CHECK_BIN:-} ]]; then
-      "$FGIT_REGISTRY_CHECK_BIN" --root "$prf_sb" claims 2>&1
-    else
-      (cd "$PRF_REPO" && cargo run --locked -q -p fgit-registry-check -- --root "$prf_sb" claims) 2>&1
-    fi
+    "$FGIT_REGISTRY_CHECK_BIN" --root "$prf_sb" claims 2>&1
   }
 
   # Baseline. A drill whose starting state already fails proves nothing about
@@ -267,19 +280,8 @@ else
   # The checkout itself never moved. This is the assertion that keeps the drill
   # runnable in a shared worktree.
 
-  # Axis three: a DRIFTED TRACE. CLM-004 is the one row that took refinement
-  # evidence, so it binds proofs/fg041/generated/Vectors.lean. Regenerating the
-  # golden corpus without re-verifying the refinement must therefore demote it,
-  # automatically and without a reviewer.
-  #
-  # The second assertion is the one that earns this axis. CLM-002, CLM-003 and
-  # CLM-005 do NOT bind the vectors, because this corpus does not exercise their
-  # theorems -- no history decides the same target twice, the batches carry no
-  # ref or forge effect vectors, and nothing crashes or retries. If a drifted
-  # trace demoted them too, the refinement class would have been spread across
-  # rows it does not cover, which is the inflation FG-041c refused. Scoping is
-  # the claim here, so scoping is what is checked.
-  cp "$PRF_REPO/proofs/fg041/generated/Vectors.lean" "$prf_sb/proofs/fg041/generated/"
+  # The terminal-uniqueness and continuity rows both cite the bounded corpus.
+  # Changing its bytes demotes both. The remaining model-only rows stay verified.
   printf '\n-- fg041d drill: a drifted trace\n' \
     >>"$prf_sb/proofs/fg041/generated/Vectors.lean"
   prf_drift_exit=0
@@ -290,8 +292,12 @@ else
     'a drifted trace must demote the claim that rests on it'
   fge_assert_contains fg041-drift-demotes-the-refinement-row "$prf_drift_out" 'CLM-004' \
     'the row that took refinement evidence is the one that loses its binding'
-  fge_assert_not_contains fg041-drift-spares-the-uncovered-rows "$prf_drift_out" 'CLM-002' \
-    'a row whose theorems this corpus never exercises must not cite it, so a drift cannot demote it'
+  fge_assert_contains fg041-drift-demotes-terminal-uniqueness "$prf_drift_out" 'CLM-002' \
+    'terminal uniqueness cites the replayed decisions and must demote on drift'
+  fge_assert_not_contains fg041-drift-spares-atomic-visibility "$prf_drift_out" 'CLM-003' \
+    'the separate atomic visibility theorem retains its original inputs'
+  fge_assert_not_contains fg041-drift-spares-crash-retry "$prf_drift_out" 'CLM-005' \
+    'the separate crash and lost-response theorem retains its original inputs'
   cp "$PRF_REPO/proofs/fg041/generated/Vectors.lean" "$prf_sb/proofs/fg041/generated/"
 
   # Digest the exact file the drill mutates in its sandbox, not the directory
@@ -312,54 +318,26 @@ fi
 fge_phase assert
 fge_step trace-refinement-bridge
 # -----------------------------------------------------------------------------
-# FG-041d step (2): every exported reference-model history is a run of the Lean
-# model. This is what turns the FG-041 theorems from statements about a model
-# into statements connected to the code. fg041c measured that no such link
-# existed; this is the link.
-#
-# The build produces oleans, because check.sh compiles ONE file and there is no
-# lake project, so `import OrderedResidue` has nothing to resolve against
-# otherwise. It all happens in a sandbox directory: the checkout is never
-# written to, which is what keeps this runnable in a sixteen-pane worktree.
-#
-# Discharged with kernel `decide`, NOT native_decide. toolchain.json pins the
-# trusted base to the Lean kernel plus bundled Init and Std, and native_decide
-# would widen it to include the Lean compiler -- a proof-class change wearing a
-# tactic's clothes.
-if ! command -v elan >/dev/null 2>&1; then
-  fge_skip fg041-trace-refinement 'elan is unavailable; the pinned Lean toolchain cannot be exercised here'
+# The normal entry point checks the exact private copy the kernel imports.
+# Exercise its source gate independently with a stale copy of the real vectors.
+if [[ $prf_have_pinned_lean == 0 || -z ${FGIT_PROOF_BRIDGE_BIN:-} ]]; then
+  fge_skip fg041-trace-refinement 'the pinned Lean toolchain or Rust proof bridge is unavailable'
 else
-  prf_bridge=$(fge_tempdir fg041-refinement)
-  cp "$PRF_REPO/proofs/fg041/OrderedResidue.lean" "$prf_bridge/"
+  fge_assert_contains fg041-trace-refinement "$(cat "$FGE_ARTIFACT_DIR/fg041-check.log")" \
+    'FG-041 replayed the recorded reference histories' \
+    'the ordinary checker completed reference replay and kernel refinement'
+
+  prf_bridge=$(fge_tempdir fg041-stale-vectors)
   cp "$PRF_REPO/proofs/fg041/generated/Vectors.lean" "$prf_bridge/"
-  cp "$PRF_REPO/proofs/fg041/Refinement.lean" "$prf_bridge/"
-  prf_refinement_log=$(fge_artifact_path fg041-refinement.log)
-
-  prf_ref_exit=0
-  (
-    cd "$prf_bridge" || exit 2
-    elan run "$PRF_TOOLCHAIN" lean -o OrderedResidue.olean OrderedResidue.lean || exit 1
-    LEAN_PATH=. elan run "$PRF_TOOLCHAIN" lean -o Vectors.olean Vectors.lean || exit 1
-    LEAN_PATH=. elan run "$PRF_TOOLCHAIN" lean Refinement.lean || exit 1
-  ) >"$prf_refinement_log" 2>&1 || prf_ref_exit=$?
-  fge_field refinement_exit "$prf_ref_exit"
-  fge_assert_eq fg041-trace-refinement 0 "$prf_ref_exit" \
-    'every exported reference-model history is a run of the Lean model'
-
-  # The committed vectors must still be what the corpus renders. A refinement
-  # theorem is about the vectors it was checked against, so a stale artifact
-  # would prove something true about a corpus that no longer exists.
+  printf '\n-- stale private copy\n' >> "$prf_bridge/Vectors.lean"
   prf_gate_log=$(fge_artifact_path fg041-vectors-gate.log)
   prf_gate_exit=0
-  if [[ -n ${FGIT_PROOF_BRIDGE_BIN:-} ]]; then
-    (cd "$PRF_REPO" && "$FGIT_PROOF_BRIDGE_BIN" check) >"$prf_gate_log" 2>&1 || prf_gate_exit=$?
-  else
-    (cd "$PRF_REPO" && cargo run --locked -q -p fgit-proof-bridge --bin fgit-proof-bridge-gen -- check) \
-      >"$prf_gate_log" 2>&1 || prf_gate_exit=$?
-  fi
-  fge_field vectors_gate_exit "$prf_gate_exit"
-  fge_assert_eq fg041-vectors-are-current 0 "$prf_gate_exit" \
-    'the committed Lean vectors match what the golden corpus renders today'
+  "$FGIT_PROOF_BRIDGE_BIN" check "$PRF_REPO/crates/fgit-reference/tests/goldens" "$prf_bridge" \
+    >"$prf_gate_log" 2>&1 || prf_gate_exit=$?
+  fge_assert_eq fg041-stale-vectors-refused 1 "$prf_gate_exit" \
+    'the source replay gate must reject a stale copy'
+  fge_assert_contains fg041-stale-vectors-reason "$(cat "$prf_gate_log")" 'Stale' \
+    'the refusal identifies vector drift'
 
   prf_dpor_log=$(fge_artifact_path fg041-dpor.log)
   prf_dpor_exit=0
@@ -375,7 +353,7 @@ else
     'requesting replay with a missing bridge must refuse'
   fge_assert_contains fg041-missing-dpor-bridge-reason \
     "$(cat "$FGE_ARTIFACT_DIR/fg041-missing-dpor-bridge.log")" \
-    'specified DPOR bridge is not executable' \
+    'specified proof bridge is not executable' \
     'a caller can distinguish a missing reference bridge from a Lean toolchain refusal'
 fi
 

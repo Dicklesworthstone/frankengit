@@ -1367,6 +1367,7 @@ export CARGO_TARGET_DIR=/data/frankengit-targets/verify-my-pane
 ./scripts/verify.sh docs
 ./scripts/verify.sh constitution
 ./scripts/verify.sh fast
+./scripts/verify.sh proof
 ./scripts/verify.sh full
 ./scripts/verify.sh release
 ```
@@ -1374,6 +1375,10 @@ export CARGO_TARGET_DIR=/data/frankengit-targets/verify-my-pane
 Build-backed lanes require that private target directory and respect Cargo/RCH
 routing. Returned native checker tools run against the caller's checkout; see
 the [local verification profile](docs/LOCAL_VERIFICATION_AND_RELEASE_PIPELINE.md).
+
+The `proof` lane replays the recorded reference histories and both orders of a
+two-writer publication race with the pinned Lean kernel. It also checks that a
+stale vector or a changed claim artifact is refused. [FG-041 inputs and toolchain](proofs/fg041/README.md)
 
 The documentation/constitution/fast bootstrap lanes exist today. `full` and `release` deliberately return a typed exit-3 refusal until real conformance, fault, native-target, and artifact gates land; a dormant gate never reports success.
 

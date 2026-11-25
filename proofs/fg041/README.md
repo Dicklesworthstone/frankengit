@@ -6,22 +6,31 @@ Run the local, fail-closed checker with:
 bash proofs/fg041/check.sh
 ```
 
-The vector generator's `check` and `generate` commands first replay each
-recorded history against the Rust reference model. Each step must reproduce its
-recorded outcome, root bytes, and full head position. A mismatch reports the
-golden name, first differing step, and observation kind before writing vectors.
+The ordinary command replays all checked-in reference histories, compares the
+generated vectors byte for byte with the copy the kernel will import, and checks
+the projected steps with Lean. Set `FGIT_PROOF_BRIDGE_BIN` to the
+`fgit-proof-bridge-gen` built from the source revision under test to use that
+executable. Otherwise set `CARGO_TARGET_DIR` to a private target directory.
+The checker builds the locked generator for the caller’s host and reads this
+checkout. All Lean outputs stay in a temporary directory.
 
-The proof E2E lane runs `bash proofs/fg041/check.sh --dpor` to check the model and both schedules. The existing `check_dpor.sh` command invokes the same checks.
-It replays the recorded `cas_loss_retry.fgtrace` seed, then lets the
-concurrency lab schedule its two competing staged batches at the common head.
-For each order the reference model executes both conditional updates. Exactly
-one must win, and the losing update must preserve the winner’s head and roots.
-The bridge exports both executions to fresh Lean modules. The pinned kernel
-checks the head generation at every projected step. A recorded head, publication
-predecessor or proposed generation below the trace genesis fails replay. It also checks that the
-same two writers sealed in both histories and that each won exactly once.
-This covers a single two-writer model race. Production storage, native crash recovery, and the
-other schedule spaces have separate verification requirements.
+Rust replay checks the recorded outcome, root bytes, and head position after
+each step. For each winning publication the exporter reads the newly published
+decisions in decision-sequence order and checks each transaction and outcome
+against that head's recorded roots. This preserves the commit and refusal in
+`multi_decision_batch`. The kernel checks that each new terminal belongs to a
+previously sealed, undecided transaction, that retries observe its prior label,
+and that the generation, total decisions and committed subset match each recorded head.
+
+Run `./scripts/verify.sh proof` for the corpus, schedule, false-theorem and
+registry-demotion checks together. Run `bash proofs/fg041/check.sh --dpor`
+to check the corpus and two freshly scheduled publications. The compatibility
+entry point `check_dpor.sh` runs the same checks. The concurrency lab schedules the two staged batches in
+`cas_loss_retry.fgtrace` at their common predecessor. Exactly one update must
+win and the loser must preserve its head and roots. The kernel checks both
+histories and requires each sealed writer to win once. The reference histories
+and this race cover a bounded model. Production storage and native crash
+recovery have separate verification lanes.
 
 The script refuses a missing or mismatched `leanprover/lean4:v4.32.0`
 toolchain, never asks `elan` to install one, rejects `sorry`/`admit` in the
@@ -40,6 +49,12 @@ reason.
 `ASSUMPTIONS.md` maps each explicit Lean axiom to its named FG-004,
 fault-conformance, or publication-epoch empirical gate. Those gates are
 finite empirical evidence, not hidden universal proof assumptions.
+
+CLM-002 (terminal uniqueness) and CLM-004 (head continuity) bind the checked
+vectors and the refinement checker by SHA-256. The proof lane alters a private
+copy and requires both claims to demote while the two model-only rows retain
+their original bindings. INV-001 also requires the authority CAS and recovery
+campaigns before release qualification.
 
 ## Non-claims
 

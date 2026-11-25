@@ -146,14 +146,16 @@ class BootstrapLinks(unittest.TestCase):
         scripts = self.root / "scripts"
         scripts.mkdir()
         shutil.copy2(SUBJECT, scripts / SUBJECT.name)
-        shutil.copy2(ROOT / "scripts/verify.sh", scripts / "verify.sh")
+        for script in ("verify.sh", "verify_native_tools.sh"):
+            shutil.copy2(ROOT / "scripts" / script, scripts / script)
         binary_dir = self.root / "bin"
         binary_dir.mkdir()
         cargo = binary_dir / "cargo"
         cargo.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$CARGO_CALLS\"\nexit 37\n", encoding="utf-8")
         cargo.chmod(0o755)
         calls = self.cwd / "cargo-calls"
-        env = {**self.env, "PATH": str(binary_dir) + os.pathsep + os.environ["PATH"], "CARGO_CALLS": str(calls)}
+        env = {**self.env, "PATH": str(binary_dir) + os.pathsep + os.environ["PATH"],
+               "CARGO_CALLS": str(calls), "CARGO_TARGET_DIR": str(self.cwd / "private-target")}
         for note, expected in [(NOTE, 37), (NOTE.replace("dist/2026-08-31/", "dist/2026-08-30/"), 3)]:
             with self.subTest(note=note):
                 calls.unlink(missing_ok=True)
@@ -164,7 +166,7 @@ class BootstrapLinks(unittest.TestCase):
                 self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
                 self.assertEqual(self.snapshot(), before)
                 if expected == 37:
-                    self.assertEqual(calls.read_text(), "run --locked -p fgit-registry-check -- docs\n")
+                    self.assertEqual(calls.read_text(), "metadata --locked --no-deps --format-version 1\n")
                 else:
                     self.assertFalse(calls.exists(), "metadata refusal must prevent the Cargo call")
                     self.assertIn("bootstrap URLs do not match", result.stderr)

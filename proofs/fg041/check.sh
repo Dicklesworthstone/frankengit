@@ -4,7 +4,8 @@ set -euo pipefail
 
 readonly toolchain='leanprover/lean4:v4.32.0'
 readonly expected_version='Lean (version 4.32.0, x86_64-unknown-linux-gnu, commit 8c9756b28d64dab099da31a4c09229a9e6a2ef35, Release)'
-readonly root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+readonly root
 readonly proof_dir="${root}/proofs/fg041"
 
 if (( $# > 1 )) || { (( $# == 1 )) && [[ $1 != --dpor ]]; }; then
@@ -29,65 +30,71 @@ if [[ "${actual_version}" != "${expected_version}" ]]; then
   exit 2
 fi
 
-if rg -n -w '(sorry|admit)' "${proof_dir}/OrderedResidue.lean" >/dev/null; then
+if [[ $(cat "$proof_dir/lean-toolchain") != "$toolchain" ]]; then
+  echo 'fg041 proof lane refusal: replay toolchain differs from the pinned model checker' >&2
+  exit 2
+fi
+
+if [[ -n ${FGIT_PROOF_BRIDGE_BIN:-} ]]; then
+  if [[ ! -f $FGIT_PROOF_BRIDGE_BIN || ! -x $FGIT_PROOF_BRIDGE_BIN ]]; then
+    echo 'fg041 proof lane refusal: specified proof bridge is not executable' >&2
+    exit 2
+  fi
+  bridge=$(realpath -- "$FGIT_PROOF_BRIDGE_BIN")
+else
+  # The verifier inspects caller-local golden files and a private Lean directory.
+  cd "$root"
+  # shellcheck source=../../scripts/verify_native_tools.sh
+  source "$root/scripts/verify_native_tools.sh"
+  bridge=$(verified_tool_path fgit-proof-bridge fgit-proof-bridge-gen)
+fi
+
+work=$(mktemp -d)
+trap 'rm -f -- "$work"/{OrderedResidue,Vectors}.{lean,olean} "$work"/{Refinement,DporRace,FalseVariant}.lean "$work/control.log"; rmdir -- "$work"' EXIT
+cp "$proof_dir"/{OrderedResidue,Refinement,FalseVariant}.lean "$work/"
+cp "$proof_dir/generated/Vectors.lean" "$work/"
+cd "$work"
+export LEAN_PATH=.
+sources=(OrderedResidue.lean Refinement.lean Vectors.lean)
+if (( $# )); then
+  cp "$proof_dir/DporRace.lean" .
+  sources+=(DporRace.lean)
+fi
+if rg -n -w '(sorry|admit)' "${sources[@]}"; then
   echo 'fg041 proof lane refusal: proof artifact contains an admitted placeholder' >&2
   exit 2
 fi
 
-elan run "${toolchain}" lean "${proof_dir}/OrderedResidue.lean"
-
-control_log="$(mktemp)"
-trap 'rm -f -- "${control_log}"' EXIT
-if elan run "${toolchain}" lean "${proof_dir}/FalseVariant.lean" >"${control_log}" 2>&1; then
+lean=(elan run "$toolchain" lean)
+"${lean[@]}" -o OrderedResidue.olean OrderedResidue.lean
+if "${lean[@]}" FalseVariant.lean >control.log 2>&1; then
   echo 'fg041 proof lane refusal: planted false theorem was accepted' >&2
   exit 2
 fi
-if ! rg -i 'tactic.*rfl.*failed' "${control_log}" >/dev/null; then
+if ! rg -i 'tactic.*rfl.*failed' control.log >/dev/null; then
   echo 'fg041 proof lane refusal: planted control failed for an unexpected reason' >&2
-  sed -n '1,120p' "${control_log}" >&2
+  cat control.log >&2
   exit 2
 fi
 
-printf 'FG-041 Lean proof lane checked with %s\n' "${toolchain}"
+# Check the exact private copy the kernel imports, including fresh execution
+# of every source history. The generator's check command never repairs drift.
+goldens="$root/crates/fgit-reference/tests/goldens"
+"$bridge" check "$goldens" "$work"
+check_vectors() {
+  "${lean[@]}" -o Vectors.olean Vectors.lean
+  "${lean[@]}" Refinement.lean
+}
+check_vectors
+printf 'FG-041 replayed the recorded reference histories with %s\n' "$toolchain"
 
-if (( $# == 0 )); then
-  exit 0
-fi
-
-if [[ $(cat "$proof_dir/lean-toolchain") != "$toolchain" ]]; then
-  echo 'fg041 proof lane refusal: DPOR toolchain differs from the pinned model checker' >&2
-  exit 2
-fi
-bridge=''
-if [[ -n ${FGIT_PROOF_BRIDGE_BIN:-} ]]; then
-  if [[ ! -f $FGIT_PROOF_BRIDGE_BIN || ! -x $FGIT_PROOF_BRIDGE_BIN ]]; then
-    echo 'fg041 proof lane refusal: specified DPOR bridge is not executable' >&2
+if (( $# )); then
+  "$bridge" dpor "$goldens/cas_loss_retry.fgtrace" >Vectors.lean
+  if rg -n -w '(sorry|admit)' Vectors.lean; then
+    echo 'fg041 proof lane refusal: scheduled vectors contain an admitted placeholder' >&2
     exit 2
   fi
-  bridge=$(realpath -- "$FGIT_PROOF_BRIDGE_BIN")
-fi
-
-# The replay owns its generated modules. The model's false-control log has
-# a separate EXIT trap in the parent.
-(
-  dpor_dir=$(mktemp -d)
-  trap 'rm -f -- "$dpor_dir"/{OrderedResidue,Vectors}.{lean,olean} "$dpor_dir"/{Refinement,DporRace}.lean; rmdir -- "$dpor_dir"' EXIT
-  cp "$proof_dir"/{OrderedResidue,Refinement,DporRace}.lean "$dpor_dir/"
-  cd "$dpor_dir"
-  if rg -n -w '(sorry|admit)' Refinement.lean DporRace.lean; then
-    echo 'fg041 proof lane refusal: refinement contains an admitted placeholder' >&2
-    exit 2
-  fi
-  set -C
-  if [[ -n $bridge ]]; then
-    "$bridge" dpor "$root/crates/fgit-reference/tests/goldens/cas_loss_retry.fgtrace" >Vectors.lean
-  else
-    (cd "$root" && cargo run --locked --quiet -p fgit-proof-bridge --bin fgit-proof-bridge-gen -- dpor) >Vectors.lean
-  fi
-  export LEAN_PATH=.
-  elan run "$toolchain" lean -o OrderedResidue.olean OrderedResidue.lean
-  elan run "$toolchain" lean -o Vectors.olean Vectors.lean
-  elan run "$toolchain" lean Refinement.lean
-  elan run "$toolchain" lean DporRace.lean
+  check_vectors
+  "${lean[@]}" DporRace.lean
   printf 'FG-041 replayed both competing head publications with %s\n' "$toolchain"
-)
+fi

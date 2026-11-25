@@ -22,81 +22,19 @@ readonly VERIFY_ARTIFACT_SCHEMA_VERSION=1
 
 export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
 
-# AGENTS.md §16.2: builds use the caller's Cargo/RCH routing and private target
-# directory. Never force a local compiler here. Tools that inspect this checkout
-# are built for the CALLER's host, returned by Cargo/RCH, then executed here:
-# `cargo run` could instead inspect a worker's filtered copy (notably no Beads).
-# Explicit input roots also avoid embedded worker CARGO_MANIFEST_DIR paths.
-VERIFY_NATIVE_HOST=''
-VERIFY_TARGET_DIRECTORY=''
+# shellcheck source=verify_native_tools.sh
+source "$ROOT/scripts/verify_native_tools.sh"
 
 echo_step() { printf '\033[1;36m==> %s\033[0m\n' "$*" >&2; }
 artifact_warning() { printf 'verify: replay artifact unavailable: %s\n' "$1" >&2 || true; }
 print_usage() {
-  printf 'usage: %s [--no-artifact] {docs|constitution|fast|e2e|operator|full|release}\n' "$0" >&2
+  printf 'usage: %s [--no-artifact] {docs|constitution|fast|e2e|operator|proof|full|release}\n' "$0" >&2
   printf 'feature lanes: exact-patch|index-maintenance|source-symbols|symbol-index|symbol-index-native|symbol-index-maintenance|review-protection|admission-tests|authority-companions|authenticated-publication|native-rebase-check|native-rebase-test|pull-request-checks|continuous-serve|tier-a\n' >&2
 }
 refuse_dormant() {
   printf '\033[1;33m==> %s\033[0m\n' "$1" >&2
   printf 'This is a typed pre-implementation refusal, not a passing gate.\n' >&2
   exit 3
-}
-
-prepare_native_tools() {
-  [[ -n "${VERIFY_NATIVE_HOST}" ]] && return 0
-  if [[ -z "${CARGO_TARGET_DIR:-}" ]]; then
-    printf 'verify: set CARGO_TARGET_DIR to a pane-private durable target directory (AGENTS.md 16.2)\n' >&2
-    return 2
-  fi
-  local compiler_version metadata
-  compiler_version="$(rustc -vV)"
-  VERIFY_NATIVE_HOST="$(printf '%s\n' "$compiler_version" | sed -n 's/^host: //p')"
-  if ! [[ "${VERIFY_NATIVE_HOST}" =~ ^[a-zA-Z0-9_]+(-[a-zA-Z0-9_]+)+$ ]]; then
-    printf 'verify: cannot determine one native caller host from rustc -vV\n' >&2
-    return 2
-  fi
-  metadata="$(cargo metadata --locked --no-deps --format-version 1)"
-  VERIFY_TARGET_DIRECTORY="$(printf '%s' "$metadata" | "${PYTHON_BIN:-python3}" -c '
-import json, os, sys
-try:
-    target = json.load(sys.stdin)["target_directory"]
-    if not isinstance(target, str) or not os.path.isabs(target) or any(c in target for c in "\0\r\n"):
-        raise ValueError("expected an absolute target_directory without control separators")
-except (ValueError, KeyError, TypeError) as error:
-    print(f"verify: invalid Cargo target metadata: {error}", file=sys.stderr)
-    sys.exit(2)
-print(target)
-')"
-}
-
-native_binary_path() {
-  local suffix='' profile="${2:-debug}"
-  case "${VERIFY_NATIVE_HOST}" in *-windows-*) suffix='.exe' ;; esac
-  printf '%s/%s/%s/%s%s\n' "$VERIFY_TARGET_DIRECTORY" "$VERIFY_NATIVE_HOST" "$profile" "$1" "$suffix"
-}
-
-build_native_tools() {
-  # RCH estimates and forwards Cargo's argv. An ambient CARGO_BUILD_JOBS may
-  # not reach the worker, so make the caller's requested compiler cap explicit
-  # for both actual compilation and its matching scheduler reservation.
-  if [[ -n "${CARGO_BUILD_JOBS:-}" ]]; then
-    cargo build --locked --target "$VERIFY_NATIVE_HOST" --jobs "$CARGO_BUILD_JOBS" "$@"
-  else
-    cargo build --locked --target "$VERIFY_NATIVE_HOST" "$@"
-  fi
-}
-
-run_native_tool() {
-  local package="$1" binary="$2" executable
-  shift 2
-  prepare_native_tools
-  build_native_tools -p "$package" --bin "$binary"
-  executable="$(native_binary_path "$binary")"
-  if [[ ! -x "$executable" ]]; then
-    printf 'verify: no returned native executable at %s\n' "$executable" >&2
-    return 1
-  fi
-  "$executable" "$@"
 }
 
 run_docs() {
@@ -288,6 +226,7 @@ run_lane() {
     fast) run_fast ;;
     e2e) run_e2e ;;
     operator) run_operator ;;
+    proof) bash "$ROOT/scripts/e2e/suites/proof/proof_lane.sh" ;;
     full) run_full ;;
     release) run_release ;;
     # Feature lanes: thin dispatch to repository-owned verification scripts so

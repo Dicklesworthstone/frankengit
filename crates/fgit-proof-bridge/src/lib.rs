@@ -19,14 +19,10 @@
 //! refinement evidence over a finite corpus, not a proof and not an exhaustive
 //! exploration. The claims registry must say exactly that and nothing stronger.
 //!
-//! # What it does not yet do, stated so nobody reads the artifact as more
-//!
-//! Delivery is staged, and this is stage one: the projection, the exporter and
-//! the staleness gate. The Lean checker that replays these vectors against
-//! `OrderedResidue.run` is stage two, and the claims rows gain a refinement
-//! evidence class only when that checker runs. Adding the class first would make
-//! the registry assert a bridge that still does not exist, which is the exact
-//! inflation FG-041c refused.
+//! The exporter checks the recorded observations against fresh reference-model
+//! replay. It reads each terminal from the replayed decision stream in order and
+//! compares it with the recorded head's outcome entry. The Lean checker uses
+//! the head generation and both sequence positions at each step as its observations.
 //!
 //! # Stated limits of the corpus
 //!
@@ -113,10 +109,12 @@ pub fn project_corpus(goldens: &Path) -> Result<Vec<ProjectedTrace>, CorpusRefus
             });
         }
         projected.push(
-            project(&name, &trace).map_err(|refusal| CorpusRefusal::Unprojectable {
-                golden: name.clone(),
-                refusal,
-            })?,
+            project::project_replayed(&name, &trace, replay.state.decisions()).map_err(
+                |refusal| CorpusRefusal::Unprojectable {
+                    golden: name.clone(),
+                    refusal,
+                },
+            )?,
         );
     }
     Ok(projected)

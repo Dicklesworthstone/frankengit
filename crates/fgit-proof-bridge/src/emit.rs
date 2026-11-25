@@ -72,9 +72,7 @@ namespace FgitBridge
 
 /-- The abstract operations, mirroring `OrderedResidue.Operation` without
 importing it. `retry` mirrors that model's own retry operation; the effect
-lists on `publish` fill the corresponding fields of its `Batch`. Deliverable
-(2) of FG-041d is the checker that maps these onto those types and replays
-them; until it exists this file is data, and says so. -/
+lists on `publish` fill the corresponding fields of its `Batch`. -/
 inductive Op where
   | sealRequest (target : Nat)
   | decide (target : Nat) (committed : Bool)
@@ -84,14 +82,16 @@ inductive Op where
   | interruptedPublication (predecessor : Nat) (generation : Nat)
   deriving Repr
 
-/-- One concrete step's projection, paired with the head generation the
-reference model recorded after it. `ops` is empty for a stuttering step, and can
+/-- One concrete step's projection, paired with the generation and both sequence
+positions recorded by the reference head. `ops` is empty for a stuttering step, and can
 hold several operations: a won compare-and-swap both advances the head and makes
 every capsule in its batch terminal. -/
 structure Step where
   concreteIndex : Nat
   ops : List Op
   generationAfter : Nat
+  decisionSequenceAfter : Nat
+  repositorySequenceAfter : Nat
   deriving Repr
 
 /-- One projected history. -/
@@ -138,8 +138,11 @@ structure Trace where
                 .join(", ");
             let _ = write!(
                 out,
-                "{{ concreteIndex := {}, ops := [{ops}], generationAfter := {} }}",
-                step.concrete_index, step.generation_after
+                "{{ concreteIndex := {}, ops := [{ops}], generationAfter := {}, decisionSequenceAfter := {}, repositorySequenceAfter := {} }}",
+                step.concrete_index,
+                step.generation_after,
+                step.decision_sequence_after,
+                step.repository_sequence_after
             );
         }
         out.push_str("\n    ]\n  }\n");
