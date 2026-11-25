@@ -239,7 +239,7 @@ pub(super) fn packed_refs_input_limit(object_format: GitHashAlgorithm, max_refs:
     let direct_line_bytes = oid_hex_bytes
         .saturating_add(1)
         .saturating_add(MAX_REF_NAME_LEN)
-        // `str::lines` admits both LF and CRLF, so the input envelope must
+        // Packed refs admit both LF and CRLF, so the input envelope must
         // retain the larger line ending even though Git normally writes LF.
         .saturating_add(2);
     let peeled_line_bytes = oid_hex_bytes.saturating_add(3);
@@ -430,29 +430,36 @@ pub(super) fn read_packed_refs(
         BoundedInputClass::RefControl,
         control,
     )?;
-    let text = std::str::from_utf8(&bytes)
-        .map_err(|_| LooseGitImportRefusal::PackedRefContents(Box::new(packed.clone())))?;
     let mut refs = BTreeMap::new();
-    for line in text.lines() {
+    for raw in bytes.split_inclusive(|byte| *byte == b'\n') {
         control.checkpoint()?;
-        if line.is_empty() || line.starts_with('#') || line.starts_with('^') {
+        let line = raw
+            .strip_suffix(b"\r\n")
+            .or_else(|| raw.strip_suffix(b"\n"))
+            .unwrap_or(raw);
+        if line.is_empty() || line.starts_with(b"#") || line.starts_with(b"^") {
+            // Only the ref-name field admits arbitrary Git name bytes.
+            std::str::from_utf8(line)
+                .map_err(|_| LooseGitImportRefusal::PackedRefContents(Box::new(packed.clone())))?;
             continue;
         }
-        let Some((identity, name)) = line.split_once(' ') else {
+        let Some(separator) = line.iter().position(|byte| *byte == b' ') else {
             return Err(LooseGitImportRefusal::PackedRefContents(Box::new(
                 packed.clone(),
             )));
         };
-        if identity.is_empty() || name.is_empty() || name.contains(' ') {
+        let identity = std::str::from_utf8(&line[..separator])
+            .map_err(|_| LooseGitImportRefusal::PackedRefContents(Box::new(packed.clone())))?;
+        let name = &line[separator + 1..];
+        if identity.is_empty() || name.is_empty() || name.contains(&b' ') {
             return Err(LooseGitImportRefusal::PackedRefContents(Box::new(
                 packed.clone(),
             )));
         }
-        let name =
-            RefName::try_new(name.as_bytes()).map_err(|error| LooseGitImportRefusal::RefName {
-                path: Box::new(packed.clone()),
-                source: Box::new(error),
-            })?;
+        let name = RefName::try_new(name).map_err(|error| LooseGitImportRefusal::RefName {
+            path: Box::new(packed.clone()),
+            source: Box::new(error),
+        })?;
         if shared_only && is_worktree_ref(&name) {
             continue;
         }
@@ -555,17 +562,20 @@ pub(super) fn ref_name_from_path(
     let relative = path
         .strip_prefix(root)
         .map_err(|_| LooseGitImportRefusal::RefContents(Box::new(path.to_path_buf())))?;
-    let mut name = String::from("refs");
+    let mut name = b"refs".to_vec();
     for component in relative.components() {
-        let Some(part) = component.as_os_str().to_str() else {
-            return Err(LooseGitImportRefusal::RefContents(Box::new(
-                path.to_path_buf(),
-            )));
-        };
-        name.push('/');
-        name.push_str(part);
+        let part = component.as_os_str();
+        #[cfg(unix)]
+        let bytes = std::os::unix::ffi::OsStrExt::as_bytes(part);
+        #[cfg(not(unix))]
+        let bytes = part
+            .to_str()
+            .ok_or_else(|| LooseGitImportRefusal::RefContents(Box::new(path.to_path_buf())))?
+            .as_bytes();
+        name.push(b'/');
+        name.extend_from_slice(bytes);
     }
-    RefName::try_new(name.as_bytes()).map_err(|error| LooseGitImportRefusal::RefName {
+    RefName::try_new(&name).map_err(|error| LooseGitImportRefusal::RefName {
         path: Box::new(path.to_path_buf()),
         source: Box::new(error),
     })

@@ -251,6 +251,77 @@ fn assert_unpublished(node: &OneNode, before: &MaterializedAdmission, source: &S
 }
 
 #[test]
+fn packed_byte_names_remain_distinct_and_symbolic_targets_resolve_in_both_hash_domains() {
+    let packed_name = b"refs/heads/topic-\xff";
+    // A lossy conversion would collapse these two distinct branches.
+    let utf8_name = "refs/heads/topic-\u{fffd}";
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let source = Source::new(scratch.0.join("source.git"), format);
+        let mut lines = format!("{} refs/tags/v1\r\n{} ", source.tag, source.commit).into_bytes();
+        lines.extend_from_slice(packed_name);
+        lines.extend_from_slice(format!("\r\n{} {utf8_name}\n", source.stale).as_bytes());
+        write(
+            &source.root,
+            "HEAD",
+            [b"ref: ".as_slice(), packed_name, b"\n"].concat(),
+        );
+        write(
+            &source.root,
+            "refs/remotes/origin/HEAD",
+            [b"ref: ".as_slice(), packed_name, b"\n"].concat(),
+        );
+
+        let mut expected = source.refs();
+        expected.insert(RefName::try_new(packed_name).unwrap(), source.commit);
+        expected.insert(name(utf8_name), source.stale);
+        expected.insert(name("refs/remotes/origin/HEAD"), source.commit);
+        let config = scratch.config(format, "node", 0x72);
+        let imported = node(config.clone());
+        let before = snapshot(&imported);
+        for malformed in [b"# \xff\n".as_slice(), b"^\xff\n", b"\xff refs/heads/invalid\n"] {
+            write(&source.root, "packed-refs", [lines.as_slice(), malformed].concat());
+            assert!(matches!(
+                staging(import(&imported, &source.root).unwrap_err()),
+                LooseGitImportRefusal::PackedRefContents(_)
+            ));
+            assert_unpublished(&imported, &before, &source);
+        }
+        write(&source.root, "packed-refs", lines);
+        let first = import(&imported, &source.root).unwrap();
+        assert_committed(&first, expected.len());
+        assert_eq!(snapshot(&imported).snapshot().refs, expected);
+
+        // Move the exact same ref into a loose filesystem entry. Its identity
+        // and the sealed import must survive the storage-layout change.
+        #[cfg(unix)]
+        {
+            use std::ffi::OsStr;
+            use std::os::unix::ffi::OsStrExt;
+            fs::write(
+                source.root.join(OsStr::from_bytes(packed_name)),
+                format!("{}\n", source.commit),
+            )
+            .unwrap();
+            write(
+                &source.root,
+                "packed-refs",
+                format!(
+                    "{} refs/tags/v1\n{} {utf8_name}\n",
+                    source.tag, source.stale
+                ),
+            );
+            assert_eq!(import(&imported, &source.root).unwrap(), first);
+        }
+        imported.shutdown().unwrap();
+        let mut reopened = OneNode::open_existing(config).unwrap();
+        reopened.bring_into_service(HeadGeneration::FIRST).unwrap();
+        assert_eq!(snapshot(&reopened).snapshot().refs, expected);
+        reopened.shutdown().unwrap();
+    }
+}
+
+#[test]
 fn clone_style_aliases_import_replay_and_export_without_the_source_in_both_hash_domains() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let scratch = Scratch::new();

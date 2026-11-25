@@ -67,7 +67,10 @@ the imported ref map and sealed retry identity unchanged. Source and destination
 Every target must be a canonical `refs/` name present in the selected namespace.
 Missing targets, cycles and chains over 32 aliases refuse the complete import
 before object placement. All aliases count toward the existing ref-count
-ceiling. A direct loose ref keeps its native hex-line byte bound; a symbolic
+ceiling. Packed ref names and symbolic targets preserve their exact Git name bytes,
+including non-UTF-8 names. On Unix, loose ref filenames preserve the same bytes,
+so packing or unpacking a ref leaves its import identity unchanged.
+A direct loose ref keeps its native hex-line byte bound; a symbolic
 line may contain `ref: `, at most 1,024 target-name bytes, and one final LF. The
 same caller cancellation control covers file reads and every resolution step.
 Normal target-kind validation still applies to the resulting refs: a symbolic
