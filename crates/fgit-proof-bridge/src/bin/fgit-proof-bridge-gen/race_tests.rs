@@ -12,14 +12,14 @@ fn seed(name: &str) -> GoldenTrace {
 }
 
 #[test]
-fn both_orders_reexecute_and_only_the_winning_transaction_is_decided() {
+fn both_orders_reexecute_and_only_the_winner_is_decided_at_the_first_head() {
     let original = seed("cas_loss_retry.fgtrace");
     let traces = explore(&original, BUDGET).unwrap();
     assert_eq!(traces.len(), 2);
     let winners: Vec<_> = traces
         .iter()
         .map(|trace| {
-            let [won, lost] = &trace.steps[trace.steps.len() - 2..] else {
+            let [won, lost, _, _, _] = &trace.steps[trace.steps.len() - 5..] else {
                 panic!("two CAS steps")
             };
             let [
@@ -59,4 +59,145 @@ fn missing_race_incomplete_search_and_corrupt_recorded_observation_refuse() {
     assert!(explore(&original, ExplorationBudget::new(1, 32)).is_err());
     original.steps[0].observed = ObservedOutcome::CasWon;
     assert!(explore(&original, BUDGET).is_err());
+}
+
+#[test]
+fn reprepare_uses_the_actual_losing_seal_and_both_distinct_refs_survive() {
+    let original = seed("cas_loss_retry.fgtrace");
+    let runs = histories(&original, BUDGET).unwrap();
+    assert_eq!(
+        runs[0].1, original,
+        "the supplied schedule replays every source input"
+    );
+    let original_state = replay(&original).unwrap().state;
+    let expected = original_state.decisions();
+    let [first, second] = expected else {
+        panic!("two distinct original decisions")
+    };
+    for ((_, run), (winner, loser)) in runs.iter().zip([(first, second), (second, first)]) {
+        let state = replay(run).unwrap().state;
+        let [won, retried] = state.decisions() else {
+            panic!("two decisions")
+        };
+        assert_eq!((won.tx_id, retried.tx_id), (winner.tx_id, loser.tx_id));
+        assert!(won.is_committed() && retried.is_committed());
+        assert_eq!(state.roots().refs, original_state.roots().refs);
+        assert_eq!(state.roots().refs.len(), 2);
+        let [prepare, stage, cas] = &run.steps[run.steps.len() - 3..] else {
+            unreachable!()
+        };
+        let ModelInput::Prepare(prepared) = &prepare.input else {
+            panic!("missing retry preparation")
+        };
+        let original_seal = run
+            .steps
+            .iter()
+            .find_map(|step| match &step.input {
+                ModelInput::Seal(s) if s.request.tx_id == loser.tx_id => Some(s),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(prepared.request, original_seal.request);
+        assert_eq!(
+            state.seal_of(loser.tx_id).unwrap().seal_id,
+            original_seal.seal_id
+        );
+        assert_eq!(state.preparations_of(loser.tx_id), 2);
+        assert_eq!(prepare.head, stage.head);
+        let ModelInput::CompareAndSwap(retry) = &cas.input else {
+            panic!("missing retry CAS")
+        };
+        let published = state.batch(retry.batch).unwrap();
+        assert_eq!(published.predecessor_head(), retry.expected_head);
+        assert_eq!(
+            published.predecessor_generation(),
+            retry.expected_generation
+        );
+        assert_eq!(published.decisions(), [*retried]);
+    }
+}
+
+#[test]
+fn an_occupied_original_target_refuses_the_loser_in_each_order() {
+    use fgit_reference::harness::IdentityMint;
+    use fgit_reference::intent::{Intent, RefIntent};
+    use fgit_types::{DecisionOutcome, RefusalCode};
+    let source = seed("cas_loss_retry.fgtrace");
+    let mut recorder = TraceRecorder::new(source.genesis);
+    let digest = IdentityMint::new(20261125).digest();
+    for step in source.steps {
+        let mut input = step.input;
+        let request = match &mut input {
+            ModelInput::Seal(s) => Some(&mut s.request),
+            ModelInput::Prepare(p) => Some(&mut p.request),
+            _ => None,
+        };
+        if let Some(request) = request
+            && let Intent::Ref(RefIntent::Update { name, .. }) =
+                &mut request.statements[0].intents[0]
+            && name.as_bytes() == b"refs/heads/other"
+        {
+            *name = fgit_types::refs::RefName::try_new(b"refs/heads/main").unwrap();
+            request.canonical_request_digest = digest;
+        }
+        recorder.apply(input).unwrap();
+    }
+    let conflict = recorder.finish();
+    let source_decisions = replay(&conflict).unwrap().state.decisions().to_vec();
+    let [a, b] = source_decisions.as_slice() else {
+        panic!("two original writers")
+    };
+    for ((_, run), (winner, loser)) in histories(&conflict, BUDGET)
+        .unwrap()
+        .iter()
+        .zip([(a, b), (b, a)])
+    {
+        let state = replay(run).unwrap().state;
+        let [won, refused] = state.decisions() else {
+            panic!("two terminals")
+        };
+        assert_eq!((won.tx_id, refused.tx_id), (winner.tx_id, loser.tx_id));
+        assert!(won.is_committed());
+        assert!(matches!(
+            refused.outcome,
+            DecisionOutcome::Refused {
+                code: RefusalCode::ExpectedOldRefMismatch,
+                ..
+            }
+        ));
+        let winning_roots =
+            fgit_reference::trace::decode_roots(&run.steps[run.steps.len() - 5].roots).unwrap();
+        assert_eq!(state.roots().refs, winning_roots.refs);
+        assert_eq!(state.roots().refs.len(), 1);
+    }
+}
+
+#[test]
+fn incomplete_retry_and_faithfully_recorded_changed_semantics_refuse() {
+    let original = seed("cas_loss_retry.fgtrace");
+    let mut incomplete = original.clone();
+    incomplete.steps.truncate(incomplete.steps.len() - 3);
+    assert!(replay(&incomplete).unwrap().is_faithful());
+    assert!(explore(&incomplete, BUDGET).is_err());
+
+    // The reference model takes digest identity as input. Change a semantic
+    // field while retaining that digest; the bridge must compare the complete
+    // request with its original seal, even if model replay remains faithful.
+    let mut mutated = TraceRecorder::new(original.genesis);
+    for (i, step) in original.steps.into_iter().enumerate() {
+        let mut input = step.input;
+        if i == 10
+            && let ModelInput::Prepare(prepared) = &mut input
+        {
+            prepared.request.atomic = !prepared.request.atomic;
+        }
+        mutated.apply(input).unwrap();
+    }
+    let changed = mutated.finish();
+    assert!(replay(&changed).unwrap().is_faithful());
+    assert!(
+        explore(&changed, BUDGET)
+            .unwrap_err()
+            .contains("original loser's sealed request")
+    );
 }

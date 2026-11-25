@@ -27,8 +27,11 @@ registry-demotion checks together. Run `bash proofs/fg041/check.sh --dpor`
 to check the corpus and two freshly scheduled publications. The compatibility
 entry point `check_dpor.sh` runs the same checks. The concurrency lab schedules the two staged batches in
 `cas_loss_retry.fgtrace` at their common predecessor. Exactly one update must
-win and the loser must preserve its head and roots. The kernel checks both
-histories and requires each sealed writer to win once. The reference histories
+win and the losing CAS must preserve the winning head and roots. In both
+orders the bridge reprepares the original losing request on that head and
+publishes its revalidated outcome. The kernel checks that each writer wins
+the first CAS once and that the other sealed writer commits its distinct ref
+in the next generation, as required by the two disjoint requests in this fixture. The reference histories
 and this race cover a bounded model. Production storage and native crash
 recovery have separate verification lanes.
 
