@@ -5,12 +5,27 @@ use fgit_proof_bridge::{ProjectedTrace, project};
 use fgit_reference::machine::ModelInput;
 use fgit_reference::trace::{GoldenTrace, ObservedOutcome, TraceRecorder, replay};
 
+#[path = "race_retry.rs"]
+mod retry;
+
 pub(super) const BUDGET: ExplorationBudget = ExplorationBudget::new(4, 32);
 
 pub(super) fn explore(
     seed: &GoldenTrace,
     budget: ExplorationBudget,
 ) -> Result<Vec<ProjectedTrace>, String> {
+    histories(seed, budget)?
+        .into_iter()
+        .map(|(name, history)| {
+            project(&name, &history).map_err(|e| format!("cannot project {name}: {e:?}"))
+        })
+        .collect()
+}
+
+fn histories(
+    seed: &GoldenTrace,
+    budget: ExplorationBudget,
+) -> Result<Vec<(String, GoldenTrace)>, String> {
     let replayed = replay(seed).map_err(|e| format!("cannot replay seed: {e:?}"))?;
     if !replayed.is_faithful() {
         return Err(format!("seed diverged at step {}", replayed.steps_replayed));
@@ -28,6 +43,14 @@ pub(super) fn explore(
     if races.next().is_some() {
         return Err("seed contains multiple competing CAS pairs".into());
     }
+    let contenders = [
+        retry::contender(&seed.steps[..index], &pair[0].input)?,
+        retry::contender(&seed.steps[..index], &pair[1].input)?,
+    ];
+    if contenders[0].request.tx_id == contenders[1].request.tx_id {
+        return Err("the two staged writers have the same transaction".into());
+    }
+    let retry = retry::Retry::from_tail(&seed.steps[index + 2..], contenders[1])?;
     let mut prefix = TraceRecorder::new(seed.genesis.clone());
     for step in &seed.steps[..index] {
         prefix
@@ -78,10 +101,16 @@ pub(super) fn explore(
                         .into(),
                 );
             }
+            if recording
+                .state()
+                .outcome_of(contenders[order[0]].request.tx_id)
+                .is_none()
+            {
+                return Err("first publication did not decide the scheduled winner".into());
+            }
+            retry.publish(&mut recording, contenders[order[1]])?;
             let name = format!("dpor_{}_wins", winner.actor);
-            let trace = project(&name, &recording.finish())
-                .map_err(|e| format!("cannot project {name}: {e:?}"))?;
-            if traces.insert(order, trace).is_some() {
+            if traces.insert(order, (name, recording.finish())).is_some() {
                 return Err("repeated schedule".into());
             }
             Ok(())
