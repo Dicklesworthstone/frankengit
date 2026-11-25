@@ -325,14 +325,15 @@ export function form(fields) {
 }
 export function metadataCommand(action, fields) {
   if (!['open', 'update', 'close', 'reopen', 'retarget'].includes(action)) fail('Unsupported PR metadata action.');
-  keys(fields, ['expected_version', 'object_format', 'source_ref', 'target_ref', 'source_tip', 'target_tip', 'title', 'body']);
+  keys(fields, ['expected_version', 'object_format', 'source_ref', 'source_ref_hex', 'target_ref', 'target_ref_hex', 'source_tip', 'target_tip', 'title', 'body']);
   const version = integer(fields.expected_version, 'expected PR version', 0, Number.MAX_SAFE_INTEGER - 1);
   if ((action === 'open') !== (version === 0)) fail('Only a new PR uses expected version zero.');
   const algorithm = format(fields.object_format);
-  const result = { expected_version: version, object_format: algorithm, source_ref: branch(fields.source_ref), target_ref: branch(fields.target_ref),
+  const source = commandReference(fields, 'source_ref'), target = commandReference(fields, 'target_ref');
+  const result = { expected_version: version, object_format: algorithm, [source.name]: source.value, [target.name]: target.value,
     source_tip: oid(fields.source_tip, algorithm), target_tip: oid(fields.target_tip, algorithm),
     title: text(fields.title, 256, 'title', true), body: text(fields.body, 64 * 1024, 'body') };
-  if (result.source_ref === result.target_ref) fail('Source and target must differ.');
+  if (source.hex === target.hex) fail('Source and target must differ.');
   form(result); return result;
 }
 export function rootFor(href, suffix = '/ui/pulls/') {

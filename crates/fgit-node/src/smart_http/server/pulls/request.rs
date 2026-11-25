@@ -168,7 +168,9 @@ impl<'a> Request<'a> {
                 "expected_version"
                     | "object_format"
                     | "source_ref"
+                    | "source_ref_hex"
                     | "target_ref"
+                    | "target_ref_hex"
                     | "source_tip"
                     | "target_tip"
                     | "title"
@@ -198,10 +200,8 @@ impl<'a> Request<'a> {
                 .map_err(|_| ApiError::bad("version_exhausted"))?;
             ExpectedVersion::Exactly(version)
         };
-        let source_ref = RefName::try_new(take(&mut fields, "source_ref")?.as_bytes())
-            .map_err(|_| ApiError::bad("invalid_ref"))?;
-        let target_ref = RefName::try_new(take(&mut fields, "target_ref")?.as_bytes())
-            .map_err(|_| ApiError::bad("invalid_ref"))?;
+        let source_ref = metadata_ref(&mut fields, "source_ref", "source_ref_hex")?;
+        let target_ref = metadata_ref(&mut fields, "target_ref", "target_ref_hex")?;
         let source_tip = oid(&take(&mut fields, "source_tip")?, format)?;
         let target_tip = oid(&take(&mut fields, "target_tip")?, format)?;
         let data = PullRequestData {
@@ -293,6 +293,18 @@ fn take(fields: &mut BTreeMap<String, String>, name: &str) -> Result<String, Api
         .remove(name)
         .ok_or_else(|| ApiError::bad("required_field_missing"))
 }
+// Keep the original text form's missing-field and invalid-ref responses.
+fn metadata_ref(
+    fields: &mut BTreeMap<String, String>,
+    plain: &str,
+    encoded: &str,
+) -> Result<RefName, ApiError> {
+    if fields.contains_key(encoded) {
+        return super::subject::reference(fields, plain, encoded);
+    }
+    RefName::try_new(take(fields, plain)?.as_bytes()).map_err(|_| ApiError::bad("invalid_ref"))
+}
+
 fn oid(text: &str, format: GitHashAlgorithm) -> Result<GitOid, ApiError> {
     if text.len() != format.digest_len() * 2
         || !text
@@ -416,6 +428,62 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn metadata_commands_preserve_exact_ref_bytes_and_reject_ambiguous_names() {
+        let plain_source = "source_ref=refs%2Fheads%2Ftopic";
+        let plain_target = "target_ref=refs%2Fheads%2Fmain";
+        let raw_source = "source_ref_hex=726566732f68656164732fff";
+        let raw_target = "target_ref_hex=726566732f68656164732ffe";
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let body = fields(format).replace("expected_version=0", "expected_version=1");
+            for action in ["update", "close", "reopen", "retarget"] {
+                for (source, target) in [(true, false), (false, true), (true, true)] {
+                    let mut encoded = body.clone();
+                    if source {
+                        encoded = encoded.replace(plain_source, raw_source);
+                    }
+                    if target {
+                        encoded = encoded.replace(plain_target, raw_target);
+                    }
+                    let decoded = command(action, &encoded, format).unwrap();
+                    assert_eq!(
+                        decoded.data.source_ref.as_bytes(),
+                        if source {
+                            &b"refs/heads/\xff"[..]
+                        } else {
+                            &b"refs/heads/topic"[..]
+                        }
+                    );
+                    assert_eq!(
+                        decoded.data.target_ref.as_bytes(),
+                        if target {
+                            &b"refs/heads/\xfe"[..]
+                        } else {
+                            &b"refs/heads/main"[..]
+                        }
+                    );
+                }
+            }
+            for invalid in [
+                body.replace(plain_source, &format!("{plain_source}&{raw_source}")),
+                body.replace(plain_source, "source_ref_hex=ffF"),
+                body.replace(plain_source, "source_ref_hex=726566732f746167732fff"),
+                body.replace(
+                    plain_source,
+                    "source_ref_hex=726566732f68656164732f6d61696e",
+                ),
+            ] {
+                assert!(command("update", &invalid, format).is_err());
+            }
+            let text = command("update", &body, format).unwrap();
+            let alias = body.replace(
+                plain_source,
+                "source_ref_hex=726566732f68656164732f746f706963",
+            );
+            assert_eq!(command("update", &alias, format).unwrap().data, text.data);
+        }
+    }
+
     #[test]
     fn commands_cannot_inject_authority_omit_preconditions_or_change_hash_domains() {
         let format = GitHashAlgorithm::Sha1;

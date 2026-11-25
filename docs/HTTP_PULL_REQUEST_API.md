@@ -98,12 +98,15 @@ Every command contains all eight fields:
 |---|---|
 | `expected_version` | `0` for open; exact positive predecessor aggregate version for update/close. |
 | `object_format` | Exactly `sha1` or `sha256`, matching the repository. |
-| `source_ref` | Full source branch name, such as `refs/heads/topic`. |
-| `target_ref` | Full target branch name, such as `refs/heads/main`; distinct from source. |
+| `source_ref` or `source_ref_hex` | Full source branch, supplied as UTF-8 text or the lowercase hex encoding of its exact Git name bytes. |
+| `target_ref` or `target_ref_hex` | Full target branch in either encoding. Its decoded bytes must differ from the source. |
 | `source_tip` | Exact nonzero source commit OID, lowercase hex in the declared hash domain. |
 | `target_tip` | Exact nonzero target commit OID in the same domain. |
 | `title` | Nonblank title, at most 256 UTF-8 bytes, without control characters. |
 | `body` | Explicit body, at most 64 KiB; `body=` is an empty body. |
+
+Each side takes exactly one spelling. Equivalent text and hex spellings identify
+the same native command when the other fields match.
 
 Open and update compare both submitted tips with the current branches during
 admission. A well-formed stale tip becomes the existing canonical ref-precondition
