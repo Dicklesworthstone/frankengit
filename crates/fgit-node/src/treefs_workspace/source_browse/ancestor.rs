@@ -89,14 +89,14 @@ impl OneNode {
     }
 }
 
-pub(super) struct Receipt {
-    pub(super) body: Vec<u8>,
-    pub(super) bytes: u64,
+pub(in crate::treefs_workspace) struct Receipt {
+    pub(in crate::treefs_workspace) body: Vec<u8>,
+    pub(in crate::treefs_workspace) bytes: u64,
 }
 
 /// Every read remains in the authenticated selected closure and inherits the
 /// request-owned database context. Tighten before fabric decode/allocation.
-pub(super) fn select(
+pub(in crate::treefs_workspace) fn select(
     source: &NodeTreeSource<'_>,
     request: &NodeRequestContext,
     tip: Oid,

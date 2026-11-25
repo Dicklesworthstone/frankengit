@@ -108,6 +108,7 @@ impl OneNode {
             Some(number),
             None,
             None,
+            false,
         )
         .await
     }
@@ -168,7 +169,9 @@ impl OneNode {
         let Some(target_commit) = state.snapshot().refs.get(&event.data.target_ref).copied() else {
             return Ok(Selection::Absent);
         };
-        let selected = self.select_ref_workflow_event(request, reference).await?;
+        let selected = self
+            .select_ref_workflow_event(request, reference, None)
+            .await?;
         let Selection::Ready(mut selected) = selected else {
             return Ok(selected);
         };

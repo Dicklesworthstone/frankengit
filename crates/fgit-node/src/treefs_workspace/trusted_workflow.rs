@@ -37,7 +37,7 @@ use fgit_types::{
     RepositoryCommitId, RepositoryId, RepositoryIncarnationId, TenantId,
 };
 
-use super::{NodeTreeSource, NodeWorkspaceRefusal, workspace_request_live};
+use super::{NodeTreeSource, NodeWorkspaceRefusal, WorkspaceSourceBinding, workspace_request_live};
 use crate::{NodeRequestContext, OneNode};
 
 const FETCH_BYTES: u64 = 256 * 1024 * 1024;
@@ -125,6 +125,7 @@ impl OneNode {
         now: u64,
         expected_head: Option<RepositoryAuthorityHeadId>,
         expected_commit: Option<GitOid>,
+        ancestor_of: Option<GitOid>,
         maximum_object_bytes: usize,
         consume: impl FnOnce(
             &BaseView<A>,
@@ -136,6 +137,25 @@ impl OneNode {
         ) -> Result<T, NodeWorkspaceRefusal>
         + Send,
     ) -> Result<T, NodeWorkspaceRefusal> {
+        if let Some(tip) = ancestor_of {
+            let commit = expected_commit.ok_or(NodeWorkspaceRefusal::CommitRequired)?;
+            return self
+                .with_workspace_snapshot_from_in(
+                    request,
+                    reference,
+                    visibility,
+                    capability,
+                    now,
+                    expected_head,
+                    Some(commit),
+                    Some(WorkspaceSourceBinding::Ancestor { tip, commit }),
+                    maximum_object_bytes,
+                    |base, source, capability, head, bytes| {
+                        consume(base, source, capability, head, bytes, None)
+                    },
+                )
+                .await;
+        }
         if !reference.as_bytes().starts_with(b"refs/tags/") {
             return self
                 .with_workspace_snapshot_in(
@@ -181,7 +201,10 @@ impl OneNode {
             now,
             Some(tag.head),
             expected_commit,
-            Some((tag.tip, tag.peeled)),
+            Some(WorkspaceSourceBinding::Tag {
+                tip: tag.tip,
+                commit: tag.peeled,
+            }),
             maximum_object_bytes,
             |base, source, capability, head, bytes| {
                 consume(base, source, capability, head, bytes, Some(tag.tip))
@@ -581,6 +604,7 @@ impl OneNode {
                 0,
                 expected.0,
                 expected.1,
+                None,
                 SOURCE_LIMITS.max_entry_bytes,
                 |base, source, capability, head, _, tag_tip| {
                     let result = run_at(

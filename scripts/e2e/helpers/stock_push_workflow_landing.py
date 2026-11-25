@@ -16,7 +16,7 @@ import time
 
 from workflow_http_service import Server, credentials, event_directories
 from workflow_pull_request_collection import CollectionServer
-from workflow_watch_continuous import Campaign, Fixture, PRINCIPAL, REF, REPOSITORY, TARGET, TENANT, read_rows
+from workflow_watch_continuous import Campaign, Fixture, PRINCIPAL, REF, REPOSITORY, TARGET, TENANT, Watcher, read_rows
 
 PIN = "git-2.54.0"
 ORACLE = Path(__file__).resolve().parents[1] / "oracle/oracle.sh"
@@ -490,6 +490,51 @@ def check_pagination(campaign, fmt):
                     final_page=len(last["checks"]), published=len(rows), snapshot=page["snapshot_token"])
 
 
+def ordered_push_restart(campaign, fmt):
+    f = Fixture(campaign, fmt, "ordered-restart")
+
+    def run_watch(label):
+        with Watcher(f, label, extra=("--ordered-branch-updates",)) as watcher:
+            watcher.ready()
+            watcher.idle()
+            rows = watcher.stop()
+        summary = rows[-1]
+        assert not summary["requires_reconciliation"] and not summary["non_green"], summary
+        events = [row["poll"] for row in rows if row["type"] == "workflow_watch_poll"
+                  and row["poll"]["state"] == "dispatched"]
+        assert all(event["execution_settled"] for event in events)
+        return [event["event"]["commit"] for event in events]
+
+    assert run_watch("initial") == [f.tips[0]]
+    run, first = fresh_push_source(f)
+    with receive_listener(f) as address:
+        def push(label, tip):
+            upstream("push-loopback", PIN, run, label, address, f"/{REPOSITORY}.git",
+                     "client", "plain", f"{REF}:{REF}")
+            transcript = run / "transcripts" / label
+            porcelain = (transcript / "stdout.bin").read_text()
+            assert f"{REF}:{REF}" in porcelain and "[up to date]" not in porcelain, porcelain
+            shutil.copyfile(transcript / "receipt.tsv", f.root / f"{label}.tsv")
+            assert refs(f)[REF] == tip
+        push("ordered-first", first)
+        stream = (f"commit {REF}\ncommitter CI Source <source@example.test> 1720000001 +0000\n"
+                  f"data 6\nsecond\nfrom {first}\nM 100644 inline pushed.txt\n"
+                  "data 10\nnext bytes\n\ndone\n").encode()
+        upstream("run", PIN, run, "client", "--", "fast-import", "--quiet", data=stream)
+        second = upstream("run", PIN, run, "client", "--", "rev-parse", REF)
+        assert upstream("run", PIN, run, "client", "--", "rev-parse", REF + "^") == first
+        push("ordered-second", second)
+    final_refs = refs(f)
+    assert run_watch("resumed") == [first, second]
+    assert run_watch("repeat") == []
+    assert refs(f) == final_refs and f.effects_count() == 3
+    execution_reports = [json.loads(next(event.glob("dispatch-*/workflow-*/report.json")).read_bytes())
+                         for event in event_directories(f)]
+    assert {report["executed_commit"] for report in execution_reports} == {f.tips[0], first, second}
+    assert len(execution_reports) == 3 and all(report["workspaces_closed"] for report in execution_reports)
+    campaign.record(fmt, "ordered-push-restart", first=first, second=second, executed=f.effects_count())
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
@@ -501,3 +546,4 @@ if __name__ == "__main__":
         push_with_both_services_running(campaign, fmt)
         selected_byte_refs(campaign, fmt)
         check_pagination(campaign, fmt)
+        ordered_push_restart(campaign, fmt)

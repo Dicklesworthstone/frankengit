@@ -114,6 +114,7 @@ pub(super) fn reconstruct(
     let selected = Selected {
         head: head(text(fields, "observed_head")?)?,
         commit,
+        ancestor_of: None,
         previous_commit: None,
         tag_update: None,
         batch: batch(text(fields, "decision_batch")?)?,

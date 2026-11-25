@@ -287,8 +287,8 @@ impl OneNode {
         .await
     }
 
-    // Only the workflow reader supplies a verified tag binding. Ordinary
-    // browse/edit/tool callers continue to require a direct commit reference.
+    // Workflow readers can bind a verified tag or a bounded ancestor of a
+    // current branch. Ordinary workspace callers select the current commit.
     async fn with_workspace_snapshot_from_in<A: GitHashAlgorithm, T>(
         &self,
         request: &NodeRequestContext,
@@ -298,7 +298,7 @@ impl OneNode {
         now: u64,
         expected_head: Option<fgit_types::RepositoryAuthorityHeadId>,
         expected_commit: Option<AnyOid>,
-        tag_binding: Option<(AnyOid, AnyOid)>,
+        binding: Option<WorkspaceSourceBinding>,
         maximum_object_bytes: usize,
         consume: impl FnOnce(
             &BaseView<A>,
@@ -317,7 +317,7 @@ impl OneNode {
             now,
             expected_head,
             expected_commit,
-            tag_binding,
+            binding,
             None,
             maximum_object_bytes,
             consume,
@@ -337,7 +337,7 @@ impl OneNode {
         now: u64,
         expected_head: Option<fgit_types::RepositoryAuthorityHeadId>,
         expected_commit: Option<AnyOid>,
-        tag_binding: Option<(AnyOid, AnyOid)>,
+        binding: Option<WorkspaceSourceBinding>,
         absent_destination: Option<&RefName>,
         maximum_object_bytes: usize,
         consume: impl FnOnce(
@@ -380,15 +380,22 @@ impl OneNode {
             .refs
             .get(reference)
             .ok_or(NodeWorkspaceRefusal::RefUnavailable)?;
-        let commit = if let Some((expected_tip, peeled)) = tag_binding {
-            if !reference.as_bytes().starts_with(b"refs/tags/") || tip != expected_tip {
+        let commit = match binding {
+            Some(WorkspaceSourceBinding::Tag { tip: raw, commit })
+                if reference.as_bytes().starts_with(b"refs/tags/") && tip == raw =>
+            {
+                commit
+            }
+            Some(WorkspaceSourceBinding::Ancestor {
+                tip: current,
+                commit,
+            }) if reference.as_bytes().starts_with(b"refs/heads/") && tip == current => commit,
+            Some(_) => {
                 return Err(NodeWorkspaceRefusal::SourceBrowse(Box::new(
                     SourceBrowseError::CommitMoved,
                 )));
             }
-            peeled
-        } else {
-            tip
+            None => tip,
         };
         if expected_head.is_some_and(|head| head != selected.basis().id()) {
             return Err(NodeWorkspaceRefusal::SourceBrowse(Box::new(
@@ -443,14 +450,22 @@ impl OneNode {
         let built = (|| {
             let commit_oid = A::parse_hex(&commit.to_string())
                 .map_err(|_| NodeWorkspaceRefusal::ObjectFormatMismatch)?;
-            let grant = capability
-                .authorize_root(now)
-                .map_err(|e| NodeWorkspaceRefusal::Manifest(SparseRefusal::Capability(e)))?;
-            let body = source
-                .read_object::<A>(&commit_oid, GitObjectKind::Commit, &grant)
-                .map_err(NodeWorkspaceRefusal::Object)?;
+            let (body, metadata_bytes) =
+                if matches!(binding, Some(WorkspaceSourceBinding::Ancestor { .. })) {
+                    let proof = source_browse::ancestor::select(&source, request, tip, commit)?;
+                    (proof.body, proof.bytes)
+                } else {
+                    let grant = capability.authorize_root(now).map_err(|e| {
+                        NodeWorkspaceRefusal::Manifest(SparseRefusal::Capability(e))
+                    })?;
+                    let body = source
+                        .read_object::<A>(&commit_oid, GitObjectKind::Commit, &grant)
+                        .map_err(NodeWorkspaceRefusal::Object)?;
+                    let bytes = body.len() as u64;
+                    (body, bytes)
+                };
             capability
-                .charge_fetch(body.len() as u64)
+                .charge_fetch(metadata_bytes)
                 .map_err(|e| NodeWorkspaceRefusal::Manifest(SparseRefusal::Capability(e)))?;
             let ParsedObject::Commit(parsed) = parse_object_body(
                 ObjectType::Commit,
@@ -481,7 +496,7 @@ impl OneNode {
                 &source,
                 capability,
                 selected.basis().id(),
-                body.len() as u64,
+                metadata_bytes,
             )
         })();
         if let PackContextCheckpoint::Stopped { budget_exhaustion } =
@@ -493,6 +508,12 @@ impl OneNode {
         }
         built
     }
+}
+
+#[derive(Clone, Copy)]
+enum WorkspaceSourceBinding {
+    Tag { tip: AnyOid, commit: AnyOid },
+    Ancestor { tip: AnyOid, commit: AnyOid },
 }
 
 fn workspace_request_live(request: &NodeRequestContext) -> bool {
