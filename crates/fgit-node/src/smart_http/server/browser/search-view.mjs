@@ -2,7 +2,7 @@
 import { CodeSearch } from './search.mjs';
 import { byteInput } from './search-data.mjs';
 import { sourceMode } from './search-current.mjs';
-import { mountContextControls, readContextQuery, renderSourceContext } from './search-context.mjs';
+import { CONTEXT_RANKED_PROFILE, mountContextControls, readContextQuery, renderSourceContext } from './search-context.mjs';
 import { mountContextVerification } from './search-context-verify.mjs';
 import { mountContextMembership } from './search-context-membership.mjs';
 import { mountContextPackage } from './search-context-package-view.mjs';
@@ -110,6 +110,11 @@ export function mount(document, location, options = {}) {
     contextVerification?.sync(); contextMembership?.sync(); contextPackage?.sync();
     const mode = get('mode').value, regex = mode === 'regex', indexed = indexedMode(mode), symbols = mode === 'symbols', combined = mode === 'initial';
     contextControls.sync(combined);
+    const progressive = get('progressive-enabled'), progressiveControls = get('progressive-controls');
+    const progressiveAllowed = combined && get('context-enabled').checked &&
+      get('context-selection').value === CONTEXT_RANKED_PROFILE;
+    if (progressiveControls) progressiveControls.hidden = !progressiveAllowed;
+    if (progressive) { progressive.disabled = !progressiveAllowed; if (!progressiveAllowed) progressive.checked = false; }
     const symbolEnabled = symbols || (combined && get('initial-symbol-name').value !== '');
     get('case').disabled = indexed || symbols || combined; get('max-bytes').disabled = indexed || combined;
     get('index-work').disabled = !(indexed || symbols || combined);
@@ -145,13 +150,19 @@ export function mount(document, location, options = {}) {
   }
   function disconnect(message = 'Disconnected. Token, queries, results and source bytes discarded.') {
     work++; busy = false; client.disconnect(); clearResults(); contextControls.reset();
+    if (get('progressive-enabled')) get('progressive-enabled').checked = false;
     get('token').value = ''; get('query').value = ''; get('prefixes').value = ''; get('initial-symbol-name').value = ''; showPin(); sync(); status(message);
   }
   function invalidate() {
     work++; busy = false; client.discardResults(); clearResults(); sync();
     status(client.connected ? 'Query changed. Search again; the existing snapshot remains pinned.' : 'Enter a read-scoped token to begin.');
   }
-  function cancel() { work++; busy = false; client.cancel(); contextVerification?.invalidate(); contextMembership?.invalidate(); contextPackage?.invalidate(); clearFile(); sync(); status('Read canceled. No write or retry was attempted.'); }
+  function cancel() {
+    work++; busy = false; client.cancel();
+    if (result?.progressive?.phase === 'Initial') clearResults();
+    contextVerification?.invalidate(); contextMembership?.invalidate(); contextPackage?.invalidate();
+    clearFile(); sync(); status('Read canceled. No write or retry was attempted.');
+  }
   function refresh() {
     work++; busy = false; client.refreshSnapshot(); clearResults(); showPin(); sync();
     status('Snapshot released. The next search selects current state; repository identity must still match.');
@@ -238,7 +249,18 @@ export function mount(document, location, options = {}) {
     if (value.query.mode === 'regex') region.append(element('p', `${stats.steps} native VM steps · ${stats.states} program states · ${stats.lines} lines searched.`));
     for (const [index, group] of value.groups.entries()) region.append(renderGroup(group, index, version));
   }
+  function progressiveStatus(value) {
+    if (value.progressive?.phase === 'Initial') return 'Initial matches received. Loading ranked source excerpts from the same snapshot…';
+    if (value.progressive?.phase === 'RefinementFailed') return `Refinement failed (${value.progressive.code}). Initial matches are retained; no excerpts or automatic retry were accepted.`;
+    if (value.progressive?.phase === 'Incomplete') return 'Refinement stream incomplete. Validated Initial matches are retained; no excerpts or complete-stream claim were accepted.';
+    return value.context?.complete
+      ? 'Progressive search complete. Initial matches and ranked source excerpts share the same snapshot.'
+      : 'Progressive search complete with limited coverage. Initial matches and ranked excerpts retain their original omissions and limits.';
+  }
   function renderInitial(value, region, version) {
+    if (value.progressive) {
+      const progress = element('p', progressiveStatus(value)); progress.setAttribute('aria-label', 'Progressive search status'); region.append(progress);
+    }
     if (value.context) {
       contextView = renderSourceContext(document, value, { display, urlApi,
         current: () => client.connected && !busy && version === resultVersion && result === value });
@@ -266,7 +288,9 @@ export function mount(document, location, options = {}) {
       element('p', `${value.stats.retainedBytes}/${value.query.maxResultBytes} retained result bytes · ${value.stats.payloadBytes}/${value.query.maxPayloadBytes} successful-channel payload bytes · ${value.stats.work}/${value.query.maxWork} successful-channel work units. These counters exclude partial work from an unavailable channel.`),
       element('p', value.complete ? 'Native server reports all requested channels available and complete.'
         : 'Combined answer is incomplete: at least one channel is unavailable, truncated or has omitted source files. See each channel below.'),
-      element('p', 'This Initial response has no combined continuation. Narrow the query or increase its bounded per-channel limit. No scans, rebuilds, ranking, semantic refinement or automatic retries occur.'));
+      element('p', value.progressive || value.context?.selection === CONTEXT_RANKED_PROFILE
+        ? 'Initial channel matches keep their original order. Ranked excerpts use only these returned hits. There is no combined continuation, scan, rebuild, semantic refinement or automatic retry.'
+        : 'This Initial response has no combined continuation. Narrow the query or increase its bounded per-channel limit. No scans, rebuilds, ranking, semantic refinement or automatic retries occur.'));
     for (const channel of ['content', 'path']) {
       const section = element('section'); section.setAttribute('aria-label', `Combined ${channel} results`);
       section.append(element('h2', channel === 'content' ? 'Content words' : 'Path words'));
@@ -389,13 +413,26 @@ export function mount(document, location, options = {}) {
   async function search() {
     work++; const id = work; busy = true; client.discardResults(); clearResults(); sync(); status('Searching the selected repository…');
     try {
-      const value = await client.search(readQuery(document));
+      const progressive = get('progressive-enabled')?.checked === true;
+      const value = await client.search(readQuery(document), progressive ? { progressive: true, onInitial: initial => {
+        if (id !== work) fail('Progressive view superseded.');
+        clearResults(); result = initial; renderSearch(initial); showPin(); sync(); status(progressiveStatus(initial));
+      } } : {});
       if (id !== work) return;
-      busy = false; result = value; renderSearch(value); showPin(); sync();
-      status(value.context ? (value.context.complete
+      busy = false; clearResults(); result = value; renderSearch(value); showPin(); sync();
+      status(value.progressive ? progressiveStatus(value) : value.context ? (value.context.complete
         ? 'Source context retrieved at one pinned snapshot. Partial excerpts are server-reported bytes, not independently verified blobs.'
         : 'Source context is incomplete. Hydration omissions and retrieval coverage are labeled separately; no fallback or retry was attempted.') : value.query.mode === 'initial' ? (value.complete ? 'Combined query complete according to the native server. Open any channel result to verify file bytes.' : 'Combined answer is incomplete. Unavailable channels, match truncation and omitted files are labeled separately; no fallback or retry was attempted.') : value.query.mode === 'symbols' ? (!value.coverageComplete ? `Declaration source coverage is incomplete: ${value.omissions.length} Rust files omitted.${value.complete ? ' Matching declarations from indexed files are complete.' : ' Matching declarations are also truncated.'}` : value.complete ? 'Declaration query complete according to the native server. Open a result to verify its full name and file bytes.' : 'Declaration results are truncated. Narrow the query; no automatic continuation or scan was attempted.') : value.query.mode === 'indexed' ? indexedStatus(value) : value.groups.every(g => g.complete) ? 'Server scan complete. Open a result to verify its file bytes.' : 'Search returned limited results. See each query’s completion status.');
-    } catch (error) { errorAt(error, id); }
+    } catch (error) {
+      if (id === work && client.connected) {
+        const retained = client.state.result;
+        if (retained?.progressive?.phase === 'Incomplete') {
+          busy = false; clearResults(); result = retained; renderSearch(retained); showPin(); sync();
+          status(`${progressiveStatus(retained)} ${safe(error.message)}`); return;
+        }
+      }
+      errorAt(error, id);
+    }
   }
   function renderFile(value) {
     const hit = value.hit, region = get('file');
@@ -516,7 +553,10 @@ export function mount(document, location, options = {}) {
   for (const id of ['mode', 'encoding', 'case', 'query', 'prefixes', 'prefix-encoding', 'max-matches', 'max-file-bytes', 'max-bytes', 'max-steps', 'index-work', 'index-payload', 'symbol-match', 'symbol-kind', 'initial-symbol-name', 'initial-symbol-policy', 'initial-result-bytes']) {
     get(id).addEventListener('input', invalidate); get(id).addEventListener('change', invalidate);
   }
-  for (const event of ['input', 'change']) get('index-source-mode')?.addEventListener(event, invalidate);
+  for (const event of ['input', 'change']) {
+    get('index-source-mode')?.addEventListener(event, invalidate);
+    get('progressive-enabled')?.addEventListener(event, invalidate);
+  }
   const connectionChanged = () => {
     work++; busy = false; client.disconnect(); clearResults(); showPin(); sync(); status('Connection settings changed. Connect explicitly before searching.');
   };

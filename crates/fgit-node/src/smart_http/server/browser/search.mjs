@@ -1,14 +1,39 @@
 // Same-snapshot search and independently hash-checked source navigation. Tokens,
 // queries and source bytes are ephemeral; there is no mutation/recovery surface.
-import { Transport, copy, fail, form, integer } from './pulls-core.mjs';
+import { Transport, copy, fail, form, integer, keys } from './pulls-core.mjs';
 import { PAGE_BYTES, fields, filePage, query, searchCommand, searchReply, selection, verifyFile } from './search-data.mjs';
 
 import { indexCommand, indexQuery, indexReply, verifyIndexedFile, symbolCommand, symbolQuery, symbolReply, initialCommand, initialQuery, initialReply } from './search-index.mjs';
 
-import { splitContextQuery, contextCommand, joinInitialContext } from './search-context.mjs';
+import { CONTEXT_RANKED_PROFILE, splitContextQuery, contextCommand, joinInitialContext } from './search-context.mjs';
 import { verifyContextFiles } from './search-context-verify.mjs';
 import { acquireContextMembership } from './search-context-membership.mjs';
 import { acquireContextPackage } from './search-context-package.mjs';
+
+// Compare the original native Initial receipt without depending on JSON key
+// order. Arrays remain ordered. Iteration bounds avoid recursive stack growth
+// from a malformed peer; the transport separately bounds total response bytes.
+function sameInitial(left, right, check) {
+  const pending = [[left, right]];
+  let visited = 0;
+  while (pending.length) {
+    if (++visited > 500_000) fail('Progressive Initial comparison exceeds its work limit.');
+    if ((visited & 1023) === 0) check();
+    const [a, b] = pending.pop();
+    if (a === b) continue;
+    if (!a || !b || typeof a !== 'object' || typeof b !== 'object' ||
+        Array.isArray(a) !== Array.isArray(b)) return false;
+    const names = Object.keys(a), other = Object.keys(b);
+    if (names.length !== other.length || (Array.isArray(a) && a.length !== b.length)) return false;
+    if (visited + pending.length + names.length > 500_000) fail('Progressive Initial comparison exceeds its work limit.');
+    for (const name of names) {
+      if (!Object.hasOwn(b, name)) return false;
+      pending.push([a[name], b[name]]);
+    }
+  }
+  check();
+  return true;
+}
 
 export class CodeSearch {
   #transport; #selection = null; #scope = null; #pin = null; #result = null; #generation = 0; #timeout; #indexMinimum = null; #symbolMinimum = null;
@@ -29,7 +54,11 @@ export class CodeSearch {
     this.#generation += 1; this.#transport.disconnect();
     this.#selection = null; this.#scope = null; this.#pin = null; this.#result = null; this.#indexMinimum = null; this.#symbolMinimum = null;
   }
-  cancel() { this.#generation += 1; this.#transport.cancelReads(); }
+  cancel() {
+    this.#generation += 1; this.#transport.cancelReads();
+    // A superseded live stream must not leave its early answer installed.
+    if (this.#result?.progressive?.phase === 'Initial') this.#result = null;
+  }
   discardResults() { this.cancel(); this.#result = null; }
   refreshSnapshot() { this.discardResults(); this.#pin = null; } // Keep the repository/incarnation binding.
   async #run(action) {
@@ -50,11 +79,19 @@ export class CodeSearch {
       throw error;
     } finally { clearTimeout(timer); }
   }
-  async search(input) {
+  async search(input, options = {}) {
     this.discardResults();
+    keys(options, ['progressive', 'onInitial']);
+    const progressive = options.progressive === undefined ? false : options.progressive, onInitial = options.onInitial ?? null;
+    if (typeof progressive !== 'boolean' || (onInitial !== null && typeof onInitial !== 'function') ||
+        (!progressive && onInitial !== null)) fail('Invalid progressive search options.');
     const hydration = splitContextQuery(input); input = hydration.input;
     const q = input?.mode === 'indexed' ? indexQuery(input) : input?.mode === 'symbols' ? symbolQuery(input) : input?.mode === 'initial' ? initialQuery(input) : query(input); // Copies caller arrays before the first await.
+    if (progressive && (q.mode !== 'initial' || hydration.limits?.selection !== CONTEXT_RANKED_PROFILE)) {
+      fail('Progressive search requires combined search with explicitly ranked source excerpts.');
+    }
     return this.#run(async check => {
+      if (progressive) return this.#progressive(q, check, hydration.limits, onInitial);
       if (q.mode === 'indexed') return this.#indexed(q, null, check);
       if (q.mode === 'symbols') return this.#symbols(q, check);
       if (q.mode === 'initial') return this.#initial(q, check, hydration.limits);
@@ -102,6 +139,58 @@ export class CodeSearch {
     if (result.symbols.state === 'available') this.#symbolMinimum = result.symbols.result.index;
     this.#result = result;
     return copy(result);
+  }
+  async #progressive(q, check, context, onInitial) {
+    const selected = this.#selection, minimum = { lexical: this.#indexMinimum, symbols: this.#symbolMinimum };
+    const body = contextCommand(initialCommand(selected, this.#pin, q, minimum), context);
+    let initial = null, original = null, terminal = null;
+    try {
+      await this.#transport.request('source/search-progressive', {
+        method: 'POST', body, onRecord: async (row, index) => {
+          check();
+          if (index === 0) {
+            keys(row, ['phase', 'answer']);
+            if (row.phase !== 'Initial' || !Object.hasOwn(row, 'answer') || initial !== null) fail('Progressive search must begin with one Initial record.');
+            original = copy(row.answer);
+            const value = initialReply(original, selected, q, this.#scope, this.#pin, minimum);
+            check();
+            initial = { ...value, progressive: { phase: 'Initial' } };
+            this.#scope = initial.scope; this.#pin = initial.pin; this.#indexMinimum = initial.lexicalCheckpoint;
+            if (initial.symbols.state === 'available') this.#symbolMinimum = initial.symbols.result.index;
+            this.#result = initial;
+            if (onInitial !== null) { await onInitial(copy(initial)); check(); }
+          } else if (index === 1 && initial !== null && terminal === null) {
+            if (row?.phase === 'Refined') {
+              keys(row, ['phase', 'answer']);
+              if (!Object.hasOwn(row, 'answer')) fail('Progressive refinement has no answer.');
+              const value = joinInitialContext(row.answer, raw => {
+                if (!sameInitial(raw, original, check)) fail('Progressive refinement changed its original Initial receipt.');
+                return initialReply(raw, selected, q, initial.scope, initial.pin, minimum);
+              }, context, check);
+              terminal = { ...value, progressive: { phase: 'Refined' } };
+            } else {
+              keys(row, ['phase', 'code']);
+              if (row.phase !== 'RefinementFailed' || typeof row.code !== 'string' ||
+                  !/^[a-z][a-z0-9_]{0,95}$/.test(row.code)) fail('Invalid progressive refinement refusal.');
+              terminal = { ...initial, progressive: { phase: 'RefinementFailed', code: row.code } };
+            }
+          } else fail('Unexpected progressive search record.');
+          check();
+        },
+      });
+      check();
+      if (!initial || !terminal) fail('Progressive search ended without both records.');
+      // The terminal stays private until Transport verifies EOF, record count,
+      // byte framing and cancellation. A trailing record cannot publish context.
+      const result = copy(terminal);
+      check(); this.#result = terminal;
+      return result;
+    } catch (error) {
+      if (initial !== null && this.#result === initial && this.connected) {
+        this.#result = { ...initial, progressive: { phase: 'Incomplete' } };
+      }
+      throw error;
+    }
   }
   // Explicit second read: verify every hydrated file, not just the clicked hit.
   // One operation owns every page, hash and witness check; no pin is refreshed.

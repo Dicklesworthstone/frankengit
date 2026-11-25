@@ -34,8 +34,10 @@ The browser recomputes selection from every returned channel before accepting th
 receipt. It checks every winner, score, contribution, channel rank, identity and
 tie-break; a plausible total is insufficient. Ranked responses without ranking
 evidence, downgrades to alphabetical selection, mixed identities, reordered input
-channels and arbitrary weights are refused. Invalid responses do not advance the
+channels and arbitrary weights are refused. Invalid ordinary context responses do not advance the
 source pin or generation checkpoints, and do not trigger retries or fallback.
+Progressive requests install a validated Initial before refinement, as described
+below.
 
 Native replies spell blob identities as `sha1:<digest>` or `sha256:<digest>`,
 while validated Initial results retain bare digests. The context join validates
@@ -43,6 +45,55 @@ the selected hash domain and exact digest before comparing either spelling;
 file membership and ranked-selection receipts use the same identity rule.
 The wire receipt is not rewritten, and this comparison is not a substitute
 for full-file hash verification.
+
+## Progressive results
+
+With combined search, source excerpts and **Corroborated documents** selected,
+enable **Show initial matches while ranked excerpts load**. This is an explicit
+opt-in to one `source/search-progressive` POST. The browser validates and displays
+the Initial content/path/declaration matches as soon as the first complete NDJSON
+record arrives. The same request then hydrates ranked excerpts from the same
+native snapshot; the browser does not issue a second search.
+
+Combined search, including this progressive option, retains its **exact index
+snapshot** contract. The standalone lexical/declaration **Current Git source**
+selector does not apply to combined search. No index revalidation, refresh, scan
+or retry is selected implicitly.
+
+The stream must contain exactly two newline-terminated records. The first is
+`Initial`; the second is either `Refined` or `RefinementFailed`. A refined
+answer must retain the original Initial receipt exactly, including its ordered
+hits, budgets, authorization labels, source identity and generation vector.
+Object-key order is immaterial; array order is significant. The browser then
+applies the existing ranked-selection and excerpt validators. It accepts the
+refined result only after the stream ends with valid framing and length, so a
+third record or truncated response cannot enable reports or context verification.
+
+The view distinguishes these outcomes:
+
+- **Initial received:** validated matches are visible while ranked excerpts load.
+  Navigation waits until that read completes or is canceled.
+- **Refined:** ranked excerpts passed receipt validation and the full stream
+  completed. Existing coverage and hydration omissions remain visible.
+- **Refinement failed:** a well-formed terminal refusal supplies a bounded static
+  error identifier. Initial matches remain available for file navigation; there
+  are no context excerpts, context reports or context-verification controls.
+- **Stream incomplete:** a missing/malformed terminal, receipt disagreement,
+  interrupted body or deadline prevents acceptance of refinement. A previously
+  validated Initial remains available and is explicitly labeled incomplete.
+
+An accepted Initial establishes the repository/source pin and generation
+checkpoints even if refinement later fails. This differs from the ordinary JSON
+context response, which installs results only after the whole join validates.
+A malformed Initial installs nothing. Query changes, explicit cancellation,
+disconnect, credential revocation and superseding reads clear live partial
+results and prevent old callbacks from restoring them. Disconnect also clears
+the retained pin and credentials. The same absolute operation deadline covers
+both phases; a new record does not renew it.
+
+Initial and refined data remain server-reported source observations. Early
+display, a completed stream and deterministic ranking do not independently prove
+source authority, search coverage or complete-file bytes.
 
 ## Inspection and report export
 
@@ -67,11 +118,12 @@ explicit complete-file navigation retains its independent full-blob hash checks.
 Changing selection or any query/limit invalidates in-flight results and download
 URLs while retaining the existing snapshot pin. Selecting another snapshot is
 explicit. Disconnect clears results, revokes download URLs and resets hydration
-and ranking to their defaults.
+and ranking to their defaults, and turns progressive display off.
 
 ## Verification boundary
 
-`node --test tests/browser/search-context*.test.mjs` runs the focused tests.
+`node --test tests/browser/search-context*.test.mjs tests/browser/search-progressive*.test.mjs`
+runs the focused tests.
 Ranking golden values follow native test source at
 `9da3ef87c0ccd6ca061a3e6b00a72f9b9c9ba166`, including the exact `4279` corroborated
 late-path example and raw-byte ties. The earlier decoder fixtures assume a
@@ -88,6 +140,14 @@ operator fixtures use native-schema replies with hash-qualified object IDs;
 no shared production import is replaced and no response is prevalidated.
 These tests detect both the missing transport route and the qualified/bare
 identity mismatch that the earlier isolated tests missed.
+
+`search-progressive.test.mjs` and `search-progressive-view.test.mjs` import the
+production controller, transport and validators unchanged. Their independent
+native-schema fixtures exercise SHA-1/SHA-256 Initial delivery, exact terminal
+receipt preservation, ranked joins, EOF validation, useful failure results,
+deadlines, supersession and disconnect. The view checks use a small DOM oracle,
+not a rendering engine. `search-progressive-transport.test.mjs` checks the
+streaming transport boundary separately.
 
 The HTTP peers are explicit protocol fixtures, not live Rust servers. These
 checks are not real-browser, Rust-refinement, native authorization/CAS, or

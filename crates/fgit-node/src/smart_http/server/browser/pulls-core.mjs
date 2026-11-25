@@ -382,6 +382,66 @@ export async function readBytes(response, signal, maximum) {
     return bytes;
   } finally { signal.removeEventListener('abort', cancel); cancelBody(reader); reader.releaseLock(); }
 }
+// Deliver each complete native progress record before waiting for the next.
+// A terminal record is provisional until EOF validates framing and total bytes.
+// The caller must not install refined state until this function returns.
+export async function readJsonRecords(response, signal, maximum, onRecord) {
+  integer(maximum, 'progressive response byte limit', 1, REPLY_LIMIT);
+  if (typeof onRecord !== 'function') fail('A progressive record consumer is required.');
+  const declared = response.headers.get('Content-Length');
+  const encoded = (response.headers.get('Content-Encoding') ?? '').split(',')
+    .some(coding => coding.trim() !== '' && coding.trim().toLowerCase() !== 'identity');
+  if (declared !== null && (!/^(0|[1-9][0-9]*)$/.test(declared) ||
+      (!encoded && BigInt(declared) > BigInt(maximum)))) { cancelBody(response.body); fail('Response exceeds the browser byte limit.'); }
+  if (!response.body) fail('Missing response body.');
+  const reader = response.body.getReader();
+  let size = 0, count = 0, pending = 0;
+  let buffer = new Uint8Array(Math.min(maximum, 64 * 1024));
+  const append = bytes => {
+    const needed = pending + bytes.length;
+    if (needed > buffer.length) {
+      const grown = new Uint8Array(Math.max(needed, Math.min(maximum, buffer.length * 2)));
+      grown.set(buffer.subarray(0, pending)); buffer = grown;
+    }
+    buffer.set(bytes, pending); pending = needed;
+  };
+  const cancel = () => cancelBody(reader);
+  signal.addEventListener('abort', cancel, { once: true });
+  try {
+    while (true) {
+      signal.throwIfAborted(); const next = await reader.read(); signal.throwIfAborted();
+      if (next.done) break;
+      if (!(next.value instanceof Uint8Array)) fail('Invalid progressive response bytes.');
+      size += next.value.byteLength;
+      if (size > maximum) fail('Response exceeds the browser byte limit.');
+      let start = 0;
+      while (start < next.value.length) {
+        if (count >= 2) fail('Unexpected extra progressive record.');
+        const end = next.value.indexOf(10, start);
+        if (end < 0) { append(next.value.subarray(start)); break; }
+        append(next.value.subarray(start, end));
+        if (!pending) fail('Empty progressive record.');
+        const row = record(json(buffer.subarray(0, pending))); pending = 0;
+        // An async consumer cannot hold the network reader after cancellation.
+        // Promise.race observes any late rejection without reviving this read.
+        let abort;
+        try {
+          const cancelled = new Promise((resolve, reject) => {
+            abort = () => { try { signal.throwIfAborted(); } catch (error) { reject(error); } };
+            signal.addEventListener('abort', abort, { once: true });
+            if (signal.aborted) abort();
+          });
+          await Promise.race([Promise.resolve().then(() => {
+            signal.throwIfAborted(); return onRecord(row, count);
+          }), cancelled]);
+        } finally { signal.removeEventListener('abort', abort); }
+        signal.throwIfAborted(); count += 1; start = end + 1;
+      }
+    }
+    if (!encoded && declared !== null && BigInt(declared) !== BigInt(size)) fail('Truncated or inconsistent HTTP response length.');
+    if (pending || count !== 2) fail('Incomplete progressive response; the refinement outcome was not delivered.');
+  } finally { signal.removeEventListener('abort', cancel); cancelBody(reader); reader.releaseLock(); }
+}
 export function json(bytes) { return JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)); }
 export function apiError(status) {
   const error = new Error(({ 401: 'Credential rejected or revoked.', 403: 'Required independent scope is missing or this endpoint is disabled.',
@@ -457,8 +517,13 @@ export class Transport {
     this.#recovery = selected;
   }
   cancelReads() { for (const c of this.#reads) c.abort(); }
-  async request(path, { method = 'GET', body, contentType = 'application/x-www-form-urlencoded', key, statuses = [200], maximum = REPLY_LIMIT, read = true, binary = false, headerNames = [] } = {}) {
+  async request(path, { method = 'GET', body, contentType = 'application/x-www-form-urlencoded', key, statuses = [200], maximum = REPLY_LIMIT, read = true, binary = false, headerNames = [], onRecord = null } = {}) {
     if (!this.connected) fail('Connect an explicitly scoped token first.');
+    const streaming = onRecord !== null;
+    // Streaming is one closed source-read route, never an alternate framing for
+    // mutations, outcome recovery, artifacts or another browser profile.
+    if ((streaming && (typeof onRecord !== 'function' || !this.#search || path !== 'source/search-progressive')) ||
+        (path === 'source/search-progressive' && !streaming)) fail('Progressive source search requires a streamed read.');
     const recovery = this.#recovery;
     if (recovery) {
       if (path !== 'outcomes' || method !== 'POST' || body !== undefined || key !== recovery.key ||
@@ -567,7 +632,7 @@ export class Transport {
     // The search profile has no write, artifact, recovery or alternate-method lane.
     if (this.#search && (method !== 'POST' || key !== undefined || !read || binary ||
         contentType !== 'application/x-www-form-urlencoded' || typeof body !== 'string' ||
-        body.length > FORM_LIMIT || statuses.length !== 1 || statuses[0] !== 200)) fail('Search is a closed read-only profile.');
+        (body.length > FORM_LIMIT || utf8.encode(body).length > FORM_LIMIT) || statuses.length !== 1 || statuses[0] !== 200)) fail('Search is a closed read-only profile.');
     if (this.#search) integer(maximum, 'search response limit', 1, REPLY_LIMIT);
     if (this.#tags) {
       const reading = path === 'source/refs' || path === 'source/tags/inspect';
@@ -644,7 +709,7 @@ export class Transport {
       : this.#transfers
       ? /^(?:source\/(?:refs|bundle\/(?:export|import|fetch))|outcomes)$/.test(path)
       : this.#search
-      ? /^source\/(?:search|search-batch|search-regex|search-index|search-symbols-index|search-initial|context-initial|commit|tree|blob)$/.test(path)
+      ? /^source\/(?:search|search-batch|search-regex|search-index|search-symbols-index|search-initial|context-initial|search-progressive|commit|tree|blob)$/.test(path)
       : this.#branches
       ? /^(?:source\/(?:refs|branches\/(?:create|update|delete|rename|transaction))|outcomes)$/.test(path)
       : this.#initial
@@ -656,7 +721,7 @@ export class Transport {
     requirePublicationEnvelope(path, method, body, key, read);
     const epoch = this.#epoch, controller = new AbortController(); this.#all.add(controller); if (read) this.#reads.add(controller);
     const timer = setTimeout(() => controller.abort(), this.#timeout);
-    const headers = { Authorization: `Bearer ${this.#token}`, Accept: this.#artifacts && binary ? 'application/octet-stream' : this.#transfers && binary ? 'application/x-git-bundle' : binary ? 'multipart/mixed, application/json' : 'application/json' };
+    const headers = { Authorization: `Bearer ${this.#token}`, Accept: streaming ? 'application/x-ndjson' : this.#artifacts && binary ? 'application/octet-stream' : this.#transfers && binary ? 'application/x-git-bundle' : binary ? 'multipart/mixed, application/json' : 'application/json' };
     if (body !== undefined) headers['Content-Type'] = contentType;
     if (key) headers['Idempotency-Key'] = key;
     let response;
@@ -671,12 +736,12 @@ export class Transport {
         if (this.#artifacts && response.status === 404) error.message = 'Artifact or repository unavailable.';
         // Only this closed read endpoint exposes a small diagnostic code. Never
         // render server prose, accept an error as a result, or broaden statuses.
-        if (this.#search && ['source/search-index', 'source/search-symbols-index', 'source/search-initial', 'source/context-initial'].includes(path) && response.status === 409
+        if (this.#search && ['source/search-index', 'source/search-symbols-index', 'source/search-initial', 'source/context-initial', 'source/search-progressive'].includes(path) && response.status === 409
             && /^application\/json(?:\s*;|$)/i.test(response.headers.get('Content-Type') ?? '')) {
           const bytes = await readBytes(response, controller.signal, 4096);
           if (epoch !== this.#epoch) fail('Connection superseded.');
           let detail; try { detail = json(bytes); } catch { /* Keep the HTTP refusal. */ }
-          const codes = ['source/search-initial', 'source/context-initial'].includes(path)
+          const codes = ['source/search-initial', 'source/context-initial', 'source/search-progressive'].includes(path)
             ? ['source_index_uninitialized', 'source_index_stale', 'symbol_index_uninitialized', 'symbol_index_stale', 'index_checkpoint_unavailable', 'source_snapshot_mismatch', 'index_generation_mismatch']
             : path === 'source/search-symbols-index'
             ? ['symbol_index_uninitialized', 'symbol_index_stale', 'index_checkpoint_unavailable']
@@ -686,13 +751,24 @@ export class Transport {
         throw error;
       }
       const type = response.headers.get('Content-Type') ?? '';
-      if (!binary && !/^application\/json(?:\s*;|$)/i.test(type)) fail('Expected a JSON API response.');
+      if (streaming) {
+        if (!/^application\/x-ndjson(?:\s*;|$)/i.test(type)) fail('Expected a progressive NDJSON API response.');
+      } else if (!binary && !/^application\/json(?:\s*;|$)/i.test(type)) fail('Expected a JSON API response.');
       if (this.#artifacts && (response.headers.get('X-Content-Type-Options') !== 'nosniff' ||
           (binary && (type !== 'application/octet-stream' || response.headers.get('Content-Disposition') !==
             `attachment; filename="artifact-${path.split('/')[1]}"`)))) fail('Expected inert native artifact response headers.');
-      const bytes = await readBytes(response, controller.signal, maximum);
+      let value = null;
+      if (streaming) {
+        await readJsonRecords(response, controller.signal, maximum, async (row, index) => {
+          if (epoch !== this.#epoch) fail('Connection superseded.');
+          await onRecord(row, index);
+          if (epoch !== this.#epoch) fail('Connection superseded.');
+        });
+      } else {
+        const bytes = await readBytes(response, controller.signal, maximum);
+        value = binary ? bytes : json(bytes);
+      }
       if (epoch !== this.#epoch) fail('Connection superseded.');
-      const value = binary ? bytes : json(bytes);
       if (recovery && principal(record(value).principal_id) !== recovery.principal) fail('Recovery credential does not identify the selected original principal. Outcome remains unknown.');
       return { status: response.status, type, value,
         ...(capturedHeaders.length ? { headers: Object.fromEntries(capturedHeaders.map(name => [name, response.headers.get(name)])) } : {}) };
