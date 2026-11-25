@@ -80,7 +80,7 @@ def receive_listener(f):
 
 
 def refs(f):
-    raw = f.campaign.invoke("canonical-refs", ["at", *f.scope, "latest", "refs"]).decode()
+    raw = f.campaign.invoke("canonical-refs", ["at", *f.scope, "latest", "refs"]).decode(errors="surrogateescape")
     return dict(line.strip().split(" -> ", 1) for line in raw.splitlines() if " -> " in line)
 
 
@@ -279,7 +279,14 @@ def lifecycle(campaign, fmt):
 
 
 def push_with_both_services_running(campaign, fmt):
-    f = Fixture(campaign, fmt, "live-push")
+    boundary = b"refs/heads/01-\xff"
+    packed = [f"refs/heads/00-{i:02d}".encode("ascii") for i in range(49)]
+    f = Fixture(campaign, fmt, "live-push", packed_refs=packed)
+    created = json.loads(campaign.invoke("byte-named-branch", [
+        "branch", "create", *f.scope, "--trusted-local", "--object-format", fmt,
+        "--principal", PRINCIPAL, "--idempotency-key", "byte-branch", "--ref-hex", boundary.hex(),
+        "--target", f.base]))
+    assert created["command_committed"], created
     credentials(f)
     sync_token = grant_tip_sync(f)
     f.open_pull()
@@ -289,6 +296,11 @@ def push_with_both_services_running(campaign, fmt):
     with Server(f, "live-push", publish=True, source_reads=True) as server:
         server.ready()
         prior = server.check()
+        query = dict(object_format=fmt, namespace="branches", limit=50, cursor_encoding="hex")
+        status, body = server.request("POST", "/api/v1/source/refs", fields=query)
+        inventory = json.loads(body)
+        assert status == 200 and inventory["next_after"] == boundary.hex()
+        assert inventory["refs"][-1]["ref"] is None and len(inventory["refs"]) == 50
         with tip_sync_command(f, server, sync_token) as command, log.open("xb") as output:
             watcher = subprocess.Popen([*command, "--max-polls", "600"], stdout=output)
             try:
@@ -337,7 +349,8 @@ def push_with_both_services_running(campaign, fmt):
         assert not drained["requires_reconciliation"] and drained["checks_committed"] == 2
     campaign.record(fmt, "unattended-stock-push-visible-on-existing-pr", source=tip,
                     sync_transaction=update["tx_id"], before_push=prior["id"], check=check["id"],
-                    pull_request_version=2, executions=f.effects_count(), oracle_pin=PIN)
+                    pull_request_version=2, executions=f.effects_count(), oracle_pin=PIN,
+                    branch_page_boundary=boundary.hex())
 
 
 def check_pagination(campaign, fmt):

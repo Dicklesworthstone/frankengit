@@ -1,5 +1,6 @@
 // Real HTTP fixture speaking the inspected Rust schema; NOT native authority/CAS.
 import { createServer } from 'node:http';
+import { isUtf8 } from 'node:buffer';
 import { createHash } from 'node:crypto';
 export const TOKEN = 'a'.repeat(64), ROTATED = 'b'.repeat(64), ACTOR = '3'.repeat(32);
 const hex = value => Buffer.from(value).toString('hex');
@@ -41,10 +42,16 @@ export async function fixture(t, format = 'sha1', count = 2) {
         result = { ...header(), type: 'pull_request', number, found: !!selected, pull_request: selected ?? null }; status = selected ? 200 : 404;
       } else if (url.pathname.endsWith('/source/refs')) {
         const after = form.get('after'), limit = Number(form.get('limit'));
-        const selected = [...state.tips].sort((a, b) => Buffer.compare(Buffer.from(a[0]), Buffer.from(b[0])))
-          .filter(([name]) => after === null || Buffer.compare(Buffer.from(name), Buffer.from(after)) > 0);
-        const rows = selected.slice(0, limit).map(([name, oid]) => ({ ref: name, ref_hex: hex(name), object_id: `${format}:${oid}` }));
-        result = { ...header(), type: 'source_refs', namespace: 'branches', after, limit, next_after: selected.length > limit ? rows.at(-1).ref : null,
+        const byteCursor = form.get('cursor_encoding') === 'hex';
+        const afterBytes = after === null ? null : Buffer.from(after, byteCursor ? 'hex' : 'utf8');
+        const selected = [...state.tips].map(([name, oid]) => [Buffer.from(name), oid])
+          .sort(([a], [b]) => Buffer.compare(a, b)).filter(([name]) => !afterBytes || name.compare(afterBytes) > 0);
+        const rows = selected.slice(0, limit).map(([name, oid]) => ({
+          ref: isUtf8(name) ? name.toString() : null, ref_hex: hex(name), object_id: `${format}:${oid}` }));
+        const more = selected.length > limit;
+        if (more && !byteCursor && rows.at(-1).ref === null) { res.writeHead(503); res.end(); return; }
+        result = { ...header(), type: 'source_refs', namespace: 'branches', after, limit,
+          ...(byteCursor ? { cursor_encoding: 'hex' } : {}), next_after: more ? rows.at(-1)[byteCursor ? 'ref_hex' : 'ref'] : null,
           read_only: true, transaction_created: false, published: false, direct_refs_only: true, refs: rows };
       } else if (/\/pulls\/[0-9]+\/update$/.test(url.pathname)) {
         const number = Number(url.pathname.split('/').at(-2)), key = req.headers['idempotency-key'], old = decisions.get(key);

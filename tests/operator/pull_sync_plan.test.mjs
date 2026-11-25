@@ -25,6 +25,21 @@ for (const format of ['sha1', 'sha256']) {
     assert.deepEqual(plan, freezePlan(result, TOKEN, nonce));
     assert.notEqual(plan.plan_sha256, freezePlan(result, ROTATED, nonce).plan_sha256);
   });
+  test(`${format}: byte-only last branch on a page preserves the cursor and finds both selected tips`, async t => {
+    const f = await fixture(t, format, 1);
+    const tip = f.state.tips.get('refs/heads/main');
+    for (let i = 0; i < 49; i++) f.state.tips.set(`refs/heads/00-${i.toString().padStart(2, '0')}`, tip);
+    const boundary = Buffer.concat([Buffer.from('refs/heads/01-'), Buffer.from([0xff])]);
+    f.state.tips.set(boundary, tip);
+    const result = await discover(f.dest, TOKEN, [1]);
+    const pages = f.calls.filter(c => c.path.endsWith('/refs'));
+    assert.deepEqual(pages.map(c => c.form.get('after')), [null, boundary.toString('hex')]);
+    assert.ok(pages.every(c => c.form.get('cursor_encoding') === 'hex' && c.form.get('expected_head') === f.state.head));
+    assert.equal(result.changes.length, 1);
+    assert.equal(result.changes[0].fields.source_tip, f.state.tips.get('refs/heads/topic-1'));
+    assert.equal(result.changes[0].fields.target_tip, tip);
+    assert.equal(f.decisions.size, 0);
+  });
   test(`${format}: all-open omits closed PRs, avoids unnecessary version increments and pins pagination`, async t => {
     const f = await fixture(t, format, 55); f.state.rows[0].state = 'closed';
     for (const r of f.state.rows.slice(1)) { r.data.source_tip = f.state.tips.get(r.data.source_ref); r.data.target_tip = f.state.tips.get(r.data.target_ref); }
@@ -63,9 +78,22 @@ test('a branch move between discovery calls receives native snapshot refusal, ne
 });
 for (const mutate of [r => r.refs.reverse(), r => r.refs.push(r.refs[0]), r => r.refs[0].ref_hex = 'ff',
   r => r.refs[0].object_id = '0'.repeat(40), r => r.next_after = r.refs.at(-1).ref,
+  r => delete r.cursor_encoding, r => r.cursor_encoding = 'utf8', r => r.refs[0].ref = null,
   r => r.published = true, r => r.direct_refs_only = false]) test(`malformed ref page is not a usable tip: ${mutate}`, async t => {
   const f = await fixture(t); f.state.mutate = (r, c) => { if (c.path.endsWith('/refs')) mutate(r); };
   await assert.rejects(discover(f.dest, TOKEN, [1]));
+});
+test('a full reference page cannot substitute a different valid byte cursor', async t => {
+  const f = await fixture(t, 'sha1', 55);
+  f.state.mutate = (reply, call) => {
+    if (call.path.endsWith('/refs')) {
+      assert.equal(reply.refs.length, 50);
+      reply.next_after = reply.refs.at(-2).ref_hex;
+    }
+  };
+  await assert.rejects(discover(f.dest, TOKEN, [1]), /continuation/);
+  assert.equal(f.calls.filter(c => c.path.endsWith('/refs')).length, 1);
+  assert.equal(f.decisions.size, 0);
 });
 test('explicit selection is mandatory and bounded, with no request for invalid input', async t => {
   const f = await fixture(t);

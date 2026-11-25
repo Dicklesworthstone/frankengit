@@ -196,9 +196,13 @@ serialized receipt-capacity boundary. Run it with the unchanged one-off suites:
 node --test tests/operator/pull_sync*.test.mjs
 ```
 
-The remote node in these tests is explicitly a native-schema contract fixture,
-not Rust `fg`. These are client orchestration tests, not native authorization,
-CAS, review-freshness, live-deployment, hardware-power-loss, or full-workspace
-acceptance. No server permission is inferred from local checks. The broader
-`frankengit-root-doctrine-x2mv.4.20` and CI product-loop acceptance remain open;
-no required-green check, merge permission, or approval-survival rule is added.
+The loopback peer in those tests implements the native HTTP schema. The
+[stock-push campaign](../scripts/e2e/suites/workflow/stock_push_landing.sh)
+runs the operator against a native node with its own scoped token. It pushes
+with pinned Git 2.54.0 while CI and PR synchronization are running, checks the
+PR version and published job, and exercises a non-UTF-8 branch name at a page
+boundary in both Git hash formats. A second case restarts the operator after
+a refresh and exercises protected landing at the exact pushed tip.
+
+Deployment qualification, hardware power loss, the CI product-loop acceptance
+and `frankengit-root-doctrine-x2mv.4.20` remain open.

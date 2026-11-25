@@ -2,7 +2,8 @@
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { outcomeEndpoint } from './transaction_outcome.mjs';
-import { form, integer, snapshot, branch, metadataCommand } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-core.mjs';
+import { form, integer, snapshot, metadataCommand } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-core.mjs';
+import { refBytes } from '../../crates/fgit-node/src/smart_http/server/browser/branches.mjs';
 
 export class PullSyncError extends Error {
   constructor(code, status = null) { super(code); this.name = 'PullSyncError'; this.code = code; this.status = status; }
@@ -52,9 +53,9 @@ function envelope(operation) {
   if (operation.kind === 'refs') {
     exactKeys(operation, ['kind', 'after', 'head', 'format']); snapshot(operation.head);
     if (!['sha1', 'sha256'].includes(operation.format)) fail('invalid_sync_format');
-    if (operation.after !== null) branch(operation.after);
+    if (operation.after !== null) refBytes(operation.after, 'branches');
     return { path: 'source/refs', method: 'POST', maximum: 1024 * 1024, statuses: [200], body: form({
-      object_format: operation.format, namespace: 'branches', limit, expected_head: operation.head,
+      object_format: operation.format, namespace: 'branches', cursor_encoding: 'hex', limit, expected_head: operation.head,
       ...(operation.after === null ? {} : { after: operation.after }),
     }) };
   }
