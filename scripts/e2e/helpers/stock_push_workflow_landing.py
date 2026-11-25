@@ -93,12 +93,12 @@ def grant_tip_sync(f):
 
 
 @contextmanager
-def tip_sync_command(f, server, token):
+def tip_sync_command(f, server, token, selected=(1,)):
     state = f.root / "pr-sync"
     state.mkdir(mode=0o700)
     destination = dict(endpoint=server.endpoint.geturl(), tenant_id=TENANT, repository_id=REPOSITORY,
                        repository_incarnation=f.incarnation, principal_id=PRINCIPAL, object_format=f.format)
-    config = dict(schema="frankengit-pr-sync-watch-v1", destination=destination, selected=[1],
+    config = dict(schema="frankengit-pr-sync-watch-v1", destination=destination, selected=list(selected),
                   state_directory=str(state), max_batches=2, state_bytes=1048576, policy="recorded-tips-only")
     with tempfile.TemporaryDirectory() as private:
         config_path, token_path = (Path(private) / name for name in ("watch.json", "token"))
@@ -353,6 +353,86 @@ def push_with_both_services_running(campaign, fmt):
                     branch_page_boundary=boundary.hex())
 
 
+def selected_byte_refs(campaign, fmt):
+    f = Fixture(campaign, fmt, "selected-byte-refs")
+    credentials(f)
+    token = grant_tip_sync(f)
+    target = b"refs/heads/raw-\xff"
+    source = b"refs/heads/raw-\xfe"
+    for name, oid in ((target, f.base), (source, f.tips[0])):
+        receipt = json.loads(campaign.invoke("raw-branch-create", [
+            "branch", "create", *f.scope, "--trusted-local", "--object-format", fmt,
+            "--principal", PRINCIPAL, "--idempotency-key", "create-" + name.hex(),
+            "--ref-hex", name.hex(), "--target", oid]))
+        assert receipt["command_committed"], receipt
+
+    for number, selector in ((1, ["--source-ref", REF]), (2, ["--source-ref-hex", source.hex()])):
+        campaign.invoke("open-byte-pr", [
+            "pr", "open", *f.scope, number, "--trusted-local", "--principal", PRINCIPAL,
+            "--idempotency-key", f"byte-pr-{number}", "--expected-version", 0,
+            *selector, "--target-ref-hex", target.hex(), "--expected-source", f.tips[0],
+            "--expected-target", f.base, "--object-format", fmt,
+            "--title", f"Byte PR {number}", "--body", "Keep both branch names and this metadata."])
+    run, tip = fresh_push_source(f)
+    with Server(f, "selected-byte-refs", publish=True, source_reads=True) as server:
+        server.ready()
+        server.check()
+        def detail(number):
+            status, body = server.request("GET", f"/api/v1/pulls/{number}")
+            assert status == 200, (status, body)
+            return json.loads(body)["pull_request"]
+        before = [detail(1), detail(2)]
+        assert all(row["version"] == 1 and row["data"]["target_ref"] is None
+                   and row["data"]["target_ref_hex"] == target.hex() for row in before)
+        assert before[0]["data"]["source_ref"] == REF
+        assert before[1]["data"]["source_ref"] is None and before[1]["data"]["source_ref_hex"] == source.hex()
+        with receive_listener(f) as address:
+            upstream("push-loopback", PIN, run, "push", address, f"/{REPOSITORY}.git",
+                     "client", "plain", f"{REF}:{REF}")
+        for name, old, new in ((source, f.tips[0], f.tips[2]), (target, f.base, f.tips[1])):
+            moved = json.loads(campaign.invoke("raw-branch-move", [
+                "branch", "update", *f.scope, "--trusted-local", "--object-format", fmt,
+                "--principal", PRINCIPAL, "--idempotency-key", "advance-" + name.hex(),
+                "--ref-hex", name.hex(), "--expected-tip", old, "--target", new]))
+            assert moved["command_committed"], moved
+
+        # Let the independent check publisher finish before taking the tip
+        # synchronizer's pinned snapshot. The live-push case races both services.
+        server.wait(lambda _: sum((e / "reported").is_file() for e in event_directories(f)) == 2)
+        branches = refs(f)
+        with tip_sync_command(f, server, token, (1, 2)) as command:
+            for label in ("first", "restart"):
+                log = f.root / f"byte-pr-sync-{label}.ndjson"
+                with log.open("xb") as output:
+                    subprocess.run([*command, "--max-polls", "3"], stdout=output, timeout=45, check=True)
+                events = read_rows(log)
+                publications = [event for event in events if event["type"] == "pull_sync_observed"]
+                if label == "first":
+                    assert [event["number"] for event in publications] == [1, 2], events
+                    assert all(event["outcome"] == "committed" for event in publications)
+                    transactions = [event["tx_id"] for event in publications]
+                    assert len(set(transactions)) == 2
+                else:
+                    assert not publications and events[-1]["updates"] == 0, events
+                assert any(event.get("unchanged") == [1, 2] for event in events), events
+        for row, number, expected in zip(before, (1, 2), (tip, f.tips[2]), strict=True):
+            current = detail(number)
+            assert current["version"] == 2 and current["state"] == "open", current
+            assert current["data"] == {**row["data"], "source_tip": expected, "target_tip": f.tips[1]}, current
+        def visible(_):
+            status, body = server.request("GET", "/api/v1/pulls/1/checks")
+            page = json.loads(body)
+            assert status == 200, page
+            return page["source_current"] and page["source_tip"] == tip and bool(page["checks"])
+        server.wait(visible)
+        assert refs(f) == branches and f.effects_count() == 2
+        drained, _ = server.stop()
+        assert drained["checks_committed"] == 2 and not drained["requires_reconciliation"], drained
+    campaign.record(fmt, "selected-byte-refs-and-stock-push", source_ref_hex=source.hex(),
+                    target_ref_hex=target.hex(), pushed_tip=tip, raw_tip=f.tips[2],
+                    target_tip=f.tips[1], transactions=transactions, executions=f.effects_count())
+
+
 def check_pagination(campaign, fmt):
     jobs = [f"job-{index:02}" for index in range(21)]
     workflow = "name: paginated-checks\non: push\njobs:\n" + "".join(
@@ -397,4 +477,5 @@ if __name__ == "__main__":
     for fmt in ("sha1", "sha256"):
         lifecycle(campaign, fmt)
         push_with_both_services_running(campaign, fmt)
+        selected_byte_refs(campaign, fmt)
         check_pagination(campaign, fmt)

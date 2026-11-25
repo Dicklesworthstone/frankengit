@@ -3,9 +3,46 @@ import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
 import { discover, destination, freezePlan, validatePlan, encode, LIMITS } from '../../scripts/operator/pull_sync_plan.mjs';
 import { syncRequest, parseSyncJson } from '../../scripts/operator/pull_sync_transport.mjs';
+import { metadataCommand } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-core.mjs';
 import { fixture, TOKEN, ROTATED, row } from './fixtures/pull_sync_native.mjs';
 const nonce = '7'.repeat(32);
 for (const format of ['sha1', 'sha256']) {
+  test(`${format}: selected byte-named branches retain both identities across publication and restart`, async t => {
+    const f = await fixture(t, format, 2);
+    const raw = byte => Buffer.concat([Buffer.from('refs/heads/raw-'), Buffer.from([byte])]);
+    const source = raw(0xfe), target = raw(0xff), tip = c => c.repeat(format === 'sha1' ? 40 : 64);
+    f.state.tips.set(source, tip('a')); f.state.tips.set(target, tip('b'));
+    for (const row of f.state.rows) {
+      row.data.target_ref = null; row.data.target_ref_hex = target.toString('hex');
+    }
+    f.state.rows[1].data.source_ref = null; f.state.rows[1].data.source_ref_hex = source.toString('hex');
+    const before = structuredClone(f.state.rows);
+    const plan = freezePlan(await discover(f.dest, TOKEN, [1, 2]), TOKEN, nonce);
+    assert.deepEqual(validatePlan(plan), plan);
+    for (const request of plan.requests) {
+      const fields = request.fields;
+      assert.equal(fields.target_ref_hex, target.toString('hex')); assert.ok(!('target_ref' in fields));
+      assert.equal(fields.target_tip, tip('b'));
+      if (request.number === 1) {
+        assert.equal(fields.source_ref, 'refs/heads/topic-1'); assert.ok(!('source_ref_hex' in fields));
+      } else {
+        assert.equal(fields.source_ref_hex, source.toString('hex')); assert.ok(!('source_ref' in fields));
+        assert.equal(fields.source_tip, tip('a'));
+      }
+      const reply = await syncRequest(f.dest.endpoint, TOKEN, { kind: 'update', ...request });
+      assert.equal(reply.value.outcome, 'committed');
+    }
+    assert.deepEqual((await discover(f.dest, TOKEN, [1, 2])).unchanged, [1, 2]);
+    assert.equal(f.decisions.size, 2);
+    for (const [index, original] of before.entries()) {
+      assert.deepEqual(f.state.rows[index].data, { ...original.data, source_tip: plan.requests[index].fields.source_tip,
+        target_tip: plan.requests[index].fields.target_tip });
+      assert.equal(f.state.rows[index].version, original.version + 1);
+    }
+    const changed = structuredClone(plan.discovery);
+    changed.changes[1].fields.source_ref_hex = raw(0xfd).toString('hex');
+    assert.throws(() => freezePlan(changed, TOKEN, nonce), /only_refresh_changed_tips/);
+  });
   test(`${format}: explicit selected PRs retain metadata while discovering both new tips without mutation`, async t => {
     const f = await fixture(t, format), before = structuredClone(f.state.rows);
     const result = await discover(f.dest, TOKEN, [2, 1]);
@@ -50,6 +87,20 @@ for (const format of ['sha1', 'sha256']) {
     assert.equal(freezePlan(result, TOKEN, nonce).requests.length, 0);
   });
 }
+test('an encoded metadata ref cannot alias the other branch or override its text spelling', async t => {
+  const f = await fixture(t, 'sha1', 1);
+  const fields = (await discover(f.dest, TOKEN, [1])).changes[0].fields;
+  const { source_ref, ...rest } = fields;
+  const raw = Buffer.from(source_ref).toString('hex');
+  assert.equal(metadataCommand('update', { ...rest, source_ref_hex: raw }).source_ref_hex, raw);
+  for (const invalid of [
+    { ...fields, source_ref_hex: raw },
+    { ...rest, source_ref_hex: Buffer.from(fields.target_ref).toString('hex') },
+    { ...rest, source_ref_hex: raw.toUpperCase() },
+    { ...rest, source_ref_hex: raw.slice(1) },
+  ]) assert.throws(() => metadataCommand('update', invalid));
+  assert.equal(f.decisions.size, 0);
+});
 test('both sides share one ref scan instead of per-PR unpinned reads', async t => {
   const f = await fixture(t, 'sha1', 20); await discover(f.dest, TOKEN, 'all-open');
   assert.equal(f.calls.length, 2); assert.equal(f.calls[1].form.get('namespace'), 'branches');
@@ -59,11 +110,11 @@ test('empty repository produces explicit no-op without any branch read', async t
   const f = await fixture(t, 'sha1', 0), result = await discover(f.dest, TOKEN, 'all-open');
   assert.equal(result.scanned, 0); assert.deepEqual(result.changes, []); assert.equal(f.calls.length, 1);
 });
-for (const scenario of ['missing', 'closed', 'byte-only', 'deleted-source', 'deleted-target']) test(`unavailable selection refuses all planning: ${scenario}`, async t => {
+for (const scenario of ['missing', 'closed', 'missing-byte-source', 'deleted-source', 'deleted-target']) test(`unavailable selection refuses all planning: ${scenario}`, async t => {
   const f = await fixture(t);
   if (scenario === 'missing') f.state.rows = [];
   if (scenario === 'closed') f.state.rows[0].state = 'closed';
-  if (scenario === 'byte-only') { f.state.rows[0].data.source_ref = null; f.state.rows[0].data.source_ref_hex = Buffer.from('refs/heads/').toString('hex') + 'ff'; }
+  if (scenario === 'missing-byte-source') { f.state.rows[0].data.source_ref = null; f.state.rows[0].data.source_ref_hex = Buffer.from('refs/heads/').toString('hex') + 'ff'; }
   if (scenario === 'deleted-source') f.state.tips.delete('refs/heads/topic-1');
   if (scenario === 'deleted-target') f.state.tips.delete('refs/heads/main');
   await assert.rejects(discover(f.dest, TOKEN, [1])); assert.equal(f.decisions.size, 0);

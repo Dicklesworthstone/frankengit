@@ -59,15 +59,27 @@ export async function fixture(t, format = 'sha1', count = 2) {
         if (old) { result = old.reply; status = result.outcome === 'committed' ? 200 : 409; }
         else {
           const selected = state.rows.find(r => r.number === number), version = Number(form.get('expected_version'));
+          const branchTip = side => {
+            const name = form.get(side + '_hex') ?? hex(form.get(side));
+            return [...state.tips].find(([ref]) => hex(ref) === name)?.[1];
+          };
           const refused = state.refuse || !selected || selected.state !== 'open' || selected.version !== version ||
-            form.get('source_tip') !== state.tips.get(form.get('source_ref')) || form.get('target_tip') !== state.tips.get(form.get('target_ref'));
+            form.get('source_tip') !== branchTip('source_ref') || form.get('target_tip') !== branchTip('target_ref');
           result = { ...header(), type: 'pull_request_publication', principal_id: ACTOR, number, expected_version: version, action: 'update',
             tx_id: `fixture-tx-${hash(key)}`, outcome: refused ? 'refused' : 'committed', decision_sequence: '18446744073709551615',
             repository_commit_id: refused ? null : `fixture-rcr-${hash(key)}`, refusal_record_id: refused ? `fixture-refusal-${hash(key)}` : null,
             refusal_code: refused ? 'TargetRefMoved' : null, refusal_code_point: refused ? 7 : null, delivery_acknowledged: null };
           delete result.source_head; delete result.snapshot_token;
           decisions.set(key, { body, reply: result });
-          if (!refused) { selected.version++; for (const field of ['title', 'body', 'source_ref', 'target_ref', 'source_tip', 'target_tip']) selected.data[field] = form.get(field); }
+          if (!refused) {
+            selected.version++;
+            for (const field of ['title', 'body', 'source_tip', 'target_tip']) selected.data[field] = form.get(field);
+            for (const side of ['source_ref', 'target_ref']) {
+              const raw = form.has(side) ? Buffer.from(form.get(side)) : Buffer.from(form.get(side + '_hex'), 'hex');
+              selected.data[side] = isUtf8(raw) ? raw.toString() : null;
+              selected.data[side + '_hex'] = hex(raw);
+            }
+          }
           status = refused ? 409 : 200;
         }
         if (state.drop === true || state.drop === number) { req.socket.destroy(); return; }

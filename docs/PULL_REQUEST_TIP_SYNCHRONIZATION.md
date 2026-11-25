@@ -81,8 +81,11 @@ in the report. A plan is bounded by 20 MiB; an over-budget plan is not saved.
 Branch discovery requests hex cursors on every page. It compares exact native
 ref bytes and checks the continuation against the last returned name. A branch
 whose name contains non-UTF-8 bytes may end a page. Discovery resumes at the
-next branch in the same snapshot. The native PR metadata update form requires
-UTF-8 names for the selected source and target branches.
+next branch in the same snapshot. Both selected branches are matched by their
+exact bytes. When a branch has no UTF-8 spelling, its update carries
+`source_ref_hex` or `target_ref_hex`. Existing text plans keep their original
+form bytes and idempotency keys. Use a node that accepts the hex fields before
+enabling writes for a selection containing byte-only branch names.
 Git SHA-1 and SHA-256 are separate domains. PR/version counters above JavaScript's exact
 safe integer range refuse before publication; unquoted native decision counters
 are handled separately without precision loss.

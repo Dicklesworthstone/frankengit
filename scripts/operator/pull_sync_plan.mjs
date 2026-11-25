@@ -2,7 +2,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { outcomeEndpoint, outcomeScope } from './transaction_outcome.mjs';
 import { exactKeys, fail, syncRequest, tokenValue } from './pull_sync_transport.mjs';
-import { integer, listReply, showReply, oid, metadataCommand, opaque, snapshot }
+import { integer, listReply, showReply, oid, metadataCommand, opaque, snapshot, subjectReferences }
   from '../../crates/fgit-node/src/smart_http/server/browser/pulls-core.mjs';
 import { refsPage } from '../../crates/fgit-node/src/smart_http/server/browser/branches.mjs';
 
@@ -42,9 +42,8 @@ export function operationContext(options = {}) {
 }
 function priorFields(row, format) {
   const data = row.data;
-  if (data.source_ref === null || data.target_ref === null) fail('sync_byte_only_ref_requires_native_client');
   return metadataCommand('update', { expected_version: row.version, object_format: format,
-    source_ref: data.source_ref, target_ref: data.target_ref, source_tip: oid(data.source_tip, format), target_tip: oid(data.target_tip, format),
+    ...subjectReferences(data), source_tip: oid(data.source_tip, format), target_tip: oid(data.target_tip, format),
     title: data.title, body: data.body });
 }
 export async function discover(dest, token, selected, options = {}) {
@@ -82,8 +81,9 @@ export async function discover(dest, token, selected, options = {}) {
       rows.push(page.reply.pull_request); scanned++;
     }
   }
-  const before = rows.map(row => ({ number: row.number, fields: priorFields(row, dest.object_format) }));
-  const needed = new Set(before.flatMap(row => [row.fields.source_ref, row.fields.target_ref])), tips = new Map();
+  const before = rows.map(row => ({ number: row.number, fields: priorFields(row, dest.object_format),
+    source: row.data.source_ref_hex, target: row.data.target_ref_hex }));
+  const needed = new Set(before.flatMap(row => [row.source, row.target])), tips = new Map();
   let after = null;
   while (needed.size > tips.size) {
     const raw = await request({ kind: 'refs', after, head, format: dest.object_format });
@@ -93,7 +93,7 @@ export async function discover(dest, token, selected, options = {}) {
     if (page.source_head !== sourceHead) fail('sync_source_head_changed');
     for (const row of page.refs) {
       exactKeys(row, ['ref', 'ref_hex', 'object_id']);
-      if (needed.has(row.ref)) tips.set(row.ref, oid(row.object_id, dest.object_format));
+      if (needed.has(row.ref_hex)) tips.set(row.ref_hex, oid(row.object_id, dest.object_format));
     }
     after = page.next_after;
     if (after === null) break;
@@ -101,7 +101,7 @@ export async function discover(dest, token, selected, options = {}) {
   if (needed.size !== tips.size) fail('sync_branch_unavailable_no_changes_prepared');
   const changes = [], unchanged = [];
   for (const row of before) {
-    const fields = metadataCommand('update', { ...row.fields, source_tip: tips.get(row.fields.source_ref), target_tip: tips.get(row.fields.target_ref) });
+    const fields = metadataCommand('update', { ...row.fields, source_tip: tips.get(row.source), target_tip: tips.get(row.target) });
     if (fields.source_tip === row.fields.source_tip && fields.target_tip === row.fields.target_tip) unchanged.push(row.number);
     else changes.push({ number: row.number, before: row.fields, fields });
   }
