@@ -7,7 +7,7 @@ import { BRANCH_LIMITS, BranchTransactionError, fail, fields, hash, credential, 
   parse, publication, validateBranchIntent, matchObservation } from './branch_transaction.mjs';
 
 function options(value, sending) {
-  fields(value, ['signal', 'timeoutMs', 'ca', 'known', 'publication', ...(sending ? ['confirmKey'] : [])], []);
+  fields(value, ['signal', 'timeoutMs', 'ca', 'known', 'publication', ...(sending ? ['confirmKey', 'outcomeToken'] : [])], []);
   const timeoutMs = value.timeoutMs ?? 30000;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300000 ||
       value.signal !== undefined && !(value.signal instanceof AbortSignal)) fail('branch_transaction_options');
@@ -77,6 +77,8 @@ async function operate(input, token, supplied, send) {
   const intent = validateBranchIntent(input), config = options(supplied, send);
   credential(token, send);
   if (send && (config.confirmKey !== intent.key || hash(token) !== intent.credential_sha256)) fail('branch_transaction_original_key_and_credential_required');
+  if (config.outcomeToken !== undefined && intent.bind_writer_scope !== true) fail('branch_transaction_writer_scope_required');
+  const outcomeToken = config.outcomeToken === undefined ? token : credential(config.outcomeToken);
   const scope = binding(intent.scope), deadline = performance.now() + config.timeoutMs;
   let outcome = config.known == null ? null : validateOutcomeReply(config.known, scope);
   let receipt = config.publication == null ? null : publication(config.publication, intent, config.publication.outcome === 'committed' ? 200 : 409);
@@ -87,7 +89,7 @@ async function operate(input, token, supplied, send) {
     if (timeoutMs < 1) fail('branch_transaction_timeout');
     return { timeoutMs, signal: config.signal, ca: config.ca };
   };
-  const lookup = () => lookupOutcome(intent.endpoint, token, { ...scope, key: intent.key }, { ...remaining(), known: outcome });
+  const lookup = () => lookupOutcome(intent.endpoint, outcomeToken, { ...scope, key: intent.key }, { ...remaining(), known: outcome });
   let phase = 'preflight', dispatched = false;
   try {
     // A contradictory new observation must not replace compatible retained

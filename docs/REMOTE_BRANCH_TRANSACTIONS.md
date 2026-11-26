@@ -18,6 +18,7 @@ node scripts/fg_branch_transaction.mjs send \
   --request-dir /srv/operator/reviewed-branches \
   --confirm "$INTENT_SHA256" \
   --token-file /srv/operator/branch-writer.token \
+  --outcome-token-file /srv/operator/recovery.token \
   --record /srv/operator/branch-result.json
 ~~~
 
@@ -32,6 +33,7 @@ The input is private JSON with the following shape:
 ~~~json
 {
   "endpoint": "https://forge.example/team/project.git",
+  "bind_writer_scope": true,
   "scope": {
     "tenant_id": "11111111111111111111111111111111",
     "repository_id": "22222222222222222222222222222222",
@@ -87,6 +89,21 @@ Publication requires the existing native receive grant plus the source and
 receive deployment ceilings. Original-key recovery independently requires
 outcomes-read and its deployment ceiling. Read, PR and merge grants do not
 imply these permissions. The client does not decode a bearer into capabilities.
+
+Set `"bind_writer_scope": true` at preparation to pin the tenant, repository,
+incarnation and principal into the mutation form. With this option,
+`send --outcome-token-file` uses the separate outcomes-read credential for both
+original-key lookups. The publication request uses only the original receive
+credential. Both credentials must authenticate the selected principal. The
+server checks the publication credential against the pinned scope before
+admission, and the operator verifies the scope of each outcome reply.
+Only the publication credential fingerprint is retained.
+
+When omitting `--outcome-token-file`, the original sending credential must
+have both grants. Saved intents without the binding keep their original form
+and use a combined grant. Prepare a new reviewed intent to use separate
+credentials. Servers that predate the binding reject the additional form field
+before admission. The operator does not retry with an unbound form.
 
 The native sponsored source-branch-create grant applies to the separate
 single-create endpoint. Atomic transaction preparation and sending reject

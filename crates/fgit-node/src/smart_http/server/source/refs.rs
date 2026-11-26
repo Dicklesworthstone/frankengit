@@ -21,6 +21,7 @@ use crate::{
     NodeWorkspaceRefusal, OneNode,
 };
 use request::{Command, Namespace};
+use transaction::WriterScope;
 
 /// The parent source router needs only route, mutation class, and execution;
 /// the command grammar and atomic lowering stay private to this adapter.
@@ -167,7 +168,26 @@ pub(super) fn execute(
                 terminal: None,
             })
         }
-        Command::Mutate(commands) => {
+        Command::Mutate {
+            commands,
+            expected_scope,
+        } => {
+            // The assertion only constrains the already-authenticated writer.
+            // Check it before creating any native transaction or seal.
+            if let Some(expected) = expected_scope
+                && expected
+                    != (WriterScope {
+                        tenant: node.tenant_id(),
+                        repository: node.repository_id(),
+                        incarnation: node.repository_incarnation_id(),
+                        principal: authenticated.principal_id(),
+                    })
+            {
+                return Err(ApiError::new(
+                    Status::Forbidden,
+                    "branch_transaction_scope_mismatch",
+                ));
+            }
             super::super::require_ref_writes(authenticated, commands.iter().map(|c| &c.name))?;
             // The node checks current visibility and commit kind, preserves
             // the default branch, constructs real empty-pack quarantine proof,

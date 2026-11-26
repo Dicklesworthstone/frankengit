@@ -57,19 +57,27 @@ function command(value, format) {
 }
 function build(value) {
   const selected = scope(value.scope), checked = command(value.changes, selected.object_format);
+  const writerBound = Object.hasOwn(value, 'bind_writer_scope');
+  if (writerBound && value.bind_writer_scope !== true) fail('branch_transaction_writer_scope');
   if (typeof value.nonce !== 'string' || !/^[0-9a-f]{32}$/.test(value.nonce)) fail('branch_transaction_nonce');
   const basis = { schema: SCHEMA, endpoint: outcomeEndpoint(value.endpoint), scope: selected,
-    changes: checked.changes, body: checked.body, credential_sha256: pin(value.credential_sha256), nonce: value.nonce };
+    changes: checked.changes,
+    body: writerBound ? checked.body + '&expected_scope=' +
+      [selected.tenant_id, selected.repository_id, selected.repository_incarnation, selected.principal_id].join(':') : checked.body,
+    credential_sha256: pin(value.credential_sha256), nonce: value.nonce,
+    ...(writerBound ? { bind_writer_scope: true } : {}) };
   const intent = { ...basis, key: 'fgbt1-' + basis.nonce + '-' + hash(encode(basis)) };
   if (encode(intent).length > BRANCH_LIMITS.intent) fail('branch_transaction_intent_limit');
   return intent;
 }
 export function prepareBranchTransaction(value, token) {
-  fields(value, ['endpoint', 'scope', 'changes']); credential(token, true);
+  const required = ['endpoint', 'scope', 'changes'];
+  fields(value, [...required, 'bind_writer_scope'], required); credential(token, true);
   return build({ ...value, credential_sha256: hash(token), nonce: randomBytes(16).toString('hex') });
 }
 export function validateBranchIntent(value) {
-  fields(value, ['schema', 'endpoint', 'scope', 'changes', 'body', 'credential_sha256', 'nonce', 'key']);
+  const required = ['schema', 'endpoint', 'scope', 'changes', 'body', 'credential_sha256', 'nonce', 'key'];
+  fields(value, [...required, 'bind_writer_scope'], required);
   const expected = build(value);
   if (!encode(value).equals(encode(expected))) fail('branch_transaction_intent_changed');
   return expected;

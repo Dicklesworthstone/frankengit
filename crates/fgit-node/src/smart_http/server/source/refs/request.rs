@@ -3,6 +3,7 @@
 //! plus absent-destination create; no force or implicit-current-tip option.
 
 use super::cursor::CursorEncoding;
+use super::transaction::{self, WriterScope};
 use std::collections::BTreeMap;
 
 use fgit_authority::{ExpectedOld, ProposedNew, RefCommand};
@@ -70,7 +71,10 @@ pub(super) struct Page {
 #[derive(Debug)]
 pub(super) enum Command {
     List(Page),
-    Mutate(Vec<RefCommand>),
+    Mutate {
+        commands: Vec<RefCommand>,
+        expected_scope: Option<WriterScope>,
+    },
 }
 
 #[derive(Debug)]
@@ -148,7 +152,11 @@ impl<'a> Request<'a> {
         format: GitHashAlgorithm,
     ) -> Result<Command, ApiError> {
         if self.operation == Operation::Transaction {
-            return super::transaction::parse(bytes, format).map(Command::Mutate);
+            let (commands, expected_scope) = transaction::parse(bytes, format)?;
+            return Ok(Command::Mutate {
+                commands,
+                expected_scope,
+            });
         }
         let mut fields = BTreeMap::new();
         for (name, value) in parse_form(bytes, 6)? {
@@ -236,7 +244,10 @@ impl<'a> Request<'a> {
                         force: false,
                     });
                 }
-                Command::Mutate(commands)
+                Command::Mutate {
+                    commands,
+                    expected_scope: None,
+                }
             }
         };
         if !fields.is_empty() {
@@ -297,7 +308,7 @@ mod tests {
                 "object_format={}&ref=refs/heads/z&expected_commit={id}&new_ref=refs/heads/a",
                 format.as_str()
             );
-            let Command::Mutate(commands) = parse("rename", &form, format).unwrap() else {
+            let Command::Mutate { commands, .. } = parse("rename", &form, format).unwrap() else {
                 panic!("mutation");
             };
             assert_eq!(commands.len(), 2);

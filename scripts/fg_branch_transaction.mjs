@@ -11,6 +11,7 @@ export const HELP = [
   '       node scripts/fg_branch_transaction.mjs inspect --request-dir JOB --confirm INTENT_SHA256 [--known PRIVATE_RECORD]',
   '       node scripts/fg_branch_transaction.mjs send|recover --request-dir JOB --confirm INTENT_SHA256',
   '         --token-file PRIVATE_TOKEN --record NEW_PRIVATE_JSON [--known PRIVATE_RECORD] [--ca-file PRIVATE_PEM]',
+  '       send also accepts --outcome-token-file PRIVATE_TOKEN with bind_writer_scope: true in the prepared input.',
   '',
   'All commands accept --timeout-ms 1..300000. Paths must be absolute, private, and outside Git worktrees.',
   'Input: endpoint, scope {tenant_id, repository_id, repository_incarnation, principal_id, object_format}, changes.',
@@ -38,7 +39,8 @@ function argumentsFor(args) {
     action === 'inspect' ? ['request-dir', 'confirm'] :
     ['send', 'recover'].includes(action) ? ['request-dir', 'confirm', 'token-file', 'record'] : null;
   if (required === null) fail('branch_transaction_operation');
-  const allowed = [...required, 'timeout-ms', ...(action === 'inspect' ? ['known'] : ['send', 'recover'].includes(action) ? ['known', 'ca-file'] : [])];
+  const allowed = [...required, 'timeout-ms', ...(action === 'inspect' ? ['known'] : ['send', 'recover'].includes(action) ? ['known', 'ca-file'] : []),
+    ...(action === 'send' ? ['outcome-token-file'] : [])];
   const flags = {};
   for (let i = 1; i < args.length; i += 2) {
     const name = args[i].startsWith('--') ? args[i].slice(2) : '', value = args[i + 1];
@@ -74,9 +76,12 @@ export async function run(args, { output = text => write(process.stdout, text), 
       credential(token, true);
       if (hash(token) !== intent.credential_sha256) fail('branch_transaction_original_key_and_credential_required');
     }
+    const outcomePath = flags['outcome-token-file'];
+    if (outcomePath !== undefined && intent.bind_writer_scope !== true) fail('branch_transaction_writer_scope_required');
+    const outcomeToken = outcomePath === undefined ? undefined : await tokenFile(outcomePath, life.check);
     recordPath = await recordDestination(flags.record); life.check();
     const options = { timeoutMs: life.remaining(), signal, ca, known: known?.outcome ?? null, publication: known?.publication ?? null,
-      ...(action === 'send' ? { confirmKey: intent.key } : {}) };
+      ...(action === 'send' ? { confirmKey: intent.key, outcomeToken } : {}) };
     network = true;
     let result, failure;
     try { result = await (action === 'send' ? sendBranchTransaction : recoverBranchTransaction)(intent, token, options); }

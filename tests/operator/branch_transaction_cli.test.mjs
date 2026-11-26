@@ -72,6 +72,36 @@ test('existing result files, wrong confirmation pins and rotated send credential
   assert.equal((await f.invoke(rotated)).code, 2);
   assert.equal(f.calls.length, 0); assert.equal(await readFile(record, 'utf8'), 'keep');
 });
+test('a separate outcome credential requires a prepared writer binding before network or result custody', async t => {
+  const f = await local(t), prepared = await f.prepare(), record = join(f.root, 'split.json');
+  const args = ['--request-dir', f.job, '--confirm', prepared.value.intent_sha256,
+    '--token-file', f.token, '--outcome-token-file', f.rotated, '--record', record];
+  const sending = await f.invoke(['send', ...args]);
+  assert.equal(sending.code, 2);
+  assert.equal(sending.error.code, 'branch_transaction_writer_scope_required');
+  const recovering = await f.invoke(['recover', ...args]);
+  assert.equal(recovering.code, 2);
+  assert.equal(recovering.error.code, 'branch_transaction_option');
+  assert.equal(f.calls.length, 0);
+  await assert.rejects(lstat(record), { code: 'ENOENT' });
+});
+test('preparation pins the entire writer scope into the exact form and accepts only an explicit true binding', async t => {
+  const f = await local(t);
+  for (const invalid of [false, null, 'true']) {
+    await writeFile(f.inputPath, JSON.stringify({ ...f.input, bind_writer_scope: invalid }));
+    assert.equal((await f.prepare()).code, 2);
+    await assert.rejects(lstat(f.job), { code: 'ENOENT' });
+  }
+  await writeFile(f.inputPath, JSON.stringify({ ...f.input, bind_writer_scope: true }));
+  const prepared = await f.prepare();
+  assert.equal(prepared.code, 0);
+  const intent = await loadIntent(f.job, prepared.value.intent_sha256);
+  const { tenant_id, repository_id, repository_incarnation, principal_id } = f.input.scope;
+  assert.equal(intent.bind_writer_scope, true);
+  assert.equal(new URLSearchParams(intent.body).get('expected_scope'),
+    [tenant_id, repository_id, repository_incarnation, principal_id].join(':'));
+  assert.equal(f.calls.length, 0);
+});
 test('invalid private files, aliases and Git worktree custody are refused', async t => {
   const f = await local(t);
   await chmod(f.token, 0o644); assert.equal((await f.prepare()).code, 2); await chmod(f.token, 0o600);

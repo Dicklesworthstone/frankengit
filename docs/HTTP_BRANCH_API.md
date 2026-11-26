@@ -166,6 +166,26 @@ rewrite PR metadata or emit a fabricated PR transition. Update a PR explicitly
 with its new source name and expected PR version when appropriate; old candidate
 subjects/approvals do not silently acquire different branch coordinates.
 
+## Submit an atomic batch
+
+```text
+POST {REPO_URL}/api/v1/source/branches/transaction
+```
+
+Supply `object_format` and one or more ordered operands as repeated form
+fields. Use `create=REF_HEX:NEW_OID`, `update=REF_HEX:OLD_OID:NEW_OID`, or
+`delete=REF_HEX:OLD_OID`. Ref operands are the lowercase hexadecimal bytes of
+full branch names. Each ref can appear once. The native receive grant covers
+every command in the batch, which shares one seal and decision.
+
+An optional `expected_scope=TENANT:REPOSITORY:INCARNATION:PRINCIPAL` asserts
+four canonical 32-character lowercase hexadecimal identities. The gateway
+compares the assertion with its repository and the authenticated receive
+principal before native admission. A mismatch returns HTTP 403
+`branch_transaction_scope_mismatch` before registering a transaction or seal.
+Use this precondition when a separate credential reads the original outcome.
+It grants no permissions and does not change the transaction identity.
+
 ## Outcomes and retry semantics
 
 HTTP 200 `branch_publication` contains `atomic: true`, `terminal: true`, one
