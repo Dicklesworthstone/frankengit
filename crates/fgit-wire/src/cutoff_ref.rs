@@ -1,5 +1,16 @@
 //! Bounded advertised-ref-only DWIM for shallow exclusions.
-use super::{AnyGitOid, UploadPackRepository, WireError, WireLimits, parse_ref_name};
+use super::{
+    AdvertisedRef, AnyGitOid, UploadPackRepository, WireError, WireLimits, parse_ref_name,
+};
+
+const EXPANSIONS: [(&[u8], &[u8]); 6] = [
+    (b"", b""),
+    (b"refs/", b""),
+    (b"refs/tags/", b""),
+    (b"refs/heads/", b""),
+    (b"refs/remotes/", b""),
+    (b"refs/remotes/", b"/HEAD"),
+];
 
 pub fn resolve(
     repository: &impl UploadPackRepository,
@@ -7,33 +18,43 @@ pub fn resolve(
     limits: &WireLimits,
 ) -> Result<AnyGitOid, WireError> {
     let name = parse_ref_name(text, limits)?;
-    if repository.advertised_refs().len() > limits.max_advertised_refs {
+    repository.negotiation_checkpoint()?;
+    let sorted = repository.sorted_advertised_refs();
+    let references = sorted.unwrap_or_else(|| repository.advertised_refs());
+    if references.len() > limits.max_advertised_refs {
         return Err(WireError::TooManyAdvertisedRefs {
             limit: limits.max_advertised_refs,
         });
     }
+    let matched = if sorted.is_some() {
+        resolve_sorted(repository, references, &name)?
+    } else {
+        resolve_scalar(repository, references, &name)?
+    };
+    repository.negotiation_checkpoint()?;
+    matched.ok_or(WireError::UnknownDeepenNotRef { name })
+}
+
+fn resolve_scalar(
+    repository: &impl UploadPackRepository,
+    references: &[AdvertisedRef],
+    name: &[u8],
+) -> Result<Option<AnyGitOid>, WireError> {
     let mut matched = None;
-    for reference in repository.advertised_refs() {
+    for reference in references {
+        repository.negotiation_checkpoint()?;
         // The six native ref expansion rules; compare slices without building
         // six copies of an untrusted name. Distinct names remain ambiguous even
         // when their current targets are equal. Hidden refs are never consulted.
         let raw = reference.name.as_slice();
-        let mut matches = raw == name.as_slice();
-        for prefix in [
-            b"refs/".as_slice(),
-            b"refs/tags/",
-            b"refs/heads/",
-            b"refs/remotes/",
-        ] {
-            matches |= raw.strip_prefix(prefix) == Some(name.as_slice());
-        }
-        matches |= raw
-            .strip_prefix(b"refs/remotes/")
-            .and_then(|tail| tail.strip_suffix(b"/HEAD"))
-            == Some(name.as_slice());
+        let matches = EXPANSIONS.iter().any(|(prefix, suffix)| {
+            raw.strip_prefix(*prefix)
+                .and_then(|tail| tail.strip_suffix(*suffix))
+                == Some(name)
+        });
         if matches {
             if matched.is_some() {
-                return Err(WireError::UnknownDeepenNotRef { name });
+                return Ok(None);
             }
             if reference.oid.algorithm() != repository.object_format() {
                 return Err(WireError::ObjectFormatMismatch {
@@ -44,8 +65,64 @@ pub fn resolve(
             matched = Some(reference.oid);
         }
     }
-    matched.ok_or(WireError::UnknownDeepenNotRef { name })
+    Ok(matched)
 }
+
+fn resolve_sorted(
+    repository: &impl UploadPackRepository,
+    references: &[AdvertisedRef],
+    name: &[u8],
+) -> Result<Option<AnyGitOid>, WireError> {
+    // Preserve advertisement-order error precedence, not expansion-rule order.
+    // Only the first two matching rows can affect the scalar result; include
+    // repeated names too, rather than allowing binary search to hide ambiguity.
+    let mut first = usize::MAX;
+    let mut second = usize::MAX;
+    for (prefix, suffix) in EXPANSIONS {
+        let compare = |reference: &AdvertisedRef| {
+            reference
+                .name
+                .iter()
+                .cmp(prefix.iter().chain(name).chain(suffix))
+        };
+        let mut lower = 0;
+        let mut upper = references.len();
+        while lower < upper {
+            repository.negotiation_checkpoint()?;
+            let middle = lower + (upper - lower) / 2;
+            if compare(&references[middle]).is_lt() {
+                lower = middle + 1;
+            } else {
+                upper = middle;
+            }
+        }
+        repository.negotiation_checkpoint()?;
+        for index in lower..references.len().min(lower.saturating_add(2)) {
+            if !compare(&references[index]).is_eq() {
+                break;
+            }
+            if index < first {
+                second = first;
+                first = index;
+            } else if index != first && index < second {
+                second = index;
+            }
+        }
+    }
+    let Some(reference) = references.get(first) else {
+        return Ok(None);
+    };
+    if reference.oid.algorithm() != repository.object_format() {
+        return Err(WireError::ObjectFormatMismatch {
+            expected: repository.object_format(),
+            observed: reference.oid.algorithm(),
+        });
+    }
+    Ok((second == usize::MAX).then_some(reference.oid))
+}
+
+#[cfg(test)]
+mod bounds_tests;
 
 #[cfg(test)]
 mod tests {

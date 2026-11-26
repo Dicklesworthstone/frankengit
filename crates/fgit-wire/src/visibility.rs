@@ -138,6 +138,7 @@ pub fn filter_advertised_refs(
 pub struct VisibleUploadPackRepository<'a, R: ?Sized + UploadPackRepository> {
     inner: &'a R,
     visible: Vec<AdvertisedRef>,
+    advertisement_sorted: bool,
     /// Symbolic metadata selected with the same policy as `visible`.
     symref_targets: BTreeMap<Vec<u8>, Vec<u8>>,
     unborn_target: Option<Vec<u8>>,
@@ -238,9 +239,11 @@ impl<'a, R: ?Sized + UploadPackRepository> VisibleUploadPackRepository<'a, R> {
             }
         }
         hidden_tips.retain(|oid| !visible_tips.contains(oid));
+        let advertisement_sorted = visible.windows(2).all(|pair| pair[0].name <= pair[1].name);
         Self {
             inner,
             visible,
+            advertisement_sorted,
             symref_targets,
             unborn_target,
             peeled_targets,
@@ -266,6 +269,12 @@ impl<R: ?Sized + UploadPackRepository> UploadPackRepository for VisibleUploadPac
 
     fn advertised_refs(&self) -> &[AdvertisedRef] {
         &self.visible
+    }
+
+    fn sorted_advertised_refs(&self) -> Option<&[AdvertisedRef]> {
+        // The order belongs to this immutable filtered slice, not a later
+        // inner view or a differently ordered resolver.
+        self.advertisement_sorted.then_some(self.visible.as_slice())
     }
 
     fn contains_want(&self, oid: AnyGitOid) -> bool {

@@ -1322,6 +1322,14 @@ pub trait UploadPackRepository {
     /// Deterministically ordered advertised refs, with unique names. Different
     /// names may share an object (for example HEAD and its target branch).
     fn advertised_refs(&self) -> &[AdvertisedRef];
+    /// The complete current advertisement in nondecreasing byte-name order.
+    /// Return `Some` only when this is the same authorized view as
+    /// `advertised_refs` and its order is established. `None` keeps the
+    /// checkpointed scalar lookup. This ordering hint must never expose a
+    /// different ref set or consult a general-purpose ref resolver.
+    fn sorted_advertised_refs(&self) -> Option<&[AdvertisedRef]> {
+        None
+    }
     /// Whether a v2 non-advertised want is in the canonical permitted closure.
     fn contains_want(&self, oid: AnyGitOid) -> bool;
     /// Whether a client `have` is already common with the advertised closure.
