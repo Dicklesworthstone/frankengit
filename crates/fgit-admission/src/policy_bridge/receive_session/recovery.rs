@@ -9,7 +9,8 @@
 //! credential, pack, validation basis, or locally inferred outcome is stored.
 
 use fgit_authority::key_recovery::{
-    RecoveryFailure, RecoveryScope, RequestRecovery, recover_request_async, recover_requests_async,
+    BoundRecoveryFailure, RecoveryFailure, RecoveryScope, RequestRecovery,
+    recover_bound_requests_async, recover_request_async,
 };
 use fgit_authority::{
     AsyncAuthorityStore, ExpectedOld, ImmutableKey, ImmutableRead, ProposedNew, PutOutcome,
@@ -567,22 +568,27 @@ where
         .whole_attempt(context, checkpoint)
         .map_err(recovery_preflight_failure)?;
     let (identity, _) = require_binding(store, cx, &whole).await?;
-    // Validate the entire descriptor's child bindings and expected seals before
-    // a shared authority replay supplies any result. The immutable bindings are
-    // checked again by the authority-owned key recovery boundary.
+    // Derive the expected child identities locally. The authority checks each
+    // binding as it reads it, including a bound child whose seal is still absent.
     let mut expected = Vec::with_capacity(descriptor.len());
     let mut keys = Vec::with_capacity(descriptor.len());
     for index in 0..descriptor.len() {
         checkpoint().map_err(RecoveryFailure::Interrupted)?;
         let child = descriptor.child_attempt(context, index)?;
-        // Reuse the seal derived while verifying the binding. Re-deriving it
-        // would hash and encode every child's request and push options twice.
-        let (child_id, seal) = require_binding(store, cx, &child).await?;
-        expected.push((child_id, seal, child.request.ref_commands()[0].name.clone()));
-        keys.push(child.idempotency_key);
+        let (child_id, seal) = child.derive().map_err(AdmissionError::from)?;
+        expected.push((seal, child.request.ref_commands()[0].name.clone()));
+        keys.push((child.idempotency_key, child_id));
     }
     let recoveries =
-        recover_requests_async(store, cx, &context.head_key, scope, &keys, checkpoint).await?;
+        recover_bound_requests_async(store, cx, &context.head_key, scope, &keys, checkpoint)
+            .await
+            .map_err(|error| match error {
+                BoundRecoveryFailure::BindingMismatch => {
+                    SessionRecoveryFailure::Integrity("descriptor/key binding")
+                }
+                BoundRecoveryFailure::BindingRead(source) => AdmissionError::from(source).into(),
+                BoundRecoveryFailure::Recovery(other) => SessionRecoveryFailure::from(other),
+            })?;
     if recoveries.len() != expected.len() {
         return Err(SessionRecoveryFailure::Integrity("recovered child count"));
     }
@@ -590,9 +596,7 @@ where
         .iter()
         .all(|recovery| recovery.terminal().is_some());
     let mut commands = Vec::with_capacity(descriptor.len());
-    for (index, ((child_id, seal, reference), recovery)) in
-        expected.into_iter().zip(recoveries).enumerate()
-    {
+    for (index, ((seal, reference), recovery)) in expected.into_iter().zip(recoveries).enumerate() {
         // Authority has already resolved every requested terminal decision.
         // This bounded comparison performs no I/O; a late cancellation must
         // not erase an all-terminal answer while assembling its command list.
@@ -601,7 +605,7 @@ where
         }
         match &recovery {
             RequestRecovery::Recovered(known) => {
-                if known.tx_id() != child_id || known.seal() != &seal {
+                if known.seal() != &seal {
                     return Err(SessionRecoveryFailure::Integrity("descriptor/child seal"));
                 }
             }

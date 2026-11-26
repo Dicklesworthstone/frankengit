@@ -21,7 +21,9 @@ use crate::{
 };
 
 mod batch;
-pub use batch::{MAX_RECOVERY_KEYS, recover_requests_async};
+pub use batch::{
+    BoundRecoveryFailure, MAX_RECOVERY_KEYS, recover_bound_requests_async, recover_requests_async,
+};
 
 const MAX_BINDING_BYTES: usize = 256;
 const MAX_SEAL_BYTES: usize = 8192;

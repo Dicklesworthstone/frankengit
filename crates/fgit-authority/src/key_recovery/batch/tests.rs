@@ -23,6 +23,7 @@ struct ObservedStore {
     authentications: AtomicUsize,
     writes: AtomicUsize,
     overrides: Mutex<BTreeMap<ImmutableKey, ImmutableRead>>,
+    unreadable: Mutex<Option<ImmutableKey>>,
     publish_on_hint: Mutex<Option<Vec<SealAttempt>>>,
 }
 impl AsyncAuthorityStore for ObservedStore {
@@ -51,6 +52,11 @@ impl AsyncAuthorityStore for ObservedStore {
     ) -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>> + Send {
         std::future::poll_fn(move |_| {
             self.reads.fetch_add(1, Ordering::SeqCst);
+            if self.unreadable.lock().unwrap().as_ref() == Some(key) {
+                return Poll::Ready(Err(AuthorityFailure::Ambiguous(
+                    crate::AmbiguityReason::Cancelled,
+                )));
+            }
             if key.as_bytes().starts_with(crate::OUTCOME_KEY_PREFIX) {
                 let publication = self.publish_on_hint.lock().unwrap().take();
                 if let Some(attempts) = publication {
@@ -158,6 +164,7 @@ fn setup(count: usize) -> (ObservedStore, Vec<SealAttempt>) {
             authentications: AtomicUsize::new(0),
             writes: AtomicUsize::new(0),
             overrides: Mutex::new(BTreeMap::new()),
+            unreadable: Mutex::new(None),
             publish_on_hint: Mutex::new(None),
         },
         attempts,
@@ -278,6 +285,77 @@ fn hint_key(store: &ObservedStore, attempt: &SealAttempt) -> ImmutableKey {
         attempt.derive().unwrap().0,
     )
     .unwrap()
+}
+
+#[test]
+fn bound_session_recovery_checks_unsealed_children_in_the_same_read() {
+    let (store, attempts) = setup(2);
+    let attempt = &attempts[0];
+    seal(&store, std::slice::from_ref(attempt));
+    let id = attempt.derive().unwrap().0;
+    let other = attempts[1].derive().unwrap().0;
+    let seal_slot = seal_key(store.scope.tenant_id, store.scope.repository_id, id).unwrap();
+    store
+        .overrides
+        .lock()
+        .unwrap()
+        .insert(seal_slot, ImmutableRead::Absent);
+
+    let recover = |attempt: &SealAttempt, expected| {
+        ready(recover_bound_requests_async(
+            &store,
+            &(),
+            &store.head,
+            store.scope,
+            &[(attempt.idempotency_key.clone(), expected)],
+            &|| Ok(()),
+        ))
+    };
+    assert_eq!(
+        recover(attempt, id).unwrap(),
+        [RequestRecovery::SealNotObserved]
+    );
+    assert_eq!(
+        store.reads.load(Ordering::SeqCst),
+        2,
+        "one binding and one seal"
+    );
+    for (attempt, expected) in [(attempt, other), (&attempts[1], other)] {
+        let before = store.reads.load(Ordering::SeqCst);
+        assert!(matches!(
+            recover(attempt, expected),
+            Err(BoundRecoveryFailure::BindingMismatch)
+        ));
+        assert_eq!(store.reads.load(Ordering::SeqCst), before + 1);
+    }
+    let binding_slot = idempotency_binding_key(
+        store.scope.tenant_id,
+        store.scope.repository_id,
+        store.scope.principal_id,
+        &attempt.idempotency_key,
+    )
+    .unwrap();
+    store
+        .overrides
+        .lock()
+        .unwrap()
+        .insert(binding_slot.clone(), ImmutableRead::Present(vec![0xff]));
+    assert!(matches!(
+        recover(attempt, id),
+        Err(BoundRecoveryFailure::BindingMismatch)
+    ));
+    store.overrides.lock().unwrap().clear();
+    *store.unreadable.lock().unwrap() = Some(binding_slot);
+    assert!(matches!(
+        recover(attempt, id),
+        Err(BoundRecoveryFailure::BindingRead(
+            AuthorityFailure::Ambiguous(crate::AmbiguityReason::Cancelled)
+        ))
+    ));
+    *store.unreadable.lock().unwrap() = None;
+    publish(&store, std::slice::from_ref(attempt));
+    assert!(recover(attempt, id).unwrap()[0].terminal().is_some());
+    assert_eq!(store.writes.load(Ordering::SeqCst), 0);
 }
 
 #[test]
