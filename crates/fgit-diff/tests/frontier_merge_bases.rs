@@ -698,27 +698,70 @@ fn crisscross_and_octopus_bases_are_exact_above_a_long_shared_history() {
         assert_eq!(result, expected, "{left} / {right}");
         assert_eq!(frontier(&graph, right, left, generous()).0, expected);
     }
-    // Two incomparable bases are proved incomparable only by draining their
-    // shared history; a profile too small for that refuses instead of
-    // returning one of them.
-    let (_, drained) = frontier(&graph, x, y, generous());
-    assert!(drained.visited_commits > 300, "{drained:?}");
+    // The common boundary at 300 proves both bases without draining the chain.
+    let (actual, multiple) = frontier(&graph, x, y, profile());
     assert_eq!(
-        frontier(
-            &graph,
-            x,
-            y,
-            MergeBaseLimits {
-                max_commits: 100,
-                max_edges: 400
-            }
-        )
-        .0,
-        Err(MergeBaseError::CommitLimitExceeded { limit: 100 })
+        actual,
+        Ok(MergeBaseResult::Bases(vec![left_parent, right_parent]))
     );
+    assert!(multiple.visited_commits < 12, "{multiple:?}");
     // A unique base needs no drain at all.
     let (_, unique) = frontier(&graph, octopus, third_parent, generous());
     assert!(unique.visited_commits < 12, "{unique:?}");
+}
+
+#[test]
+fn crisscross_bases_on_deep_history_share_a_boundary_after_distinct_parent_paths() {
+    let mut graph = chain_with_topic(100_000, 3);
+    // Each candidate reaches both old commits through a different parent.
+    // Reversing the parent and tip order must preserve the full base set.
+    let ancestors = [99_998, 99_999];
+    let bases = [100_004, 100_005, 100_006];
+    for (index, base) in bases.into_iter().enumerate() {
+        let bridge = 100_001 + u64::try_from(index).unwrap();
+        graph.link(bridge, &ancestors, 100_001);
+        graph.link(base, &[bridge], 100_002);
+    }
+    graph.link(100_007, &bases, 100_003);
+    graph.link(100_008, &[bases[2], bases[0], bases[1]], 100_003);
+    for (left, right) in [(100_007, 100_008), (100_008, 100_007)] {
+        let (actual, work) = frontier(&graph, left, right, profile());
+        assert_eq!(actual, Ok(MergeBaseResult::Bases(bases.to_vec())));
+        assert!(work.visited_commits < 64, "{work:?}");
+    }
+}
+
+#[test]
+fn one_shared_parent_does_not_hide_a_path_to_another_candidate() {
+    let mut graph = Graph::default();
+    graph.link(0, &[], 0);
+    graph.link(1, &[0], 100);
+    for id in 2..=40 {
+        graph.link(id, &[id - 1], 0);
+    }
+    // The parents of 41 include an apparent shared boundary at 0, but the
+    // second path passes through 1. Only 41 is a best common ancestor.
+    graph.link(41, &[0, 40], 101);
+    graph.link(42, &[1, 41], 102);
+    graph.link(43, &[41, 1], 102);
+    for (left, right) in [(42, 43), (43, 42)] {
+        let expected = Ok(MergeBaseResult::Bases(vec![41]));
+        assert_eq!(frontier(&graph, left, right, generous()).0, expected);
+        assert_eq!(merge_bases_all(&graph, left, right, generous()), expected);
+        assert!(matches!(
+            frontier(
+                &graph,
+                left,
+                right,
+                MergeBaseLimits {
+                    max_commits: 10,
+                    max_edges: 30
+                }
+            )
+            .0,
+            Err(MergeBaseError::CommitLimitExceeded { limit: 10 })
+        ));
+    }
 }
 
 #[test]

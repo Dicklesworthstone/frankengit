@@ -32,9 +32,9 @@
 //! runs while any undominated commit is queued. Both marks therefore reach `b`
 //! and it is popped as a candidate. The undominated candidates thus contain
 //! every best base and only common ancestors. One candidate is the answer. With
-//! several, domination is drained further until one remains or the queue is
-//! empty; a complete drain marks every proper ancestor of every candidate, so
-//! the survivors are exactly the best bases. No candidate means no common
+//! several, an identical unexplored boundary below all surviving candidates
+//! proves them incomparable. Otherwise domination continues until one remains
+//! or the queue empties, marking every proper ancestor of every candidate. No candidate means no common
 //! ancestor, since nothing was dominated and both closures were read in full.
 //!
 //! Refusals are observed where the traversal reads. A shallow boundary, a
@@ -42,6 +42,8 @@
 //! the full loaders do. Below the stopping frontier nothing is read, so nothing
 //! there is checked; content-addressed identities, which the caller's source
 //! must verify, already exclude a cycle there.
+
+mod boundary;
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, VecDeque};
@@ -171,8 +173,22 @@ impl<'g, G: CommitGraph> Frontier<'g, G> {
             self.expand(ordinal, paint, checkpoint)?;
         }
         // Every queued entry is dominated now and carries DOMINATED onward.
+        // Recheck the boundary as the explored graph grows. Doubling the work
+        // between probes bounds their total cost by a constant times the
+        // final admitted graph, even when no early proof is possible.
+        let mut next_probe = 0;
         while self.open > 1 {
             checkpoint().map_err(MergeBaseError::Source)?;
+            let size = self
+                .work
+                .visited_commits
+                .saturating_add(self.work.examined_edges);
+            if size >= next_probe {
+                if self.shared_boundary(&candidates, size, checkpoint)? {
+                    break;
+                }
+                next_probe = size.saturating_mul(2);
+            }
             let Some(ordinal) = self.pop(checkpoint)? else {
                 break;
             };

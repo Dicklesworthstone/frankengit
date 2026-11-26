@@ -823,9 +823,10 @@ and residue after a process crash still require garbage collection.
   publish. Merge-base discovery retires already-read ancestors as soon as a
   common base dominates them, so equal or missing dates do not force a recent
   unique-base query through the whole history. Bounded FIFO service also keeps
-  skewed timestamps from starving the other side. Wide ancestry regions or
-  multiple best bases can still exhaust the 4,096-commit bound and refuse,
-  never select a wrong base.
+  skewed timestamps from starving the other side. For criss-cross histories,
+  the reader can return every best base once their expanded parent paths
+  reach the same unexplored boundary. Wider or disconnected ancestry regions
+  can still exhaust the 4,096-commit limit and refuse.
 - Forge-position and outbox state have 16,384-entry bounds; the node writer
   gate is one. Required-check history scans are independently bounded.
   These do not establish sustained or extreme-scale operation.
