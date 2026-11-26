@@ -21,6 +21,8 @@ pub(in super::super) struct TerminalDispatch {
 }
 
 impl TerminalDispatch {
+    const DEFINITION_REFUSED: u8 = 6;
+
     fn from_native(
         selected: usize,
         reason: &str,
@@ -32,6 +34,7 @@ impl TerminalDispatch {
             "workflow_refused" => 3,
             "workflow_timed_out" => 4,
             "workflow_output_limit" => 5,
+            "definition_refused" if selected == 0 => Self::DEFINITION_REFUSED,
             _ => return Err(invalid("watch terminal dispatch is not proved closed")),
         };
         if selected > 32 {
@@ -46,6 +49,10 @@ impl TerminalDispatch {
 
     pub(super) const fn permits_empty_prefix(self) -> bool {
         self.reason == 1
+    }
+
+    pub(super) const fn is_definition_refusal(self) -> bool {
+        self.reason == Self::DEFINITION_REFUSED
     }
 }
 
@@ -217,7 +224,9 @@ impl Sources {
                     .map_err(|_| invalid("watch terminal count width"))?,
             ) as usize;
             let reason = bytes[start + 4];
-            if selected > 32 || !(1..=5).contains(&reason) {
+            let valid_reason = (1..=5).contains(&reason)
+                || (reason == TerminalDispatch::DEFINITION_REFUSED && selected == 0);
+            if selected > 32 || !valid_reason {
                 return Err(invalid("invalid watch terminal selection or reason"));
             }
             Some(TerminalDispatch {
@@ -435,6 +444,15 @@ mod tests {
         assert!(TerminalDispatch::from_native(1, "containment_unproved", [1; 32]).is_err());
         assert!(TerminalDispatch::from_native(1, "", [1; 32]).is_err());
         assert!(TerminalDispatch::from_native(33, "request_stopped", [1; 32]).is_err());
+        assert!(TerminalDispatch::from_native(1, "definition_refused", [1; 32]).is_err());
+        let refused = TerminalDispatch::from_native(0, "definition_refused", [1; 32]).unwrap();
+        for format in [Format::Sha1, Format::Sha256] {
+            let frame = empty_frame(format, Some(refused));
+            let decoded = Sources::decode(&frame, &[1; 32], &hex(&[2; 32])).unwrap();
+            assert!(decoded.terminal.unwrap().is_definition_refusal());
+            assert!(decoded.verify_selection(0, [1; 32]).is_ok());
+            assert!(decoded.runs.is_empty());
+        }
         for reason in [
             "request_stopped",
             "output_budget_exhausted",

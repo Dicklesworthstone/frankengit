@@ -45,8 +45,8 @@ class Fixture:
         (self.source/'config').write_text('[core]\nrepositoryformatversion=0\nbare=true\n' if fmt=='sha1' else '[core]\nrepositoryformatversion=1\nbare=true\n[extensions]\nobjectformat=sha256\n')
         self.effects=self.home/'effects';self.pids=self.home/'pids'
         workflow=f"name: native-watch\non: {event}\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: printf x >> '{self.effects}'; {tail.format(pids=self.pids)}\n"
-        blob=write_object(self.source,fmt,'blob',workflow.encode())
-        ci=write_object(self.source,fmt,'tree',tree([(b'100644',b'build.yml',blob)]))
+        self.workflow_blob=write_object(self.source,fmt,'blob',workflow.encode())
+        ci=write_object(self.source,fmt,'tree',tree([(b'100644',b'build.yml',self.workflow_blob)]))
         self.tree=write_object(self.source,fmt,'tree',tree([(b'40000',b'ci',ci)]))
         self.tip=None;self.revision=0;self.advance_files()
         self.scope=[self.node,TENANT,REPOSITORY]
@@ -84,6 +84,79 @@ def complete(child,out,err,expected):
 def alive(pid):
     try:return Path(f'/proc/{pid}/stat').read_text().rsplit(') ',1)[1][0]not in 'ZX'
     except FileNotFoundError:return False
+
+def definition_refusal(fmt, ordered):
+    profile = 'ordered' if ordered else 'latest'
+    f = Fixture(fmt, f'{profile}-definition-refusal')
+    watch = f.args()
+    if ordered:
+        watch.append('--ordered-branch-updates')
+
+    def poll(label, code=0):
+        return [json.loads(line) for line in invoke(label, watch, code).splitlines()]
+
+    first = poll('valid-anchor')[0]['poll']
+    watch.extend(['--publish-checks', '--principal-id', PRINCIPAL,
+                  '--expected-incarnation', first['event']['repository_incarnation']])
+    assert poll('publish-anchor')[-1]['committed_check_decisions'] == 1
+    assert f.count() == 'x'
+    good_tree = f.tree
+    source = f.source
+    bad_path = b'ci/z-invalid.yml'
+    bad_yaml = b'name: invalid\non: push\njobs:\n  check:\n    runs-on: fgit-trusted-local\n    steps:\n      - uses: external/action@v1\n'
+    bad_blob = write_object(source, fmt, 'blob', bad_yaml)
+    bad_entries = tree([(b'100644', b'build.yml', f.workflow_blob),
+                        (b'100644', b'z-invalid.yml', bad_blob)])
+    bad_ci = write_object(source, fmt, 'tree', bad_entries)
+    f.tree = write_object(source, fmt, 'tree', tree([(b'40000', b'ci', bad_ci)]))
+    f.advance()
+    rejected = f.tip
+    if ordered:
+        f.tree = good_tree
+        f.advance()
+
+    listing = ['pr', 'list', *f.scope, '--trusted-local', '--object-format', fmt]
+    authority = invoke('authority-before-refusal', listing)
+    observations = poll('reject-invalid-definition', 1)
+    rejected_poll = observations[0]['poll']
+    summary = observations[-1]
+    dispatch = rejected_poll['dispatch']
+    assert rejected_poll['event']['commit'] == rejected
+    assert rejected_poll['execution_settled']
+    assert dispatch['stop_reason'] == 'definition_refused'
+    assert dispatch['executed_count'] == 0 and not dispatch['succeeded']
+    assert dispatch['plan']['workflows'] == []
+    refusal = dispatch['plan']['definition_refusal']
+    assert bytes.fromhex(refusal['path_hex']) == bad_path and refusal['blob'] == bad_blob
+    assert bytes.fromhex(refusal['diagnostic_hex'])
+    assert not summary['requires_reconciliation'] and summary['non_green']
+    assert summary['committed_check_decisions'] == 0
+    assert invoke('authority-after-refusal', listing) == authority and f.count() == 'x'
+    case(fmt, f'{profile}-definition-refuses-before-any-job', rejected=rejected)
+
+    event_dir = Path(os.fsdecode(bytes.fromhex(rejected_poll['event']['custody_directory_hex'])))
+    dispatch_dir = Path(os.fsdecode(bytes.fromhex(dispatch['plan']['run_directory_hex'])))
+    marker = event_dir / 'settled'
+    plan = dispatch_dir / 'dispatch.json'
+    original = plan.read_bytes()
+    marker.unlink()
+    plan.write_bytes(original + b' ')
+    poll('reject-changed-refusal-plan', 2)
+    assert not marker.exists() and f.count() == 'x'
+    assert invoke('changed-plan-authority', listing) == authority
+    plan.write_bytes(original)
+    if not ordered:
+        again = poll('recover-refusal-acknowledgement')
+        assert again[0]['poll']['state'] == 'previously_settled' and marker.exists()
+        assert again[-1]['committed_check_decisions'] == 0 and f.count() == 'x'
+        f.tree = good_tree
+        f.advance()
+    repaired = poll('run-repaired-successor')
+    assert repaired[0]['poll']['event']['commit'] == f.tip and marker.exists()
+    assert repaired[-1]['committed_check_decisions'] == 1 and f.count() == 'xx'
+    assert poll('suppress-repaired-repeat')[-1]['committed_check_decisions'] == 0
+    assert f.count() == 'xx'
+    case(fmt, f'{profile}-refusal-ack-recovery-and-successor', repaired=f.tip)
 
 for fmt in ('sha1','sha256'):
     f=Fixture(fmt,'ordinary')
@@ -130,4 +203,6 @@ for fmt in ('sha1','sha256'):
         if pid and alive(pid):os.kill(pid,signal.SIGKILL)
     interrupted.advance();blocked=interrupted.poll(code=1);assert blocked[0]['poll']['state']=='blocked_unresolved' and interrupted.count()=='x';case(fmt,'active-drain-blocks-later-events')
     old=f.count();invalid=f.args();invalid.extend(['--event','push']);invoke('reject-caller-event',invalid,2);assert f.count()==old;case(fmt,'caller-event-refused')
+    definition_refusal(fmt, ordered=False)
+    definition_refusal(fmt, ordered=True)
 (root/'results.json').write_text(json.dumps(results,indent=2))

@@ -121,6 +121,14 @@ Cancellation during earlier source discovery, an error without a returned
 terminal dispatch, an unfinished `Started` owner, abrupt termination and
 unproved descendant containment remain unresolved.
 
+A branch push rejected during definition compilation uses the v2 completion
+handoff with reason `definition_refused`, zero selected and executed children,
+and the committed dispatch-plan digest. The plan binds the refused definition's
+path and blob to the event's exact source. Recovery rejects a changed plan or
+unexpected child and restores only the missing settlement acknowledgement.
+Publication has no check to submit for that event. Latest and ordered branch
+watches can then observe a corrected commit with the same custody directory.
+
 ## What is verified
 
 The completion handoff must name the exact scope and event. Its original

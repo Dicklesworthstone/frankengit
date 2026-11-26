@@ -4,7 +4,7 @@ use super::{
     Budget, GitOid, OneNode, OsStrExt, Path, PrivateDirectory, RefName, Run, Sources,
     TrustedWorkflowFailure, checkpoint, hex, invalid, read_private,
 };
-use crate::treefs_workspace::trusted_workflow::durable::dispatch::child_id;
+use crate::treefs_workspace::trusted_workflow::durable::dispatch::{child_id, workflow_child};
 use fgit_crypto::sha256_digest;
 use fgit_schema::json::{self, Object, Value};
 use std::collections::BTreeSet;
@@ -147,6 +147,42 @@ pub(super) fn dispatch(
     if definitions.len() > 32 {
         return Err(invalid("watch dispatch workflow bound exceeded"));
     }
+    match (
+        sources
+            .terminal
+            .is_some_and(|terminal| terminal.is_definition_refusal()),
+        plan.get("definition_refusal"),
+    ) {
+        (true, Some(refusal))
+            if trigger == "push"
+                && reference.as_bytes().starts_with(b"refs/heads/")
+                && definitions.is_empty() =>
+        {
+            let refusal = object(refusal)?;
+            let path = path_bytes(text(refusal, "path_hex")?)?;
+            let blob = GitOid::from_hex(node.object_format(), text(refusal, "blob")?)
+                .map_err(|_| invalid("invalid refused workflow blob"))?;
+            let diagnostic = text(refusal, "diagnostic_hex")?;
+            if !workflow_child(&path, workflow_directory)
+                || blob.is_zero()
+                || diagnostic.len() > 2048
+                || diagnostic.len() % 2 != 0
+                || diagnostic.is_empty()
+                || !diagnostic
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(invalid("invalid watch definition refusal"));
+            }
+            equal_text(plan, "source_head", text(event, "observed_head")?)?;
+        }
+        (false, None) => {}
+        _ => {
+            return Err(invalid(
+                "watch definition refusal differs from its terminal record",
+            ));
+        }
+    }
     let mut selected = Vec::new();
     let mut previous: Option<Vec<u8>> = None;
     let mut seen = BTreeSet::new();
@@ -154,12 +190,7 @@ pub(super) fn dispatch(
         checkpoint(live)?;
         let definition = object(definition)?;
         let path = path_bytes(text(definition, "path_hex")?)?;
-        let tail = path
-            .strip_prefix(workflow_directory)
-            .and_then(|tail| tail.strip_prefix(b"/"))
-            .ok_or_else(|| invalid("watch workflow is outside the original directory"))?;
-        if tail.contains(&b'/')
-            || !(tail.ends_with(b".yml") || tail.ends_with(b".yaml"))
+        if !workflow_child(&path, workflow_directory)
             || previous.as_ref().is_some_and(|previous| previous >= &path)
         {
             return Err(invalid("watch workflow order or direct path differs"));

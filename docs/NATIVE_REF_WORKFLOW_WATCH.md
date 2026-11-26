@@ -85,6 +85,14 @@ create no check. A repeated settled event returns `previously_settled` without
 executing or claiming its report succeeded. A missing or invalid settlement
 cannot be promoted from a process exit, candidate file or report snippet.
 
+For a branch push watch, a definition rejected by the native compiler or its
+UTF-8 decoder settles as `definition_refused` with zero jobs and zero checks.
+The dispatch plan retains the exact source commit, workflow path and blob, and
+a bounded diagnostic in hex. This lets a corrected push advance the same watch.
+An ordered watch also retains a refused intermediate commit before moving on to
+its successor. An incomplete changed-path comparison or uncertain execution
+still blocks later events.
+
 A missing final settlement can be recovered automatically when the original
 `check-sources` completion handoff and every original closed execution receipt
 and journal pin verify. Polling, retained check publication and owned service

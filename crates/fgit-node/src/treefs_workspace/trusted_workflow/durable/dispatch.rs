@@ -125,7 +125,7 @@ fn event_supported(event: &str) -> bool {
     matches!(event, "push" | "workflow_dispatch" | "pull_request")
 }
 
-fn workflow_child(path: &[u8], directory: &[u8]) -> bool {
+pub(super) fn workflow_child(path: &[u8], directory: &[u8]) -> bool {
     path.strip_prefix(directory)
         .and_then(|rest| rest.strip_prefix(b"/"))
         .is_some_and(|name| {
@@ -318,6 +318,9 @@ impl OneNode {
         path_basis: Option<PathBasis>,
         reserve: Option<impl FnOnce() -> Result<(), TrustedWorkflowFailure> + Send>,
     ) -> Result<TrustedWorkflowDispatch, TrustedWorkflowFailure> {
+        let retain_definition_refusal = reserve.is_some()
+            && event == "push"
+            && reference.as_bytes().starts_with(b"refs/heads/");
         let bytes = ByteCount::try_new("workflow source", FETCH_BYTES, FETCH_BYTES)
             .map_err(|_| TrustedWorkflowFailure::InvalidInput("source budget"))?;
         let declared = paths
@@ -386,6 +389,7 @@ impl OneNode {
                             source,
                             path_basis,
                             tag_tip,
+                            retain_definition_refusal,
                         )
                     })();
                     *observed
@@ -435,6 +439,7 @@ fn dispatch_at<A: GitHashAlgorithm>(
     source: &crate::treefs_workspace::NodeTreeSource<'_>,
     path_basis: Option<PathBasis>,
     tag_tip: Option<GitOid>,
+    retain_definition_refusal: bool,
 ) -> Result<TrustedWorkflowDispatch, TrustedWorkflowFailure> {
     let invalid = TrustedWorkflowFailure::InvalidInput;
     let live = || workspace_request_live(request) && started.elapsed() < limits.run_timeout;
@@ -454,6 +459,7 @@ fn dispatch_at<A: GitHashAlgorithm>(
     let (mut source_bytes, mut jobs, mut steps) = (0usize, 0usize, 0usize);
     let mut reference_filtered = false;
     let mut path_changes: Option<SourcePathChanges> = None;
+    let mut definition_refusal = None;
     for entry in entries {
         if !live() {
             return Err(invalid("dispatch stopped during definition preflight"));
@@ -465,10 +471,26 @@ fn dispatch_at<A: GitHashAlgorithm>(
             .checked_add(body.len())
             .filter(|n| *n <= MAX_WORKFLOW_BYTES)
             .ok_or_else(|| invalid("dispatch workflow sources exceed 1 MiB"))?;
-        let plan = WorkflowPlan::compile(
-            std::str::from_utf8(body).map_err(|_| invalid("workflow is not UTF-8"))?,
-        )
-        .map_err(TrustedWorkflowFailure::Workflow)?;
+        let compiled = std::str::from_utf8(body)
+            .map_err(|_| invalid("workflow is not UTF-8"))
+            .and_then(|source| {
+                WorkflowPlan::compile(source).map_err(TrustedWorkflowFailure::Workflow)
+            });
+        let plan = match compiled {
+            Ok(plan) => plan,
+            Err(error) if retain_definition_refusal => {
+                // Compilation happens before any child or artifact session is
+                // opened. Preserve the rejected definition and discard the
+                // partially compiled plan so no earlier valid job can run.
+                definition_refusal = Some((entry, error));
+                definitions.clear();
+                jobs = 0;
+                reference_filtered = false;
+                path_changes = None;
+                break;
+            }
+            Err(error) => return Err(error),
+        };
         reference_filtered |= plan.graph().triggers.iter().any(|trigger| {
             trigger.name == event
                 && (trigger.branch_filter.is_some() || trigger.tag_filter.is_some())
@@ -550,11 +572,13 @@ fn dispatch_at<A: GitHashAlgorithm>(
             selected,
         });
     }
-    if artifacts.is_some_and(|config| {
-        config
-            .selected_workflows()
-            .any(|path| !definitions.iter().any(|d| d.selected && d.path == path))
-    }) {
+    if definition_refusal.is_none()
+        && artifacts.is_some_and(|config| {
+            config
+                .selected_workflows()
+                .any(|path| !definitions.iter().any(|d| d.selected && d.path == path))
+        })
+    {
         return Err(invalid(
             "artifact selection names an absent dispatch workflow",
         ));
@@ -588,6 +612,7 @@ fn dispatch_at<A: GitHashAlgorithm>(
         }
     }
     let artifact_session = artifacts
+        .filter(|_| definition_refusal.is_none())
         .map(|config| artifacts::Session::open(node, config))
         .transpose()?;
     if let Some(session) = &artifact_session {
@@ -672,12 +697,24 @@ fn dispatch_at<A: GitHashAlgorithm>(
         write!(identity, ",\"artifact_contract\":{}", config.to_json())
             .expect("writing to a String cannot fail");
     }
+    let stop_reason = definition_refusal.map(|(entry, error)| {
+        let diagnostic = error.to_string().chars().take(256).collect::<String>();
+        write!(
+            identity,
+            ",\"definition_refusal\":{{\"path_hex\":\"{}\",\"blob\":\"{}\",\"diagnostic_hex\":\"{}\"}}",
+            hex(entry.path().as_bytes()),
+            hex(entry.source_oid().digest_bytes()),
+            hex(diagnostic.as_bytes())
+        )
+        .expect("writing to a String cannot fail");
+        "definition_refused"
+    });
     let mut report = TrustedWorkflowDispatch {
         run_directory,
         identity,
         definitions,
         runs: Vec::new(),
-        stop_reason: None,
+        stop_reason,
     };
     if !live() {
         return Err(invalid("dispatch stopped before batch reservation"));
