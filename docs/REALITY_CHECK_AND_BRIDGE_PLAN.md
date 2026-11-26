@@ -64,7 +64,9 @@ that revision. The same executable accepted all eight original inputs. A
 reopened branch listing matched stock Git's complete reference and object IDs
 in SHA-1 and SHA-256, including byte FF, in loose and packed layouts. Bead
 `.4.60`, comment 6293, retains the exact replay and executable. Its broader
-Tier A acceptance remains open.
+Tier A acceptance remains open. The repository suite and receipt generator
+also passed all 18 declared rows and all 624 checks at `5ef8e378` using that
+debug executable. Comment 6294 retains the machine receipt.
 [Native import reader](../crates/fgit-node/src/loose_import/source_io.rs)
 
 At `a2b7bd4c`, a release-proof check now catches a lost transaction outcome in
