@@ -122,8 +122,8 @@ impl WorkflowWatchConfig {
         self
     }
 
-    /// Use the settled branch events to resume ordered execution. The final
-    /// configuration must select a plain branch with local execution only.
+    /// Use the settled branch events to resume ordered execution on a plain
+    /// branch. An explicit publisher still uses current-tip check admission.
     #[must_use]
     pub const fn with_ordered_branch_updates(mut self) -> Self {
         self.ordered_branch_updates = true;
@@ -262,15 +262,12 @@ impl WorkflowWatchConfig {
     pub fn validate(&self) -> io::Result<()> {
         if self.ordered_branch_updates
             && (!self.reference.as_bytes().starts_with(b"refs/heads/")
-                || self.publisher.is_some()
                 || self.pull_request.is_some()
                 || self.pull_requests.is_some()
                 || self.merge_queue.is_some()
                 || self.merge_candidate.is_some())
         {
-            return Err(invalid(
-                "ordered workflow service requires a plain branch without automatic check publication",
-            ));
+            return Err(invalid("ordered workflow service requires a plain branch"));
         }
         if self.pull_requests.is_some()
             && let Some(merge) = &self.merge_candidate
@@ -1242,6 +1239,8 @@ impl Custody {
         let owner = Owner::open(&root).map_err(custody)?;
         let events = config.run_parent.join(format!("watch-{}", hex(&scope)));
         let _event_owner = Owner::open(&events).map_err(custody)?;
+        reporting::check_branch_order(&events, &scope, config.ordered_branch_updates)
+            .map_err(custody)?;
         if let Some(merge) = &config.merge_candidate {
             merge.bind(&events).map_err(custody)?;
         }

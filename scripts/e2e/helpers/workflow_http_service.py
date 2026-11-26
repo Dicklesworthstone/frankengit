@@ -62,7 +62,7 @@ class Server:
     source_reads = False
 
     def __init__(self, fixture, label, *, publish=False, attempt=30, source_reads=False,
-                 ordered=False):
+                 ordered=False, reference_bytes=None):
         self.fixture = fixture
         self.source_reads = source_reads
         self.stop_file = fixture.root / f"{label}.stop"
@@ -70,6 +70,9 @@ class Server:
         self.diagnostic = fixture.root / f"{label}.err"
         self.endpoint = None
         args = arguments(fixture, self.stop_file, publish=publish, attempt=attempt)
+        if reference_bytes is not None:
+            at = args.index("--workflow-ref")
+            args[at:at + 2] = ["--workflow-ref-hex", reference_bytes.hex()]
         if ordered:
             args.append("--workflow-ordered-branch-updates")
         if source_reads:

@@ -14,6 +14,8 @@ mod settlement;
 pub(super) use settlement::recover as recover_settlement;
 pub(super) use settlement::verify_complete;
 
+const ORDERED_BRANCH_BINDING: &str = "ordered-branch-updates";
+
 /// Counts refer to observed canonical decisions, including historical retries.
 /// Previously reported events are suppression records, never passing checks.
 #[derive(Debug, Default)]
@@ -276,26 +278,25 @@ pub(super) fn scope(node: &OneNode, reference: &RefName, directory: &[u8]) -> [u
     ])
 }
 pub(super) fn event_entries(root: &Path) -> Result<Vec<fs::DirEntry>, TrustedWorkflowFailure> {
+    let metadata = [
+        "owner.lock",
+        "publisher",
+        "merge-config",
+        "landing-principal",
+        "refresh-principal",
+        "queue-refresh",
+        ORDERED_BRANCH_BINDING,
+    ];
+    let maximum_entries = MAX_EVENTS + metadata.len();
     let mut entries = fs::read_dir(root)
         .map_err(io)?
-        .take(MAX_EVENTS + 7)
+        .take(maximum_entries + 1)
         .collect::<Result<Vec<_>, _>>()
         .map_err(io)?;
-    if entries.len() > MAX_EVENTS + 6 {
+    if entries.len() > maximum_entries {
         return Err(invalid("ref watcher retained-event limit exceeded"));
     }
-    entries.retain(|entry| {
-        ![
-            "owner.lock",
-            "publisher",
-            "merge-config",
-            "landing-principal",
-            "refresh-principal",
-            "queue-refresh",
-        ]
-        .iter()
-        .any(|name| entry.file_name() == *name)
-    });
+    entries.retain(|entry| !metadata.iter().any(|name| entry.file_name() == *name));
     if entries.len() > MAX_EVENTS {
         return Err(invalid("ref watcher retained-event limit exceeded"));
     }
@@ -315,6 +316,43 @@ pub(super) fn capture(
 fn bind_reporter(root: &Path, expected: &[u8; 32]) -> Result<(), TrustedWorkflowFailure> {
     bind_identity(root, "publisher", expected)
 }
+
+fn branch_order_identity(scope: &[u8; 32]) -> [u8; 32] {
+    commitment(&[b"frankengit/watch-ordered-branch-updates/v1", scope])
+}
+
+/// Called with the event owner held so a competing latest-only poll cannot
+/// reserve an event while this scope is enabling ordered delivery.
+pub(super) fn bind_branch_order(
+    root: &Path,
+    scope: &[u8; 32],
+) -> Result<(), TrustedWorkflowFailure> {
+    bind_identity(root, ORDERED_BRANCH_BINDING, &branch_order_identity(scope))
+}
+
+/// A legacy scope can start either mode. Once ordered delivery has been
+/// bound, a latest-only poll would be able to advance past undispatched work.
+pub(super) fn check_branch_order(
+    root: &Path,
+    scope: &[u8; 32],
+    ordered: bool,
+) -> Result<(), TrustedWorkflowFailure> {
+    let path = root.join(ORDERED_BRANCH_BINDING);
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io(error)),
+        Ok(_) if !ordered => Err(invalid("watch scope requires ordered branch updates")),
+        Ok(_) => {
+            if read_private(&path, 32)? != branch_order_identity(scope) {
+                return Err(invalid(
+                    "watch configuration differs from original bound identity",
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
 pub(super) fn bind_identity(
     root: &Path,
     name: &str,

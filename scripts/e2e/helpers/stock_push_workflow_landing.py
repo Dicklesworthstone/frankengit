@@ -86,6 +86,14 @@ def refs(f):
     return dict(line.strip().split(" -> ", 1) for line in raw.splitlines() if " -> " in line)
 
 
+def byte_branches(f):
+    page = json.loads(f.campaign.invoke("canonical-byte-branches", [
+        "branch", "list", *f.scope, "--trusted-local", "--object-format", f.format, "--limit", 100,
+    ]))
+    assert page["node_closed"] and not page["has_more"]
+    return {bytes.fromhex(branch["reference_hex"]): branch["tip"] for branch in page["branches"]}
+
+
 def grant_tip_sync(f):
     token = secrets.token_hex(32)
     with f.credentials.open("a") as grants:
@@ -491,25 +499,35 @@ def check_pagination(campaign, fmt):
                     final_page=len(last["checks"]), published=len(rows), snapshot=page["snapshot_token"])
 
 
-def push_two_workflow_trees(f):
+def push_two_workflow_trees(f, *, second_marker=False, reference=REF):
     run, first = fresh_push_source(f)
     with receive_listener(f) as address:
         def push(label, tip):
+            if reference != REF:
+                upstream("run", PIN, run, "client", "--", "update-ref", reference, tip)
+            refspec = f"{reference}:{reference}"
             upstream("push-loopback", PIN, run, label, address, f"/{REPOSITORY}.git",
-                     "client", "plain", f"{REF}:{REF}")
+                     "client", "plain", refspec)
             transcript = run / "transcripts" / label
-            porcelain = (transcript / "stdout.bin").read_text()
-            assert f"{REF}:{REF}" in porcelain and "[up to date]" not in porcelain, porcelain
+            porcelain = (transcript / "stdout.bin").read_bytes()
+            assert os.fsencode(refspec) in porcelain and b"[up to date]" not in porcelain, porcelain
             shutil.copyfile(transcript / "receipt.tsv", f.root / f"{label}.tsv")
-            assert refs(f)[REF] == tip
+            if reference == REF:
+                assert refs(f)[reference] == tip
+            else:
+                assert byte_branches(f)[os.fsencode(reference)] == tip
         push("ordered-first", first)
-        workflow = (f"name: second-snapshot\non: push\njobs:\n  a:\n"
+        if second_marker:
+            path, data = "ci/replayed.txt", b"second-snapshot\n"
+        else:
+            path = "ci/build.yml"
+            data = (f"name: second-snapshot\non: push\njobs:\n  a:\n"
                     f"    runs-on: fgit-trusted-local\n    steps:\n"
                     f"      - run: printf 'second-snapshot\\n' >> {shlex.quote(str(f.effects))}\n").encode()
         stream = (f"commit {REF}\ncommitter CI Source <source@example.test> 1720000001 +0000\n"
                   f"data 6\nsecond\nfrom {first}\nM 100644 inline pushed.txt\n"
-                  f"data 10\nnext bytes\nM 100644 inline ci/build.yml\ndata {len(workflow)}\n").encode()
-        stream += workflow + b"\n\ndone\n"
+                  f"data 10\nnext bytes\nM 100644 inline {path}\ndata {len(data)}\n").encode()
+        stream += data + b"\n\ndone\n"
         upstream("run", PIN, run, "client", "--", "fast-import", "--quiet", data=stream)
         second = upstream("run", PIN, run, "client", "--", "rev-parse", REF)
         assert upstream("run", PIN, run, "client", "--", "rev-parse", REF + "^") == first
@@ -622,6 +640,207 @@ def ordered_http_restart(campaign, fmt):
                     executed=f.effects_count(), recovered_settlement=True, checks_published=0)
 
 
+def ordered_http_publish(campaign, fmt):
+    label = "ordered-http-publish"
+    effects = shlex.quote(str(campaign.root / f"{fmt}-{label}" / "effects"))
+    # The immutable workflow graph survives both pushes. A difference in its
+    # input tree identifies the second execution independently of the report.
+    workflow = ("name: ordered-publication\non: push\njobs:\n  a:\n"
+                "    runs-on: fgit-trusted-local\n    steps:\n"
+                "      - run: if test -f ci/replayed.txt; then cat ci/replayed.txt; "
+                f"else printf 'executed\\n'; fi >> {effects}\n")
+    f = Fixture(campaign, fmt, label, workflow_source=workflow)
+    credentials(f)
+    f.open_pull()
+
+    with Server(f, "initial-publisher", ordered=True, publish=True) as server:
+        server.ready()
+        previous = server.check()
+        server.wait(lambda _: all((event / "reported").is_file() for event in event_directories(f)))
+        drained, _ = server.stop()
+        assert drained["checks_committed"] == drained["dispatched"] == 1
+
+    first, second = push_two_workflow_trees(f, second_marker=True)
+    f.tips[1] = second
+    f.current = 1
+    f.open_pull()
+    installed = json.loads(campaign.invoke("protect-ordered-check", [
+        "protection", "set", *f.scope, "--trusted-local", "--principal", PRINCIPAL,
+        "--admin", PRINCIPAL, "--idempotency-key", "ordered-protection",
+        "--expected-version", 0, "--expected-epoch", 1, "--object-format", fmt,
+        "--require-check", f"{TARGET}:{REF}:{PRINCIPAL}:{previous['graph_root']}:a",
+    ]))
+    assert installed["committed"], installed
+
+    def try_update(key, expected):
+        return json.loads(campaign.invoke(key, [
+            "branch", "update", *f.scope, "--trusted-local", "--principal", PRINCIPAL,
+            "--idempotency-key", key, "--object-format", fmt,
+            "--ref", TARGET, "--expected-tip", f.base, "--target", second,
+        ], code=expected))
+
+    refused = try_update("new-tip-before-check", 3)
+    assert refused["refusal_code"] == "ProtectedRefTransitionDenied", refused
+    with Server(f, "catch-up-publisher", ordered=True, publish=True) as server:
+        server.ready()
+        current = server.check()
+        server.wait(lambda _: len(event_directories(f)) == 3 and all(
+            (event / "reported").is_file() for event in event_directories(f)))
+        drained, _ = server.stop(code=1)
+    assert current["id"] != previous["id"] and current["graph_root"] == previous["graph_root"]
+    assert drained["dispatched"] == 2 and drained["checks_committed"] == drained["checks_refused"] == 1
+    assert drained["non_green"] and not drained["requires_reconciliation"]
+    assert not drained["publication_pending"] and not drained["interrupted"]
+    assert refs(f)[TARGET] == f.base and refs(f)[REF] == second
+
+    historical, = [event for event in event_directories(f)
+                   if json.loads((event / "event.json").read_bytes())["commit"] == first]
+    original = f.root / "reported-before-recovery"
+    (historical / "reported").rename(original)
+    position = ["at", *f.scope, "latest"]
+    before = campaign.invoke("authority-before-report-recovery", position)
+    recovered = [json.loads(line) for line in campaign.invoke("recover-original-check-refusal", [
+        *f.arguments(publish=True), "--ordered-branch-updates"], code=1).splitlines()]
+    decision, = [row for row in recovered if row["type"] == "workflow_check_set_decision"]
+    assert decision["refusal_code"] == "TargetRefMoved" and decision["historical_outcome"], decision
+    assert (historical / "reported").read_bytes() == original.read_bytes()
+    assert campaign.invoke("authority-after-report-recovery", position) == before
+    assert f.effects.read_text().splitlines() == ["executed", "executed", "second-snapshot"]
+    assert try_update("new-tip-after-check", 0)["command_committed"]
+    assert refs(f)[TARGET] == refs(f)[REF] == second
+    campaign.record(fmt, "ordered-http-publishes-exact-current-check", first=first, second=second,
+                    prior_check=previous["id"], current_check=current["id"],
+                    recovered_refusal=decision["refusal_code"], landed=second)
+
+
+def ordered_http_byte_ref(campaign, fmt):
+    f = Fixture(campaign, fmt, "ordered-http-byte-ref")
+    credentials(f)
+    raw = b"refs/heads/topic-\xff"
+    reference = os.fsdecode(raw)
+    initial_tip = f.tips[0]
+    created = json.loads(campaign.invoke("create-ordered-byte-source", [
+        "branch", "create", *f.scope, "--trusted-local", "--object-format", fmt,
+        "--principal", PRINCIPAL, "--idempotency-key", "byte-source",
+        "--ref-hex", raw.hex(), "--target", initial_tip,
+    ]))
+    assert created["command_committed"], created
+
+    def open_pull(number, tip):
+        campaign.invoke("open-ordered-byte-pr", [
+            "pr", "open", *f.scope, number, "--trusted-local", "--object-format", fmt,
+            "--principal", PRINCIPAL, "--idempotency-key", f"ordered-byte-pr-{number}",
+            "--expected-version", 0, "--source-ref-hex", raw.hex(), "--target-ref", TARGET,
+            "--expected-source", tip, "--expected-target", f.base,
+            "--title", "Checks on the exact byte-named branch", "--body", "Raw source ref.",
+        ])
+
+    def run_service(label, expected_runs, code=0):
+        with Server(f, label, ordered=True, publish=True, reference_bytes=raw) as server:
+            server.ready()
+            check = server.check()
+            number = f.current + 1
+            status, body = server.request("GET", f"/api/v1/pulls/{number}")
+            assert status == 200, (status, body)
+            subject = json.loads(body)["pull_request"]["data"]
+            assert subject["source_ref"] is None and subject["source_ref_hex"] == raw.hex()
+            assert subject["source_tip"] == f.tips[f.current]
+            server.wait(lambda _: all((event / "reported").is_file() for event in event_directories(f)))
+            drained, _ = server.stop(code=code)
+        assert drained["dispatched"] == expected_runs and not drained["requires_reconciliation"]
+        return check, drained
+
+    open_pull(1, initial_tip)
+    initial, initial_drain = run_service("byte-watch-initial", 1)
+    assert initial_drain["checks_committed"] == 1 and initial_drain["checks_refused"] == 0
+    before = byte_branches(f)
+    first, second = push_two_workflow_trees(f, reference=reference)
+    assert f.effects_count() == 1
+    f.tips[1], f.current = second, 1
+    open_pull(2, second)
+    latest, catch_up = run_service("byte-watch-resume", 2, code=1)
+    assert catch_up["checks_committed"] == catch_up["checks_refused"] == 1
+    assert catch_up["non_green"] and not catch_up["publication_pending"]
+    assert latest["id"] != initial["id"]
+    records = [json.loads((event / "event.json").read_bytes()) for event in event_directories(f)]
+    assert len(records) == 3 and {row["commit"] for row in records} == {initial_tip, first, second}
+    assert all(row["ref_hex"] == raw.hex() for row in records)
+    assert f.effects.read_text().splitlines() == ["executed", "executed", "second-snapshot"]
+    assert byte_branches(f) == {**before, raw: second}
+    resumed, idle = run_service("byte-watch-repeat", 0)
+    assert resumed == latest and idle["checks_committed"] == idle["checks_refused"] == 0
+    assert f.effects_count() == 3
+    campaign.record(fmt, "ordered-http-byte-ref-pushes", source_ref_hex=raw.hex(),
+                    first=first, second=second, check=latest["id"], executed=3)
+
+
+def ordered_restart_requires_ordered_selection(campaign, fmt):
+    label = "ordered-custody-restart"
+    effects = shlex.quote(str(campaign.root / f"{fmt}-{label}" / "effects"))
+    workflow = ("name: ordered-custody\non: push\njobs:\n  a:\n"
+                "    runs-on: fgit-trusted-local\n    steps:\n"
+                "      - run: if test -f ci/replayed.txt; then cat ci/replayed.txt; "
+                f"else printf 'executed\\n'; fi >> {effects}\n")
+    f = Fixture(campaign, fmt, label, workflow_source=workflow)
+    credentials(f)
+    ordinary = f.arguments()
+    ordered = [*ordinary, "--ordered-branch-updates"]
+
+    def poll(label, args, code=0):
+        return [json.loads(row) for row in campaign.invoke(label, args, code=code).splitlines()]
+
+    def settled_commits():
+        return {json.loads((event / "event.json").read_bytes())["commit"]
+                for event in event_directories(f) if (event / "settled").is_file()}
+
+    start = poll("before-order-activation", ordinary)
+    assert start[0]["poll"]["event"]["commit"] == f.tips[0]
+    assert poll("activate-ordered", ordered)[0]["poll"]["state"] == "previously_settled"
+    original, = event_directories(f)
+    original_settlement = (original / "settled").read_bytes()
+    first, second = push_two_workflow_trees(f, second_marker=True)
+    before = refs(f)
+    assert before[REF] == second
+
+    refused = poll("refuse-latest-cli-restart", ordinary, code=2)
+    assert all(row["type"] != "workflow_watch_poll" for row in refused)
+    assert "watch scope requires ordered branch updates" in refused[-1]["operation_error"], refused
+    assert refused[-1]["node_closed"] and refused[-1]["cleanup_error"] is None
+    with Server(f, "refuse-latest-http-restart") as server:
+        assert server.child.wait(timeout=20) == 2, server.diagnostic.read_bytes()
+        assert "watch scope requires ordered branch updates" in server.diagnostic.read_text()
+        assert all(row["type"] != "smart_http_listening" for row in server.rows())
+        drained, = [row for row in server.rows() if row["type"] == "workflow_service_drained"]
+        assert drained["node_closed"] and drained["service_failed"] and drained["dispatched"] == 0
+
+    assert settled_commits() == {f.tips[0]} and event_directories(f) == [original]
+    assert f.effects_count() == 1 and refs(f) == before
+    assert (original / "settled").read_bytes() == original_settlement
+
+    marker = original.parent / "ordered-branch-updates"
+    binding = marker.read_bytes()
+    assert len(binding) == 32
+    marker.write_bytes(bytes([binding[0] ^ 1]) + binding[1:])
+    corrupted = poll("refuse-corrupt-order-binding", ordered, code=2)
+    assert all(row["type"] != "workflow_watch_poll" for row in corrupted)
+    assert "watch configuration differs from original bound identity" in corrupted[-1]["operation_error"]
+    assert event_directories(f) == [original] and f.effects_count() == 1 and refs(f) == before
+    marker.write_bytes(binding)
+
+    with Server(f, "resume-original-order", ordered=True) as server:
+        server.ready()
+        server.wait(lambda _: settled_commits() == {f.tips[0], first, second})
+        recovered, _ = server.stop()
+        assert recovered["dispatched"] == 2 and not recovered["requires_reconciliation"]
+    repeated = poll("repeat-ordered-restart", ordered)
+    assert repeated[0]["poll"]["state"] == "previously_settled"
+    assert f.effects.read_text().splitlines() == ["executed", "executed", "second-snapshot"]
+    assert (original / "settled").read_bytes() == original_settlement
+    assert refs(f) == before
+    campaign.record(fmt, "ordered-custody-requires-ordered-restart", first=first, second=second,
+                    refused_cli=True, refused_http_before_readiness=True, executed=f.effects_count())
+
+
 def ordered_unreachable_source(campaign, fmt):
     f = Fixture(campaign, fmt, "ordered-unreachable")
     watch = ["workflow", "watch", *f.scope, TARGET, "--trusted-local", "--workflow", "ci",
@@ -668,4 +887,7 @@ if __name__ == "__main__":
         check_pagination(campaign, fmt)
         ordered_push_restart(campaign, fmt)
         ordered_http_restart(campaign, fmt)
+        ordered_http_publish(campaign, fmt)
+        ordered_http_byte_ref(campaign, fmt)
+        ordered_restart_requires_ordered_selection(campaign, fmt)
         ordered_unreachable_source(campaign, fmt)

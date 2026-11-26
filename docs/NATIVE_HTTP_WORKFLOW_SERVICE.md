@@ -43,6 +43,10 @@ fg serve-http NODE TENANT REPOSITORY 127.0.0.1:8080 \
 All workflow selection flags are explicit. `--workflow-input` repeats for distinct,
 non-overlapping repository paths, including [nested prefixes](TRUSTED_WORKFLOW_INPUTS.md);
 the workflow directory must be included in those inputs.
+Supply exactly one ref selector. `--workflow-ref` takes a full branch or tag
+name. `--workflow-ref-hex` takes the exact full name encoded as lowercase byte pairs.
+The byte selector preserves non-UTF-8 Git names through execution, settlement and
+optional check publication.
 `--workflow-format` must match the repository's SHA-1 or SHA-256 object format.
 The polling interval accepts 10–60000 milliseconds and defaults to 1000. Each
 attempt accepts a 1–3600 second deadline and defaults to 300. Pending publication,
@@ -73,8 +77,12 @@ pending net branch change, one per poll. An older commit must still be
 reachable from the current visible branch. The selected commit's tree supplies
 the workflow and inputs.
 
-This profile retains execution and its evidence locally. Omit the check
-publisher, tag, PR and queue options. The same trusted-local acknowledgement,
+The first ordered poll binds the delivery mode in the existing watch directory.
+Keep the ordered flag on future starts using that directory and scope. A
+latest-only restart of a bound controller refuses before HTTP readiness,
+leaving the pending branch updates for the next ordered start.
+
+Use a plain branch for ordered replay. The same trusted-local acknowledgement,
 authority checks, custody recovery, request limits and HTTP capability flags
 apply. See [ordered branch selection](NATIVE_REF_WORKFLOW_WATCH.md#ordered-branch-execution-after-a-restart)
 for reachability and history limits.
@@ -87,6 +95,10 @@ Execution alone does not publish checks. Supply **both**
 The original reporting identity remains permanently bound to its custody scope.
 Pending publication recovers under original identities before new execution;
 failed or skipped job observations are never promoted to success.
+Ordered replay can use the same publisher. A superseded job receives the
+ordinary `TargetRefMoved` decision and counts as non-green. The controller
+continues through settled events and can publish the exact current tip. A
+graceful stop exits 1 if the service observed a refusal.
 
 Optional `--workflow-pull-request NUMBER` selects the native same-repository PR
 profile. The PR must be open and its source branch must match `--workflow-ref`.

@@ -737,12 +737,16 @@ oracle_validate_loopback_push_mode() {
 }
 
 oracle_validate_loopback_ref_name() {
+    local LC_ALL=C
     local name="$1"
     local component=""
     local -a components=()
+    # Permit opaque Git name suffix bytes while retaining the restricted ASCII
+    # grammar, exact refspec names, and the loopback-only sandbox.
+    local ref_pattern=$'^refs/(heads|tags)/[A-Za-z0-9][A-Za-z0-9._/\x80-\xff-]*$'
 
     [[ "${#name}" -le 200 ]] || oracle_die "REFUSED" "loopback push ref name is too long"
-    [[ "${name}" =~ ^refs/(heads|tags)/[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || \
+    [[ "${name}" =~ ${ref_pattern} ]] || \
         oracle_die "REFUSED" "loopback push ref must be refs/heads/<name> or refs/tags/<name>"
     [[ "${name}" != *..* && "${name}" != *'//'* && "${name}" != */ && "${name}" != *.lock && "${name}" != */.* ]] || \
         oracle_die "REFUSED" "loopback push ref name contains an unsafe component"

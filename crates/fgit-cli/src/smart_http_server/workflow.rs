@@ -40,8 +40,15 @@ pub(super) fn parse(
         "sha256" => GitHashAlgorithm::Sha256,
         _ => return Err("--workflow-format must be sha1 or sha256".into()),
     };
-    let reference = RefName::try_new(required("--workflow-ref")?.as_bytes())
-        .map_err(|error| error.to_string())?;
+    let reference = match (flags.get("--workflow-ref"), flags.get("--workflow-ref-hex")) {
+        (Some(reference), None) => RefName::try_new(reference.as_bytes()),
+        (None, Some(encoded)) => RefName::try_new(&crate::workflow_command::unhex(
+            encoded,
+            fgit_types::MAX_REF_NAME_LEN,
+        )?),
+        _ => return Err("supply exactly one of --workflow-ref and --workflow-ref-hex".into()),
+    }
+    .map_err(|error| error.to_string())?;
     let interval = Duration::from_millis(number(flags, "--workflow-interval-ms", 1000, 60000)?);
     let mut config = WorkflowWatchConfig::try_new(
         format,
@@ -337,6 +344,34 @@ mod tests {
     }
 
     #[test]
+    fn service_ref_selectors_preserve_raw_bytes_and_are_exclusive() {
+        let mut arguments = server_arguments();
+        let at = arguments
+            .iter()
+            .position(|arg| arg == "--workflow-ref")
+            .unwrap();
+        arguments[at] = "--workflow-ref-hex".into();
+        arguments[at + 1] = "726566732f68656164732f746f7069632dff".into();
+        let options = parse_server(&arguments).unwrap();
+        assert_eq!(
+            options.workflow_service.unwrap().reference().as_bytes(),
+            b"refs/heads/topic-\xff"
+        );
+        for value in ["", "0", "FF", "00", "726566732f6e6f7465732f78"] {
+            let mut invalid = arguments.clone();
+            invalid[at + 1] = value.into();
+            let Err(_) = parse_server(&invalid) else {
+                panic!("accepted invalid workflow ref hex {value:?}");
+            };
+        }
+        arguments.extend(["--workflow-ref".into(), "refs/heads/topic".into()]);
+        let Err(error) = parse_server(&arguments) else {
+            panic!("accepted two workflow ref selectors");
+        };
+        assert!(error.contains("supply exactly one"));
+    }
+
+    #[test]
     fn ordered_service_accepts_plain_branch_and_refuses_other_profiles() {
         let mut arguments = server_arguments();
         arguments.push("--workflow-ordered-branch-updates".into());
@@ -356,6 +391,17 @@ mod tests {
             "--expected-incarnation".into(),
             "88".repeat(16),
         ]);
+        let configured = parse_server(&publication)
+            .unwrap()
+            .workflow_service
+            .unwrap();
+        assert_eq!(
+            configured.publisher(),
+            Some(PrincipalId::from_hex(&"77".repeat(16)).unwrap())
+        );
+        publication.pop();
+        publication.pop();
+        assert!(parse_server(&publication).is_err());
         let mut pull_request = arguments.clone();
         pull_request.extend(["--workflow-pull-request".into(), "7".into()]);
         let mut collection = arguments;
@@ -366,7 +412,7 @@ mod tests {
         ]);
         let mut queue = queue_arguments();
         queue.push("--workflow-ordered-branch-updates".into());
-        for refused in [tag, publication, pull_request, collection, queue] {
+        for refused in [tag, pull_request, collection, queue] {
             let Err(error) = parse_server(&refused) else {
                 panic!("ordered polling accepted an incompatible profile");
             };

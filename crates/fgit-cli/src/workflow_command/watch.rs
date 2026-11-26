@@ -45,7 +45,8 @@ between polls are coalesced. Unrelated forge updates do not create a new event.
 --ordered-branch-updates instead resumes from the latest settled branch event
 and executes one retained, currently reachable branch transition in order per
 poll. It runs locally and retains results in the run parent. This option requires
-a branch and excludes automatic check publication and PR or queue selection.
+a plain branch. With --publish-checks the normal current-tip guard applies.
+Superseded results receive a canonical refusal, which counts as non-green.
 Ordinary push watches accept explicit refs/heads/* or refs/tags/* references.
 Commit tags execute their peeled commit; a tag does not select a PR, merge queue
 or merge candidate and cannot publish canonical checks in this profile.
@@ -282,13 +283,9 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
     }
     let merge_candidate = crate::workflow_merge_watch::parse(&merge_fields)?;
     if ordered_branch_updates
-        && (!branch
-            || publish
-            || pull_request.is_some()
-            || merge_queue.is_some()
-            || merge_candidate.is_some())
+        && (!branch || pull_request.is_some() || merge_queue.is_some() || merge_candidate.is_some())
     {
-        return Err("--ordered-branch-updates requires a plain branch watch without automatic check publication".into());
+        return Err("--ordered-branch-updates requires a plain branch watch".into());
     }
     if tag
         && (publish

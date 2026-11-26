@@ -49,7 +49,8 @@ const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository
    [--index-symbol-state-dir <private-directory>]
    --index-ref <full-ref> [--index-ref <full-ref> ...]
    [--index-interval-secs <1..3600>] [--index-attempt-timeout-secs <1..3600>]]
-  [--workflow-trusted-local --workflow-ref <refs/heads/...>
+  [--workflow-trusted-local
+   (--workflow-ref <full-ref> | --workflow-ref-hex <full-ref-bytes>)
    --workflow-format sha1|sha256 --workflow-dir <committed-directory>
    --workflow-input <repository-path> [--workflow-input <repository-path> ...]
    --workflow-run-parent <absolute-private-directory>
@@ -104,11 +105,13 @@ native sibling of the HTTP listener. It requires --credentials-file, --continuou
 all future selected scripts with host-user privileges. Select 1-64 distinct,
 non-overlapping repository input paths covering the workflow directory, and an existing absolute private run
 parent. The worker waits 1000 ms between polls and bounds each attempt to 300 seconds
-by default. --workflow-publish-checks and --workflow-principal require an explicit
+by default. Use --workflow-ref-hex for exact branch or tag bytes instead of
+--workflow-ref. --workflow-publish-checks and --workflow-principal require an explicit
 --expected-incarnation. Workflow file/log capture requires --artifact-root. Readiness
 follows exclusive workflow custody; execution begins after readiness is flushed.
 --workflow-ordered-branch-updates replays reachable branch changes after settlement.
-It requires a plain branch and local execution without a check publisher.
+It requires a plain branch. An explicit check publisher still uses the current-tip
+guard, and refusals for superseded results count as non-green.
 Stopping drains execution and reports workflow_service_drained before HTTP drain.
 Select up to 64 exact workflow/job/output files with --workflow-artifact or its
 byte-safe hex form. Logs and files share the capture allowance: 16 MiB per payload
@@ -491,6 +494,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                     | "--index-interval-secs"
                     | "--index-attempt-timeout-secs"
                     | "--workflow-ref"
+                    | "--workflow-ref-hex"
                     | "--workflow-dir"
                     | "--workflow-input"
                     | "--workflow-run-parent"

@@ -439,7 +439,7 @@ fn validate_path(path: &[u8]) -> Result<(), String> {
     }
     Ok(())
 }
-fn unhex(text: &str, maximum: usize) -> Result<Vec<u8>, String> {
+pub(super) fn unhex(text: &str, maximum: usize) -> Result<Vec<u8>, String> {
     if text.is_empty()
         || !text.len().is_multiple_of(2)
         || text.len() > maximum * 2

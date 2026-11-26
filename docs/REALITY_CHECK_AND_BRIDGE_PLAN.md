@@ -79,6 +79,46 @@ passed 14 cases, and 36 focused Rust tests passed at the same source
 revision. Comment 6297 on `.4.12` records executable and terminal receipts.
 [HTTP controller](NATIVE_HTTP_WORKFLOW_SERVICE.md#replay-missed-branch-updates)
 
+At `c3890e06`, both ordered branch entry points accept the existing explicit
+check publisher. In each Git format, two pushes made while the HTTP controller
+was stopped executed in order. The older check received `TargetRefMoved`.
+Recovering its acknowledgement reused the same decision without another
+authority write. The exact current-tip success appeared on the PR and allowed
+a protected branch update that the earlier success could not authorize. The
+stock Git and ordinary HTTP suites passed 16 and 14 cases respectively.
+Seven native configuration refusals, the Cargo syntax lane and the native
+`fg_at` regression also passed. RCH disk admission blocked the focused Rust
+unit-test groups. Comment 6299 on `.4.12` records the exact receipts.
+[Check publication](NATIVE_WATCH_CHECK_PUBLICATION.md#interrupted-publication-and-source-movement)
+
+At `9c9e06cf`, `fg serve-http --workflow-ref-hex` selects exact Git branch
+bytes. In each Git hash format, pinned stock Git 2.54.0 made two pushes to
+the same branch ending in byte `ff` while the HTTP controller was stopped.
+On restart, the controller ran both original trees in authority order,
+refused the stale check at publication, and served the current-tip success
+on a PR whose source retained the exact branch bytes. A second restart
+dispatched and published nothing again. At harness revision `ba1282a7`,
+the stock Git suite passed 18 cases and the ordinary HTTP suite passed 14.
+Both suites used the same independently verified executable. The original
+RCH artifact delivery ran out of local space, and recovery retrieved the
+same executable. Bead `.4.12` remains in progress for historical check
+publication, ordered PR and queue triggers, and durable capsule reuse.
+[HTTP workflow reference selection](NATIVE_HTTP_WORKFLOW_SERVICE.md) · [Stock-push campaign](../scripts/e2e/suites/workflow/stock_push_landing.sh)
+
+On the `9c9e06cf` executable, a CLI or HTTP restart with latest-only
+selection could settle the second of two offline pushes and skip the first
+even after ordered mode resumed. Pinned stock Git reproduced the gap through
+both entry points in SHA-1 and SHA-256. At `1a482067`, the first ordered
+poll durably binds that mode to the existing custody scope. A latest-only
+restart refuses new execution. HTTP also refuses before readiness. Resuming
+the same scope in ordered mode ran both original trees, preserved the
+earlier settlement and repeated no jobs. The stock Git suite passed 20
+native cases and the ordinary HTTP suite passed 14 on the same
+source-verified executable. Cargo check compiled the command and its
+`fg_at` integration target. Bead `.4.12` records the separate native,
+compile and artifact transfer outcomes.
+[Ordered restart and upgrade](NATIVE_REF_WORKFLOW_WATCH.md#ordered-branch-execution-after-a-restart)
+
 The proof bridge at `b4bf422a` follows the same sealed loser through
 re-preparation at the winner's head in both writer schedules. The disjoint
 writes both commit. The same-ref Rust controls refuse the losing precondition
