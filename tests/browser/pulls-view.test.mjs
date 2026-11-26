@@ -273,17 +273,23 @@ test('asset module imports and HTML resources resolve within the declared PR sta
   assert.ok(html.includes('src="../pulls-view.mjs"')); assert.ok(!html.includes('<script>'));
 });
 
-test('selecting a byte-only PR cannot leave another PR metadata proposal under it', async () => {
+test('selecting a byte-only PR replaces prior metadata with the exact new proposal', async () => {
   let requests = 0;
   const h = harness(call => {
     if (new URL(call.url).pathname.endsWith('/pulls/1') && ++requests > 1) return json(show({ pull_request: row(1, {
-      data: data({ source_ref: null, source_ref_hex: hex('refs/heads/topic') + 'ff' }) }) }));
+      data: data({ title: 'Byte-only PR', body: 'The newly selected metadata.', source_ref: null, source_ref_hex: hex('refs/heads/topic') + 'ff' }) }) }));
     return null;
   });
   await h.connect(); await h.open(); assert.equal(h.nodes.title.value, 'Title 🦀'); await h.open();
-  assert.equal(h.nodes.title.value, ''); assert.equal(h.nodes['pr-number'].value, '');
-  assert.match(h.nodes.selected.textContent, /Byte-only refs/); assert.equal(h.nodes['prepare-candidate'].disabled, false);
-  assert.match(h.nodes.selected.textContent, /Metadata editing through the text form is unavailable/);
+  assert.equal(h.nodes.title.value, 'Byte-only PR'); assert.equal(h.nodes['pr-number'].value, '1');
+  assert.equal(h.nodes.body.value, 'The newly selected metadata.');
+  assert.equal(h.nodes['source-ref-encoding'].value, 'hex'); assert.equal(h.nodes['target-ref-encoding'].value, 'text');
+  assert.equal(h.nodes['source-ref'].value, hex('refs/heads/topic') + 'ff');
+  assert.equal(h.nodes['prepare-candidate'].disabled, false);
+  h.nodes.metadata.fire('submit'); await settled();
+  assert.equal(h.app.client.pending.fields.source_ref_hex, hex('refs/heads/topic') + 'ff');
+  assert.equal(h.app.client.pending.fields.source_ref, undefined);
+  assert.equal(h.app.client.pending.fields.title, 'Byte-only PR');
 });
 test('oversized receipt files are rejected before their bytes are read', async () => {
   const h = harness(); await h.connect(); let read = false;

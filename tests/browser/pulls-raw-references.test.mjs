@@ -322,8 +322,9 @@ async function mounted(f = sample()) {
 for (const algorithm of ['sha1', 'sha256']) test(`${algorithm}: the PR view prepares and explicitly approves observed raw references without copying display labels into forms`, async () => {
   const f = sample(algorithm), h = await mounted(f);
   assert.equal(h.node('prepare-candidate').disabled, false); assert.equal(h.node('fast-forward-stage').disabled, false);
-  assert.equal(h.node('source-ref').value, ''); assert.equal(h.node('target-ref').value, '');
-  assert.equal(h.node('title').value, ''); assert.equal(h.node('pr-number').value, '');
+  assert.equal(h.node('source-ref').value, f.refs.source_ref_hex); assert.equal(h.node('source-ref-encoding').value, 'hex');
+  assert.equal(h.node('target-ref').value, f.refs.target_ref_hex); assert.equal(h.node('target-ref-encoding').value, 'hex');
+  assert.equal(h.node('title').value, data().title); assert.equal(h.node('pr-number').value, '1');
   for (const [name, value] of Object.entries({ 'policy-epoch': '1', ...commitMetadata })) h.node(name).value = String(value);
   h.submit('prepare'); await until(() => h.app.client.candidate !== null, 'raw-reference preparation and native inspection completed');
   await until(() => !h.node('review-stage').disabled);
