@@ -648,6 +648,7 @@ impl OneNode {
                     // This is an ordinary source watch. Merge candidates have
                     // already returned through their separate start owner.
                     settle_definition_refusal: !tag,
+                    watch_owns_completion: true,
                 },
                 limits,
                 artifacts,
@@ -924,6 +925,9 @@ fn finish_dispatch(
     } else {
         false
     };
+    // Once closure is proved, delivery of the optional report must not
+    // prevent a later owner from recovering the original check sources.
+    dispatch.persist_report()?;
     Ok(TrustedRefWorkflowPoll {
         state,
         event,

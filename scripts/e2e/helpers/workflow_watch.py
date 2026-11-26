@@ -161,6 +161,64 @@ def definition_refusal(fmt, ordered):
     assert f.count() == 'xx'
     case(fmt, f'{profile}-refusal-ack-recovery-and-successor', repaired=f.tip)
 
+def failed_batch_report(fmt):
+    # Block a real job until the fixture occupies the batch report's name.
+    # The job report, journal and completion files remain writable.
+    f = Fixture(fmt, 'batch-report-failure',
+                tail="printf ready > '{pids}'; while [ ! -f '{pids}.release' ]; do sleep .02; done")
+    release = f.pids.with_suffix('.release')
+    watcher, out, err = f.started('report-collision', polls=1)
+    occupied = b'occupied batch report fixture\n'
+    try:
+        wait_for(lambda: f.pids.exists() and f.pids.read_bytes() == b'ready')
+        assert watcher.poll() is None and f.count() == 'x'
+        event, = f.parent.glob('watch-*/event-*')
+        batch, = event.glob('dispatch-*')
+        assert (batch / 'dispatch.json').exists()
+        with (batch / 'report.json').open('xb') as output:
+            output.write(occupied)
+        release.touch()
+        failure = complete(watcher, out, err, 2)[-1]
+    finally:
+        release.touch()
+        if watcher.poll() is None:
+            watcher.terminate()
+            watcher.wait(timeout=12)
+    assert 'report durability failed' in failure['operation_error']
+    assert (batch / 'report.json').read_bytes() == occupied
+    child, = batch.glob('workflow-*')
+    execution = json.loads((child / 'report.json').read_bytes())
+    assert execution['workspaces_closed'] and execution['executed_commit'] == f.tip
+    handoff = event / 'check-sources'
+    settled = event / 'settled'
+    assert handoff.is_file() and settled.is_file(), 'closed run lost its original handoff'
+    case(fmt, 'late-batch-report-failure-preserves-closed-execution', commit=f.tip)
+
+    metadata = json.loads((event / 'event.json').read_bytes())
+    original = f.tip
+    auto = f.args() + ['--publish-checks', '--principal-id', PRINCIPAL,
+                       '--expected-incarnation', metadata['repository_incarnation']]
+    settled.unlink()
+    captured = [json.loads(line) for line in invoke('recover-without-batch-report', auto).splitlines()]
+    decisions = [row for row in captured if row['type'] == 'workflow_check_set_decision']
+    checks = [check for row in captured if row['type'] == 'workflow_check_set' for check in row['checks']]
+    assert len(decisions) == len(checks) == 1
+    assert decisions[0]['command_committed'] and checks[0]['source_commit'] == original
+    assert checks[0]['conclusion'] == 'success' and settled.is_file()
+    assert f.count() == 'x' and (batch / 'report.json').read_bytes() == occupied
+    repeated = [json.loads(line) for line in invoke('repeat-after-report-failure', auto).splitlines()]
+    assert repeated[-1]['committed_check_decisions'] == 0 and f.count() == 'x'
+    case(fmt, 'recover-original-check-without-replaying-jobs-or-writing-report', commit=original)
+
+    f.advance()
+    successor = [json.loads(line) for line in invoke('run-after-report-failure', auto).splitlines()]
+    poll = next(row['poll'] for row in successor if row['type'] == 'workflow_watch_poll')
+    assert poll['event']['commit'] == f.tip and poll['execution_settled']
+    assert successor[-1]['committed_check_decisions'] == 1 and f.count() == 'xx'
+    directory = Path(os.fsdecode(bytes.fromhex(poll['dispatch']['plan']['run_directory_hex'])))
+    assert json.loads((directory / 'report.json').read_bytes()) == poll['dispatch']
+    case(fmt, 'report-failure-does-not-block-next-commit', commit=f.tip)
+
 for fmt in ('sha1','sha256'):
     f=Fixture(fmt,'ordinary')
     first=f.poll(polls=2);assert [x['poll']['state']for x in first[:-1]]==['dispatched','previously_settled'] and f.count()=='x'
@@ -208,4 +266,5 @@ for fmt in ('sha1','sha256'):
     old=f.count();invalid=f.args();invalid.extend(['--event','push']);invoke('reject-caller-event',invalid,2);assert f.count()==old;case(fmt,'caller-event-refused')
     definition_refusal(fmt, ordered=False)
     definition_refusal(fmt, ordered=True)
+    failed_batch_report(fmt)
 (root/'results.json').write_text(json.dumps(results,indent=2))

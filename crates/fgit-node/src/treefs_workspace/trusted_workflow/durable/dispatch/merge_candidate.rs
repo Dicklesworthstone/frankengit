@@ -181,7 +181,11 @@ impl OneNode {
                         )),
                         None,
                         false,
-                    );
+                    )
+                    .and_then(|report| {
+                        report.persist_report()?;
+                        Ok(report)
+                    });
                     *observed
                         .lock()
                         .map_err(|_| NodeWorkspaceRefusal::UnsupportedWorkspaceEdit)? =
