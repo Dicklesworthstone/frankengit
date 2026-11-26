@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { eventBytes, eventHash, eventCredentialBinding, EventFeedError } from '../../scripts/operator/event_feed.mjs';
 import { initializeEventArchive, openEventArchive, captureEventArchive, readEventPrivate } from '../../scripts/operator/event_archive.mjs';
-import { config, page, row, peer, json, TOKEN } from './event_feed_fixture.mjs';
+import { config, collaborationConfig, page, row, peer, json, TOKEN } from './event_feed_fixture.mjs';
 const code = expected => error => error.code === expected;
 const privateFile = (path, value) => writeFile(path, value, { mode: 0o600 });
 async function fixture(configuration = config()) {
@@ -317,4 +317,60 @@ test('the real 4096-page ceiling permits bounded replay but refuses a 4097th cha
     await assert.rejects(archive.append(page(f.configuration, { rows: [], head: '02' })), code('event_archive_capacity'));
     assert.equal((await readdir(f.root)).length, ARCHIVE_LIMITS.pages + 1);
   } finally { await f.close(); }
+});
+
+test('v1 archive binding bytes remain unchanged and profile upgrades require a separate archive', async () => {
+  const f = await fixture();
+  try {
+    await f.archive.append(page(f.configuration));
+    const before = await finalFiles(f.root);
+    const reopened = await openEventArchive(f.root, f.configuration, { synchronize: true });
+    assert.equal(reopened.summary().pages, 1);
+    assert.deepEqual(await finalFiles(f.root), before);
+    const binding = JSON.parse(before.find(row => row.entry === 'binding').bytes);
+    assert.equal(binding.schema_version, 1); assert.equal(binding.configuration.schema_version, 1);
+    assert.equal(Object.hasOwn(binding.configuration, 'disclosure_profile'), false);
+    const broader = collaborationConfig(f.configuration.endpoint, f.configuration.scope.object_format);
+    await assert.rejects(openEventArchive(f.root, broader), code('event_archive_binding_mismatch'));
+    await assert.rejects(initializeEventArchive(f.root, broader, TOKEN), code('event_archive_binding_mismatch'));
+    assert.deepEqual(await finalFiles(f.root), before);
+  } finally { await f.close(); }
+});
+
+for (const format of ['sha1', 'sha256']) test(`${format}: collaboration archive resumes filtered history and keeps wait choices outside its binding`, async () => {
+  let cfg;
+  const server = await peer((request, response, ordinal) => {
+    const query = new URL(request.url, 'http://fixture.test').searchParams;
+    assert.equal(query.get('profile'), 'collaboration-v2');
+    assert.equal(query.get('wait_ms'), ordinal === 1 ? '1000' : '2000');
+    assert.equal(query.get('after'), ordinal === 1 ? '0' : '9007199254740993:4294967295');
+    json(response, ordinal === 1 ? page(cfg, { rows: [], resume: '9007199254740993:4294967295', more: true }) :
+      page(cfg, { rows: [row('18446744073709551615', '4294967295')], head: '02' }));
+  });
+  cfg = collaborationConfig(server.endpoint, format);
+  cfg.scope.issues_read = false; cfg.scope.pulls_read = false;
+  const f = await fixture(cfg);
+  try {
+    const originalBinding = await readFile(join(f.root, 'binding', 'record.json'));
+    const first = await captureEventArchive(f.root, cfg, TOKEN, { maxPages: 1, waitMs: 1000 });
+    assert.equal(first.caught_up_at_observed_head, false); assert.equal(first.events, 0);
+    const second = await captureEventArchive(f.root, cfg, TOKEN, { waitMs: 2000, expectedTail: first.tail_sha256 });
+    assert.equal(second.caught_up_at_observed_head, true); assert.equal(second.pages, 2); assert.equal(second.events, 1);
+    assert.equal(second.resume_after, '18446744073709551615:4294967295');
+    const offline = await openEventArchive(f.root, cfg, { expectedTail: second.tail_sha256, page: 2 });
+    assert.equal(offline.selectedPage().schema_version, 1);
+    assert.equal(offline.selectedPage().page.schema_version, 1);
+    assert.equal(offline.selectedPage().page.disclosure_profile, 'collaboration-v2');
+    assert.equal(offline.selectedPage().page.events[0].event_frame_hex, '00ff80');
+    assert.deepEqual(await readFile(join(f.root, 'binding', 'record.json')), originalBinding);
+    for (const field of ['discussions_read', 'reviews_read']) {
+      const changed = structuredClone(cfg); changed.scope[field] = !changed.scope[field];
+      await assert.rejects(openEventArchive(f.root, changed), code('event_archive_binding_mismatch'));
+    }
+    for (const waitMs of [-1, 30001, 0.5, '1000']) {
+      await assert.rejects(captureEventArchive(f.root, cfg, TOKEN, { waitMs }), code('invalid_event_bound'));
+    }
+    assert.equal(server.requests.length, 2);
+    assert.deepEqual(await readFile(join(f.root, 'binding', 'record.json')), originalBinding);
+  } finally { await server.close(); await f.close(); }
 });

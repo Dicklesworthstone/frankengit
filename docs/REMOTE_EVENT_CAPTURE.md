@@ -18,7 +18,7 @@ before returning a capture. Synchronous validation cannot be preempted, but
 crossing the original deadline refuses with `event_timeout` when it finishes;
 the timeout is never renewed for the final page.
 
-The complete configuration is explicit:
+The legacy configuration remains explicit and selects `issues-pulls-v1`:
 
 ```json
 {
@@ -37,6 +37,16 @@ The complete configuration is explicit:
   "page_size": 20
 }
 ```
+
+For collaboration history, use `schema_version:2`, add
+`"disclosure_profile":"collaboration-v2"` and include explicit
+`discussions_read` and `reviews_read` booleans in `scope`. All four read grants
+must match the credential/endpoint intersection; a discussion-only or
+review-only subscription is supported. The [archive guide](REMOTE_EVENT_ARCHIVE.md#collaboration-history)
+contains a complete example and the event-family mapping. Native response
+envelopes remain schema 1. Profile substitution, a missing grant field, or any
+changed grant refuses. Schema-1 configurations gain no additional fields, so
+their existing saved captures and archive bindings retain their exact bytes.
 
 Pass a separately provisioned 64-character lowercase hex Bearer credential.
 The endpoint must be exact, without credentials, query, fragment, encoded path
@@ -62,14 +72,33 @@ snapshot. A page/byte/deadline limit cannot manufacture EOF. A returned capture
 may still have `has_more:true`; network errors are not retried automatically.
 Server errors or a changed scope produce no apparently complete batch.
 
-The native profile omits event families other than its authorized issues and
-pull requests, and cursor gaps reveal repository activity. Earlier events
+The legacy profile includes authorized issue and PR lifecycle history.
+`collaboration-v2` additionally includes milestones, discussions, PR
+conversations and review votes under their independent native grants. Both
+profiles omit unrelated families, and cursor gaps reveal repository activity. Earlier events
 skipped under a narrower grant are not backfilled by a later cursor. A changed
 scope requires an explicitly new consumer/backfill, not silent continuation.
 Server policy changes within unchanged grants are not detectable as a complete
 ACL history by this protocol. Remote observations are not proof of authority,
 absence, disclosure completeness, native frame authenticity or Git identity.
 No delivery is acknowledged and no canonical outbox obligation is settled.
+
+## Bounded native waits
+
+`readEventPage` and `captureEventPages` accept `waitMs` from 0 through 30,000.
+The default is 0 and preserves the existing immediate request. Positive values
+send native `wait_ms`; the service waits only at an empty tail and returns
+immediately for any cursor progress, including fully filtered pages. Successful
+quiet waits retain the original cursor, while failures remain failures and are
+never converted to empty pages or retried implicitly.
+
+Waiting shares the original `timeoutMs` budget. Each request caps its requested
+wait below its remaining transport deadline; capture neither renews that
+deadline nor grants each page another full timeout. Leave time for network and
+response work, for example `{ waitMs: 25000, timeoutMs: 30000 }`. The native wait
+is an upper bound on idle time, not a completion guarantee. Cancellation still
+closes the request before returning. `waitMs` is not configuration identity and
+does not change saved-capture or archive bindings.
 
 ## Focused verification
 

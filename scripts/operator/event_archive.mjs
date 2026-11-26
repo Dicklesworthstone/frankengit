@@ -233,7 +233,8 @@ class EventArchive {
   }
 }
 export async function captureEventArchive(path, configuration, credential, options = {}) {
-  eventKeys(options, ['maxPages', 'maxBytes', 'timeoutMs', 'signal', 'ca', 'expectedTail', 'onPage'], []);
+  eventKeys(options, ['maxPages', 'maxBytes', 'timeoutMs', 'waitMs', 'signal', 'ca', 'expectedTail', 'onPage'], []);
+  const waitMs = eventInteger(options.waitMs ?? 0, 0, EVENT_LIMITS.waitMs);
   const maxPages = eventInteger(options.maxPages ?? 16, 1, EVENT_LIMITS.pages);
   const maxBytes = eventInteger(options.maxBytes ?? EVENT_LIMITS.bytes, 1, EVENT_LIMITS.bytes);
   const timeout = eventInteger(options.timeoutMs ?? 30000, 1, EVENT_LIMITS.timeoutMs);
@@ -249,7 +250,7 @@ export async function captureEventArchive(path, configuration, credential, optio
   while (pages < maxPages) {
     checkpoint(); if (received === maxBytes) eventFail('event_capture_limit');
     const result = await readEventPage(config, credential, { after: archive.summary().resume_after,
-      timeoutMs: Math.max(1, Math.floor(timeout - (performance.now() - start))), signal, ca,
+      timeoutMs: Math.max(1, Math.floor(timeout - (performance.now() - start))), waitMs, signal, ca,
       maximumBytes: Math.min(EVENT_LIMITS.response, maxBytes - received) });
     received += result.bytes; checkpoint();
     const receipt = await archive.append(result.page, checkpoint); pages++;

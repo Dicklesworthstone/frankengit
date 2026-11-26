@@ -50,6 +50,47 @@ credential/endpoint grant intersection. Grants are not widened automatically.
 `after` is an explicit starting position: `"0"` starts from the beginning;
 choosing a later cursor deliberately excludes earlier history.
 
+### Collaboration history
+
+Schema-1 configurations continue to select `issues-pulls-v1` with their original
+bytes and grant fields. To capture milestones, discussions, PR conversations
+and review votes, choose a new archive and an explicit schema-2 configuration:
+
+```json
+{
+  "type": "frankengit_event_subscription",
+  "schema_version": 2,
+  "endpoint": "https://forge.example/repo.git",
+  "disclosure_profile": "collaboration-v2",
+  "scope": {
+    "tenant_id": "11111111111111111111111111111111",
+    "repository_id": "22222222222222222222222222222222",
+    "repository_incarnation": "33333333333333333333333333333333",
+    "object_format": "sha1",
+    "issues_read": true,
+    "pulls_read": true,
+    "discussions_read": true,
+    "reviews_read": true
+  },
+  "after": "0",
+  "page_size": 20
+}
+```
+
+All four booleans must match the server's effective grants exactly; any one
+grant is sufficient, including a discussion-only or review-only credential.
+Issue permission includes milestone events. Pull permission includes PR
+conversation events, while review votes require the separate review grant.
+Selecting this profile never supplies missing permission. The native page
+envelope still uses `schema_version:1`; `disclosure_profile` identifies its
+event contract and the additional grant fields.
+
+A profile change or new grant cannot reuse an existing archive binding. Create
+a separate archive and deliberately select a backfill cursor, normally `0`,
+so previously omitted events are not skipped. Existing schema-1 archives keep
+their exact binding and page bytes; no migration or default-field insertion is
+performed. The archive's own envelope remains schema 1 for both configurations.
+
 Keep the 64-character lowercase hexadecimal Bearer credential in a separate
 private file, with an optional final newline. Do not put it in command-line
 arguments. Provision both files with mode 0600, then initialize:
@@ -125,6 +166,23 @@ reads, but **stops on the first failed request**, rather than retrying failures
 in the background. An identical quiet page does not grow the archive; a changed
 head, watermark or page is a new observation. Configuration and an optional CA
 file are snapshotted at startup; the credential is reread before each sweep.
+
+Add `--wait-ms 25000` to `capture` or `watch` to let the native service wait up
+to 25 seconds when the requested cursor is already at an empty tail. This
+works with either disclosure profile. The native service returns immediately
+for visible events or filtered cursor progress; the consumer saves and advances
+those pages normally. A quiet completed wait is a successful empty observation,
+and identical observations still do not grow the archive.
+
+`--wait-ms` admits 0..30,000 and defaults to 0, preserving immediate reads and
+existing request URLs. It is an operational option, so changing the wait does
+not change configuration or archive binding bytes. The wait is shortened when
+necessary to fit the remaining `--timeout-ms` budget, leaving at least one
+millisecond for response work. That allowance does not guarantee completion;
+network acquisition, validation and archive checkpoints still share the
+original operation budget. Choose enough headroom, for example
+`--wait-ms 25000 --timeout-ms 30000`. The usual `--poll-ms` gap still applies
+between watch sweeps. No failed wait is automatically retried.
 
 SIGTERM/SIGINT abort the in-flight read and stop future admissions. A cancellation
 before page publication leaves the prior saved cursor intact. Once a page is

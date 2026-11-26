@@ -6,8 +6,8 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { EVENT_LIMITS, eventBytes, eventJson, eventConfiguration, eventCredentialBinding,
-  readEventPage, captureEventPages, validateEventCapture } from '../../scripts/operator/event_feed.mjs';
-import { config, page, row, peer, json, TOKEN } from './event_feed_fixture.mjs';
+  readEventPage, captureEventPages, validateEventCapture, validateEventPage } from '../../scripts/operator/event_feed.mjs';
+import { config, collaborationConfig, page, row, peer, json, TOKEN } from './event_feed_fixture.mjs';
 const code = expected => error => error.code === expected;
 
 for (const format of ['sha1', 'sha256']) test(`${format}: filtered pages advance exact watermarks across changing heads`, async () => {
@@ -225,4 +225,124 @@ test('HTTPS verifies trust and hostname with a test-only CA; no plaintext downgr
       assert.equal(server.requests.length, 1);
     } finally { await server.close(); }
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('legacy subscription bytes stay unchanged while collaboration subscriptions explicitly pin every grant', () => {
+  const legacy = config();
+  assert.deepEqual(eventBytes(eventConfiguration(legacy)), eventBytes(legacy));
+  assert.equal(Object.hasOwn(eventConfiguration(legacy), 'disclosure_profile'), false);
+  for (const selected of ['issues_read', 'pulls_read', 'discussions_read', 'reviews_read']) {
+    const value = collaborationConfig();
+    for (const name of ['issues_read', 'pulls_read', 'discussions_read', 'reviews_read']) value.scope[name] = name === selected;
+    const checked = eventConfiguration(value);
+    assert.deepEqual(checked, value);
+    assert(Object.isFrozen(checked)); assert(Object.isFrozen(checked.scope));
+    assert.equal(validateEventPage(page(checked), checked).schema_version, 1);
+  }
+  const malformed = [
+    value => { delete value.disclosure_profile; },
+    value => { value.disclosure_profile = 'issues-pulls-v1'; },
+    value => { value.schema_version = 3; },
+    value => { delete value.scope.discussions_read; },
+    value => { value.scope.reviews_read = 1; },
+    value => { for (const name of ['issues_read', 'pulls_read', 'discussions_read', 'reviews_read']) value.scope[name] = false; }
+  ];
+  for (const alter of malformed) { const value = collaborationConfig(); alter(value); assert.throws(() => eventConfiguration(value)); }
+  assert.throws(() => eventConfiguration({ ...legacy, disclosure_profile: 'issues-pulls-v1' }));
+  assert.throws(() => eventConfiguration({ ...legacy, scope: { ...legacy.scope, discussions_read: false, reviews_read: false } }));
+});
+
+for (const format of ['sha1', 'sha256']) {
+  for (const grant of ['discussions_read', 'reviews_read']) test(`${format}: a ${grant}-only collaboration consumer selects the native profile and bounded wait`, async () => {
+    let cfg;
+    const server = await peer((request, response) => {
+      const query = new URL(request.url, 'http://fixture.test').searchParams;
+      assert.equal(query.get('profile'), 'collaboration-v2');
+      assert.equal(query.get('wait_ms'), '25000');
+      assert.equal(query.get('after'), '0');
+      assert.equal(query.has('expected_head'), false);
+      json(response, page(cfg, { rows: [row('9007199254740993', '4294967295')] }));
+    });
+    cfg = collaborationConfig(server.endpoint, format);
+    for (const name of ['issues_read', 'pulls_read', 'discussions_read', 'reviews_read']) cfg.scope[name] = name === grant;
+    try {
+      const received = await readEventPage(cfg, TOKEN, { waitMs: 25000 });
+      assert.equal(received.page.disclosure_profile, 'collaboration-v2');
+      assert.equal(received.page.resume_after, '9007199254740993:4294967295');
+      assert.equal(received.page.events[0].event_frame_hex, '00ff80');
+      assert.equal(server.requests.length, 1);
+    } finally { await server.close(); }
+  });
+}
+
+test('profile substitution and every collaboration grant change refuse instead of widening retained scope', () => {
+  const legacy = config(), collaboration = collaborationConfig();
+  assert.throws(() => validateEventPage(page(collaboration), legacy), code('invalid_event_page_or_scope'));
+  assert.throws(() => validateEventPage(page(legacy), collaboration), code('invalid_event_page_or_scope'));
+  for (const name of ['issues_read', 'pulls_read', 'discussions_read', 'reviews_read']) {
+    const changed = page(collaboration); changed[name] = !changed[name];
+    assert.throws(() => validateEventPage(changed, collaboration), code('invalid_event_page_or_scope'));
+  }
+  const wrongVersion = page(collaboration); wrongVersion.schema_version = 2;
+  assert.throws(() => validateEventPage(wrongVersion, collaboration), code('invalid_event_page_or_scope'));
+});
+
+test('waiting is operational, bounded by the original request deadline and omitted from legacy immediate URLs', async () => {
+  let cfg;
+  const server = await peer((request, response, ordinal) => {
+    const query = new URL(request.url, 'http://fixture.test').searchParams;
+    assert.equal(query.has('profile'), false);
+    assert.equal(query.get('wait_ms'), ordinal === 1 ? null : '1999');
+    json(response, page(cfg));
+  });
+  cfg = config(server.endpoint);
+  try {
+    const before = eventBytes(cfg);
+    await readEventPage(cfg, TOKEN);
+    await readEventPage(cfg, TOKEN, { waitMs: 30000, timeoutMs: 2000 });
+    assert.deepEqual(eventBytes(cfg), before);
+    for (const waitMs of [-1, 30001, 1.5, '1000']) {
+      await assert.rejects(readEventPage(cfg, TOKEN, { waitMs }), code('invalid_event_bound'));
+      await assert.rejects(captureEventPages(cfg, TOKEN, { waitMs }), code('invalid_event_bound'));
+    }
+    assert.equal(server.requests.length, 2);
+  } finally { await server.close(); }
+});
+
+test('waited reads still cancel or time out without retries or successful empty pages', async () => {
+  const server = await peer(() => {});
+  try {
+    const cfg = collaborationConfig(server.endpoint);
+    await assert.rejects(readEventPage(cfg, TOKEN, { waitMs: 30000, timeoutMs: 40 }), code('event_timeout'));
+    const stop = new AbortController();
+    const pending = readEventPage(cfg, TOKEN, { waitMs: 30000, timeoutMs: 300000, signal: stop.signal });
+    const until = performance.now() + 2000;
+    while (server.requests.length < 2) {
+      if (performance.now() >= until) throw new Error('wait request did not reach the peer');
+      await sleep(5);
+    }
+    stop.abort();
+    await assert.rejects(pending, code('event_cancelled'));
+    assert.equal(server.requests.length, 2);
+  } finally { await server.close(); }
+});
+
+test('collaboration page capture preserves filtered progress and forwards waits without changing its configuration', async () => {
+  let cfg;
+  const server = await peer((request, response, ordinal) => {
+    const query = new URL(request.url, 'http://fixture.test').searchParams;
+    assert.equal(query.get('profile'), 'collaboration-v2');
+    assert.equal(query.get('wait_ms'), '1000');
+    assert.equal(query.get('after'), ordinal === 1 ? '0' : '9007199254740993:1');
+    json(response, ordinal === 1 ? page(cfg, { rows: [], resume: '9007199254740993:1', more: true }) :
+      page(cfg, { rows: [row('18446744073709551615', '4294967295')], head: '02' }));
+  });
+  cfg = collaborationConfig(server.endpoint);
+  try {
+    const captured = await captureEventPages(cfg, TOKEN, { waitMs: 1000 });
+    assert.equal(captured.pages.length, 2);
+    assert.deepEqual(captured.configuration, cfg);
+    assert.equal(captured.pages[0].events.length, 0);
+    assert.deepEqual(validateEventCapture(eventJson(eventBytes(captured)), cfg), captured);
+  } finally { await server.close(); }
 });
