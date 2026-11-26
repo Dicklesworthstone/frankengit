@@ -25,8 +25,10 @@ stage   --package PRIVATE_DIR --sha256 INDEPENDENT_MANIFEST_HASH
 
 All commands: [--timeout-ms 1..300000] (default 30000, one operation deadline).
 Capture input: endpoint, scope {tenant_id, repository_id, repository_incarnation,
-object_format}, number (decimal string), metadata {author, committer, timestamp
-(decimal string), message}, method (merge-commit or squash), optional expected_head.
+object_format}, number (decimal string), method, metadata, optional expected_head.
+For merge-commit or squash: metadata {author, committer, timestamp, message}.
+For rebase: metadata {upstream, committer, timestamp, empty (stop, drop or keep)}.
+Timestamp is a decimal string; upstream is the explicit exclusive original base.
 No identity, timestamp, merge method or branch is inferred from ambient state.
 
 Inspect is offline and emits the retained PR/reviewer/preparation/inspection JSON,
@@ -36,7 +38,9 @@ approval, an independently recomputed diff, or current permission to merge.
 Draft choices: action (approve, request-changes or merge), principal_id,
 candidate_commit (exact raw inspected OID), plus reason for a review or explicit
 method and required_reviewers for a merge. The method must match the inspected
-candidate. Drafts use complete retained reviewer predecessors and never refresh
+candidate. Rebase reviews also require explicit method "rebase" and a complete
+whole-series inspection; each intermediate commit and its paths are retained.
+Drafts use complete retained reviewer predecessors and never refresh
 source tips or policy epochs. Withdraw stale reviews with fg_pull_review.mjs.
 
 Resolve requires one explicit choice for every original conflict: base, ours
@@ -44,6 +48,9 @@ Resolve requires one explicit choice for every original conflict: base, ours
 mode 100644 or 100755 and content_hex (empty/binary allowed). The original
 package fixes all coordinates, commit metadata and merge method. The resolved
 package is new and keeps the original conflict report and exact choices.
+This resolve command accepts merge-commit and squash only. Rebase conflicts and
+became_empty stops remain inspectable noncandidates; native/browser rebase
+resolution uses original-commit recipes and cannot use this ordinary path list.
 
 Only capture and resolve contact the native node; neither publishes a repository
 mutation. Stage is offline: it fingerprints the explicit private credential and
@@ -59,7 +66,7 @@ are create-only and must remain outside their source package. Preserve interrupt
 Keep the returned manifest hash separately. An unverified self-selected new root
 cannot establish that transported bytes are your originally inspected candidate.
 
-Exit 0: completed capture/resolution/inspection/draft/staging; 1: captured conflict or up-to-date
+Exit 0: completed capture/resolution/inspection/draft/staging; 1: captured conflict, became_empty or up-to-date
 noncandidate; 2: local input/file/pin/draft refusal; 3: acquisition, save or output
 failure after work began. See docs/PULL_CANDIDATE_PACKAGES.md for limits.
 `;
@@ -115,6 +122,7 @@ export async function run(args, { output = text => write(process.stdout, text), 
     const value = await loadCandidatePackage(flags.package, flags.sha256, options());
     if (action === 'resolve') {
       // Refuse unrelated or already resolved input before reading a credential.
+      if (value.capture.request.method === 'rebase') candidateFail('candidate_rebase_resolution_requires_original_commit_recipes');
       if (value.capture.schema !== CANDIDATE_CAPTURE_SCHEMA || value.capture.preparation.state !== 'conflicted') {
         candidateFail('original_candidate_conflicts_required');
       }

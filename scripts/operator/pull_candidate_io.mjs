@@ -84,10 +84,10 @@ function envelope(operation) {
     if (operation.after !== null) query.set('after', principal(operation.after));
     return { path: `${prefix}/reviews?${query}`, method: 'GET', maximum: CANDIDATE_IO_LIMITS.json, statuses: [200, 404] };
   }
-  if (operation.kind === 'prepare') {
+  if (['prepare', 'prepare-rebase'].includes(operation.kind)) {
     candidateKeys(operation, ['kind', 'number', 'body']);
     if (typeof operation.body !== 'string' || Buffer.byteLength(operation.body) > 256 * 1024) candidateFail('candidate_form_limit');
-    return { path: `${prefix}/prepare`, method: 'POST', body: operation.body,
+    return { path: `${prefix}/${operation.kind}`, method: 'POST', body: operation.body,
       type: 'application/x-www-form-urlencoded', maximum: PREPARATION_LIMIT, statuses: [200, 409] };
   }
   if (operation.kind === 'resolve') {
@@ -99,18 +99,18 @@ function envelope(operation) {
     return { path: `${prefix}/resolve`, method: 'POST', body: Buffer.from(operation.body), type: operation.type,
       maximum: PREPARATION_LIMIT, statuses: [200] };
   }
-  if (operation.kind === 'inspect') {
+  if (['inspect', 'inspect-rebase'].includes(operation.kind)) {
     candidateKeys(operation, ['kind', 'number', 'body', 'type']);
     if (!(operation.body instanceof Uint8Array) || !operation.body.length || operation.body.length > PREPARATION_LIMIT ||
         !/^multipart\/form-data; boundary=[A-Za-z0-9_.-]{1,70}$/.test(operation.type)) candidateFail('invalid_candidate_inspection_upload');
-    return { path: `${prefix}/inspect`, method: 'POST', body: Buffer.from(operation.body), type: operation.type,
+    return { path: `${prefix}/${operation.kind}`, method: 'POST', body: Buffer.from(operation.body), type: operation.type,
       maximum: CANDIDATE_IO_LIMITS.json, statuses: [200] };
   }
   candidateFail('unsupported_candidate_operation');
 }
 export async function candidateRequest(address, token, operation, options = {}) {
   const endpoint = candidateEndpoint(address); candidateToken(token);
-  const selected = envelope(operation), preparation = ['prepare', 'resolve'].includes(operation.kind);
+  const selected = envelope(operation), preparation = ['prepare', 'prepare-rebase', 'resolve'].includes(operation.kind);
   candidateKeys(options, ['timeoutMs', 'signal', 'ca', 'maximum'], []);
   const timeout = integer(options.timeoutMs ?? 30000, 'candidate timeout', 1, 300000);
   const maximum = Math.min(selected.maximum, integer(options.maximum ?? selected.maximum, 'candidate response limit', 1, PREPARATION_LIMIT));

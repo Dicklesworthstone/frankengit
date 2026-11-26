@@ -1,7 +1,7 @@
 # Retained native PR candidates
 
 The candidate acquisition client already reads one PR/reviewer snapshot, asks the
-native node to prepare an explicit merge-commit or squash, and inspects that
+native node to prepare an explicit merge-commit, squash or rebase, and inspects that
 exact bundle. `scripts/operator/pull_candidate_files.mjs` retains its output for
 offline inspection and the candidate CLI. It does not create a review, seal,
 transaction, merge permission, Git ref, or canonical object.
@@ -40,9 +40,18 @@ commit bodies, and malformed inspections refuse even when someone recomputes
 local file hashes. A manifest hash alone is not native authorization or an
 independent proof of Git ancestry, bundle closure, or the reported diff.
 
-`conflicted` and `already_up_to_date` reports remain inspectable noncandidates.
+`conflicted`, `already_up_to_date` and rebase `became_empty` reports remain inspectable noncandidates.
 They have no bundle or inspection and cannot be treated as empty successful
 merges. Reading the package never contacts its endpoint or grants approval.
+
+Rebase uses the same package and capture schemas, selected by the explicit
+request method. Its capture retains the original-to-rewritten step mapping,
+every rewritten commit's native bytes, every intermediate parent-to-child diff,
+and the separate original-source comparison. Steps must match the complete
+inspected series in order; dropped empty steps cannot change the preceding tree.
+Rewritten committer/timestamp bytes must match the explicit input. An empty final
+diff does not hide paths changed in intermediate commits. Original authors and
+messages remain native preservation claims, not verified author identity.
 
 ## Limits, interrupted writes, and trust
 
@@ -88,6 +97,12 @@ executed Rust `fg` server. This does not establish native admission/ancestry,
 real deployment, or full-workspace verification. It adds no production dependency
 and does not close `frankengit-root-doctrine-x2mv.4.13` or `.4.20`.
 
+`tests/operator/pull_candidate_rebase.test.mjs` separately covers rebase
+capture/inspection/packages/drafts/staging through real HTTP sockets, private
+files and executable CLI processes. Its controlled native-schema reports use
+real computed commit-body hashes and explicitly opaque bundle bytes. It can run
+without the Git oracle and makes no native bundle-admission claim.
+
 ## Command-line workflow
 
 `node scripts/fg_pull_candidate.mjs --help` exposes `capture`, `resolve`,
@@ -101,6 +116,9 @@ and token files. The acquisition input is the existing `capturePullCandidate`
 input documented in `REMOTE_PULL_CANDIDATES.md`: exact endpoint and repository
 scope, a PR number as a decimal string, explicit author/committer/timestamp/message,
 explicit `merge-commit` or `squash`, and an optional retained `expected_head`.
+For `method:"rebase"`, metadata instead contains `upstream`, `committer`,
+`timestamp` and `empty` (`stop`, `drop` or `keep`). `upstream` is the exact exclusive
+original common base; original author/message replacement fields are refused.
 No author, principal, timestamp, branch or merge method is taken from environment
 variables, Git configuration or a current-time default.
 
@@ -132,8 +150,11 @@ including original hexadecimal path/hunk bytes. JSON escaping keeps control and
 bidirectional formatting characters inert in the envelope. This is private
 untrusted repository text, not a sanitized public report. A complete native
 inspection report does not mean the client independently recomputed the diff,
-proved Git closure/ancestry, checked all supplied commit metadata against the
-reported commit body, or granted permission to merge.
+proved Git closure/ancestry or original author/message preservation, or granted
+permission to merge. It does verify reported native commit identities and
+cross-check the supplied construction metadata against the relevant native
+commit bodies. Rebase inspection always retains the full ordered commit array
+and all its intermediate differences, even when the final comparison is empty.
 
 To draft an approval or change request, supply a private choice file such as:
 
@@ -147,9 +168,12 @@ To draft an approval or change request, supply a private choice file such as:
 ```
 
 The illustrative OID must be replaced with the raw, lowercase 40- or 64-character
-native digest. `request-changes` has the same shape. A merge choice instead has
+native digest. `request-changes` has the same shape. For a rebase package, both
+review actions additionally require explicit `"method":"rebase"`; omission or
+another method refuses. Ordinary review choices retain their existing shape.
+A merge choice instead has
 `action:"merge"`, the submitting `principal_id`, that exact `candidate_commit`,
-explicit `method:"merge-commit"` or `"squash"`, and `required_reviewers` containing
+explicit `method:"merge-commit"`, `"squash"` or `"rebase"`, and `required_reviewers` containing
 a nonempty distinct set of principal IDs other than the submitter. No reason or
 reviewer-stream override is accepted on a merge. The selected method must equal
 the method that produced the inspected candidate.
@@ -190,7 +214,7 @@ SIGINT cancel the owned request; SIGKILL can leave an incomplete slot, which is
 not a completed package. There are no network retries or automatic publications.
 
 Exit codes: **0** for completed clean capture/resolution, offline inspection, draft or staging;
-**1** for a captured conflict/up-to-date noncandidate; **2** for local input,
+**1** for a captured conflict/became-empty/up-to-date noncandidate; **2** for local input,
 file, hash or drafting refusal; **3** for acquisition/save/output failure after
 work began. A saved noncandidate can be inspected, but never drafted as a clean
 review or merge. Neither a successful draft nor a failed invocation says that a

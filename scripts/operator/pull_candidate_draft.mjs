@@ -12,7 +12,8 @@ export async function draftCandidateReview(input, bundle, selection, options = {
     if (bundle !== null && typeof SharedArrayBuffer !== 'undefined' && bundle?.buffer instanceof SharedArrayBuffer) candidateFail('candidate_shared_bundle_refused');
     if (!['approve', 'request-changes', 'merge'].includes(selection?.action)) candidateFail('explicit_candidate_draft_action_required');
     const merge = selection.action === 'merge';
-    candidateKeys(selection, ['action', 'principal_id', 'candidate_commit', ...(merge ? ['method', 'required_reviewers'] : ['reason'])]);
+    candidateKeys(selection, ['action', 'principal_id', 'candidate_commit', ...(merge ? ['method', 'required_reviewers'] : ['reason', 'method'])],
+      ['action', 'principal_id', 'candidate_commit', ...(merge ? ['method', 'required_reviewers'] : ['reason'])]);
     // Detach choices before the asynchronous native commit/body hash checks.
     const choice = candidateJson(Buffer.from(candidateCanonical(selection)), 512 * 1024);
     const checked = await validateCandidateCapture(input, bundle); check();
@@ -20,6 +21,9 @@ export async function draftCandidateReview(input, bundle, selection, options = {
     if (artifact === null) candidateFail('candidate_draft_requires_clean_inspection');
     if (choice.candidate_commit !== artifact.fields.candidate_commit) candidateFail('confirm_exact_inspected_candidate');
     if (merge && choice.method !== artifact.method) candidateFail('candidate_draft_method_changed');
+    if (!merge && (artifact.method === 'rebase' ? choice.method !== 'rebase' : Object.hasOwn(choice, 'method'))) {
+      candidateFail('candidate_draft_method_changed');
+    }
     const scope = pullScope({ ...capture.request.scope, principal_id: choice.principal_id });
     const fields = Object.fromEntries(Object.entries(artifact.fields)
       .filter(([key]) => !['object_format', 'source_ref', 'source_ref_hex', 'target_ref', 'target_ref_hex'].includes(key))
@@ -38,6 +42,7 @@ export async function draftCandidateReview(input, bundle, selection, options = {
       // reviewer page. Stale prior votes still own their exact stream version.
       fields.expected_version = String(reviews.find(row => row.reviewer === scope.principal_id)?.version ?? 0);
       fields.reason = choice.reason;
+      if (artifact.method === 'rebase') fields.method = choice.method;
     }
     const command = pullCommand(capture.request.number, choice.action, fields, scope.object_format);
     if (merge && command.fields.required_reviewers.includes(scope.principal_id)) candidateFail('candidate_submitter_is_required_reviewer');

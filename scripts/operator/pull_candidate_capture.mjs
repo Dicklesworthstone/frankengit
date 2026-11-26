@@ -10,7 +10,8 @@ import { preparationCommand, preparationReply, inspectionReply, multipart, makeB
 import { CandidateError, candidateFail, candidateKeys, candidateEndpoint, candidateToken, candidateJson,
   candidateRequest, CANDIDATE_IO_LIMITS } from './pull_candidate_io.mjs';
 import { resolutionUpload, verifyResolutionResult, RESOLUTION_FILE_LIMIT } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-resolution.mjs';
-import { candidateCommitMatches } from './pull_candidate_commit.mjs';
+import { rebasePreparationCommand, rebasePreparationReply, rebaseInspectionReply } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-rebase.mjs';
+import { candidateCommitMatches, rebaseCommitterMatches } from './pull_candidate_commit.mjs';
 export { CandidateError, candidateJson, CANDIDATE_IO_LIMITS } from './pull_candidate_io.mjs';
 export const CANDIDATE_CAPTURE_SCHEMA = 'frankengit-pull-candidate-capture-v1';
 export const RESOLVED_CAPTURE_SCHEMA = 'frankengit-pull-resolved-candidate-capture-v1';
@@ -59,16 +60,24 @@ export function candidateInput(value) {
     ['endpoint', 'scope', 'number', 'metadata', 'method']);
   const endpoint = candidateEndpoint(value.endpoint), selected = scope(value.scope);
   const number = String(decimal(value.number, 'candidate PR number', 1));
-  candidateKeys(value.metadata, ['author', 'committer', 'timestamp', 'message']);
+  if (!['merge-commit', 'squash', 'rebase'].includes(value.method)) candidateFail('invalid_candidate_metadata_or_method');
+  const rebase = value.method === 'rebase';
+  candidateKeys(value.metadata, rebase ? ['upstream', 'committer', 'timestamp', 'empty'] : ['author', 'committer', 'timestamp', 'message']);
   const metadata = {};
-  for (const name of ['author', 'committer']) {
+  if (rebase) metadata.upstream = oid(value.metadata.upstream, selected.object_format);
+  for (const name of rebase ? ['committer'] : ['author', 'committer']) {
     metadata[name] = text(value.metadata[name], 1024, name, true);
     const match = /^([^<>\r\n]+) <([^<>\r\n]+)>$/.exec(metadata[name]);
     if (!match || !match[1].trim()) candidateFail('invalid_candidate_commit_identity');
   }
   metadata.timestamp = String(decimal(value.metadata.timestamp, 'candidate timestamp', 1));
-  metadata.message = text(value.metadata.message, 64 * 1024, 'candidate message');
-  if (!metadata.message.trim() || !['merge-commit', 'squash'].includes(value.method)) candidateFail('invalid_candidate_metadata_or_method');
+  if (rebase) {
+    if (!['stop', 'drop', 'keep'].includes(value.metadata.empty)) candidateFail('invalid_candidate_empty_policy');
+    metadata.empty = value.metadata.empty;
+  } else {
+    metadata.message = text(value.metadata.message, 64 * 1024, 'candidate message');
+    if (!metadata.message.trim()) candidateFail('invalid_candidate_metadata_or_method');
+  }
   const expected_head = value.expected_head == null ? null : snapshot(value.expected_head);
   return { endpoint, scope: selected, number, metadata, method: value.method, expected_head };
 }
@@ -97,6 +106,16 @@ function discovery(request, pull, pages, complete = true) {
   return { binding, head: selected.head, fields, reviews, after };
 }
 function metadataFor(request) { return { ...request.metadata, timestamp: Number(request.metadata.timestamp) }; }
+function nativePreparationCommand(request, fields) {
+  return request.method === 'rebase' ? rebasePreparationCommand(fields, metadataFor(request))
+    : { ...preparationCommand(fields, metadataFor(request), request.method), method: request.method, profile: 'path-merge-v1' };
+}
+function nativePreparationReply(response, request, observed, resolved = false) {
+  return request.method === 'rebase'
+    ? rebasePreparationReply(response, Number(request.number), nativePreparationCommand(request, observed.fields),
+      observed.binding, webcrypto, observed.head)
+    : preparationReply(response, Number(request.number), observed.fields, observed.binding, webcrypto, resolved, request.method);
+}
 function sameHead(reply, observed, request) {
   pinned(reply, sharedScope(request.scope), observed.snapshot_token);
   if (reply.source_head !== observed.source_head) candidateFail('candidate_snapshot_changed');
@@ -139,15 +158,85 @@ function retainedPreparation(metadata, bundle, status) {
   }
   candidateFail('candidate_boundary_collision');
 }
-function checkPreparationShape(metadata) {
-  candidateKeys(metadata, ['type', 'schema_version', 'tenant_id', 'repository_id', 'repository_incarnation', 'object_format',
+function checkPreparationShape(metadata, method = 'merge-commit') {
+  const common = ['type', 'schema_version', 'tenant_id', 'repository_id', 'repository_incarnation', 'object_format',
     'source_head', 'snapshot_token', 'profile', 'method', 'read_only', 'objects_staged', 'transaction_created', 'published',
-    'merge_authorized', 'subject', 'state', 'candidate', 'bundle', 'conflicts', ...(metadata.state === 'conflicted' ? ['merge_base'] : []),
+    'merge_authorized', 'subject', 'state', 'bundle', 'conflicts'];
+  if (method === 'rebase') {
+    candidateKeys(metadata, [...common, 'merge_base', 'committer', 'timestamp', 'empty_policy',
+      'original_authors_preserved', 'original_messages_preserved', 'original_signatures_copied', 'author_identity_verified',
+      'series_complete', 'provisional_steps', 'candidate_commit', 'root_tree', 'stopped_commit', 'step_count', 'steps',
+      ...(metadata.state === 'clean' ? ['generated_objects', 'pack_objects', 'borrowed_objects'] : [])]);
+    if (metadata.original_authors_preserved !== true || metadata.original_messages_preserved !== true ||
+        metadata.original_signatures_copied !== false || metadata.author_identity_verified !== false) candidateFail('candidate_rebase_preservation_changed');
+    if (!Array.isArray(metadata.steps) || metadata.steps.length > 256) candidateFail('candidate_rebase_steps_required');
+    for (const step of metadata.steps) {
+      candidateKeys(step, ['original', 'rewritten', 'tree', 'kind']);
+      if (oid(step.original, metadata.object_format) === oid(metadata.merge_base, metadata.object_format)) {
+        candidateFail('candidate_rebase_original_outside_suffix');
+      }
+    }
+    if (metadata.stopped_commit !== null && oid(metadata.stopped_commit, metadata.object_format) === oid(metadata.merge_base, metadata.object_format)) {
+      candidateFail('candidate_rebase_original_outside_suffix');
+    }
+    if (metadata.state === 'clean') {
+      candidateKeys(metadata.bundle, ['bytes', 'sha256']);
+      for (const key of ['generated_objects', 'pack_objects', 'borrowed_objects']) integer(metadata[key], key, 0, 10000);
+      if (!metadata.generated_objects || !metadata.pack_objects || metadata.borrowed_objects > metadata.pack_objects) candidateFail('candidate_rebase_object_accounting');
+    }
+    return;
+  }
+  candidateKeys(metadata, [...common, 'candidate', ...(metadata.state === 'conflicted' ? ['merge_base'] : []),
     ...(metadata.state === 'resolved' ? ['resolution_profile', 'resolutions'] : [])]);
   if (['clean', 'resolved'].includes(metadata.state)) {
     candidateKeys(metadata.candidate, ['merge_base', 'commit', 'tree', 'new_object_count']);
     candidateKeys(metadata.bundle, ['bytes', 'sha256']);
     integer(metadata.candidate.new_object_count, 'candidate objects', 1, 10000);
+  }
+}
+async function checkInspection(inspection, artifact, preparation, request) {
+  const common = ['type', 'schema_version', 'tenant_id', 'repository_id', 'repository_incarnation', 'object_format',
+    'source_head', 'snapshot_token', 'read_only', 'objects_staged', 'transaction_created', 'published', 'merge_authorized',
+    'all_changed_paths', 'binary_bodies_included', 'comparison_profile', 'context_lines', 'subject', 'merge_base',
+    'candidate_commit', 'prerequisites', 'bundle'];
+  if (request.method === 'rebase') {
+    candidateKeys(inspection, [...common, 'profile', 'scope', 'method', 'complete', 'all_rewritten_commits',
+      'replay_equivalence_verified', 'commit_count', 'source_comparison', 'commits']);
+    await rebaseInspectionReply(inspection, artifact, webcrypto);
+    const algorithm = artifact.scope.format;
+    const retained = preparation.steps.filter(step => step.kind !== 'dropped_empty');
+    if (retained.length !== inspection.commits.length || preparation.pack_objects !== inspection.bundle.pack_objects) {
+      candidateFail('candidate_rebase_series_changed');
+    }
+    // Inspecting only the last tree is insufficient: all original-to-rewritten
+    // steps must join the exact complete native parent chain and every diff.
+    let index = 0, tree = oid(inspection.commits[0].comparison.before_tree, algorithm);
+    for (const step of preparation.steps) {
+      const nextTree = oid(step.tree, algorithm);
+      if (step.kind === 'dropped_empty') {
+        if (nextTree !== tree) candidateFail('candidate_rebase_dropped_tree_changed');
+        continue;
+      }
+      const commit = inspection.commits[index++];
+      candidateKeys(commit, ['commit', 'parent', 'tree', 'commit_hex', 'comparison']);
+      if (oid(step.rewritten, algorithm) !== oid(commit.commit, algorithm) || nextTree !== oid(commit.tree, algorithm)) {
+        candidateFail('candidate_rebase_series_changed');
+      }
+      if (!rebaseCommitterMatches(commit.commit_hex, request.metadata)) candidateFail('candidate_rebase_committer_changed');
+      tree = nextTree;
+    }
+    if (tree !== oid(preparation.root_tree, algorithm)) candidateFail('candidate_tree_report_changed');
+    return;
+  }
+  candidateKeys(inspection, [...common, 'parents', 'candidate_commit_body_hex', 'comparison']);
+  await inspectionReply(inspection, artifact, webcrypto);
+  if (!candidateCommitMatches({ bodyHex: inspection.candidate_commit_body_hex, format: artifact.scope.format,
+    tree: oid(preparation.candidate.tree, artifact.scope.format), targetTip: artifact.fields.target_tip,
+    sourceTip: artifact.fields.source_tip, method: request.method, metadata: request.metadata })) {
+    candidateFail('candidate_commit_metadata_or_tree_changed');
+  }
+  if (oid(inspection.comparison.after_tree, artifact.scope.format) !== oid(preparation.candidate.tree, artifact.scope.format)) {
+    candidateFail('candidate_tree_report_changed');
   }
 }
 export async function validateCandidateCapture(input, suppliedBundle = null) {
@@ -163,6 +252,7 @@ export async function validateCandidateCapture(input, suppliedBundle = null) {
     const observed = discovery(request, capture.pull, capture.review_pages);
     let resolution = null;
     if (resolved) {
+      if (request.method === 'rebase') candidateFail('candidate_rebase_resolution_requires_original_commit_recipes');
       candidateKeys(capture.resolution, ['preparation', 'choices']);
       if (capture.resolution.preparation?.state !== 'conflicted') candidateFail('original_candidate_conflicts_required');
       const choices = candidateResolutionChoices(capture.resolution.choices);
@@ -175,32 +265,15 @@ export async function validateCandidateCapture(input, suppliedBundle = null) {
       resolution = await resolutionUpload(capture.resolution.preparation, observed.fields, metadataFor(request),
         resolutionFiles(choices), webcrypto, request.method);
     }
-    checkPreparationShape(capture.preparation);
-    const prepared = await preparationReply(retainedPreparation(capture.preparation, bundle, capture.preparation_status), Number(request.number),
-      observed.fields, observed.binding, webcrypto, resolved, request.method);
+    checkPreparationShape(capture.preparation, request.method);
+    const prepared = await nativePreparationReply(retainedPreparation(capture.preparation, bundle, capture.preparation_status), request, observed, resolved);
     sameHead(prepared.metadata, capture.pull, request);
     if (resolution) verifyResolutionResult(prepared.metadata, resolution.expected);
     if (prepared.artifact === null) {
       if (bundle !== null || capture.inspection !== null) candidateFail('candidate_material_without_candidate');
     } else {
-      candidateKeys(capture.inspection, ['type', 'schema_version', 'tenant_id', 'repository_id', 'repository_incarnation', 'object_format',
-        'source_head', 'snapshot_token', 'read_only', 'objects_staged', 'transaction_created', 'published', 'merge_authorized',
-        'all_changed_paths', 'binary_bodies_included', 'comparison_profile', 'context_lines', 'subject', 'merge_base',
-        'candidate_commit', 'parents', 'prerequisites', 'candidate_commit_body_hex', 'bundle', 'comparison']);
-      await inspectionReply(capture.inspection, prepared.artifact, webcrypto);
+      await checkInspection(capture.inspection, prepared.artifact, prepared.metadata, request);
       sameHead(capture.inspection, capture.pull, request);
-      if (!candidateCommitMatches({
-        bodyHex: capture.inspection.candidate_commit_body_hex,
-        format: observed.binding.format,
-        tree: oid(prepared.metadata.candidate.tree, observed.binding.format),
-        targetTip: prepared.artifact.fields.target_tip,
-        sourceTip: prepared.artifact.fields.source_tip,
-        method: request.method,
-        metadata: request.metadata,
-      })) candidateFail('candidate_commit_metadata_or_tree_changed');
-      if (oid(capture.inspection.comparison.after_tree, observed.binding.format) !== oid(prepared.metadata.candidate.tree, observed.binding.format)) {
-        candidateFail('candidate_tree_report_changed');
-      }
     }
     return { capture, bundle, artifact: prepared.artifact, reviews: observed.reviews };
   } catch (error) { if (error instanceof CandidateError) throw error; candidateFail('invalid_candidate_capture'); }
@@ -245,20 +318,20 @@ export async function capturePullCandidate(input, token, options = {}) {
       pages.push(candidateJson(response.value)); observed = discovery(request, pull, pages, false);
     } while (observed.after !== null);
     phase = 'preparation';
-    const command = preparationCommand(observed.fields, metadataFor(request), request.method);
+    const command = nativePreparationCommand(request, observed.fields);
     // Explicit method and profile: never rely on a server default changing.
-    const response = await exchange({ kind: 'prepare', number, body: form({ ...command, method: request.method, profile: 'path-merge-v1' }) });
-    const metadata = strictPreparation(response); checkPreparationShape(metadata);
-    const prepared = await preparationReply(response, number, observed.fields, observed.binding, webcrypto, false, request.method);
+    const response = await exchange({ kind: request.method === 'rebase' ? 'prepare-rebase' : 'prepare', number, body: form(command) });
+    const metadata = strictPreparation(response); checkPreparationShape(metadata, request.method);
+    const prepared = await nativePreparationReply(response, request, observed);
     checkpoint(); sameHead(metadata, pull, request);
     let inspection = null;
     if (prepared.artifact) {
       phase = 'inspection';
       const command = form(prepared.artifact.fields);
       const upload = multipart(command, prepared.artifact.bundle, makeBoundary(command, prepared.artifact.bundle, webcrypto));
-      const response = await exchange({ kind: 'inspect', number, body: upload.bytes, type: upload.contentType });
+      const response = await exchange({ kind: request.method === 'rebase' ? 'inspect-rebase' : 'inspect', number, body: upload.bytes, type: upload.contentType });
       inspection = candidateJson(response.value);
-      await inspectionReply(inspection, prepared.artifact, webcrypto); checkpoint(); sameHead(inspection, pull, request);
+      await checkInspection(inspection, prepared.artifact, metadata, request); checkpoint(); sameHead(inspection, pull, request);
     }
     phase = 'validation';
     const capture = { schema: CANDIDATE_CAPTURE_SCHEMA, request, pull, review_pages: pages,
@@ -295,6 +368,7 @@ export async function resolvePullCandidate(input, inputChoices, token, options =
     const choices = candidateResolutionChoices(inputChoices);
     const checked = await validateCandidateCapture(input); checkpoint();
     const original = checked.capture, request = original.request;
+    if (request.method === 'rebase') candidateFail('candidate_rebase_resolution_requires_original_commit_recipes');
     if (original.schema !== CANDIDATE_CAPTURE_SCHEMA || original.preparation.state !== 'conflicted') candidateFail('original_candidate_conflicts_required');
     const observed = discovery(request, original.pull, original.review_pages);
     const selected = await resolutionUpload(original.preparation, observed.fields, metadataFor(request),
