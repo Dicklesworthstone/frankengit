@@ -74,8 +74,8 @@ The client validates the exact terminal coordinates, native reference bytes,
 repository scope and previously observed transaction/principal. Transport
 requires an explicit keyed POST outside the cancellable-read lane. Cancelling
 views does not abort this publication. A disconnect still means uncertainty,
-not rollback. Browser text forms refuse byte-only refs rather than converting
-them lossily.
+not rollback. The selected-PR and inspected-candidate controls carry byte-only names in
+`source_ref_hex` or `target_ref_hex`. Saved requests retain the chosen aliases.
 
 ## Verification scope
 

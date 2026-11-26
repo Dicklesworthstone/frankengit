@@ -44,16 +44,15 @@ references, policy or versions. An explicitly selected outcome-only recovery
 connection may use a replacement credential for the original principal; it
 cannot re-inspect, reconstruct or resend the mutation.
 
-PR metadata creation/update/close/reopen still uses the separate text-only
-form. The PR fast-forward publication command below is also text-only. A
-source-tip candidate imported with hex references may be inspected and
-reviewed, but its fast-forward publication control remains unavailable. This
-does not restrict the native raw-reference queue landing workflow.
+Fast-forward publication accepts text or lowercase hex for each branch. A
+selected PR supplies its recorded branch bytes. An imported source-tip candidate
+supplies the exact reference encodings retained during inspection. Both paths
+use the same six-field HTTP command and explicit send confirmation.
 
 ## Fast-forward merges from the PR page
 
 The served `/ui/pulls/` page now offers **Prepare fast-forward merge** for an
-open PR with representable recorded branch names and distinct source/target
+open PR with valid recorded branch names and distinct source/target
 tips. This completes the browser interaction on top of the existing
 [fast-forward HTTP command](FAST_FORWARD_PULL_REQUEST_HTTP.md), rather than
 introducing another publication path.
@@ -78,7 +77,7 @@ interrupted or lost reply retains the original pending request. Outcome lookup
 does not resend it, and absence does not prove non-commit. Export/restore uses
 the existing credential-fingerprint-bound receipt with its original command and
 idempotency key; no token or candidate bundle is written into this receipt.
-Closed/merged PRs, byte-only names, equal tips, wrong scope/hash domains, and
+Closed/merged PRs, equal tips, wrong scope/hash domains, and
 exhausted exact-integer versions do not become actionable proposals.
 
 ## Reproduction and evidence boundary

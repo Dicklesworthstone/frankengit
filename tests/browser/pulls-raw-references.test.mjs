@@ -90,6 +90,8 @@ test('reference aliases reject ambiguity, missing encodings, invalid Git branch 
         hex('refs/heads/') + '61'.repeat(1014)].map(value => fields => { fields[encoded] = value; })];
     for (const mutate of changed) {
       const fields = { ...f.selected }; mutate(fields);
+      const { policy_epoch, ...fastForward } = fields;
+      assert.throws(() => fastForwardCommand(fastForward));
       assert.throws(() => subject(fields)); assert.throws(() => preparationCommand(fields, commitMetadata));
       assert.throws(() => collaborationCommand('approve', { ...fields, merge_base: f.fields.merge_base,
         candidate_commit: f.fields.candidate_commit, expected_version: 0, reason: 'Exact bytes' }));
@@ -101,7 +103,7 @@ test('reference aliases reject ambiguity, missing encodings, invalid Git branch 
   assert.throws(() => subject(same), /must differ/);
   assert.throws(() => metadataCommand('update', { ...metadata(), source_ref_hex: f.selected.source_ref_hex }));
   const { policy_epoch, ...fastForward } = f.selected;
-  assert.throws(() => fastForwardCommand(fastForward));
+  assert.deepEqual(fastForwardCommand(fastForward), fastForward);
 });
 
 test('raw branch bytes are native bytes, including valid UTF-8 which is not a lossy display label', () => {
@@ -319,7 +321,7 @@ async function mounted(f = sample()) {
 
 for (const algorithm of ['sha1', 'sha256']) test(`${algorithm}: the PR view prepares and explicitly approves observed raw references without copying display labels into forms`, async () => {
   const f = sample(algorithm), h = await mounted(f);
-  assert.equal(h.node('prepare-candidate').disabled, false); assert.equal(h.node('fast-forward-stage').disabled, true);
+  assert.equal(h.node('prepare-candidate').disabled, false); assert.equal(h.node('fast-forward-stage').disabled, false);
   assert.equal(h.node('source-ref').value, ''); assert.equal(h.node('target-ref').value, '');
   assert.equal(h.node('title').value, ''); assert.equal(h.node('pr-number').value, '');
   for (const [name, value] of Object.entries({ 'policy-epoch': '1', ...commitMetadata })) h.node(name).value = String(value);
@@ -350,15 +352,19 @@ test('portable raw-reference candidate files are imported through the PR view, r
   assert.equal(h.node('merge-stage').disabled, false);
 });
 
-test('raw-reference source-tip review remains available while the separate text-only fast-forward publication is explicitly unavailable', async () => {
+test('a reviewed raw-reference source-tip candidate stages its exact fast-forward coordinates', async () => {
   const f = sample();
   f.fields = { ...f.fields, source_tip: f.fields.candidate_commit, merge_base: f.fields.target_tip };
   f.artifact = { ...f.artifact, fields: f.fields };
   f.inspection = { ...f.inspection, subject: { ...f.inspection.subject, source_tip: f.fields.source_tip }, merge_base: f.fields.merge_base };
   const h = await mounted(f); await h.importCandidate();
-  assert.equal(h.node('review-stage').disabled, false); assert.equal(h.node('merge-stage').disabled, true);
-  assert.match(h.node('merge-method-guidance').textContent, /requires text branch references/);
-  await assert.rejects(h.app.client.stageInspectedFastForward(), /requires text branch references/);
+  assert.equal(h.node('review-stage').disabled, false); assert.equal(h.node('merge-stage').disabled, false);
   await assert.rejects(h.app.client.stageMerge([reviewer]), /explicit fast-forward/);
-  assert.equal((await stage(h.app.client, 'approve')).fields.source_ref_hex, f.refs.source_ref_hex);
+  await h.app.client.stageInspectedFastForward();
+  const pending = h.app.client.pending;
+  assert.equal(pending.action, 'fast-forward'); assert.equal(pending.sent, false);
+  assert.equal(pending.fields.source_ref_hex, f.refs.source_ref_hex);
+  assert.equal(pending.fields.target_ref_hex, f.refs.target_ref_hex);
+  assert.equal(pending.bundle_bytes, 0);
+  assert.ok(!Object.hasOwn(pending.fields, 'policy_epoch'));
 });

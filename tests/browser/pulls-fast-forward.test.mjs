@@ -48,6 +48,20 @@ for (const format of ['sha1', 'sha256']) test(`fast-forward preserves exact ${fo
   assert.equal(publication(receipt(pending(format)), pending(format), 200).outcome, 'committed');
 });
 
+test('byte-named fast-forward receipts bind raw refs even when both display names are null', () => {
+  const p = pending(), r = receipt(p);
+  for (const side of ['source', 'target']) {
+    const name = `${side}_ref`, bytes = hex(utf8.encode('refs/heads/x')) + (side === 'source' ? 'fe' : 'ff');
+    delete p.fields[name]; p.fields[`${name}_hex`] = bytes;
+    r[name] = null; r[`${name}_hex`] = bytes;
+  }
+  assert.equal(publication(r, p, 200).outcome, 'committed');
+  assert.throws(() => publication({ ...r, source_ref_hex: r.target_ref_hex }, p, 200));
+  assert.throws(() => publication({ ...r, target_ref: 'refs/heads/x�' }, p, 200));
+  assert.throws(() => fastForwardCommand({ ...p.fields, source_ref: 'refs/heads/x' }));
+  assert.throws(() => fastForwardCommand({ ...p.fields, target_ref_hex: p.fields.source_ref_hex }));
+});
+
 test('fast-forward rejects missing, unknown and inapplicable authority fields', () => {
   for (const name of Object.keys(fields())) {
     const input = fields(); delete input[name]; assert.throws(() => fastForwardCommand(input), undefined, name);

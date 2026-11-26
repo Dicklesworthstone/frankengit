@@ -152,7 +152,7 @@ export function fastForwardProposal(observed, scope) {
   const row = selected.reply.pull_request;
   if (!row || row.state !== 'open' || !row.data) fail('Fast-forward requires an open PR with recorded metadata.');
   return { number: row.number, fields: fastForwardCommand({ object_format: selected.binding.format,
-    pull_request_version: row.version, source_ref: row.data.source_ref, target_ref: row.data.target_ref,
+    pull_request_version: row.version, ...subjectReferences(row.data),
     source_tip: row.data.source_tip, target_tip: row.data.target_tip }) };
 }
 
@@ -287,16 +287,12 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     resolution.setDisabled(!connected || busy || !resolving);
     for (const id of ['review-stage', 'merge-stage']) nodes[id].disabled = !candidate || busy || Boolean(pending);
     const method = candidateMethod(candidate), inspectedFastForward = method === 'fast-forward-only', squash = method === 'squash', rebase = method === 'rebase';
-    const rawFastForward = inspectedFastForward && (Object.hasOwn(candidate.fields, 'source_ref_hex') || Object.hasOwn(candidate.fields, 'target_ref_hex'));
-    if (rawFastForward) nodes['merge-stage'].disabled = true;
     nodes['merge-heading'].textContent = inspectedFastForward ? 'Fast-forward inspected source' : rebase ? 'Reviewed rebase' : squash ? 'Reviewed squash' : 'Reviewed merge';
     nodes['merge-stage'].textContent = inspectedFastForward ? 'Prepare fast-forward — do not send' : rebase ? 'Prepare rebase merge — do not send' : squash ? 'Prepare squash — do not send' : 'Prepare merge — do not send';
     nodes['merge-reviewer-fields'].hidden = inspectedFastForward;
     nodes['required-reviewers'].disabled = inspectedFastForward || !candidate || busy || Boolean(pending);
     nodes['required-reviewers'].required = !inspectedFastForward;
-    nodes['merge-method-guidance'].textContent = rawFastForward
-      ? 'This source-tip candidate can be reviewed with its exact reference bytes. Fast-forward publication through this form requires text branch references.'
-      : inspectedFastForward
+    nodes['merge-method-guidance'].textContent = inspectedFastForward
       ? 'Publish the exact inspected source tip with the native fast-forward method. Current branch protection determines required approvals. The request preserves the inspected PR version and both branch tips; it sends no candidate bundle or caller-selected reviewer list.'
       : rebase ? 'Publish the complete inspected series on the target while preserving the source branch. Required checks and path-specific reviews cover every rewritten commit, including temporary changes.'
       : squash ? 'Publish the inspected squash with the target as its only parent and the explicit reviewer requirements below. Current branch protection also applies.'
