@@ -65,10 +65,13 @@ reconciliation.
 
 ## After completed execution
 
-After a native dispatch returns, the watcher checks that its processes and
-workspaces have closed. It then writes and syncs `check-sources`, retaining the
-original event, executed commit, child run IDs, journal identities and exact
-journal pins. Finally it writes and syncs `settled`.
+After native dispatch and source finalization, the watcher checks that its
+processes and workspaces have closed. It writes and syncs `check-sources`,
+retaining the original event, executed commit, child run IDs, journal identities
+and exact journal pins. It then writes and syncs `settled` before publishing the
+human-readable batch report. A late report write error still fails the current
+invocation. A new watcher can use the saved evidence to publish the original
+checks and process later commits.
 
 A crash between those last two writes used to leave the entire watch scope
 blocked despite a completed execution. The watcher now verifies the completion

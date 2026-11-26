@@ -29,6 +29,7 @@ pub(super) struct Snapshot {
     pub(super) commit: GitOid,
     pub(super) ancestor_of: Option<GitOid>,
     pub(super) settle_definition_refusal: bool,
+    pub(super) watch_owns_completion: bool,
 }
 
 impl From<(RepositoryAuthorityHeadId, GitOid)> for Snapshot {
@@ -38,6 +39,7 @@ impl From<(RepositoryAuthorityHeadId, GitOid)> for Snapshot {
             commit,
             ancestor_of: None,
             settle_definition_refusal: false,
+            watch_owns_completion: false,
         }
     }
 }
@@ -73,6 +75,17 @@ impl TrustedWorkflowDispatch {
     /// Completed child observations in their deterministic dispatch order.
     pub fn runs(&self) -> &[TrustedWorkflowRun] {
         &self.runs
+    }
+
+    pub(super) fn persist_report(&self) -> Result<(), TrustedWorkflowFailure> {
+        File::open(&self.run_directory)
+            .and_then(|root| publish_report(&root, &self.run_directory, self.to_json().as_bytes()))
+            .map_err(|error| TrustedWorkflowFailure::Journal {
+                directory: self.run_directory.clone(),
+                detail: format!(
+                    "dispatch finished but report durability failed: {error}; do not replay"
+                ),
+            })
     }
 
     /// Only the native dispatcher constructs this terminal description. A
@@ -370,7 +383,7 @@ impl OneNode {
                                     ))
                                 })?,
                         );
-                        dispatch_at(
+                        let report = dispatch_at(
                             self,
                             request,
                             WorkflowInputs::Canonical(manifest),
@@ -390,7 +403,11 @@ impl OneNode {
                             path_basis,
                             tag_tip,
                             retain_definition_refusal,
-                        )
+                        )?;
+                        if !expected.watch_owns_completion {
+                            report.persist_report()?;
+                        }
+                        Ok(report)
                     })();
                     *observed
                         .lock()
@@ -406,12 +423,19 @@ impl OneNode {
         match (selected, observed) {
             (_, Some(Err(error))) => Err(error),
             (Ok(()) | Err(NodeWorkspaceRefusal::Cancelled { .. }), Some(Ok(report))) => Ok(report),
-            (Err(error), Some(Ok(report))) => Err(TrustedWorkflowFailure::Journal {
-                directory: report.run_directory,
-                detail: format!(
-                    "dispatch source finalization failed after execution: {error}; inspect saved reports, do not replay"
-                ),
-            }),
+            (Err(error), Some(Ok(report))) => {
+                if expected.watch_owns_completion {
+                    // Preserve the report for inspection without handing a
+                    // failed source-finalization result to the watch.
+                    report.persist_report()?;
+                }
+                Err(TrustedWorkflowFailure::Journal {
+                    directory: report.run_directory,
+                    detail: format!(
+                        "dispatch source finalization failed after execution: {error}; inspect saved reports, do not replay"
+                    ),
+                })
+            }
             (Err(error), None) => Err(TrustedWorkflowFailure::Source(error)),
             (Ok(()), None) => Err(TrustedWorkflowFailure::InvalidInput(
                 "dispatch source consumer did not complete",
@@ -799,11 +823,6 @@ fn dispatch_at<A: GitHashAlgorithm>(
             break;
         }
     }
-    publish_report(&root, &batch_directory, report.to_json().as_bytes()).map_err(|e| {
-        failed(format!(
-            "dispatch finished but report durability failed: {e}; do not replay"
-        ))
-    })?;
     Ok(report)
 }
 
