@@ -55,6 +55,18 @@ passed 14 cases, and 36 focused Rust tests passed at the same source
 revision. Comment 6297 on `.4.12` records executable and terminal receipts.
 [HTTP controller](NATIVE_HTTP_WORKFLOW_SERVICE.md#replay-missed-branch-updates)
 
+At `c3890e06`, both ordered branch entry points accept the existing explicit
+check publisher. In each Git format, two pushes made while the HTTP controller
+was stopped executed in order. The older check received `TargetRefMoved`.
+Recovering its acknowledgement reused the same decision without another
+authority write. The exact current-tip success appeared on the PR and allowed
+a protected branch update that the earlier success could not authorize. The
+stock Git and ordinary HTTP suites passed 16 and 14 cases respectively.
+Seven native configuration refusals, the Cargo syntax lane and the native
+`fg_at` regression also passed. RCH disk admission blocked the focused Rust
+unit-test groups. Comment 6299 on `.4.12` records the exact receipts.
+[Check publication](NATIVE_WATCH_CHECK_PUBLICATION.md#interrupted-publication-and-source-movement)
+
 The proof bridge at `b4bf422a` follows the same sealed loser through
 re-preparation at the winner's head in both writer schedules. The disjoint
 writes both commit. The same-ref Rust controls refuse the losing precondition
