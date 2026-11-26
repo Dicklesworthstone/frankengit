@@ -1,7 +1,6 @@
-//! Byte-preserving reference coordinates shared by candidate construction,
-//! inspection and review publication. Decoding never supplies authority.
+//! Exact text or hex reference fields for HTTP reads and publication.
 
-use super::super::issues::ApiError;
+use super::issues::ApiError;
 use fgit_types::{MAX_REF_NAME_LEN, RefName};
 use std::collections::BTreeMap;
 
@@ -41,6 +40,20 @@ pub(super) fn reference(
         _ => return Err(ApiError::bad("exactly_one_ref_encoding_required")),
     };
     RefName::try_new(&bytes).map_err(|_| ApiError::bad("invalid_ref"))
+}
+
+/// Preserve the route's original response when plain text is missing or invalid.
+pub(super) fn required_reference(
+    fields: &mut BTreeMap<String, String>,
+    plain: &str,
+    encoded: &str,
+    missing: &'static str,
+) -> Result<RefName, ApiError> {
+    if fields.contains_key(encoded) {
+        return reference(fields, plain, encoded);
+    }
+    let value = fields.remove(plain).ok_or_else(|| ApiError::bad(missing))?;
+    RefName::try_new(value.as_bytes()).map_err(|_| ApiError::bad("invalid_ref"))
 }
 
 #[cfg(test)]

@@ -299,10 +299,7 @@ pub(super) fn command_ref(
     plain: &str,
     encoded: &str,
 ) -> Result<RefName, ApiError> {
-    if fields.contains_key(encoded) {
-        return super::subject::reference(fields, plain, encoded);
-    }
-    RefName::try_new(take(fields, plain)?.as_bytes()).map_err(|_| ApiError::bad("invalid_ref"))
+    super::subject::required_reference(fields, plain, encoded, "required_field_missing")
 }
 
 fn oid(text: &str, format: GitHashAlgorithm) -> Result<GitOid, ApiError> {

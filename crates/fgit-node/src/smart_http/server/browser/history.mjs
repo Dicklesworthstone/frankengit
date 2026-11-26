@@ -1,7 +1,7 @@
 // Read-only repository investigation. No arbitrary route, write key, mutation,
 // credential persistence, automatic retry, or client-side authorization oracle.
 import { fail, keys, integer, format, oid, utf8, hex, unhex, copy, form, readBytes, json } from './pulls-core.mjs';
-import { HISTORY_LIMITS, fullRef, bytePath, logPage, firstParentCursor, firstParentPage, blamePage, historicalPage, comparisonQuery, comparisonPage, COMPARISON_LIMITS } from './history-data.mjs';
+import { HISTORY_LIMITS, fullRef, referenceHex, referenceField, bytePath, logPage, firstParentCursor, firstParentPage, blamePage, historicalPage, comparisonQuery, comparisonPage, COMPARISON_LIMITS } from './history-data.mjs';
 export const HISTORICAL_FILE_LIMIT = 8 * 1024 * 1024;
 const ENDPOINTS = new Set(['log', 'blame', 'historical-tree', 'historical-blob', 'diff']);
 function rootFor(href) {
@@ -87,14 +87,14 @@ export class HistoryClient {
     return copy(this.#selection);
   }
   #fields(selection) {
-    return { ref: selection.ref, object_format: selection.object_format, expected_head: selection.head, expected_commit: selection.tip };
+    return { ...referenceField('ref', selection.ref), object_format: selection.object_format, expected_head: selection.head, expected_commit: selection.tip };
   }
   async open(ref, algorithm, options = {}) {
     this.#selection = null; this.#comparison = null; this.#beforePin = null;
     return this.#run(async (signal, check) => {
       keys(options, ['first_parent', 'limit']);
       const request = { ref: fullRef(ref), object_format: format(algorithm) }, query = logOptions(options);
-      const raw = await this.#request('log', { ...request, ...logFields(query) }, signal); check();
+      const raw = await this.#request('log', { ...referenceField('ref', request.ref), object_format: request.object_format, ...logFields(query) }, signal); check();
       const page = await (query.first_parent ? firstParentPage : logPage)(raw, request, null, query, this.#crypto, check); check();
       if (this.#scope && Object.keys(page.selection.scope).some(key => page.selection.scope[key] !== this.#scope[key])) fail('Repository incarnation changed. Reconnect explicitly.');
       this.#scope = page.selection.scope; this.#selection = page.selection; return page;
@@ -113,19 +113,19 @@ export class HistoryClient {
   // Later modes/filters keep that tip. Only an explicit reopen clears this pin.
   async compare(beforeRef, options = {}) {
     const selection = this.#base(), query = comparisonQuery(beforeRef, options);
-    const retained = this.#beforePin?.ref === query.before_ref ? this.#beforePin.tip : null;
+    const retained = this.#beforePin?.hex === referenceHex(query.before_ref) ? this.#beforePin.tip : null;
     if (query.expected_before !== null) query.expected_before = oid(query.expected_before, selection.object_format);
     if (retained !== null && query.expected_before !== null && retained !== query.expected_before) fail('Before-tip pin changed. Reopen explicitly.');
     query.expected_before ??= retained;
     this.#comparison = null;
     return this.#run(async (signal, check) => {
-      const fields = { before_ref: query.before_ref, after_ref: selection.ref, object_format: selection.object_format,
+      const fields = { ...referenceField('before_ref', query.before_ref), ...referenceField('after_ref', selection.ref), object_format: selection.object_format,
         expected_head: selection.head, expected_after: selection.tip, mode: query.mode, context_lines: 3,
         path_prefix_hex: query.path_prefixes_hex, ...COMPARISON_LIMITS };
       if (query.expected_before !== null) fields.expected_before = query.expected_before;
       const raw = await this.#request('diff', fields, signal); check();
       const result = comparisonPage(raw, selection, query, check); check();
-      this.#beforePin = { ref: query.before_ref, tip: result.before };
+      this.#beforePin = { hex: referenceHex(query.before_ref), tip: result.before };
       this.#comparison = copy(result); return result;
     });
   }
@@ -176,7 +176,7 @@ export class HistoryClient {
     return this.#run((signal, check) => this.#historical(selection, query, signal, check));
   }
   async #historical(selection, query, signal, check, maximum = HISTORY_LIMITS.reply) {
-    const fields = { ref: selection.ref, object_format: selection.object_format, expected_head: selection.head,
+    const fields = { ...referenceField('ref', selection.ref), object_format: selection.object_format, expected_head: selection.head,
       expected_ref_tip: selection.tip, at_commit: query.commit, limit: query.limit };
     if (query.path_hex !== null) fields.path_hex = query.path_hex;
     if (query.kind === 'tree' && query.after !== null) fields.after_hex = query.after;
@@ -226,7 +226,7 @@ export class HistoryClient {
       // receipt. It does not certify path ancestry, authors or branch freshness.
       const raw = { type: 'browser_historical_file_verification', schema_version: 1, read_only: true,
         transaction_created: false, published: false, full_blob_verified: true, ...wanted, pages,
-        object_format: algorithm, repository: selection.scope, ref: selection.ref,
+        object_format: algorithm, repository: selection.scope, ...referenceField('ref', selection.ref),
         snapshot_token: selection.head, source_ref_tip: selection.tip, at_commit: query.commit, path_hex: query.path_hex };
       return { selection, query, ...wanted, pages, bytes: framed.slice(header.length), fullBlobVerified: true, raw };
     });

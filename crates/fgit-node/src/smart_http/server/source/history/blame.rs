@@ -31,6 +31,7 @@ impl Command {
             if !matches!(
                 name.as_str(),
                 "ref"
+                    | "ref_hex"
                     | "object_format"
                     | "expected_head"
                     | "expected_commit"
@@ -324,6 +325,10 @@ mod tests {
                 "object_format={}&ref=refs/heads/main&path_hex=6469722fff",
                 format.as_str()
             );
+            let encoded = base.replace("ref=refs/heads/main", "ref_hex=726566732f68656164732fff");
+            let raw = Command::parse(encoded.as_bytes(), format).unwrap();
+            assert_eq!(raw.selection.reference.as_bytes(), b"refs/heads/\xff");
+            assert!(Command::parse((encoded + "&ref=refs/heads/main").as_bytes(), format).is_err());
             let query = Command::parse(
                 (base.clone() + "&line_start=1&line_end=3").as_bytes(),
                 format,

@@ -234,3 +234,30 @@ test('one reference at one snapshot cannot report two different tips', () => {
   const same = f.diff({ mode: 'merge-base', requested_before: f.tag(f.after), compared_before: f.tag(f.before) });
   assert.throws(() => check(f, same, comparisonQuery(f.beforeRef, { mode: 'merge-base' })), /changed/);
 });
+
+for (const algorithm of ['sha1', 'sha256']) {
+  test(`${algorithm}: raw before and after refs remain bound across comparison and side reads`, async () => {
+    const f = fixture(algorithm);
+    const before = hex('refs/heads/') + 'fe', after = hex('refs/heads/') + 'ff';
+    const { client, calls } = harness(f, ({ url, form }) => {
+      if (url.endsWith('/log')) return jsonResponse({ ...f.log(), ref_hex: after });
+      if (url.endsWith('/diff')) return jsonResponse(f.diff({ before_ref_hex: before, after_ref_hex: after }));
+      const isBefore = form.get('ref_hex') === before, translated = new URLSearchParams(form);
+      translated.set('ref', isBefore ? f.beforeRef : f.afterRef);
+      const reply = f.historical(translated);
+      reply.source.ref_hex = isBefore ? before : after;
+      return jsonResponse(reply);
+    });
+    client.connect(token);
+    await client.open('hex:' + after, algorithm);
+    const compared = await client.compare('hex:' + before);
+    assert.equal(calls.at(-1).form.get('before_ref_hex'), before);
+    assert.equal(calls.at(-1).form.get('after_ref_hex'), after);
+    for (const [side, ref] of [['before', before], ['after', after]]) {
+      const file = await client.comparisonFile(side, compared.entries[0].path_hex);
+      assert.equal(file.fullBlobVerified, true);
+      assert.equal(calls.at(-1).form.get('ref_hex'), ref);
+      assert.equal(calls.at(-1).form.has('ref'), false);
+    }
+  });
+}

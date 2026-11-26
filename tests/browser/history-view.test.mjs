@@ -33,6 +33,16 @@ function harness(f = fixture()) {
   };
 }
 for (const algorithm of ['sha1', 'sha256']) {
+  test(`${algorithm}: history form opens a byte-named ref and traces its historical origin`, async () => {
+    const h = harness(fixture(algorithm)), raw = hex(bytes('refs/heads/')) + 'ff';
+    h.f.config.mutate = value => { (value.source ?? value).ref_hex = raw; };
+    h.get('ref').value = 'hex:' + raw; await h.connect();
+    await h.blame();
+    await one(h.get('content'), `Verify origin ${h.f.base.object_id.slice(0, 12)}:1`).fire('click');
+    assert.match(h.get('status').textContent, /Exact attributed origin bytes checked/);
+    assert.ok(h.get('snapshot').textContent.includes('hex:' + raw));
+    for (const call of h.f.calls) assert.equal(call.form.get('ref_hex'), raw);
+  });
   test(`${algorithm}: connect displays checked history and clears the credential input`, async () => {
     const h = harness(fixture(algorithm)); await h.connect();
     assert.equal(h.get('token').value, ''); assert.equal(h.get('log').disabled, false);

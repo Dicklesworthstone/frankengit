@@ -13,12 +13,12 @@
     <p>Follow commit history, inspect historical files, and trace exact lines through all merge parents. Names, messages and source are inert data. Commit identity does not authenticate its author.</p>
     <form id="history-connect">
       <label>Source-read token<input id="history-token" type="password" autocomplete="off" maxlength="64" spellcheck="false" required></label>
-      <label>Full reference<input id="history-ref" value="refs/heads/main" autocomplete="off" spellcheck="false" maxlength="1024" required></label>
+      <label>Full reference<input id="history-ref" value="refs/heads/main" autocomplete="off" spellcheck="false" maxlength="2052" required></label>
       <label>Object format<select id="history-format"><option value="sha1">SHA-1</option><option value="sha256">SHA-256</option></select></label>
       <label>History view<select id="history-mode"><option value="all">All parents — complete bounded graph</option><option value="first-parent">Recent first-parent chain — large repositories</option></select></label>
       <button type="submit">Connect and open</button><button id="history-open" type="button">Reopen reference explicitly</button><button id="history-disconnect" type="button">Disconnect</button>
     </form>
-    <p class="hint">Tokens remain only in page memory. HTTPS is required outside trusted loopback. Changing the reference field does not change the selected snapshot until you reopen it.</p>
+    <p class="hint">Tokens remain only in page memory. HTTPS is required outside trusted loopback. For either reference, enter its full name or <code>hex:</code> followed by the entire name in lowercase hexadecimal. Changing the reference field does not change the selected snapshot until you reopen it.</p>
     <p class="hint">Recent first-parent history reads only the prefix needed for a page, so a long repository can open without a complete ancestry walk. Side-parent history is omitted. Continuations re-walk the prefix within the same finite budget; older pages can still exceed it. Choose all parents for exact-path history.</p>
     <pre id="history-snapshot" aria-label="Pinned repository snapshot"></pre>
     <form id="history-query">
@@ -36,7 +36,7 @@
       <h2 id="history-compare-heading">Compare branches before opening a pull request</h2>
       <p>The selected reference above is the <strong>after</strong> side. Choose the <strong>before</strong> reference below. Both are read at the selected authority snapshot; neither reference is moved.</p>
       <form id="history-compare">
-        <label>Before reference<input id="history-before-ref" value="refs/heads/main" autocomplete="off" spellcheck="false" maxlength="1024" required></label>
+        <label>Before reference<input id="history-before-ref" value="refs/heads/main" autocomplete="off" spellcheck="false" maxlength="2052" required></label>
         <label>Expected before tip (optional independent pin)<input id="history-before-tip" autocomplete="off" spellcheck="false" maxlength="71" placeholder="Full lowercase native commit ID"></label>
         <label>Comparison mode<select id="history-compare-mode"><option value="direct">Direct: before tip → selected after tip</option><option value="merge-base">Merge base → selected after tip</option></select></label>
         <label>Optional exact path prefixes, one per line<textarea id="history-compare-paths" rows="3" maxlength="65536" spellcheck="false"></textarea></label>

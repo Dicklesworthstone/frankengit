@@ -104,6 +104,7 @@ impl Command {
             if !matches!(
                 name.as_str(),
                 "ref"
+                    | "ref_hex"
                     | "object_format"
                     | "expected_head"
                     | "expected_commit"
@@ -224,8 +225,7 @@ fn selection(
     if take(fields, "object_format")? != format.as_str() {
         return Err(ApiError::bad("object_format_mismatch"));
     }
-    let reference = RefName::try_new(take(fields, "ref")?.as_bytes())
-        .map_err(|_| ApiError::bad("invalid_ref"))?;
+    let reference = super::super::ref_field::required_reference(fields, "ref", "ref_hex", "missing_history_field")?;
     let expected_head = fields
         .remove("expected_head")
         .map(|text| parse_snapshot(&text))
@@ -656,6 +656,10 @@ mod tests {
     fn history_forms_are_closed_and_continuations_require_the_original_snapshot() {
         for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
             let base = form(format);
+            let encoded = base.replace("ref=refs/heads/main", "ref_hex=726566732f68656164732fff");
+            let raw = Command::parse(encoded.as_bytes(), format).unwrap();
+            assert_eq!(raw.selection.reference.as_bytes(), b"refs/heads/\xff");
+            assert!(Command::parse((encoded + "&ref=refs/heads/main").as_bytes(), format).is_err());
             assert!(Command::parse(base.as_bytes(), format).is_ok());
             for extra in [
                 "&after=1",

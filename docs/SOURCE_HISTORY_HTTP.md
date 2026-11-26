@@ -16,7 +16,7 @@ POST carries a bounded **read query**, not a mutation. Query strings and
 existing bounded form decoder.
 
 Required fields are `object_format=sha1|sha256` (matching the repository) and
-`ref` (a full native reference name). The ref is resolved from one authenticated
+exactly one of `ref` (full native reference name as UTF-8 text) and `ref_hex` (the entire native reference name as lowercase hexadecimal). Log, blame, historical tree and historical blob queries accept the same two encodings. The reference-diff route accepts either spelling independently for each side (`before_ref`/`before_ref_hex` and `after_ref`/`after_ref_hex`). The ref is resolved from one authenticated
 current authority snapshot; canonical hidden-ref policy still applies. A raw
 commit ID cannot select an object. Optional `expected_commit` compares against
 the selected ref tip and is never a grant to read that object.

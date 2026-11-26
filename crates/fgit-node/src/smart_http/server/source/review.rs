@@ -11,7 +11,7 @@ use std::io::Read;
 use fgit_forge::preparation::MergeSourceError;
 use fgit_forge::review::{ComparisonMode, ReviewError, ReviewOptions, ReviewSelection};
 use fgit_forge::{AggregateVersion, PullRequestNumber};
-use fgit_types::{GitHashAlgorithm, GitOid, RefName, RepositoryAuthorityHeadId};
+use fgit_types::{GitHashAlgorithm, GitOid, RepositoryAuthorityHeadId};
 use fgit_wire::smart_http::{BodyFraming, HttpLimits, head::Envelope};
 use fgit_wire::visibility::RefVisibility;
 
@@ -103,7 +103,7 @@ impl Command {
             let selector = if pull.is_some() {
                 name == "expected_version"
             } else {
-                matches!(name.as_str(), "before_ref" | "after_ref")
+                matches!(name.as_str(), "before_ref" | "before_ref_hex" | "after_ref" | "after_ref_hex")
             };
             if !selector
                 && !matches!(
@@ -145,10 +145,8 @@ impl Command {
                 expected_version,
             }
         } else {
-            let before = RefName::try_new(take(&mut fields, "before_ref")?.as_bytes())
-                .map_err(|_| ApiError::bad("invalid_ref"))?;
-            let after = RefName::try_new(take(&mut fields, "after_ref")?.as_bytes())
-                .map_err(|_| ApiError::bad("invalid_ref"))?;
+            let before = super::super::ref_field::required_reference(&mut fields, "before_ref", "before_ref_hex", "missing_diff_field")?;
+            let after = super::super::ref_field::required_reference(&mut fields, "after_ref", "after_ref_hex", "missing_diff_field")?;
             ReviewSelection::References { before, after }
         };
         let expected_head = fields
@@ -439,6 +437,18 @@ mod tests {
             )
             .is_ok()
         );
+    }
+    #[test]
+    fn reference_diff_preserves_raw_names_but_pr_diff_never_accepts_ref_selectors() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let form = format!("object_format={}&before_ref_hex=726566732f68656164732fff&after_ref=refs/heads/main", format.as_str());
+            let command = Command::parse(form.as_bytes(), format).unwrap();
+            let ReviewSelection::References { before, after } = command.selection else { panic!("expected reference diff") };
+            assert_eq!(before.as_bytes(), b"refs/heads/\xff");
+            assert_eq!(after.as_bytes(), b"refs/heads/main");
+            assert!(Command::parse_for(form.as_bytes(), format, Some(PullRequestNumber::FIRST)).is_err());
+            assert!(Command::parse((form + "&after_ref_hex=726566732f68656164732ffe").as_bytes(), format).is_err());
+        }
     }
     #[test]
     fn diff_envelopes_are_closed_body_bearing_read_queries() {

@@ -104,7 +104,7 @@ No production Git subprocess or dependency is introduced.
 
 The source-enabled gateway serves `<repository-route>/ui/history/`, linked
 from the current source browser. Connect a source-read token and explicitly
-open a full reference. Use the path form for exact file/directory history,
+open a full reference. To inspect or compare a byte-named ref, enter `hex:` followed by the entire ref in lowercase hex in either reference field. For example, `hex:726566732f68656164732fff` selects the branch whose final byte is `ff`. The cursor, blame origins, historical downloads and comparison sides continue to use those exact bytes. Use the path form for exact file/directory history,
 then browse a commit's tree and its immutable file ranges. Byte-valued paths
 can be entered as lowercase hex and stay lossless during navigation.
 

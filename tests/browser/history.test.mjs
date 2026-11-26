@@ -6,6 +6,27 @@ import { fixture, token, crypto, href, bytes, hex, hash, commit, json, deferred 
 const client = f => new HistoryClient({ href, fetchImpl: f.fetchImpl, cryptoImpl: crypto });
 async function opened(f) { const c = client(f); c.connect(token); await c.open(f.ref, f.algorithm); return c; }
 for (const algorithm of ['sha1', 'sha256']) {
+  test(`${algorithm}: hex reference survives first-parent paging, blame and historical reads`, async () => {
+    const f = fixture(algorithm), c = client(f), raw = hex(bytes('refs/heads/')) + 'ff';
+    f.config.mutate = value => {
+      (value.source ?? value).ref_hex = raw;
+      if (value.next_cursor) value.next_cursor = value.next_cursor.replace(hex(bytes(f.ref)), raw);
+    };
+    c.connect(token);
+    const page = await c.open('hex:' + raw, algorithm, { first_parent: true, limit: 1 });
+    assert.equal(page.selection.ref, 'hex:' + raw);
+    const next = await c.log({ first_parent: true, limit: 1, cursor: page.nextCursor });
+    assert.equal(next.commits[0].id, f.base.object_id);
+    await c.blame(f.path);
+    assert.equal((await c.origin(1)).originBytesVerified, true);
+    await c.historical('tree', f.base.object_id);
+    for (const { form } of f.calls) {
+      assert.equal(form.get('ref_hex'), raw);
+      assert.equal(form.has('ref'), false);
+    }
+    f.config.mutate = value => { value.ref_hex = raw.slice(0, -2) + 'fe'; };
+    await assert.rejects(c.log(), /reference or hash domain changed/);
+  });
   test(`${algorithm}: log, exact path history and continuations retain the original snapshot`, async () => {
     const f = fixture(algorithm), c = await opened(f);
     assert.equal(c.selection.tip, f.tip.object_id);

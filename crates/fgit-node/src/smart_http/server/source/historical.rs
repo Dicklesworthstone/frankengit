@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::io::Read;
 
 use fgit_forge::source_browse::{SourceBrowseAction, SourceBrowseQuery};
-use fgit_types::{GitHashAlgorithm, GitOid, RefName};
+use fgit_types::{GitHashAlgorithm, GitOid};
 use fgit_wire::smart_http::{BodyFraming, HttpLimits, head::Envelope};
 
 use super::super::issues::{MAX_FORM_BYTES, parse_decimal, parse_form, parse_snapshot, quote};
@@ -80,6 +80,7 @@ impl<'a> Request<'a> {
             let common = matches!(
                 name.as_str(),
                 "ref"
+                    | "ref_hex"
                     | "object_format"
                     | "expected_head"
                     | "expected_ref_tip"
@@ -101,8 +102,7 @@ impl<'a> Request<'a> {
         if take(&mut fields, "object_format")? != format.as_str() {
             return Err(ApiError::bad("object_format_mismatch"));
         }
-        let reference = RefName::try_new(take(&mut fields, "ref")?.as_bytes())
-            .map_err(|_| ApiError::bad("invalid_ref"))?;
+        let reference = super::super::ref_field::required_reference(&mut fields, "ref", "ref_hex", "historical_source_selection_required")?;
         let expected_head = parse_snapshot(&take(&mut fields, "expected_head")?)?;
         let expected_ref_tip = oid(&take(&mut fields, "expected_ref_tip")?, format)?;
         let commit = oid(&take(&mut fields, "at_commit")?, format)?;

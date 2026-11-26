@@ -21,6 +21,10 @@ fn form(format: GitHashAlgorithm) -> String {
 fn historical_selection_is_explicit_and_binds_both_native_formats() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let input = form(format);
+        let encoded = input.replace("ref=refs%2Fheads%2Fmain", "ref_hex=726566732f68656164732fff");
+        let raw = request(Operation::Tree).command(encoded.as_bytes(), format).unwrap();
+        assert_eq!(raw.selection.reference.as_bytes(), b"refs/heads/\xff");
+        assert!(request(Operation::Tree).command((encoded + "&ref=refs/heads/main").as_bytes(), format).is_err());
         let command = request(Operation::Tree)
             .command(input.as_bytes(), format)
             .unwrap();

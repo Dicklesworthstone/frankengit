@@ -4,10 +4,19 @@ import { findBytes, joinBytes } from './pulls-candidate.mjs';
 export const HISTORY_LIMITS = Object.freeze({ reply: 8 * 1024 * 1024, commits: 4096, edges: 16384,
   metadata: 4 * 1024 * 1024, commitBytes: 65536, blob: 1024 * 1024, lines: 20000, comparisons: 128 });
 export function fullRef(value) {
-  text(value, 1024, 'reference', true);
-  if (!value.startsWith('refs/') || /[\x00-\x20\x7f~^:?*\[\\]/u.test(value) || value.includes('..') || value.includes('@{') ||
-      value.endsWith('.') || value.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.lock'))) fail('A complete native reference is required.');
+  // hex: is the branch picker's notation. Git forbids colon in a native name.
+  const raw = typeof value === 'string' && value.startsWith('hex:')
+    ? unhex(value.slice(4), 1024) : utf8.encode(text(value, 1024, 'reference'));
+  const bytes = String.fromCharCode(...raw);
+  if (!bytes.startsWith('refs/') || /[\x00-\x20\x7f~^:?*\[\\]/u.test(bytes) || bytes.includes('..') || bytes.includes('@{') ||
+      bytes.endsWith('.') || bytes.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.lock'))) fail('A complete native reference is required.');
   return value;
+}
+export function referenceHex(ref) {
+  return ref.startsWith('hex:') ? ref.slice(4) : hex(utf8.encode(ref));
+}
+export function referenceField(name, ref) {
+  return ref.startsWith('hex:') ? { [name + '_hex']: ref.slice(4) } : { [name]: ref };
 }
 export function bytePath(value, root = false) {
   if (value === null && root) return null;
@@ -29,7 +38,7 @@ export function selected(reply, request, previous = null, historicalCommit = nul
   readOnly(reply);
   const scope = binding(reply, previous?.scope), head = snapshot(reply.snapshot_token);
   opaque(reply.source_head);
-  if (scope.format !== request.object_format || reply.ref_hex !== hex(utf8.encode(request.ref))) fail('Source reference or hash domain changed.');
+  if (scope.format !== request.object_format || reply.ref_hex !== referenceHex(request.ref)) fail('Source reference or hash domain changed.');
   const tip = oid(reply.source_commit, scope.format);
   if (previous && (head !== previous.head || tip !== (historicalCommit ?? previous.tip))) fail('Source snapshot moved. Reopen explicitly.');
   return { ref: request.ref, object_format: scope.format, scope, head, tip };
@@ -95,7 +104,7 @@ export function firstParentCursor(value, selection) {
   text(value, 4096, 'first-parent cursor', true);
   const parts = value.split('/');
   if (parts.length !== 6 || parts[0] !== 'fgfp1' || parts[1] !== selection.head ||
-      parts[2] !== hex(utf8.encode(selection.ref)) || parts[3] !== selection.object_format ||
+      parts[2] !== referenceHex(selection.ref) || parts[3] !== selection.object_format ||
       parts[4] !== selection.tip || !/^[1-9][0-9]*$/.test(parts[5])) fail('First-parent cursor changed its snapshot, reference, tip or profile.');
   return integer(Number(parts[5]), 'first-parent offset', 1, HISTORY_LIMITS.commits);
 }
@@ -112,7 +121,7 @@ export async function firstParentPage(reply, request, previous, query, crypto, c
   if (reply.visited_commits !== end) fail('First-parent visited prefix changed.');
   integer(reply.visited_parent_edges, 'visited parent headers', end - Number(reply.root_reached), HISTORY_LIMITS.edges);
   integer(reply.metadata_bytes, 'visited metadata bytes', 1, HISTORY_LIMITS.metadata);
-  const next = reply.root_reached ? null : `fgfp1/${selection.head}/${hex(utf8.encode(selection.ref))}/${selection.object_format}/${selection.tip}/${end}`;
+  const next = reply.root_reached ? null : `fgfp1/${selection.head}/${referenceHex(selection.ref)}/${selection.object_format}/${selection.tip}/${end}`;
   if (reply.next_cursor !== next) fail('Invalid first-parent continuation.');
   const seen = new Set(), commits = []; let metadata = 0, edges = 0;
   for (const row of reply.commits) {
@@ -261,8 +270,8 @@ export function comparisonPage(reply, selection, query, check = () => {}) {
   if (reply.type !== 'source_diff' || reply.profile !== 'native-tree-review-v1' || reply.pull_request !== null ||
       reply.approval_created !== false || reply.complete !== true || reply.line_origin !== 0 || reply.context_lines !== 3 ||
       scope.format !== algorithm || head !== selection.head || reply.mode !== query.mode ||
-      reply.before_ref_hex !== hex(utf8.encode(query.before_ref)) || reply.after_ref_hex !== hex(utf8.encode(selection.ref)) ||
-      after !== selection.tip || (query.before_ref === selection.ref && before !== after) ||
+      reply.before_ref_hex !== referenceHex(query.before_ref) || reply.after_ref_hex !== referenceHex(selection.ref) ||
+      after !== selection.tip || (referenceHex(query.before_ref) === referenceHex(selection.ref) && before !== after) ||
       (before === after && base !== before) || (query.expected_before !== null && before !== query.expected_before) ||
       (query.mode === 'direct' && base !== before) ||
       JSON.stringify(reply.path_prefixes_hex) !== JSON.stringify(query.path_prefixes_hex)) fail('Comparison changed its exact references, tips, snapshot or profile.');

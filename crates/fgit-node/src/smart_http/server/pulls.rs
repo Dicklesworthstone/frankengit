@@ -13,7 +13,7 @@ mod output;
 mod preparation;
 mod request;
 mod search;
-mod subject;
+use super::ref_field as subject;
 
 // Queue preparation shares only the bounded artifact formatter and native
 // read-error mapping. Queue selection and its independent grants remain local.
