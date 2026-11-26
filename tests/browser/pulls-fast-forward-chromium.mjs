@@ -86,8 +86,14 @@ try {
   const wait = async expression => { for (let i = 0; i < 200; i++) { if (await evaluate(expression)) return; await delay(25); }
     throw new Error(`Browser condition timed out: ${expression}; status=${await evaluate('document.querySelector("#status")?.textContent ?? document.body?.innerText')}; fixtureErrors=${JSON.stringify(errors)}`); };
   const click = id => evaluate(`document.getElementById(${JSON.stringify(id)}).click()`);
-  const connect = async format => {
+  const connect = async (format, rawRefs = false) => {
     observed = observation(format); writes = [];
+    if (rawRefs) {
+      const data = observed.reply.pull_request.data;
+      data.source_ref = null; data.target_ref = null;
+      const prefix = Buffer.from('refs/heads/raw-').toString('hex');
+      data.source_ref_hex = prefix + 'fe'; data.target_ref_hex = prefix + 'ff';
+    }
     await call('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/repository/ui/pulls/` }, sessionId);
     await wait('document.querySelector("#status")?.textContent.includes("Connect with")');
     await evaluate(`document.getElementById('token').value=${JSON.stringify(token)};document.getElementById('connection').requestSubmit()`);
@@ -114,6 +120,15 @@ try {
     mode = 'refused'; await connect(format); await stage(); await send();
     await wait('document.querySelector("#status").textContent.includes("Canonical refused")'); assert.equal(writes.length, 1);
     console.log(JSON.stringify({ profile: 'real-browser-controlled-api', case: `${format}-policy-refusal`, passed: true }));
+    mode = 'committed'; await connect(format, true); await stage(); await send();
+    await wait('document.querySelector("#status").textContent.includes("Canonical committed")');
+    assert.equal(writes.length, 1);
+    const raw = new URLSearchParams(writes[0].body);
+    for (const name of ['source_ref', 'target_ref']) {
+      assert.equal(raw.get(name + '_hex'), observed.reply.pull_request.data[name + '_hex']);
+      assert.equal(raw.has(name), false);
+    }
+    console.log(JSON.stringify({ profile: 'real-browser-controlled-api', case: `${format}-byte-named-publication`, passed: true }));
     mode = 'lost'; await connect(format); await stage(); await send();
     await wait('document.querySelector("#status").textContent.includes("Outcome remains unknown")');
     const first = { ...writes[0] }; await click('recover');
@@ -123,7 +138,7 @@ try {
     console.log(JSON.stringify({ profile: 'real-browser-controlled-api', case: `${format}-lost-reply-explicit-retry`, passed: true }));
   }
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ browser: version.product, cases: 6, errors, native_server: false }));
+  console.log(JSON.stringify({ browser: version.product, cases: 8, errors, native_server: false }));
 } finally {
   socket?.close();
   if (chrome && chrome.exitCode === null && chrome.signalCode === null) { const stopped = once(chrome, 'exit'); chrome.kill('SIGTERM');
