@@ -32,9 +32,11 @@ shape plus the PR number, action, and these exact fields:
   branch references, `source_tip`, `target_tip`, `merge_base`, and `candidate_commit`.
 - Review actions: `expected_version` of the authenticated reviewer's own stream
   and a nonblank `reason` (at most 4,096 UTF-8 bytes). A withdrawal needs an
-  existing nonzero reviewer-stream version and takes no bundle.
+  existing nonzero reviewer-stream version and takes no bundle. Rebase reviews,
+  including withdrawal, also explicitly supply `method: "rebase"`; ordinary
+  merge/squash reviews omit `method`.
 - Merge: `required_reviewers` (1–32 distinct principal IDs, excluding the
-  submitting principal) and `method`, explicitly `merge-commit` or `squash`.
+  submitting principal) and `method`, explicitly `merge-commit`, `squash` or `rebase`.
 
 Numbers, versions and policy epochs are canonical decimal strings. Supply exactly
 one of `source_ref` or `source_ref_hex`, and one of `target_ref` or
@@ -52,6 +54,29 @@ length and SHA-256 transport checksum in a separate candidate-intent schema and
 `fgpc1-` key domain. The original `fgp1-` intent schema and serialization are
 unchanged. No bundle bytes or paths are embedded in the JSON intent. The caller
 must retain the bundle separately and provide it for a new submission.
+
+### Rebase candidates
+
+Prepare and inspect the complete rewritten series through the existing
+[native rebase workflow](NATIVE_PULL_REQUEST_REBASE.md). The exact candidate
+commit binds the entire ordered parent chain. Inspect every rewritten commit
+and its changes, including temporary changes removed by later commits, before
+selecting the candidate for approval or landing.
+
+The durable sender accepts `method: "rebase"` for `approve`, `request-changes`,
+`withdraw` and `merge`. It preserves that explicit method in the saved command,
+bundle binding and retry key. Rebase review and merge receipts must also report
+`method: "rebase"`; a missing or different method is not accepted as terminal
+publication evidence. Ordinary review requests and receipts keep their existing
+method-free representation. An explicit merge/squash method on a review request
+is rejected, matching the native API.
+
+This path submits already selected native artifacts. The separate
+`fg_pull_candidate.mjs` acquisition/resolution/package profile remains limited
+to merge-commit and squash. Native `prepare-rebase`/`resolve-rebase` and
+`inspect-rebase`, or the existing browser workflow, supply rebase preparation
+and whole-series inspection. Neither this sender nor a review snapshot generates
+the series or turns its transport checksum into review evidence.
 
 ## Publish or recover
 
@@ -170,11 +195,11 @@ These are fields in the merge input, not a whole input. Its `scope.principal_id`
 must identify the authenticated submitter and cannot be in the reviewer set.
 Supply the candidate bundle during `prepare`. The merge `send` requires both
 `--confirm-candidate EXACT_CANDIDATE_OID` and
-`--confirm-merge-method merge-commit`. Select `squash` in both the prepared
-method and the confirmation for a squash candidate obtained from native tooling.
+`--confirm-merge-method merge-commit`. Select `squash` or `rebase` in both the
+prepared method and the confirmation for that candidate obtained from native tooling.
 Neither flag changes a saved candidate or proves that required reviews exist.
 The native driver owns strategy validation and the current review/protection gates.
-A merge-commit candidate cannot be silently converted to squash by this client.
+A saved candidate's method cannot be changed without preparing a different command.
 
 ### Saved bytes and interruption
 

@@ -23,8 +23,9 @@ export function draftPullReview(input, choice) {
   if (LIFECYCLE.includes(action)) return draftLifecycle(capture, choice);
   if (!['approve', 'request-changes', 'withdraw', 'merge'].includes(action)) failReview('explicit_review_action_required');
   const merge = action === 'merge', withdraw = action === 'withdraw';
-  reviewFields(choice, ['action', 'principal_id', ...(withdraw ? [] : ['merge_base', 'candidate_commit']),
-    ...(merge ? ['method', 'required_reviewers'] : ['reason'])]);
+  const required = ['action', 'principal_id', ...(withdraw ? [] : ['merge_base', 'candidate_commit']),
+    ...(merge ? ['method', 'required_reviewers'] : ['reason'])];
+  reviewFields(choice, [...required, ...(merge ? [] : ['method'])], required);
   const principal = reviewPrincipal(choice.principal_id), { selection, pull } = capture;
   if (!pull.found) failReview('review_pull_missing');
   const row = capture.review_pages.flatMap(page => page.reviews).find(row => row.reviewer === principal);
@@ -50,7 +51,7 @@ export function draftPullReview(input, choice) {
   for (const side of ['source', 'target']) fields[`${side}_tip`] = nativeInput(subject[`${side}_tip`], selection.scope.object_format);
   for (const name of ['merge_base', 'candidate_commit']) fields[name] = nativeInput(candidate[name], selection.scope.object_format);
   if (merge) {
-    if (!['merge-commit', 'squash'].includes(choice.method)) failReview('explicit_review_merge_method_required');
+    if (!['merge-commit', 'squash', 'rebase'].includes(choice.method)) failReview('explicit_review_merge_method_required');
     if (!Array.isArray(choice.required_reviewers) || choice.required_reviewers.length < 1 || choice.required_reviewers.length > 32) failReview('invalid_reviewers');
     const reviewers = Array.from(choice.required_reviewers, reviewPrincipal).sort();
     if (new Set(reviewers).size !== reviewers.length || reviewers.includes(principal)) failReview('invalid_reviewers');
@@ -61,6 +62,12 @@ export function draftPullReview(input, choice) {
     fields.expected_version = writableVersion(row?.version ?? '0', withdraw ? 1n : 0n);
     fields.reason = reviewText(choice.reason, 4096);
     if (!fields.reason.trim()) failReview('empty_review_reason');
+    // Review rows retain the exact candidate, but no historical method. Use
+    // only the caller's explicit rebase choice, including during withdrawal.
+    if (Object.hasOwn(choice, 'method')) {
+      if (choice.method !== 'rebase') failReview('explicit_rebase_review_method_required');
+      fields.method = 'rebase';
+    }
   }
   return { endpoint: selection.endpoint, scope: { tenant_id: selection.scope.tenant_id,
     repository_id: selection.scope.repository_id, repository_incarnation: selection.scope.repository_incarnation,

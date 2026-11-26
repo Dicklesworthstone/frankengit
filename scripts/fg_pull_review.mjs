@@ -19,8 +19,10 @@ Choice: principal_id and explicit action. approve/request-changes/withdraw/merge
 use candidate review subjects. update/close/reopen/fast-forward use captured PR
 metadata; update accepts an explicit title and/or body replacement, not new tips.
 Approve/request-changes also require reason, merge_base, candidate_commit.
-Withdraw requires only reason: its original subject/candidate is retained.
-Merge requires merge_base, candidate_commit, method merge-commit|squash, and
+Withdraw uses reason and retains its original subject/candidate.
+For rebase approve/request-changes/withdraw, explicitly choose method:"rebase";
+ordinary reviews omit method. Historical review rows do not identify a method.
+Merge requires merge_base, candidate_commit, method merge-commit|squash|rebase, and
 required_reviewers. Candidate OIDs are raw native lowercase hex, chosen by you.
 
 Capture only reads the native API; inspect and draft are offline and take no token.

@@ -152,14 +152,24 @@ For `withdraw`, provide only `action`, `principal_id` and `reason`. The draft
 retains that principal's original subject, policy epoch and candidate even when
 they are stale. A missing, already withdrawn or legacy candidate-less review
 refuses; no substitute subject is invented. No bundle is required by withdrawal.
+For a rebase withdrawal, also explicitly provide `method: "rebase"`.
 
 For `merge`, provide explicit `merge_base`, `candidate_commit`,
-`required_reviewers` and `method` (`merge-commit` or `squash`) instead of a reason.
+`required_reviewers` and `method` (`merge-commit`, `squash` or `rebase`) instead of a reason.
 The nonempty unique reviewer set may not contain the submitting principal. It
 is not inferred from votes, and its members need not appear approved in the
 capture: only the native merge driver can decide eligibility, independence,
 ancestry and current protection. There is no readiness or merge-permission flag.
 No strategy or expected version is automatically refreshed.
+
+For a rebase `approve` or `request-changes` draft, add `method: "rebase"` to the
+explicit choice. Ordinary merge/squash review choices omit `method`; other
+explicit review methods refuse. The native review listing retains exact subjects
+and candidate IDs but does not identify historical methods, so neither drafting
+nor withdrawal infers one. Rebase preparation and inspection of every rewritten
+commit must happen through the [native rebase workflow](NATIVE_PULL_REQUEST_REBASE.md)
+before selecting its candidate. The durable sender preserves the chosen method
+in the saved request and original key and requires it in the publication receipt.
 
 Byte-only branches remain exact through drafting and publication: each captured
 null-text branch becomes its `source_ref_hex` or `target_ref_hex` command field.
@@ -282,3 +292,17 @@ unmodified `24337110` source keep historical text-command bytes and keys fixed.
 The focused verification script includes this regression. These tests use real
 client code, sockets and private files with native-schema peers; they do not
 establish native Git admission, bundle validity, authorization or deployment.
+
+### Durable rebase commands
+
+`tests/operator/remote_pull_rebase.test.mjs` exercises explicit rebase approvals,
+change requests, withdrawals and merges through capture, offline drafting,
+durable preparation, submission and original-key recovery. Both Git hash domains,
+byte-only subjects, committed/refused terminals, lost replies, rotated credentials,
+stale withdrawal subjects and actual private CLI request slots are covered.
+Missing or substituted receipt methods and altered saved methods refuse; an
+uncertain response is resolved only through the original key. Ordinary review
+choices still omit the method. The focused script also runs the historical
+whole-intent hashes above to detect changes to existing command bytes and keys.
+These are complete client executions with native-schema peers and opaque bundle
+bytes, not native rebase preparation or admission evidence.

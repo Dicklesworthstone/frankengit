@@ -226,7 +226,8 @@ export function validatePullPublication(value, input, status) {
   const comment = intent.action === 'comment' || append, review = isPullReview(intent.action);
   const names = ['type', 'schema_version', ...Object.keys(intent.scope), ...(review ? [] : ['number']), 'action', 'tx_id', 'outcome', 'decision_sequence',
     'repository_commit_id', 'refusal_record_id', 'refusal_code', 'refusal_code_point', 'delivery_acknowledged',
-    ...(review ? ['subject', 'merge_base', 'candidate_commit', 'required_reviewers', 'review_expected_version', ...(intent.action === 'merge' ? ['method'] : [])]
+    ...(review ? ['subject', 'merge_base', 'candidate_commit', 'required_reviewers', 'review_expected_version',
+      ...(intent.action === 'merge' || intent.fields.method === 'rebase' ? ['method'] : [])]
       : ff ? ['pull_request_version', 'source_ref', 'source_ref_hex', 'target_ref', 'target_ref_hex', 'source_tip', 'target_tip']
       : ['expected_version', ...(comment ? ['comment_version', 'refs_changed',
         ...(Object.hasOwn(intent.fields, 'anchor') ? ['anchor'] : [])] : [])])];
@@ -269,14 +270,15 @@ export function validatePullPublication(value, input, status) {
 function candidateCommand(number, action, input, format) {
   if (!['sha1', 'sha256'].includes(format)) failPull('invalid_pull_format');
   const merge = action === 'merge', references = referenceNames(input);
-  pullFields(input, ['pull_request_version', 'policy_epoch', ...references, 'source_tip', 'target_tip',
-    'merge_base', 'candidate_commit', ...(merge ? ['required_reviewers', 'method'] : ['expected_version', 'reason'])]);
+  const names = ['pull_request_version', 'policy_epoch', ...references, 'source_tip', 'target_tip',
+    'merge_base', 'candidate_commit', ...(merge ? ['required_reviewers', 'method'] : ['expected_version', 'reason'])];
+  pullFields(input, [...names, ...(merge ? [] : ['method'])], names);
   const f = { pull_request_version: pullU64(input.pull_request_version, 1n, U64 - 1n), policy_epoch: pullU64(input.policy_epoch, 1n) };
   const [source, target] = normalizeReferences(input, references, f);
   if (source === target) failPull('invalid_pull_coordinates');
   for (const name of ['source_tip', 'target_tip', 'merge_base', 'candidate_commit']) f[name] = oid(input[name], format);
   if (merge) {
-    if (!['merge-commit', 'squash'].includes(input.method)) failPull('explicit_reviewed_merge_method_required');
+    if (!['merge-commit', 'squash', 'rebase'].includes(input.method)) failPull('explicit_reviewed_merge_method_required');
     if (!Array.isArray(input.required_reviewers) || !input.required_reviewers.length || input.required_reviewers.length > 32) failPull('invalid_pull_reviewers');
     f.required_reviewers = Array.from(input.required_reviewers, id => {
       if (typeof id !== 'string' || !/^[0-9a-f]{32}$/.test(id)) failPull('invalid_pull_reviewers');
@@ -288,6 +290,12 @@ function candidateCommand(number, action, input, format) {
     f.expected_version = pullU64(input.expected_version, action === 'withdraw' ? 1n : 0n, U64 - 1n);
     f.reason = text(input.reason, 4096);
     if (!f.reason.trim()) failPull('empty_pull_review_reason');
+    // Ordinary review bytes stay unchanged. Rebase explicitly selects native
+    // whole-series inspection; its method belongs to the saved request and key.
+    if (Object.hasOwn(input, 'method')) {
+      if (input.method !== 'rebase') failPull('explicit_rebase_review_method_required');
+      f.method = 'rebase';
+    }
   }
   const form = new URLSearchParams({ object_format: format });
   for (const [name, value] of Object.entries(f)) {
@@ -346,6 +354,7 @@ function checkCandidatePublication(value, intent) {
     if (oid(s[`${side}_tip`], format, true) !== f[`${side}_tip`]) failPull('pull_review_subject_changed');
   }
   for (const name of ['merge_base', 'candidate_commit']) if (oid(value[name], format, true) !== f[name]) failPull('pull_review_candidate_changed');
+  if (!merge && f.method === 'rebase' && value.method !== f.method) failPull('pull_review_method_changed');
   if (merge ? value.method !== f.method || JSON.stringify(value.required_reviewers) !== JSON.stringify(f.required_reviewers)
     : value.required_reviewers !== null) failPull('pull_merge_requirements_changed');
 }
