@@ -115,7 +115,7 @@ independent outcome grant; a sponsor is not substituted for its agent.
 
 Credential files contain the exact bearer, optionally followed by one LF.
 CRLF, extra whitespace, a BOM, multiple newlines and noncanonical spellings
-refuse. Saved intent contains only a credential fingerprint. Sending requires
+refuse. Sending requires
 that original fingerprint; a rotated same-principal credential can read an
 original outcome without acquiring permission to send the saved body.
 
@@ -193,6 +193,14 @@ filesystem custody against a peer that speaks the inspected native schemas:
 both hash domains, mixed batches and raw byte renames, stale leases, original-key
 recovery after lost replies/rotation, response substitution, contradictory
 confirmation retention, concurrent result publication, cancellation, strict
-credentials and output failure. These are client/protocol-peer checks. They do
-not establish native Rust execution, Git reachability, policy enforcement or
-authority-CAS correctness.
+credentials and output failure.
+
+The native campaign uses a prebuilt `fg` and pinned Node to exercise split
+grants, mismatched writers and readers, exact byte-named effects, retained
+output, restart recovery, and an atomic stale-lease refusal in both formats.
+The suite retains the native terminal decisions and canonical ref map.
+
+~~~sh
+FG_BIN=/absolute/path/to/fg FGE_NODE=/absolute/path/to/node \
+  scripts/e2e/suites/operator/remote_branch_transaction.sh
+~~~
