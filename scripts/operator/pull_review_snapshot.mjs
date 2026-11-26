@@ -4,6 +4,7 @@ import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
+import { pullLabels } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-core.mjs';
 
 export const REVIEW_LIMITS = Object.freeze({ reply: 2 * 1024 * 1024, capture: 8 * 1024 * 1024,
   wire: 8 * 1024 * 1024, reviewers: 1024, pages: 32 });
@@ -11,7 +12,8 @@ const U64 = 18446744073709551615n;
 const SCOPE = ['tenant_id', 'repository_id', 'repository_incarnation', 'object_format'];
 const HEADER = ['type', 'schema_version', ...SCOPE, 'source_head', 'snapshot_token'];
 const REFS = ['source_ref', 'source_ref_hex', 'target_ref', 'target_ref_hex'];
-const COUNTERS = new Set(['number', 'version', 'pull_request_version', 'policy_epoch']);
+const LABEL_FIELDS = ['labels', 'labels_version', 'labels_actor'];
+const COUNTERS = new Set(['number', 'version', 'pull_request_version', 'policy_epoch', 'labels_version']);
 const FRESHNESS = ['current', 'withdrawn', 'pull_request_unavailable', 'pull_request_closed',
   'pull_request_changed', 'source_moved', 'target_moved', 'policy_changed'];
 export class ReviewSnapshotError extends Error {
@@ -120,7 +122,19 @@ function metadata(data, format) {
   reviewText(data.title, 256, true); reviewText(data.body, 65536);
 }
 function pullView(row, selected) {
-  reviewFields(row, ['number', 'version', 'state', 'data', 'opened_by', 'last_metadata_actor', 'merge_only', 'merge']);
+  const fields = ['number', 'version', 'state', 'data', 'opened_by', 'last_metadata_actor', 'merge_only', 'merge'];
+  reviewFields(row, [...fields, ...LABEL_FIELDS], fields);
+  if (LABEL_FIELDS.some(name => Object.hasOwn(row, name))) {
+    if (LABEL_FIELDS.some(name => !Object.hasOwn(row, name))) failReview('invalid_review_fields');
+    const version = reviewU64(row.labels_version);
+    try { pullLabels(row.labels, true); } catch { failReview('invalid_review_labels'); }
+    if (version === '0') {
+      if (row.labels.length || row.labels_actor !== null) failReview('invalid_review_labels');
+    } else {
+      if (row.data === null) failReview('invalid_review_labels');
+      reviewPrincipal(row.labels_actor);
+    }
+  }
   if (row.number !== selected.number || !['open', 'closed', 'merged'].includes(row.state) ||
       typeof row.merge_only !== 'boolean' || row.merge_only !== (row.data === null)) failReview('invalid_review_pull');
   reviewU64(row.version, 1n);

@@ -129,6 +129,28 @@ capture/input flags match `fg workflow dispatch`. The global leading
 idle waits; no poll resets that request budget. Defaults are one poll, 1000 ms
 between polls, the native workflow limits, and the configured command deadline.
 
+### Ordered branch execution after a restart
+
+Add `--ordered-branch-updates` to a trusted local branch watch. Keep its run
+parent and the same branch and workflow directory across restarts. The first
+poll starts at the latest change. Later polls authenticate history to the
+nearest settled change and execute one pending commit per poll, oldest first.
+The existing scope and decision batch still identify each execution. A failed
+or interrupted execution follows the normal custody and settlement rules.
+
+An older commit must be reachable from the currently visible branch at the
+selected head. Discovery and execution use that commit's exact tree. The
+watch stops if the required history or source is unavailable or exceeds its
+existing bounds. Ref removal has no commit to execute. A recreation is a
+distinct event. A force-push that makes the first pending commit unreachable
+stops catch-up before reserving it. The unit of delivery is still one net ref
+change per canonical decision batch.
+
+The ordered CLI profile retains local execution and check-source records.
+Automatic check publication continues to use the latest-state profile.
+PR, queue, tag and HTTP-owned watches continue to use their existing selection
+profiles. Protected merge checks still require a current source commit.
+
 ### Continuous service
 
 Use an explicit service lifetime for sustained trusted CI:

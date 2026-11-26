@@ -47,6 +47,17 @@ pub(super) fn dispatch(
     )?;
     let (trigger, candidate) = match text(event, "profile")? {
         "latest-canonical-ref-update-v1" => ("push", false),
+        "ordered-canonical-branch-update-v1" => {
+            let tip = GitOid::from_hex(node.object_format(), text(event, "observed_ref_tip")?)
+                .map_err(|_| invalid("invalid observed branch tip"))?;
+            if !reference.as_bytes().starts_with(b"refs/heads/")
+                || tip.is_zero()
+                || tip == sources.commit
+            {
+                return Err(invalid("invalid ordered branch settlement"));
+            }
+            ("push", false)
+        }
         "latest-canonical-tag-update-v1" => {
             if !reference.as_bytes().starts_with(b"refs/tags/") {
                 return Err(invalid("tag settlement names a non-tag reference"));
@@ -112,11 +123,15 @@ pub(super) fn dispatch(
     equal_text(plan, "source_commit", &sources.commit.to_string())?;
     equal_text(plan, "object_format", node.object_format().as_str())?;
     equal_text(plan, "workflow_directory_hex", &hex(workflow_directory))?;
-    if text(event, "profile")? == "latest-canonical-tag-update-v1" {
+    let profile = text(event, "profile")?;
+    if profile == "latest-canonical-tag-update-v1" {
         equal_text(plan, "source_tag_tip", text(event, "tag_tip")?)?;
         equal_text(plan, "source_head", text(event, "observed_head")?)?;
     } else if plan.contains_key("source_tag_tip") {
         return Err(invalid("non-tag watch dispatch contains a tag tip"));
+    }
+    if profile == "ordered-canonical-branch-update-v1" {
+        equal_text(plan, "source_head", text(event, "observed_head")?)?;
     }
     if plan.contains_key("candidate")
         || plan.contains_key("merge")

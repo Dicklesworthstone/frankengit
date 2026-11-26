@@ -19,7 +19,7 @@ fn assert_watch(node: &crate::OneNode, tip: GitOid, expected: &LatestRefChange) 
     let request = node.request_context();
     let selection = node
         .runtime()
-        .block_on(node.select_ref_workflow_event(&request, &reference(TOPIC)))
+        .block_on(node.select_ref_workflow_event(&request, &reference(TOPIC), None))
         .unwrap();
     let Selection::Ready(actual) = selection else {
         panic!("a visible committed branch must select its net event");
@@ -29,6 +29,49 @@ fn assert_watch(node: &crate::OneNode, tip: GitOid, expected: &LatestRefChange) 
     assert_eq!(actual.batch, expected.batch_id);
     assert_eq!(actual.event_head, expected.resulting_head_id);
     assert_eq!(actual.head, selected(node).basis().id());
+}
+
+#[test]
+fn ordered_selection_replays_first_unsettled_batch_and_refuses_missing_anchor() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let (node, base, child) = fixture(&scratch, format);
+        apply(&node, "topic-create", TOPIC, None, Some(base));
+        let anchor = select(&node, TOPIC, base);
+        apply(&node, "topic-first-update", TOPIC, Some(base), Some(child));
+        let first = select(&node, TOPIC, child);
+        apply(&node, "topic-delete", TOPIC, Some(child), None);
+        apply(&node, "topic-recreate", TOPIC, None, Some(child));
+        let last = select(&node, TOPIC, child);
+        assert_ne!(first.batch_id, last.batch_id);
+        assert_eq!(last.previous_tip, None);
+        let request = node.request_context();
+        let state = selected(&node);
+        let watch = |anchor, bound| {
+            node.runtime().block_on(next_change_at(
+                &node.authority,
+                request.authority(),
+                state.basis(),
+                &reference(TOPIC),
+                child,
+                bound,
+                &|| false,
+                Some(&move |batch| Some(batch) == anchor),
+            ))
+        };
+        let bound = fgit_authority::MAX_REPLAY_BATCHES;
+        assert_eq!(
+            watch(Some(anchor.batch_id), bound).unwrap(),
+            (child, first.clone())
+        );
+        assert_eq!(
+            watch(Some(first.batch_id), bound).unwrap(),
+            (child, last.clone())
+        );
+        assert_eq!(watch(Some(last.batch_id), bound).unwrap(), (child, last));
+        assert!(watch(None, bound).is_err());
+        assert!(watch(Some(anchor.batch_id), 1).is_err());
+    }
 }
 
 fn activate_checkpoint(node: &crate::OneNode) {
@@ -97,7 +140,7 @@ fn net_ref_event_matches_history_through_noop_recreation_checkpoint_and_reopen()
         let request = node.request_context();
         assert!(matches!(
             node.runtime()
-                .block_on(node.select_ref_workflow_event(&request, &reference(TOPIC)))
+                .block_on(node.select_ref_workflow_event(&request, &reference(TOPIC), None))
                 .unwrap(),
             Selection::Absent
         ));

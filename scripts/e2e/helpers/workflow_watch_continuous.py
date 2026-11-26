@@ -172,7 +172,8 @@ class Watcher:
 
 
 class Fixture:
-    def __init__(self, campaign, fmt, label, active=False, *, workflow_source=None, packed_refs=()):
+    def __init__(self, campaign, fmt, label, active=False, *, workflow_source=None, packed_refs=(),
+                 triggers="push"):
         self.campaign, self.format = campaign, fmt
         self.root = campaign.root / f"{fmt}-{label}"
         self.root.mkdir()
@@ -199,7 +200,7 @@ class Fixture:
                      f"    steps:\n      - run: printf 'dependent' >> {late}\n"
                      f"  z:\n    runs-on: fgit-trusted-local\n    steps:\n"
                      f"      - run: printf 'independent' >> {late}\n")
-        workflow = ("name: native-continuous\non: push\njobs:\n  a:\n"
+        workflow = (f"name: native-continuous\non: {triggers}\njobs:\n  a:\n"
                     f"    runs-on: fgit-trusted-local\n    steps:\n      - run: {action}\n{later}")
         if workflow_source is not None:
             workflow = workflow_source

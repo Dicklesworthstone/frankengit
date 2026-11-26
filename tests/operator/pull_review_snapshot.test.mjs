@@ -46,6 +46,36 @@ for (const format of ['sha1', 'sha256']) for (const state of ['open', 'merged'])
     assert.throws(() => validateReviewCapture(rawRetained), { code: 'invalid_review_oid' });
   });
 }
+test('capture native labels at the pinned review snapshot and retain historical captures', async t => {
+  const labels = { labels: ['CI', 'ci', '\uFEFF'], labels_version: '18446744073709551615', labels_actor: person(99) };
+  const p = await peer(t, { handle(r, res, s) {
+    if (r.url.pathname.endsWith('/reviews')) return false;
+    respond(res, { ...s.native.pull, pull_request: { ...s.native.pull.pull_request, ...labels } });
+    return true;
+  } });
+  const captured = await capturePullReviews(p.selected, TOKEN);
+  const { pull_request: row } = captured.pull;
+  for (const name of Object.keys(labels)) assert.deepEqual(row[name], labels[name]);
+  assert.deepEqual(validateReviewCapture(parseReviewJson(Buffer.from(reviewCanonical(captured)))), captured);
+  for (const edit of [
+    row => { delete row.labels; },
+    row => { row.labels.reverse(); },
+    row => { row.labels.push(row.labels.at(-1)); },
+    row => { row.labels.push(' '); },
+    row => { row.labels_version = '0'; },
+    row => { row.labels_version = '18446744073709551616'; },
+    row => { row.labels_actor = null; },
+  ]) {
+    const corrupted = structuredClone(captured);
+    edit(corrupted.pull.pull_request);
+    assert.throws(() => validateReviewCapture(corrupted));
+  }
+  const historical = structuredClone(captured);
+  for (const name of Object.keys(labels)) delete historical.pull.pull_request[name];
+  assert.equal(reviewCanonical(validateReviewCapture(historical)), reviewCanonical(historical));
+  Object.assign(historical.pull.pull_request, { labels: [], labels_version: '0', labels_actor: null });
+  assert.deepEqual(validateReviewCapture(historical), historical);
+});
 for (const state of ['open', 'closed', 'merged']) test(`inspect ${state} PR without inferring permission`, async t => {
   const p = await peer(t, { state }); const result = await capturePullReviews(p.selected, TOKEN);
   assert.equal(result.pull.pull_request.state, state); assert.equal(result.merge_authorized, false);

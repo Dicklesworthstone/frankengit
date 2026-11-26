@@ -49,6 +49,39 @@ test('all metadata operations require complete coordinates, including close and 
     }
   }
 });
+for (const format of ['sha1', 'sha256']) test(`${format} durable metadata intents preserve exact branch encodings and original keys`, () => {
+  const prefix = Buffer.from('refs/heads/raw-').toString('hex');
+  const identity = { nonce: '01'.repeat(16), credential_fingerprint: pullTokenFingerprint(TOKEN) };
+  for (const action of ['open', 'update', 'retarget', 'close', 'reopen']) {
+    const value = input('https://forge.test/repo.git', action, format);
+    for (const rawSides of [['source'], ['target'], ['source', 'target']]) {
+      const fields = { ...value.fields };
+      for (const side of rawSides) {
+        delete fields[`${side}_ref`];
+        fields[`${side}_ref_hex`] = prefix + (side === 'source' ? 'fe' : 'ff');
+      }
+      const intent = preparePullWithIdentity({ ...value, fields }, identity);
+      assert.deepEqual(validatePullIntent(JSON.parse(pullCanonical(intent))), intent);
+      const form = new URLSearchParams(intent.body);
+      for (const side of rawSides) {
+        assert.equal(form.get(`${side}_ref_hex`), fields[`${side}_ref_hex`]);
+        assert.ok(!form.has(`${side}_ref`));
+      }
+      assert.deepEqual(intent.fields, fields);
+      assert.throws(() => validatePullIntent({ ...intent, fields: { ...fields, source_ref_hex: prefix + 'fc' } }));
+    }
+    const { source_ref, ...rest } = value.fields;
+    for (const hex of [prefix + 'F0', prefix + 'f', prefix + '00', Buffer.from('refs/tags/a').toString('hex'),
+      Buffer.from(value.fields.target_ref).toString('hex'), prefix + 'ff'.repeat(1024)]) {
+      assert.throws(() => preparePullWithIdentity({ ...value, fields: { ...rest, source_ref_hex: hex } }, identity));
+    }
+    assert.throws(() => preparePullWithIdentity({ ...value, fields: { ...rest, source_ref, source_ref_hex: prefix + 'ff' } }, identity));
+  }
+  const ff = input('https://forge.test/repo.git', 'fast-forward', format);
+  delete ff.fields.source_ref;
+  ff.fields.source_ref_hex = prefix + 'fe';
+  assert.throws(() => preparePullWithIdentity(ff, identity));
+});
 test('comment stream zero is valid independently of PR version; upper bound increments exactly', () => {
   const value = input('https://forge.test/repo.git', 'comment');
   value.fields.expected_version = '18446744073709551614';

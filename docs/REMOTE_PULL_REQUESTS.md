@@ -27,16 +27,17 @@ JavaScript's safe integer range.
 | Action | Required fields |
 | --- | --- |
 | `open` | `expected_version:"0"`, source/target refs and tips, title, body |
-| `update`, `close`, `reopen` | Nonzero `expected_version`, source/target refs and tips, title, body |
+| `update`, `retarget`, `close`, `reopen` | Nonzero `expected_version`, source/target refs and tips, title, body |
 | `comment` | `expected_version` of the separate discussion stream, body; optional complete source `anchor` |
 | `append-comment` | Body; optional complete source `anchor`; `expected_version` is forbidden, including null |
 | `fast-forward` | `pull_request_version`, source/target refs and tips |
 
-The four lifecycle operations carry complete metadata because that is the
-native command contract; even close/reopen must not silently replace a newer
-PR's coordinates. Refs are explicit UTF-8 `refs/heads/...` names. Byte-only refs
-are not lossy-decoded or silently renamed. Input tips are full, raw lowercase
-native OIDs in the selected hash domain. These form-only commands
+Open, update, close, reopen and retarget each require the complete metadata.
+For each branch, supply exactly one of `source_ref` or `source_ref_hex`, and
+one of `target_ref` or `target_ref_hex`. Hex values encode the entire Git
+name, including `refs/heads/`, in lowercase. The saved intent retains the
+original spelling for retry. Fast-forward requires UTF-8 branch names.
+Input tips are full, raw lowercase native OIDs in the selected hash domain. These form-only commands
 accept no arbitrary route, force, review assertion, policy override, bundle, or
 alternative merge-method field. Candidate review/merge is a separate explicit
 action profile, never a fallback for a failed fast-forward.

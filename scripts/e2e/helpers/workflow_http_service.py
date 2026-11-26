@@ -57,6 +57,10 @@ def event_directories(fixture):
 
 
 class Server:
+    # Specialized workflow servers start with their own arguments. Only
+    # servers explicitly enabling --allow-source should expect source reads.
+    source_reads = False
+
     def __init__(self, fixture, label, *, publish=False, attempt=30, source_reads=False):
         self.fixture = fixture
         self.source_reads = source_reads

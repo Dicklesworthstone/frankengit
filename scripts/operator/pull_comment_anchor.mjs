@@ -27,13 +27,13 @@ function rawHex(value, maximum, code) {
       value.length % 2 !== 0 || !/^[0-9a-f]+$/.test(value)) fail(code);
   return Buffer.from(value, 'hex');
 }
-function reference(value) {
+export function pullBranchHex(value, code = 'invalid_pull_anchor_ref') {
   // Latin-1 is a one-byte mapping used only for ASCII rule checks. Never decode
   // or re-encode the native reference as UTF-8; non-UTF-8 names remain exact.
-  const raw = rawHex(value, 1024, 'invalid_pull_anchor_ref').toString('latin1');
+  const raw = rawHex(value, 1024, code).toString('latin1');
   if (!raw.startsWith('refs/heads/') || /[\x00-\x20\x7f~^:?*\[\\]/.test(raw) ||
       raw.includes('..') || raw.includes('@{') || raw.endsWith('.') ||
-      raw.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.lock'))) fail('invalid_pull_anchor_ref');
+      raw.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.lock'))) fail(code);
   return value;
 }
 function path(value) {
@@ -62,7 +62,7 @@ export function normalizePullCommentAnchor(value, objectFormat, options = {}) {
   if (value.profile !== PULL_COMMENT_ANCHOR_PROFILE) fail('invalid_pull_anchor_profile');
   const anchor = { profile: PULL_COMMENT_ANCHOR_PROFILE,
     pull_request_version: counter(value.pull_request_version, 1n),
-    source_ref_hex: reference(value.source_ref_hex), target_ref_hex: reference(value.target_ref_hex) };
+    source_ref_hex: pullBranchHex(value.source_ref_hex), target_ref_hex: pullBranchHex(value.target_ref_hex) };
   if (anchor.source_ref_hex === anchor.target_ref_hex) fail('invalid_pull_anchor_ref');
   for (const name of ['source_tip', 'target_tip', 'compared_base']) anchor[name] = oid(value[name], objectFormat, wire);
   if (!['direct', 'merge_base'].includes(value.comparison) ||

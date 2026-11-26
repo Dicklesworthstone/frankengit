@@ -9,6 +9,7 @@ use super::super::{
 use super::dispatch::TrustedWorkflowDispatch;
 use fgit_crypto::sha256_digest;
 use fgit_types::RepositoryDecisionBatchId;
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::io::Read;
 use std::os::unix::fs::MetadataExt;
@@ -91,6 +92,7 @@ impl TrustedRefWorkflowPoll {
 struct Selected {
     head: RepositoryAuthorityHeadId,
     commit: GitOid,
+    ancestor_of: Option<GitOid>,
     previous_commit: Option<GitOid>,
     // Tag event identity retains the raw reference values independently of
     // the verified commit whose files execute. Reannotations are new events.
@@ -156,6 +158,37 @@ impl OneNode {
             None,
             None,
             None,
+            false,
+        )
+        .await
+    }
+
+    /// Process the oldest as-yet unexecuted branch transition after the
+    /// latest verified settlement. The first poll starts at the current tip.
+    /// Older source must still be reachable from the current visible branch.
+    /// This profile can retain local workflow results for superseded commits.
+    pub async fn poll_ordered_trusted_branch_workflows_in(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        directory: &[u8],
+        parent: &Path,
+        read_prefixes: &[Vec<u8>],
+        limits: WorkflowLimits,
+        artifacts: Option<&TrustedWorkflowArtifactConfig>,
+    ) -> Result<TrustedRefWorkflowPoll, TrustedWorkflowFailure> {
+        self.poll_selected_workflows_in(
+            request,
+            reference,
+            directory,
+            parent,
+            read_prefixes,
+            limits,
+            artifacts,
+            None,
+            None,
+            None,
+            true,
         )
         .await
     }
@@ -172,6 +205,7 @@ impl OneNode {
         pull_number: Option<u64>,
         queue_number: Option<u64>,
         merge_config: Option<&pull_request_merge::PullRequestMergeWatchConfig>,
+        ordered: bool,
     ) -> Result<TrustedRefWorkflowPoll, TrustedWorkflowFailure> {
         if pull_number == Some(0) || queue_number == Some(0) {
             return Err(invalid("pull-request and queue numbers must be positive"));
@@ -189,6 +223,9 @@ impl OneNode {
             .map_err(TrustedWorkflowFailure::Workflow)?;
         validate_inputs(directory, [1; 16], parent, read_prefixes)?;
         let tag = reference.as_bytes().starts_with(b"refs/tags/");
+        if ordered && !reference.as_bytes().starts_with(b"refs/heads/") {
+            return Err(invalid("ordered workflow watch requires a branch"));
+        }
         if !reference.as_bytes().starts_with(b"refs/heads/") && !tag {
             return Err(invalid("ref watcher requires a branch or tag"));
         }
@@ -222,6 +259,7 @@ impl OneNode {
         }
         let entries = reporting::event_entries(&root)?;
         let mut pending = None;
+        let mut settled_keys = BTreeSet::new();
         for entry in &entries {
             if entry.file_name() == "owner.lock" {
                 continue;
@@ -250,7 +288,11 @@ impl OneNode {
             ) {
                 return Ok(stopped_poll());
             }
-            if !settlement? {
+            if settlement? {
+                if ordered {
+                    settled_keys.insert(key.to_owned());
+                }
+            } else {
                 if let Some(config) = merge_config {
                     let original = prestart::read(
                         self,
@@ -334,7 +376,15 @@ impl OneNode {
                 self.select_pull_request_workflow_event(request, reference, number)
                     .await?
             }
-            (None, None) => self.select_ref_workflow_event(request, reference).await?,
+            (None, None) => {
+                let settled = |batch| settled_keys.contains(&hex(&push_event_id(&scope, batch)));
+                self.select_ref_workflow_event(
+                    request,
+                    reference,
+                    (!settled_keys.is_empty()).then_some(&settled as _),
+                )
+                .await?
+            }
         };
         let mut idle_state = None;
         let selected = match selection {
@@ -377,13 +427,7 @@ impl OneNode {
             .queue
             .as_ref()
             .map_or(reference, |queue| &queue.source);
-        let batch = selected.batch.as_internal_object_id();
-        let push_id = commitment(&[
-            b"frankengit/ref-workflow-event/v1",
-            &scope,
-            &batch.algorithm().code_point().to_be_bytes(),
-            batch.digest().as_bytes(),
-        ]);
+        let push_id = push_event_id(&scope, selected.batch);
         let event_id = if let Some(queue) = &selected.queue {
             queue.event_id(&scope, &selected)?
         } else {
@@ -407,6 +451,8 @@ impl OneNode {
             "latest-canonical-pull-request-head-v1"
         } else if selected.tag_update.is_some() {
             "latest-canonical-tag-update-v1"
+        } else if selected.ancestor_of.is_some() {
+            "ordered-canonical-branch-update-v1"
         } else {
             "latest-canonical-ref-update-v1"
         };
@@ -432,6 +478,11 @@ impl OneNode {
             hex(&run_id),
             hex(event_directory.as_os_str().as_bytes())
         );
+        if let Some(tip) = selected.ancestor_of {
+            event.pop();
+            write!(event, ",\"observed_ref_tip\":\"{tip}\"}}")
+                .expect("writing to a String cannot fail");
+        }
         if let Some(pull) = &selected.pull {
             event.pop();
             write!(
@@ -585,7 +636,11 @@ impl OneNode {
                 run_id,
                 &event_directory,
                 read_prefixes,
-                (execution_head, execution_commit),
+                super::dispatch::Snapshot {
+                    head: execution_head,
+                    commit: execution_commit,
+                    ancestor_of: selected.ancestor_of,
+                },
                 limits,
                 artifacts,
                 selected.pull.as_ref().map(|pull| pull.target_reference()),
@@ -660,6 +715,7 @@ impl OneNode {
         &self,
         request: &NodeRequestContext,
         reference: &RefName,
+        settled: Option<&(dyn Fn(RepositoryDecisionBatchId) -> bool + Sync)>,
     ) -> Result<Selection, TrustedWorkflowFailure> {
         let state = match self.materialize_admission_in(request).await {
             Ok(state) => state,
@@ -679,17 +735,32 @@ impl OneNode {
             return Ok(Selection::Absent);
         };
         let head = state.basis().id();
-        let event = match ref_selection::latest_change_at(
-            &self.authority,
-            request.authority(),
-            state.basis(),
-            reference,
-            tip,
-            fgit_authority::MAX_REPLAY_BATCHES,
-            &|| !workspace_request_live(request),
-        )
-        .await
-        {
+        let event = if let Some(settled) = settled {
+            ref_selection::next_change_at(
+                &self.authority,
+                request.authority(),
+                state.basis(),
+                reference,
+                tip,
+                fgit_authority::MAX_REPLAY_BATCHES,
+                &|| !workspace_request_live(request),
+                Some(settled),
+            )
+            .await
+        } else {
+            ref_selection::latest_change_at(
+                &self.authority,
+                request.authority(),
+                state.basis(),
+                reference,
+                tip,
+                fgit_authority::MAX_REPLAY_BATCHES,
+                &|| !workspace_request_live(request),
+            )
+            .await
+            .map(|event| (tip, event))
+        };
+        let (selected_tip, event) = match event {
             Ok(event) => event,
             Err(error) if cancellation::materialization(&error) => {
                 return Ok(Selection::StoppedBeforeReservation);
@@ -745,7 +816,7 @@ impl OneNode {
                 }
                 (tag.peeled, None, Some((tip, previous_tip)))
             } else {
-                (tip, previous_tip, None)
+                (selected_tip, previous_tip, None)
             };
         if !workspace_request_live(request) {
             return Ok(Selection::StoppedBeforeReservation);
@@ -753,6 +824,7 @@ impl OneNode {
         Ok(Selection::Ready(Selected {
             head,
             commit,
+            ancestor_of: (selected_tip != tip).then_some(tip),
             previous_commit,
             tag_update,
             batch: event.batch_id,
@@ -761,6 +833,16 @@ impl OneNode {
             queue: None,
         }))
     }
+}
+
+fn push_event_id(scope: &[u8; 32], batch: RepositoryDecisionBatchId) -> [u8; 32] {
+    let batch = batch.as_internal_object_id();
+    commitment(&[
+        b"frankengit/ref-workflow-event/v1",
+        scope,
+        &batch.algorithm().code_point().to_be_bytes(),
+        batch.digest().as_bytes(),
+    ])
 }
 
 // A successful directory creation acquires permanent event custody, even if

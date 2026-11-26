@@ -3,7 +3,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { outcomeEndpoint, outcomeScope } from './transaction_outcome.mjs';
 import { isCredentialToken, isAgentCredentialToken } from './credential_token.mjs';
-import { normalizePullCommentAnchor, pullCommentAnchorFields, PullAnchorError } from './pull_comment_anchor.mjs';
+import { normalizePullCommentAnchor, pullBranchHex, pullCommentAnchorFields, PullAnchorError } from './pull_comment_anchor.mjs';
 
 export const PULL_LIMITS = Object.freeze({ form: 256 * 1024, reply: 32 * 1024, intent: 1024 * 1024, bundle: 16 * 1024 * 1024 });
 export const PULL_ACTIONS = Object.freeze(['open', 'update', 'close', 'reopen', 'retarget', 'comment', 'append-comment', 'fast-forward']);
@@ -61,7 +61,6 @@ export function requireAgentMetadataOperation(action, token) {
 }
 function branch(value) {
   text(value, 1024, true);
-  // HTTP forms admit UTF-8 refs only; never lossy-decode a native byte-only ref.
   if (!value.startsWith('refs/heads/') || /[\x00-\x20\x7f~^:?*\[\\]/u.test(value) ||
       value.includes('..') || value.includes('@{') || value.endsWith('.') ||
       value.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.lock'))) failPull('invalid_pull_branch');
@@ -123,17 +122,27 @@ export function pullCommand(number, action, input, format) {
   if (isPullReview(action)) return candidateCommand(number, action, input, format);
   if (!PULL_ACTIONS.includes(action) || !['sha1', 'sha256'].includes(format)) failPull('unsupported_pull_command');
   const ff = action === 'fast-forward', append = action === 'append-comment', comment = action === 'comment' || append;
+  const references = ['source_ref', 'target_ref'].map(name =>
+    !ff && !comment && Object.hasOwn(input ?? {}, name + '_hex') ? name + '_hex' : name);
   const names = comment ? [...(append ? [] : ['expected_version']), 'body'] :
-    [ff ? 'pull_request_version' : 'expected_version', 'source_ref', 'target_ref', 'source_tip', 'target_tip', ...(ff ? [] : ['title', 'body'])];
+    [ff ? 'pull_request_version' : 'expected_version', ...references, 'source_tip', 'target_tip', ...(ff ? [] : ['title', 'body'])];
   pullFields(input, [...names, ...(comment ? ['anchor'] : [])], names);
   const versionName = ff ? 'pull_request_version' : 'expected_version';
   const version = append ? null : pullU64(input[versionName], ff ? 1n : 0n, U64 - 1n);
   if (!ff && !comment && (action === 'open') !== (version === '0')) failPull('invalid_pull_action_version');
   const normalized = append ? {} : { [versionName]: version };
   if (!comment) {
-    for (const side of ['source', 'target']) normalized[`${side}_ref`] = branch(input[`${side}_ref`]);
+    // Keep the chosen alias and field order in the saved form and retry key.
+    const [source, target] = references.map(name => {
+      if (name.endsWith('_hex')) {
+        normalized[name] = anchorResult(() => pullBranchHex(input[name], 'invalid_pull_branch'));
+        return normalized[name];
+      }
+      normalized[name] = branch(input[name]);
+      return Buffer.from(normalized[name]).toString('hex');
+    });
     for (const side of ['source', 'target']) normalized[`${side}_tip`] = oid(input[`${side}_tip`], format);
-    if (normalized.source_ref === normalized.target_ref || (ff && normalized.source_tip === normalized.target_tip)) failPull('invalid_pull_coordinates');
+    if (source === target || (ff && normalized.source_tip === normalized.target_tip)) failPull('invalid_pull_coordinates');
   }
   if (!ff) {
     if (!comment) normalized.title = text(input.title, 256, true);

@@ -426,6 +426,38 @@ def run_case(campaign: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
         require(refs() == {**after_refs, TARGET: objects["candidate"]} and readback(2)["state"] == "merged",
                 "reviewed merge changed a different ref, lost the fast-forward PR or missed the exact candidate")
         campaign.facts[f"{fmt}_reviewed_merge_and_method_twin"] = True
+
+        # Set up the exact subjects a CI operator can later select for tip synchronization.
+        raw_source, raw_target = b"refs/heads/raw-\xfe".hex(), b"refs/heads/raw-\xff".hex()
+        for ref_hex, oid in [(raw_source, objects["source"]), (raw_target, objects["base"])]:
+            receipt = json.loads(campaign.run("branch", "create", root, TENANT, REPOSITORY,
+                "--trusted-local", "--object-format", fmt, "--principal", PRINCIPAL,
+                "--idempotency-key", "byte-subject-" + ref_hex, "--ref-hex", ref_hex, "--target", oid))
+            require(receipt["command_committed"], "native byte-named branch creation failed")
+        before_raw = campaign.run("at", root, TENANT, REPOSITORY, "latest", "refs")
+        metadata = fields(0, "CI on a byte-named branch", TARGET, objects["candidate"])
+        del metadata["source_ref"]
+        metadata["source_ref_hex"] = raw_source
+        transactions = set()
+        for version, action in enumerate(("open", "update", "retarget", "close", "reopen")):
+            metadata["expected_version"] = str(version)
+            if action == "update":
+                metadata["title"] = "Updated CI metadata"
+            if action == "retarget":
+                del metadata["target_ref"]
+                metadata.update(target_ref_hex=raw_target, target_tip=objects["base"])
+            sent = submit("byte-" + action, action, metadata, number=7)
+            transactions.add(sent["publication"]["tx_id"])
+            pr = readback(7)
+            expected_target = metadata.get("target_ref_hex", TARGET.encode().hex())
+            require(pr["version"] == version + 1 and pr["state"] == ("closed" if action == "close" else "open")
+                    and pr["data"]["source_reference_hex"] == raw_source
+                    and pr["data"]["target_reference_hex"] == expected_target
+                    and all(pr["data"][key] == metadata[key] for key in ("source_tip", "target_tip", "title", "body")),
+                    "durable PR command changed its selected branch, state, tips or metadata")
+        require(len(transactions) == 5 and campaign.run("at", root, TENANT, REPOSITORY, "latest", "refs") == before_raw,
+                "metadata lifecycle reused a decision or moved a ref")
+        campaign.facts[f"{fmt}_byte_named_metadata_and_recovery"] = True
     campaign.facts[f"{fmt}_owned_service_drained"] = True
     print(f"OPERATOR_PULL {fmt}: native lifecycle, discussion, exact reviews/merges, recovery, grants and drain", flush=True)
 

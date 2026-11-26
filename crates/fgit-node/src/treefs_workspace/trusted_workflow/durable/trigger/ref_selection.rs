@@ -37,6 +37,37 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
+    next_change_at(
+        store,
+        cx,
+        basis,
+        reference,
+        tip,
+        maximum_steps,
+        cancelled,
+        None,
+    )
+    .await
+    .map(|(_, change)| change)
+}
+
+/// With a settled-event lookup, select the oldest change after the most
+/// recent settled ancestor. An unverified or exhausted suffix cannot advance
+/// the selection. None keeps the first-poll / latest-event behavior.
+pub(super) async fn next_change_at<S, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    reference: &RefName,
+    tip: GitOid,
+    maximum_steps: usize,
+    cancelled: &C,
+    settled: Option<&(dyn Fn(RepositoryDecisionBatchId) -> bool + Sync)>,
+) -> Result<(GitOid, LatestRefChange), AdmissionMaterializationRefusal>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
     checkpoint(cancelled)?;
     if maximum_steps == 0 || maximum_steps > MAX_REPLAY_BATCHES {
         return Err(bound(maximum_steps));
@@ -55,6 +86,8 @@ where
 
     let mut successor = basis.body().clone();
     let mut successor_id = basis.id();
+    let mut successor_tip = Some(tip);
+    let mut next = None;
     let mut walked = 0usize;
     loop {
         checkpoint(cancelled)?;
@@ -83,20 +116,33 @@ where
                 read_historical_ref_state_in(store, cx, repository, predecessor.body()).await?;
             checkpoint(cancelled)?;
             let previous_tip = previous.refs().get(reference).copied();
-            if previous_tip != Some(tip) {
+            if previous_tip != successor_tip
+                && let Some(commit) = successor_tip
+            {
                 let batch_id = successor
                     .decision_tail_id
                     .ok_or(AdmissionMaterializationRefusal::DecisionHistoryUnbound)?;
-                return Ok(LatestRefChange {
-                    previous_tip,
-                    batch_id,
-                    resulting_head_id: successor_id,
-                });
+                let change = (
+                    commit,
+                    LatestRefChange {
+                        previous_tip,
+                        batch_id,
+                        resulting_head_id: successor_id,
+                    },
+                );
+                let Some(settled) = settled else {
+                    return Ok(change);
+                };
+                if settled(batch_id) {
+                    return Ok(next.unwrap_or(change));
+                }
+                next = Some(change);
             }
+            // Removal itself has no runnable commit. Its absence still
+            // supplies the predecessor for a later recreation event.
+            successor_tip = previous_tip;
         }
-        // Every later verified head has the selected tip. A change to another
-        // ref, a ref identity operation, and an intra-batch return to the same
-        // tip cannot become this watch's event.
+        // Unrelated/identity changes do not produce a watched event.
         successor_id = predecessor.id();
         successor = predecessor.body().clone();
     }

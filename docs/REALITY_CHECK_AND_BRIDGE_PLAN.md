@@ -2,6 +2,57 @@
 
 **On November 23, two Linux workers completed sponsored publication and remote inbox reads in both Git hash formats. Across two machines, signed repository backups restored a Git ref, its exact file contents and modes, and an issue that a fresh HTTP listener served with the original history. A supported team deployment, independent whole-installation recovery and a qualified release remain open.**
 
+The native PR metadata gateway at `2373546a` accepts exact Git branch bytes
+in all five lifecycle commands. The stock-push campaign at `5b114a69` passed
+eight cases across SHA-1 and SHA-256. In each format the synchronizer refreshed
+three existing PRs, covering a byte-named source, target and both branches.
+Re-polling and restarting published zero duplicate updates. The PR collection
+then published a successful check for the exact refreshed byte-named source.
+The 50 PR collection, merge collection, queue and artifact cases also passed
+on the same executable. [Stock-push campaign](../scripts/e2e/suites/workflow/stock_push_landing.sh)
+
+The durable remote PR client at `3ddd2a18` also accepts branch bytes and
+retains the original wire form and key. Ten saved text requests regenerated
+byte-for-byte. The ordinary remote PR campaign first exposed a review reader
+that rejected the native label fields. The repair at `345c5101` retains
+labels, their exact version and actor at the pinned review snapshot. At
+`657245fc`, all 45 campaign assertions passed against `2373546a`, including
+five byte-name lifecycle commands in each Git format. Each recovered the
+original outcome through the saved key and left the branch tips intact.
+[Remote PR client](REMOTE_PULL_REQUESTS.md) · [Native operator campaign](../scripts/e2e/suites/operator/remote_pull.sh)
+
+Two distinct stock pushes while the native watcher was stopped exposed a
+delivery gap in both Git formats. On restart only the second commit ran and
+published a check, although the authority history contained both changes.
+The opt-in trusted-local watch at `b05bdd0a` reuses durable settlement
+identities as its restart position. It replays pending branch updates in
+authenticated batch order and executes the original tree after proving its
+commit remains reachable from the current visible branch.
+
+The stock Git 2.54.0 suite at `a97cb32a` passed all 12 native cases using the
+`b05bdd0a` debug executable. In SHA-1 and SHA-256, two pushes made while the
+watcher was stopped ran once each from their distinct original trees. A
+restart reconstructed missing settlement without rerunning either script.
+The older job received `TargetRefMoved` on check publication and the
+current-tip job published successfully. In each format a separate case
+refused the unreachable historical source before acquiring execution custody.
+After the branch advanced and restored reachability, the earlier update,
+recreation and new update ran in order. Fifteen focused Rust tests passed
+across the branch history, recovery, tag and CLI controls. Comment 6295 on
+`.4.12` records the source, binary and suite receipts. Broader event
+delivery, canonical publication of historical results and durable exact
+build-capsule cache reuse remain open.
+[Watch contract](NATIVE_REF_WORKFLOW_WATCH.md) · [Check publication](TRUSTED_WORKFLOW_CHECK_PUBLICATION.md) · [Stock-push campaign](../scripts/e2e/suites/workflow/stock_push_landing.sh)
+
+The proof bridge at `b4bf422a` follows the same sealed loser through
+re-preparation at the winner's head in both writer schedules. The disjoint
+writes both commit. The same-ref Rust controls refuse the losing precondition
+in either order. All 19 bridge package tests and all 23 ordinary proof
+assertions passed. Lean rejected the old truncated traces, a flipped retry
+decision and a duplicate winning order. The production authority and fault
+traces remain open on `.4.81`, along with the release-blocking invariants.
+[Proof lane](../proofs/fg041/README.md)
+
 With the opt-in PR synchronizer and publishing CI already running, a push from
 stock Git 2.54.0 refreshed an existing PR to version 2 and exposed the successful
 job at the pushed commit. One PR update occurred in each Git hash format, even
@@ -14,11 +65,21 @@ ten skips. All nine optional native tests passed separately. Delivery of every
 intermediate push and durable reuse of an exact build capsule remain open on
 `.4.12`. [Stock-push campaign](../scripts/e2e/suites/workflow/stock_push_landing.sh)
 
-A separate local-import comparison exposed a Git compatibility gap. Pinned Git
-created, enumerated and packed a branch ending in byte FF. The native importer
-refused the loose and packed versions before publication in both hash formats.
-All four corresponding ASCII-name imports succeeded. Bead `.4.60`, comment
-6286, records the eight inputs, original ref bytes and outcomes.
+A separate local-import comparison exposed a Git compatibility gap on
+`aba5fc05`. Pinned Git created, enumerated and packed a branch ending in byte
+FF. The native importer refused the loose and packed versions before
+publication in both hash formats. All four corresponding ASCII-name imports
+succeeded. Bead `.4.60`, comment 6286, records the eight inputs and original
+ref bytes. Main now includes the byte-preserving importer from `6dec391e`,
+source revalidation from `d9559819` and the new raw-ref recovery tests in
+`5ef8e378`. The complete native import and CLI test targets passed 19 tests at
+that revision. The same executable accepted all eight original inputs. A
+reopened branch listing matched stock Git's complete reference and object IDs
+in SHA-1 and SHA-256, including byte FF, in loose and packed layouts. Bead
+`.4.60`, comment 6293, retains the exact replay and executable. Its broader
+Tier A acceptance remains open. The repository suite and receipt generator
+also passed all 18 declared rows and all 624 checks at `5ef8e378` using that
+debug executable. Comment 6294 retains the machine receipt.
 [Native import reader](../crates/fgit-node/src/loose_import/source_io.rs)
 
 At `a2b7bd4c`, a release-proof check now catches a lost transaction outcome in
@@ -237,7 +298,7 @@ The plan’s team envelope is 1,000 active operations per second and 5,000 concu
 
 ## Beads intake and subsequent verification
 
-At 07:01 UTC on November 25, the authoritative inventory contained 166 unresolved Beads. Of these, 26 were ready and unassigned, 20 were in progress and 11 awaited independent batch verification. The remaining state counts were 92 open, 26 in rework, 12 blocked and five deferred. Ready and unassigned is a subset of the open and rework records. The tracker refused the ordinary claim for the ready ancestry Bead `.4.36` at 09:03 UTC because all 20 implementation slots were occupied.
+At 16:49 UTC on November 25, the authoritative inventory contained 166 unresolved Beads. Of these, 26 were ready and unassigned, 20 were in progress and 11 awaited independent batch verification. The remaining state counts were 92 open, 26 in rework, 12 blocked and five deferred. Ready and unassigned is a subset of the open and rework records. The tracker refused a new claim for `frankengit-fg093c-projection-evidence-5qky` because all 20 implementation slots were occupied.
 
 At the initial intake, `br list --status all --no-db --limit 0 --json` returned 715 live records. Of these, 556 were closed, 100 open, 26 in rework, 15 in progress, 12 blocked, five deferred and one batch-pending. The wrapped graph accounted for 740 source records including tombstones, with 715 live nodes and 843 edges. It found zero cycles. Wrapped triage ranked 51 actionable records. The authoritative unassigned-ready query returned 34. The top-ranked lexical search task and the open team/agent exit tests answer different questions. The direct holder of the remaining batch-pending state was the verified-read transport bead, `.4.41`.
 

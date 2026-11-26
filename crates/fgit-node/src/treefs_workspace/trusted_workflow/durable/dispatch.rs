@@ -24,6 +24,22 @@ use fgit_runner::workflow::{JobOutcome, MAX_JOBS, MAX_STEPS};
 const MAX_WORKFLOWS: usize = 32;
 const MAX_WORKFLOW_BYTES: usize = 1024 * 1024;
 
+pub(super) struct Snapshot {
+    pub(super) head: RepositoryAuthorityHeadId,
+    pub(super) commit: GitOid,
+    pub(super) ancestor_of: Option<GitOid>,
+}
+
+impl From<(RepositoryAuthorityHeadId, GitOid)> for Snapshot {
+    fn from((head, commit): (RepositoryAuthorityHeadId, GitOid)) -> Self {
+        Self {
+            head,
+            commit,
+            ancestor_of: None,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Definition {
     path: Vec<u8>,
@@ -215,13 +231,14 @@ impl OneNode {
         run_id: [u8; 16],
         parent: &Path,
         read_prefixes: &[Vec<u8>],
-        expected: (RepositoryAuthorityHeadId, GitOid),
+        expected: impl Into<Snapshot>,
         limits: WorkflowLimits,
         artifacts: Option<&TrustedWorkflowArtifactConfig>,
         pull_target: Option<&RefName>,
         path_basis: Option<PathBasis>,
         reserve: Option<impl FnOnce() -> Result<(), TrustedWorkflowFailure> + Send>,
     ) -> Result<TrustedWorkflowDispatch, TrustedWorkflowFailure> {
+        let expected = expected.into();
         if !event_supported(event) {
             return Err(TrustedWorkflowFailure::InvalidInput(
                 "unsupported dispatch event",
@@ -293,7 +310,7 @@ impl OneNode {
         run_id: [u8; 16],
         parent: &Path,
         paths: Vec<TreePath>,
-        expected: (RepositoryAuthorityHeadId, GitOid),
+        expected: Snapshot,
         limits: WorkflowLimits,
         started: Instant,
         artifacts: Option<&TrustedWorkflowArtifactConfig>,
@@ -323,8 +340,9 @@ impl OneNode {
                 &Default::default(),
                 &mut capability,
                 0,
-                Some(expected.0),
-                Some(expected.1),
+                Some(expected.head),
+                Some(expected.commit),
+                expected.ancestor_of,
                 SOURCE_LIMITS.max_entry_bytes,
                 |base, source, capability, head, _, tag_tip| {
                     let result = (|| {

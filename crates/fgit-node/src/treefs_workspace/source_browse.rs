@@ -1,7 +1,7 @@
 //! Exact, bounded repository browsing over verified immutable TreeFS objects.
 //! No host paths, worktree, object-ID lookup oracle, or publication effects.
 
-mod ancestor;
+pub(super) mod ancestor;
 mod commit;
 
 use super::{NodeTreeSource, NodeWorkspaceRefusal, workspace_request_live};

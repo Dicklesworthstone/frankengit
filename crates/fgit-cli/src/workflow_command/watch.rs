@@ -17,6 +17,7 @@ const USAGE: &str =
    --merge-timestamp <positive-unix-seconds> --merge-message <text>
    [--merge-profile path|exact-renames|builtin-attributes-v1] [--merge-method merge-commit|squash]]
   [--expected-incarnation <id>] [--polls <1..10000>] [--interval-ms <10..60000>]
+  [--ordered-branch-updates]
   [--land-queue-head --landing-principal <id>]
   [--refresh-queue-head --refresh-principal <id>]
   [--continuous --stop-file <initially-absent-path> [--attempt-timeout-secs <1..3600>]]
@@ -41,6 +42,10 @@ Trust ALL future selected workflow scripts with host-user privileges. This is
 Linux trusted-local execution, not a hostile-code sandbox or a remote listener.
 Canonical import, receive and merge ref changes qualify. Intermediate tips missed
 between polls are coalesced. Unrelated forge updates do not create a new event.
+--ordered-branch-updates instead resumes from the latest settled branch event
+and executes one retained, currently reachable branch transition in order per
+poll. It runs locally and retains results in the run parent. This option requires
+a branch and excludes automatic check publication and PR or queue selection.
 Ordinary push watches accept explicit refs/heads/* or refs/tags/* references.
 Commit tags execute their peeled commit; a tag does not select a PR, merge queue
 or merge candidate and cannot publish canonical checks in this profile.
@@ -118,6 +123,7 @@ struct WatchOptions {
     merge_candidate: Option<crate::workflow_merge_watch::Options>,
     stop_file: Option<PathBuf>,
     attempt_timeout: Duration,
+    ordered_branch_updates: bool,
 }
 fn number(text: &str, minimum: u32, maximum: u32) -> Result<u32, String> {
     if text.is_empty()
@@ -152,6 +158,7 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
     let mut merge_queue = None;
     let mut merge_fields = std::collections::BTreeMap::new();
     let mut continuous = false;
+    let mut ordered_branch_updates = false;
     let mut stop_file = None;
     let mut attempt_timeout = None;
     let mut i = 5;
@@ -169,6 +176,11 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
                 return Err("duplicate --continuous".into());
             }
             continuous = true;
+        } else if flag == "--ordered-branch-updates" {
+            if ordered_branch_updates {
+                return Err("duplicate --ordered-branch-updates".into());
+            }
+            ordered_branch_updates = true;
         } else if flag == "--stop-file" {
             let value = args.get(i).ok_or("missing --stop-file path")?;
             i += 1;
@@ -269,6 +281,15 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
         return Err("watch requires an explicit branch or tag ref".into());
     }
     let merge_candidate = crate::workflow_merge_watch::parse(&merge_fields)?;
+    if ordered_branch_updates
+        && (!branch
+            || publish
+            || pull_request.is_some()
+            || merge_queue.is_some()
+            || merge_candidate.is_some())
+    {
+        return Err("--ordered-branch-updates requires a plain branch watch without automatic check publication".into());
+    }
     if tag
         && (publish
             || publisher.is_some()
@@ -353,6 +374,7 @@ fn options(args: &[String]) -> Result<WatchOptions, String> {
         interval: Duration::from_millis(u64::from(interval.unwrap_or(1000))),
         stop_file,
         attempt_timeout: Duration::from_secs(u64::from(attempt_timeout.unwrap_or(300))),
+        ordered_branch_updates,
     })
 }
 
@@ -611,6 +633,18 @@ fn poll_once(
                         request,
                         &opt.reference,
                         number,
+                        &opt.workflow,
+                        &opt.parent,
+                        &opt.inputs,
+                        Default::default(),
+                        config,
+                    )
+                    .await
+                }
+                (None, _) if options.ordered_branch_updates => {
+                    node.poll_ordered_trusted_branch_workflows_in(
+                        request,
+                        &opt.reference,
                         &opt.workflow,
                         &opt.parent,
                         &opt.inputs,

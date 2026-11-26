@@ -27,6 +27,7 @@ fn selected(format: GitHashAlgorithm) -> Selected {
     Selected {
         head: head(1),
         commit: oid(format, 2),
+        ancestor_of: None,
         previous_commit: None,
         tag_update: None,
         batch: RepositoryDecisionBatchId::from_digest(
