@@ -89,6 +89,53 @@ describes visibility, request reset, resource and cancellation boundaries.
 Authored wire/native regressions remain unexecuted for this change; historical
 stock-client and Tier A totals below are unchanged.
 
+## Ordinary protocol-v2 fetch negotiation
+
+Ordinary fetch requests now use the same readiness rule on raw Git, SSH and
+HTTP. A non-final batch whose haves do not establish a common cut returns
+ACK/NAK plus a flush, allowing another independent fetch command. Previously,
+connection framing selected a pack after the first batch even when every
+have was unknown, ending negotiation before a later batch could identify
+common history.
+
+Automatic readiness requires every exact wanted tip to be independently
+common in the authorized view, with no shallow/deepen controls or
+`wait-for-done`. This conservative rule reuses the existing HTTP behavior;
+the native interface does not supply upstream Git's broader ancestry proof.
+Initial clones without haves and explicit `done` requests retain their direct
+pack handoff. Each continued command resets its wants, haves, ref requests,
+filters and options while preserving the connection decoder and deadline.
+Shallow information and wanted-ref receipts remain deferred until pack
+selection.
+
+The expectations follow pinned Git 2.54.0's
+[`send_acks` / `ok_to_give_up`](https://github.com/git/git/blob/94f057755b7941b321fd11fec1b2e3ca5313a4e0/upload-pack.c).
+On 2026-11-26, the full `cargo test --locked -p fgit-wire --all-targets --jobs 2`
+lane passed **479 tests**, with **0 failures** and **6 existing ignored
+oracle tests**, on `nightly-2026-08-31`. The executed source was based on
+`b428f1ed25425086da12d449a6304ac5d6176426` plus the legacy correction above
+and this V2 increment. Eight new tests cover ordinary rounds, both hash
+formats, independent authority, clone/done behavior, shallow controls,
+request reset, fragmentation, checkpoint refusal/retry and EOF boundaries.
+
+| Executed V2 source | SHA-256 |
+|---|---|
+| `crates/fgit-wire/src/lib.rs` | `710e1262199f1db8e32349667e2e870ee2f2d7d3733b1fd1aae83e44fff85b02` |
+| `crates/fgit-wire/tests/negotiation_scaling.rs` | `5eb9ee8ed93e8460c13eb3519b4123bd5abf4738efe064c02400a4e18a81c4bd` |
+| `crates/fgit-wire/tests/v2_connection_negotiation.rs` | `9248914e7fbf98e5fc554df8d4342f4ce28665ff619fed9a5c922367d4c406f3` |
+
+The complete wire-test log has SHA-256
+`b4f1b27ef9a1c08c83791dcc946f112cb4fb68d89fe0714dc3a24ac8a969ede9`.
+This is native wire execution, not a new stock-client socket campaign, and
+does not extend the historical Tier A or transport qualification totals.
+
+The native visibility-test helper now sends an explicit `wait-for-done` ACK
+round followed by a fresh fetch command ending in `done`, preserving its
+non-disclosure assertions under the corrected protocol. Those native tests
+were not executed in this run: dependency compilation was terminated by
+SIGKILL, and the execution host disconnected before a lighter native check
+could start. The 479-test result above applies only to `fgit-wire`.
+
 ## Executed stock-client rows: partial clone, notes, gitlinks, atomic push, push options
 
 Current implementation supports `sparse:oid=<exact visible blob OID>` and

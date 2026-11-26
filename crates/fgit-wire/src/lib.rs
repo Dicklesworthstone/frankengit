@@ -3213,25 +3213,20 @@ impl V2UploadPack {
                     &self.limits,
                 )?;
             }
-            // Without an ancestry oracle, only exact wanted common tips prove
-            // a sufficient cut. Conservatively ask for another round otherwise;
-            // the client's explicit `done` can always terminate negotiation.
-            let ready = if self.wait_for_done {
-                false
-            } else if self.framing.is_stateless_http() {
-                any_common
-                    && self.shallows.is_empty()
-                    && self.deepen.is_none()
-                    && self.deepen_since.is_none()
-                    && self.deepen_not.is_empty()
-                    && self
-                        .wants
-                        .as_slice()
-                        .iter()
-                        .all(|oid| self.haves.contains(oid) && repository.is_common(*oid))
-            } else {
-                true
-            };
+            // Transport framing does not prove a common base. Without an
+            // ancestry oracle, only exact wanted common tips prove a sufficient
+            // cut on either carrier; explicit `done` can always finish negotiation.
+            let ready = !self.wait_for_done
+                && any_common
+                && self.shallows.is_empty()
+                && self.deepen.is_none()
+                && self.deepen_since.is_none()
+                && self.deepen_not.is_empty()
+                && self
+                    .wants
+                    .as_slice()
+                    .iter()
+                    .all(|oid| self.haves.contains(oid) && repository.is_common(*oid));
             if !ready {
                 add_output_packet(&mut output, Packet::Flush, 4, &mut used_bytes, &self.limits)?;
                 validate_response_packet_sizes(&output, &self.limits)?;

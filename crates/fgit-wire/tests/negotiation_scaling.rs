@@ -189,6 +189,16 @@ fn default_sized_have_sets_preserve_exact_wire_and_pack_order_in_every_protocol(
             }
             if version == UploadPackVersion::V2 {
                 packets.push(Packet::Flush);
+                // The common set does not prove all three wanted tips. A
+                // second independent request carries the final done and haves.
+                packets.extend([data(b"command=fetch\n"), Packet::Delimiter]);
+                for value in [3, 1, 2] {
+                    packets.push(data(format!("want {}\n", oid(format, value))));
+                }
+                for have in &haves {
+                    packets.push(data(format!("have {have}\n")));
+                }
+                packets.extend([data(b"done\n"), Packet::Flush]);
             } else {
                 packets.push(data(b"done\n"));
             }
@@ -211,7 +221,7 @@ fn default_sized_have_sets_preserve_exact_wire_and_pack_order_in_every_protocol(
                         .iter()
                         .map(|id| data(format!("ACK {id}\n"))),
                 );
-                expected.extend([data(b"ready\n"), Packet::Delimiter, data(b"packfile\n")]);
+                expected.extend([Packet::Flush, data(b"packfile\n")]);
                 expected
             } else {
                 let mut expected = Vec::new();
