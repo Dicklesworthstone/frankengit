@@ -144,7 +144,7 @@ def run_case(campaign, directory, fmt):
         denied = recorded("wrong_writer")
         require(denied["error"]["status"] == 403 and denied["error"]["phase"] == "publication"
                 and denied["dispatched"] and denied["publication"] is None and snapshot() == before,
-                "server admitted a writer selected through a different reader principal")
+                "expected a request-level 403 for the mismatched writer with the canonical branch page intact")
         status, refused_scope = native_request(campaign, gateway, fmt + "-wrong-writer-reply",
                 "/api/v1/source/branches/transaction", tokens["other_writer"], wrong_intent["key"],
                 wrong_intent["body"])

@@ -43,6 +43,11 @@ Security cannot depend on one parser, local repository, cloud provider, model, g
 ### 1.3 Authorization integrity
 
 - Every authority attempt binds an authenticated principal snapshot and effective capability root.
+- A remote atomic branch writer can pin the tenant, repository, incarnation,
+  and expected writer in its prepared form. The gateway checks those identities
+  against the authenticated receive request before registering a transaction.
+  The outcome reader independently authenticates the same original principal.
+  The form assertion constrains publication and confers no grant.
 - Capabilities are scoped by tenant/repository/ref/path/object/effect/secret/network/time/budget and revocable handle.
 - Delegation can only narrow authority.
 - Changing the canonical default branch requires a trusted-local operator and,

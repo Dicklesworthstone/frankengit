@@ -176,6 +176,8 @@ A backend profile cannot ship because its vendor documentation sounds strong; th
 - different canonical request under same idempotency key is rejected;
 - request IDs/network attempts cannot split logical identity;
 - seal body is immutable and exact-key recoverable;
+- an atomic branch writer-scope mismatch refuses before key registration or
+  sealing, even when a separate outcome credential can read the selected scope;
 - seal existence never implies commit.
 
 ### 8.2 Terminal outcomes
@@ -186,6 +188,8 @@ A backend profile cannot ship because its vendor documentation sounds strong; th
 - conflicting second outcome is detected as invariant failure;
 - outcome-index accelerators rebuild exactly from decision history;
 - connection loss/cancel ambiguity resolves by head/outcome lookup.
+- remote atomic branch batches recover the original seal and decision after
+  response loss and restart using an independent outcomes-read credential.
 
 ### 8.3 Head/batch/RCR continuity
 
