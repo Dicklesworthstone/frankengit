@@ -44,6 +44,17 @@ delivery, canonical publication of historical results and durable exact
 build-capsule cache reuse remain open.
 [Watch contract](NATIVE_REF_WORKFLOW_WATCH.md) · [Check publication](TRUSTED_WORKFLOW_CHECK_PUBLICATION.md) · [Stock-push campaign](../scripts/e2e/suites/workflow/stock_push_landing.sh)
 
+At `eb5ffba5`, the operator-owned HTTP workflow controller uses the same
+ordered branch selection with `--workflow-ordered-branch-updates`. The
+prior native service replayed only the second of two pushes made while
+stopped. With the new option, SHA-1 and SHA-256 executed each original
+tree in order, recovered a missing settlement at startup and served the
+authenticated checks read before draining. The option retains local
+execution evidence. The stock Git and ordinary HTTP workflow suites each
+passed 14 cases, and 36 focused Rust tests passed at the same source
+revision. Comment 6297 on `.4.12` records executable and terminal receipts.
+[HTTP controller](NATIVE_HTTP_WORKFLOW_SERVICE.md#replay-missed-branch-updates)
+
 The proof bridge at `b4bf422a` follows the same sealed loser through
 re-preparation at the winner's head in both writer schedules. The disjoint
 writes both commit. The same-ref Rust controls refuse the losing precondition
