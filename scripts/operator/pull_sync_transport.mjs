@@ -4,6 +4,7 @@ import { request as httpsRequest } from 'node:https';
 import { outcomeEndpoint } from './transaction_outcome.mjs';
 import { form, integer, snapshot, metadataCommand } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-core.mjs';
 import { refBytes } from '../../crates/fgit-node/src/smart_http/server/browser/branches.mjs';
+import { isCredentialToken } from './credential_token.mjs';
 
 export class PullSyncError extends Error {
   constructor(code, status = null) { super(code); this.name = 'PullSyncError'; this.code = code; this.status = status; }
@@ -15,7 +16,7 @@ export function exactKeys(value, names) {
   return value;
 }
 export function tokenValue(token) {
-  if (typeof token !== 'string' || !/^[0-9a-f]{64}$/.test(token)) fail('invalid_sync_credential');
+  if (!isCredentialToken(token)) fail('invalid_sync_credential');
   return token;
 }
 export function parseSyncJson(bytes, maximum = 8 * 1024 * 1024) {

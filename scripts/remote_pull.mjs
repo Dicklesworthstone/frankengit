@@ -14,7 +14,7 @@ prepare --input PRIVATE_JSON --token-file PRIVATE_TOKEN --request-dir NEW_SLOT
 inspect --request-dir EXISTING_SLOT [--known PRIVATE_RECORD]
 send --request-dir EXISTING_SLOT --token-file ORIGINAL_TOKEN --confirm-key SAVED_KEY
      --record NEW_PRIVATE_JSON [--fast-forward-only]
-     [--confirm-candidate EXACT_NATIVE_OID] [--confirm-merge-method merge-commit|squash]
+     [--confirm-candidate EXACT_NATIVE_OID] [--confirm-merge-method merge-commit|squash|rebase]
 recover --request-dir EXISTING_SLOT --token-file ORIGINAL_OR_ROTATED_TOKEN
         --record NEW_PRIVATE_JSON
 
@@ -33,7 +33,9 @@ Anchor counters are decimal strings; anchor coordinates are never refreshed.
 fast-forward requires pull_request_version and exact source/target refs and tips.
 approve/request-changes/withdraw require exact PR version, policy epoch, refs,
 tips, merge base and candidate commit, plus reviewer-stream expected_version/reason.
-merge requires that exact candidate and explicit required_reviewers and method.
+For rebase reviews, including withdrawal, explicitly add method:"rebase".
+Ordinary merge/squash reviews omit method. merge requires that exact candidate,
+explicit required_reviewers and method merge-commit, squash or rebase.
 Read current coordinates through the native PR API/browser; they are never guessed.
 
 prepare and inspect are offline. send requires the original token/key and

@@ -2,7 +2,8 @@
 
 use std::collections::BTreeMap;
 
-use fgit_codec::RepositoryAuthorityHeadBody;
+use crate::{AuthorityFailure, ImmutableRead};
+use fgit_codec::{Encoder, RepositoryAuthorityHeadBody};
 
 use super::{
     AsyncAuthorityStore, HeadKey, IdempotencyKey, LIMITS, OutcomeLookup, RecoveryFailure,
@@ -12,9 +13,9 @@ use super::{
 };
 #[cfg(test)]
 use super::{
-    AuthenticatedHead, AuthorityFailure, AuthorityStore, CANONICAL_CODEC_VERSION, DecodeLimits,
-    HeadRead, HeadReadReceipt, ImmutableRead, OutcomeFailure, PrincipalId, RepositoryId,
-    encode_body, recover_request, recover_request_async,
+    AuthenticatedHead, AuthorityStore, CANONICAL_CODEC_VERSION, DecodeLimits, HeadRead,
+    HeadReadReceipt, OutcomeFailure, PrincipalId, RepositoryId, encode_body, recover_request,
+    recover_request_async,
 };
 use crate::{
     TerminalOutcome, indexed_outcome_async, next_batch_to_replay, read_authority_head_body_async,
@@ -64,28 +65,162 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> Result<(), RefusalCode> + Sync,
 {
-    if keys.len() > MAX_RECOVERY_KEYS {
-        return Err(RecoveryFailure::BoundExceeded {
-            field: "request key count",
-            limit: MAX_RECOVERY_KEYS,
-            observed: keys.len(),
-        });
+    check_batch_scope(store, cx, head_key, scope, keys.len(), checkpoint).await?;
+    recover_batch(
+        store,
+        cx,
+        head_key,
+        scope,
+        keys.iter().map(|key| (key, None)),
+        checkpoint,
+    )
+    .await
+}
+
+/// Failure verifying the identities required by a bound batch. Ordinary
+/// key recovery retains its existing missing-key observations and errors.
+#[derive(Debug)]
+pub enum BoundRecoveryFailure {
+    /// Another store or recovery error, including cancellation.
+    Recovery(RecoveryFailure),
+    /// The immutable store could not read a required key binding.
+    BindingRead(AuthorityFailure),
+    /// A required key binding was absent or contained different bytes.
+    BindingMismatch,
+}
+
+impl std::fmt::Display for BoundRecoveryFailure {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Recovery(error) => std::fmt::Display::fmt(error, out),
+            Self::BindingRead(error) => write!(out, "read expected request key binding: {error}"),
+            Self::BindingMismatch => out.write_str("expected request key binding differs"),
+        }
     }
-    // Scope authentication is required even if no key or seal is observed.
-    authenticated_head(store, cx, head_key, scope, checkpoint).await?;
-    let mut pending = Vec::with_capacity(keys.len());
-    let mut outcomes: BTreeMap<TxId, Option<TerminalOutcome>> = BTreeMap::new();
-    for key in keys {
+}
+
+impl std::error::Error for BoundRecoveryFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Recovery(error) => Some(error),
+            Self::BindingRead(error) => Some(error),
+            Self::BindingMismatch => None,
+        }
+    }
+}
+
+impl From<RecoveryFailure> for BoundRecoveryFailure {
+    fn from(error: RecoveryFailure) -> Self {
+        Self::Recovery(error)
+    }
+}
+
+/// Recover keys whose immutable bindings must match independently reconstructed
+/// identities, including children of a verified receive-session descriptor.
+/// A missing or different binding is an integrity error even for an unsealed
+/// child. A matching binding still requires the ordinary seal and outcome checks.
+pub async fn recover_bound_requests_async<S, C>(
+    store: &S,
+    cx: &S::Context,
+    head_key: &HeadKey,
+    scope: RecoveryScope,
+    keys: &[(IdempotencyKey, TxId)],
+    checkpoint: &C,
+) -> Result<Vec<RequestRecovery>, BoundRecoveryFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> Result<(), RefusalCode> + Sync,
+{
+    check_batch_scope(store, cx, head_key, scope, keys.len(), checkpoint).await?;
+    // A corrupt descriptor is refused before reading any seal or outcome.
+    // The slots are immutable, so the shared replay can reuse these checks.
+    for (key, identity) in keys {
         check(checkpoint)?;
         let slot = idempotency_binding_key(
             scope.tenant_id,
             scope.repository_id,
             scope.principal_id,
             key,
-        )?;
-        let binding = store.read_immutable(cx, &slot).await?;
+        )
+        .map_err(RecoveryFailure::from)?;
+        let mut encoded = Encoder::new();
+        encoded
+            .write_internal_object_id(identity.as_internal_object_id())
+            .map_err(RecoveryFailure::from)?;
+        let binding = store
+            .read_immutable(cx, &slot)
+            .await
+            .map_err(BoundRecoveryFailure::BindingRead)?;
+        if !matches!(binding, ImmutableRead::Present(bytes) if bytes == encoded.into_bytes()) {
+            return Err(BoundRecoveryFailure::BindingMismatch);
+        }
+    }
+    recover_batch(
+        store,
+        cx,
+        head_key,
+        scope,
+        keys.iter().map(|(key, expected)| (key, Some(*expected))),
+        checkpoint,
+    )
+    .await
+    .map_err(BoundRecoveryFailure::Recovery)
+}
+
+async fn check_batch_scope<S, C>(
+    store: &S,
+    cx: &S::Context,
+    head_key: &HeadKey,
+    scope: RecoveryScope,
+    count: usize,
+    checkpoint: &C,
+) -> Result<(), RecoveryFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> Result<(), RefusalCode> + Sync,
+{
+    if count > MAX_RECOVERY_KEYS {
+        return Err(RecoveryFailure::BoundExceeded {
+            field: "request key count",
+            limit: MAX_RECOVERY_KEYS,
+            observed: count,
+        });
+    }
+    // Scope authentication is required even if no key or seal is observed.
+    authenticated_head(store, cx, head_key, scope, checkpoint).await?;
+    Ok(())
+}
+
+async fn recover_batch<'key, S, C>(
+    store: &S,
+    cx: &S::Context,
+    head_key: &HeadKey,
+    scope: RecoveryScope,
+    keys: impl ExactSizeIterator<Item = (&'key IdempotencyKey, Option<TxId>)> + Send,
+    checkpoint: &C,
+) -> Result<Vec<RequestRecovery>, RecoveryFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> Result<(), RefusalCode> + Sync,
+{
+    let mut pending = Vec::with_capacity(keys.len());
+    let mut outcomes: BTreeMap<TxId, Option<TerminalOutcome>> = BTreeMap::new();
+    for (key, expected) in keys {
         check(checkpoint)?;
-        let Some(tx_id) = binding_identity(binding)? else {
+        let observed = if let Some(verified) = expected {
+            Some(verified)
+        } else {
+            let slot = idempotency_binding_key(
+                scope.tenant_id,
+                scope.repository_id,
+                scope.principal_id,
+                key,
+            )?;
+            let binding = store.read_immutable(cx, &slot).await?;
+            check(checkpoint)?;
+            binding_identity(binding)?
+        };
+        let Some(tx_id) = observed else {
             pending.push(PendingRecovery::Observation(
                 RequestRecovery::KeyNotObserved,
             ));

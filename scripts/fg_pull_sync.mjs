@@ -7,6 +7,7 @@ import { discover, destination, freezePlan } from './operator/pull_sync_plan.mjs
 import { send, recover, status } from './operator/pull_sync_publish.mjs';
 import { loadPlan, savePlan, planSummary } from './operator/pull_sync_custody.mjs';
 import { parseSyncJson, tokenValue } from './operator/pull_sync_transport.mjs';
+import { MAX_CREDENTIAL_TOKEN_BYTES } from './operator/credential_token.mjs';
 
 const USAGE = `node scripts/fg_pull_sync.mjs inspect|prepare
   --destination /private/destination.json --token-file /private/token
@@ -80,8 +81,12 @@ export async function controlFile(path, maximum) {
   absolute(path); await directory(dirname(path)); return readPrivate(path, maximum);
 }
 export async function credential(path) {
-  const raw = await controlFile(path, 65), text = new TextDecoder('utf-8', { fatal: true }).decode(raw);
-  return tokenValue(text.endsWith('\n') ? text.slice(0, -1) : text);
+  const raw = await controlFile(path, MAX_CREDENTIAL_TOKEN_BYTES + 1);
+  try {
+    // Preserve a BOM so malformed bytes cannot normalize into another credential.
+    const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(raw);
+    return tokenValue(text.endsWith('\n') ? text.slice(0, -1) : text);
+  } finally { raw.fill(0); }
 }
 export async function main(args, { stdout = process.stdout, stderr = process.stderr } = {}) {
   const stop = new AbortController(), abort = () => stop.abort(new Error('sync_stop_requested'));

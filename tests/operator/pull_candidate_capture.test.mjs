@@ -46,6 +46,28 @@ for (const state of ['conflicted', 'already_up_to_date']) test(`${state} remains
   assert.equal(result.usage.requests, 3); assert.equal(p.requests.some(r => r.url.endsWith('/inspect')), false);
   await validateCandidateCapture(result.capture);
 });
+test('byte-named up-to-date captures bind both exact refs during offline validation', async () => {
+  const scope = { ...SCOPE, object_format: 'sha1' };
+  const request = candidateInput({ endpoint: 'https://forge.invalid/repo.git', scope, number: '7', metadata: META, method: 'merge-commit' });
+  const header = { schema_version: 1, ...scope, source_head: 'observed-source', snapshot_token: HEAD };
+  const prefix = Buffer.from('refs/heads/raw-').toString('hex');
+  const refs = { source_ref: null, source_ref_hex: prefix + 'fe', target_ref: null, target_ref_hex: prefix + 'ff',
+    source_tip: 'sha1:' + '1'.repeat(40), target_tip: 'sha1:' + '1'.repeat(40) };
+  const pull = { ...header, type: 'pull_request', number: 7, found: true, pull_request: {
+    number: 7, version: 1, state: 'open', merge_only: false, merge: null, opened_by: '1'.repeat(32),
+    last_metadata_actor: '1'.repeat(32), data: { ...refs, object_format: 'sha1', title: 'Already integrated', body: '' } } };
+  const page = { ...header, type: 'review_page', number: 7, found: true, pull_request_version: 1, policy_epoch: 1,
+    after: null, limit: 50, next_after: null, merge_authorized: false, reviews: [] };
+  const preparation = { ...header, type: 'merge_preparation', profile: 'path-merge-v1', method: 'merge-commit',
+    read_only: true, objects_staged: false, transaction_created: false, published: false, merge_authorized: false,
+    subject: { ...refs, pull_request: 7, pull_request_version: 1, policy_epoch: 1 },
+    state: 'already_up_to_date', candidate: null, bundle: null, conflicts: [] };
+  const capture = { schema: 'frankengit-pull-candidate-capture-v1', request, pull, review_pages: [page],
+    preparation_status: 200, preparation, inspection: null };
+  assert.equal((await validateCandidateCapture(capture)).artifact, null);
+  preparation.subject.source_ref_hex = prefix + 'fd';
+  await assert.rejects(validateCandidateCapture(capture), CandidateError);
+});
 test('a retained expected head is sent on the first request and cannot silently refresh', LINUX_ORACLE, async t => {
   const p = await candidatePeer(t); p.input.expected_head = HEAD;
   await capturePullCandidate(p.input, TOKEN); assert.equal(new URL(p.requests[0].url, p.endpoint).searchParams.get('expected_head'), HEAD);
@@ -56,7 +78,7 @@ test('a retained expected head is sent on the first request and cannot silently 
 for (const change of [
   p => p.pull.repository_id = 'e'.repeat(32), p => p.pull.repository_incarnation = 'e'.repeat(32),
   p => p.pull.object_format = 'sha256', p => p.pull.pull_request.version = Number.MAX_SAFE_INTEGER + 1,
-  p => p.pull.pull_request.state = 'closed', p => p.pull.pull_request.data.source_ref = null,
+  p => p.pull.pull_request.state = 'closed', p => p.pull.pull_request.data.source_ref = 'refs/heads/mismatched',
   p => p.pull.pull_request.data.source_ref_hex = 'ff', p => p.pull.number = 8,
 ]) test(`invalid discovery stops before candidate construction: ${change.toString()}`, LINUX_ORACLE, async t => {
   const p = await candidatePeer(t); change(p);

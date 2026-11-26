@@ -83,9 +83,12 @@ The existing native form API still lacks an atomic incarnation precondition.
 The inherited shared-validator profile uses exact safe integers. PR numbers,
 versions, policy epochs and timestamps above `9007199254740991` refuse rather
 than round. Input number/timestamp are canonical decimal strings. This does not
-change the existing mutation client's independent full-u64 support. Byte-only
-branch names are readable but cannot enter this UTF-8 preparation form; they
-refuse instead of being renamed. Raw changed-file paths remain byte-preserving.
+change the existing mutation client's independent full-u64 support. Candidate
+preparation and inspection send byte-only branch names as lowercase hex in
+`source_ref_hex` or `target_ref_hex`. Durable review and merge drafts also use
+the retained hex bytes for branch labels containing C1 controls. Other text
+branch names keep their original wire encoding. Raw changed-file paths remain
+byte-preserving.
 
 Defaults are one 30-second operation deadline (maximum 300 seconds), eight
 review pages of 50 records (maximum 400 reviewers), 64 MiB total response payload,

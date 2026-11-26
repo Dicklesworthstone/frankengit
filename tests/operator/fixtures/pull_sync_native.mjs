@@ -14,7 +14,7 @@ export function row(number = 1, format = 'sha1', patch = {}) {
     title: `PR ${number} <script>`, body: 'Résumé\r\n\u202e exact text\n' },
     opened_by: '4'.repeat(32), last_metadata_actor: '4'.repeat(32), merge_only: false, merge: null, ...patch };
 }
-export async function fixture(t, format = 'sha1', count = 2) {
+export async function fixture(t, format = 'sha1', count = 2, { tokens = [TOKEN, ROTATED] } = {}) {
   const size = format === 'sha1' ? 40 : 64, calls = [], decisions = new Map(), sockets = new Set();
   const state = { rows: Array.from({ length: count }, (_, i) => row(i + 1, format)),
     tips: new Map([['refs/heads/main', 'c'.repeat(size)], ...Array.from({ length: count }, (_, i) => [`refs/heads/topic-${i + 1}`, 'd'.repeat(size)])]),
@@ -28,7 +28,7 @@ export async function fixture(t, format = 'sha1', count = 2) {
       const body = Buffer.concat(chunks).toString(), url = new URL(req.url, 'http://127.0.0.1'), form = new URLSearchParams(body);
       const call = { method: req.method, path: url.pathname, query: url.searchParams, body, form, headers: req.headers }; calls.push(call);
       if (state.hook && await state.hook(call, req, res)) return;
-      if (![TOKEN, ROTATED].some(token => req.headers.authorization === `Bearer ${token}`)) { res.writeHead(401); res.end(); return; }
+      if (!tokens.some(token => req.headers.authorization === `Bearer ${token}`)) { res.writeHead(401); res.end(); return; }
       const wanted = form.get('expected_head') ?? url.searchParams.get('expected_head');
       if (wanted && wanted !== state.head) { res.writeHead(409); res.end(); return; }
       let result, status = 200;

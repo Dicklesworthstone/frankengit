@@ -61,6 +61,17 @@ grant's exact repository incarnation in the saved input. Follow the existing
 inspection, send and original-key recovery commands. The PR operator accepts an
 agent credential for `open`, `update`, `close`, `reopen` and `comment`; it refuses
 code-publication and review actions with that credential before networking.
+The [review capture operator](REMOTE_PR_REVIEW_SNAPSHOTS.md) also accepts the
+private sponsored token file. A complete capture needs the independent
+`pulls-read` and `pulls-feedback-read` scopes; it remains read-only, and neither
+capture nor offline drafting grants permission to publish a review or merge.
+The [PR tip synchronization operator](PULL_REQUEST_TIP_SYNCHRONIZATION.md)
+accepts it for inspection and preparation with `pulls-read` plus `source-read`,
+for exact metadata publication with `pulls-write`, and for original-key recovery
+with `outcomes-read`. Use the agent ID as the synchronization destination's
+`principal_id`. Both operators preserve the complete Bearer value and accept
+only one optional final LF in the private token file, without BOM or whitespace
+normalization. Every request remains subject to native authorization.
 The issue and milestone browser forms and their network operators accept the
 same sponsored token spelling. They preserve its complete fingerprint in saved
 request custody; changing or stripping the prefix cannot rebind an existing

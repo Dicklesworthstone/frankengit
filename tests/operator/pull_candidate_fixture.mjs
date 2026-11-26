@@ -92,6 +92,13 @@ export function reports(f, state = 'clean', reviewCount = 1) {
             new: { byte_start: 0, byte_end: f.after.length, line_start: 0, line_count: 1 }, before_hex: f.before.toString('hex'), after_hex: f.after.toString('hex') }] } }] } };
   return { pull, reviews, preparation, inspection };
 }
+function assertCommandRefs(command, data) {
+  for (const name of ['source_ref', 'target_ref']) {
+    const encoded = `${name}_hex`;
+    assert.equal(command.get(name), data[name]);
+    assert.equal(command.get(encoded), data[name] === null ? data[encoded] : null);
+  }
+}
 export function mixed(metadata, bundle) {
   const boundary = `fg-prepare-${createHash('sha256').update(bundle).digest('hex').slice(0, 48)}-0`;
   return { type: `multipart/mixed; boundary=${boundary}`, bytes: Buffer.concat([
@@ -126,6 +133,7 @@ export async function candidatePeer(t, { algorithm = 'sha1', method = 'merge-com
       } else if (url.pathname === '/repo.git/api/v1/pulls/7/prepare') {
         assert.equal(r.method, 'POST');
         const command = new URLSearchParams(r.body.toString('utf8'));
+        assertCommandRefs(command, p.pull.pull_request.data);
         assert.equal([...command].length, 13); assert.equal(command.get('profile'), 'path-merge-v1');
         assert.equal(command.get('source_tip'), f.source); assert.equal(command.get('target_tip'), f.target);
         assert.equal(command.get('method'), method); assert.equal(command.get('timestamp'), META.timestamp);
@@ -142,6 +150,7 @@ export async function candidatePeer(t, { algorithm = 'sha1', method = 'merge-com
         const commandStart = r.body.indexOf(Buffer.from('\r\n\r\n')) + 4;
         const commandEnd = r.body.indexOf(Buffer.from(`\r\n--${boundary}\r\n`), commandStart);
         const command = new URLSearchParams(r.body.subarray(commandStart, commandEnd).toString('utf8'));
+        assertCommandRefs(command, p.pull.pull_request.data);
         assert.equal([...command].length, 9); assert.equal(command.get('candidate_commit'), f.candidate);
         assert.equal(command.get('policy_epoch'), '3'); assert.equal(command.get('pull_request_version'), '9');
         sendJson(response, p.inspection);

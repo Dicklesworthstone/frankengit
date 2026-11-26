@@ -5,6 +5,7 @@ import { request as httpsRequest } from 'node:https';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { pullLabels } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-core.mjs';
+import { isCredentialToken } from './credential_token.mjs';
 
 export const REVIEW_LIMITS = Object.freeze({ reply: 2 * 1024 * 1024, capture: 8 * 1024 * 1024,
   wire: 8 * 1024 * 1024, reviewers: 1024, pages: 32 });
@@ -317,7 +318,7 @@ function get(address, token, number, page, config) {
 }
 export async function capturePullReviews(input, token, options = {}) {
   const selected = reviewSelection(input);
-  if (typeof token !== 'string' || !/^[0-9a-f]{64}$/.test(token)) failReview('invalid_review_credential');
+  if (!isCredentialToken(token)) failReview('invalid_review_credential');
   reviewFields(options, ['timeoutMs', 'signal', 'ca', 'pageLimit', 'maxPages', 'maxReviewers', 'maxWireBytes'], []);
   const timeoutMs = integer(options.timeoutMs ?? 30000, 1, 300000), signal = options.signal;
   if (signal !== undefined && !(signal instanceof AbortSignal)) failReview('invalid_review_signal');
