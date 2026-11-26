@@ -154,7 +154,7 @@ pub(super) fn dispatch(
         plan.get("definition_refusal"),
     ) {
         (true, Some(refusal))
-            if trigger == "push"
+            if !candidate
                 && reference.as_bytes().starts_with(b"refs/heads/")
                 && definitions.is_empty() =>
         {
@@ -163,6 +163,16 @@ pub(super) fn dispatch(
             let blob = GitOid::from_hex(node.object_format(), text(refusal, "blob")?)
                 .map_err(|_| invalid("invalid refused workflow blob"))?;
             let diagnostic = text(refusal, "diagnostic_hex")?;
+            match refusal.get("code") {
+                // Original v2 branch plans predate typed compiler diagnostics.
+                None if trigger == "push" => {}
+                Some(code)
+                    if matches!(
+                        code.text(),
+                        Some("unsupported_runner" | "invalid_utf8" | "workflow_compile_refused")
+                    ) => {}
+                _ => return Err(invalid("invalid watch definition refusal code")),
+            }
             if !workflow_child(&path, workflow_directory)
                 || blob.is_zero()
                 || diagnostic.len() > 2048

@@ -19,7 +19,7 @@ use fgit_forge::review::{ComparisonMode, SourcePathChanges};
 // An admitted candidate executes its own tree while PR filters compare the
 // original incoming branch. The override is supplied only by native selection.
 type PathBasis = (Option<GitOid>, ComparisonMode, Option<GitOid>);
-use fgit_runner::workflow::{JobOutcome, MAX_JOBS, MAX_STEPS};
+use fgit_runner::workflow::{JobOutcome, MAX_JOBS, MAX_STEPS, WorkflowError};
 
 const MAX_WORKFLOWS: usize = 32;
 const MAX_WORKFLOW_BYTES: usize = 1024 * 1024;
@@ -319,7 +319,7 @@ impl OneNode {
         reserve: Option<impl FnOnce() -> Result<(), TrustedWorkflowFailure> + Send>,
     ) -> Result<TrustedWorkflowDispatch, TrustedWorkflowFailure> {
         let retain_definition_refusal = reserve.is_some()
-            && event == "push"
+            && matches!(event, "push" | "pull_request")
             && reference.as_bytes().starts_with(b"refs/heads/");
         let bytes = ByteCount::try_new("workflow source", FETCH_BYTES, FETCH_BYTES)
             .map_err(|_| TrustedWorkflowFailure::InvalidInput("source budget"))?;
@@ -698,10 +698,17 @@ fn dispatch_at<A: GitHashAlgorithm>(
             .expect("writing to a String cannot fail");
     }
     let stop_reason = definition_refusal.map(|(entry, error)| {
+        let code = match &error {
+            TrustedWorkflowFailure::Workflow(WorkflowError::UnsupportedRunner(_)) => {
+                "unsupported_runner"
+            }
+            TrustedWorkflowFailure::InvalidInput(_) => "invalid_utf8",
+            _ => "workflow_compile_refused",
+        };
         let diagnostic = error.to_string().chars().take(256).collect::<String>();
         write!(
             identity,
-            ",\"definition_refusal\":{{\"path_hex\":\"{}\",\"blob\":\"{}\",\"diagnostic_hex\":\"{}\"}}",
+            ",\"definition_refusal\":{{\"code\":\"{code}\",\"path_hex\":\"{}\",\"blob\":\"{}\",\"diagnostic_hex\":\"{}\"}}",
             hex(entry.path().as_bytes()),
             hex(entry.source_oid().digest_bytes()),
             hex(diagnostic.as_bytes())

@@ -56,6 +56,13 @@ not execute `push`-only definitions for a PR, and zero matches create no check.
 Explicit artifact selectors still validate before execution; producer captures
 and consumer deliveries retain the original current-attempt provenance checks.
 
+A definition the native compiler refuses settles the selected PR event without
+executing any workflow or proposing any check. For example, a `runs-on` label
+other than `fgit-trusted-local` reports `definition_refused` with the code
+`unsupported_runner`. The receipt retains the selected PR version and exact
+source commit along with the refused definition's path and blob. A corrected
+source commit can run through the same watch and check publisher.
+
 The event receipt identifies the current executed source separately from
 `recorded_source_commit`, `recorded_target_commit`, `observed_target_commit` and
 the exact PR version. It explicitly says `execution_profile: source-head-only`

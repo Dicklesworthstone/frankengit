@@ -48,7 +48,11 @@ class Fixture:
         trigger='workflow_dispatch' if mode=='unmatched' else 'pull_request'
         workflow=f'name: native-pr-head\non: {trigger}\njobs:\n'
         self.outcomes={}
-        for job in (['slow'] if mode=='active' else ['produce','consume','fail','skip','ok0','ok1','ok2','ok3']):
+        jobs = {
+            'active': ['slow'],
+            'runner-policy': ['policy'],
+        }.get(mode, ['produce','consume','fail','skip','ok0','ok1','ok2','ok3'])
+        for job in jobs:
             needs='    needs: '+('produce' if job=='consume' else 'fail')+'\n' if job in ('consume','skip') else ''
             action=f"printf '{job}\\n' >> {shlex.quote(str(self.effects))}; "
             if job=='produce':action+='cat input.txt > built.bin'
@@ -60,13 +64,19 @@ class Fixture:
             self.outcomes[job]='failure' if job=='fail' else 'action_required' if job=='skip' else 'success'
         pr=store('blob',workflow.encode())
         push=store('blob',f"name: push-only\non: push\njobs:\n  push:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: printf push >> {shlex.quote(str(self.push_effects))}\n".encode())
-        ci=store('tree',b'100644 pr.yml\0'+bytes.fromhex(pr)+b'100644 push.yml\0'+bytes.fromhex(push))
-        def tree(payload):
+        def workflow_tree(pr_blob):
+            return store('tree',b'100644 pr.yml\0'+bytes.fromhex(pr_blob)+b'100644 push.yml\0'+bytes.fromhex(push))
+        ci=workflow_tree(pr)
+        def tree(payload, definition_tree=ci):
             blob=store('blob',payload)
-            return store('tree',b'40000 ci\0'+bytes.fromhex(ci)+b'100644 input.txt\0'+bytes.fromhex(blob))
+            return store('tree',b'40000 ci\0'+bytes.fromhex(definition_tree)+b'100644 input.txt\0'+bytes.fromhex(blob))
         first,second=tree(b'original input\n'),tree(b'changed source input\n')
+        intermediate = second
+        if mode == 'runner-policy':
+            self.refused_blob = store('blob', workflow.replace('fgit-trusted-local', 'ubuntu-latest').encode())
+            intermediate = tree(b'changed source input\n', workflow_tree(self.refused_blob))
         self.target=store('commit',commit(first,[],'base'));self.tip=store('commit',commit(first,[self.target],'topic'))
-        self.future=store('commit',commit(second,[self.tip],'next source'));self.future2=store('commit',commit(second,[self.future],'last source'))
+        self.future=store('commit',commit(intermediate,[self.tip],'next source'));self.future2=store('commit',commit(second,[self.future],'last source'))
         for name,oid in [(TARGET,self.target),(SOURCE,self.tip),('refs/heads/future',self.future),('refs/heads/future2',self.future2)]: (self.source/name).write_text(oid+'\n')
         self.scope=[self.node,TENANT,REPOSITORY]
         invoke('init',['init',*self.scope,fmt]);invoke('import',['import',*self.scope,PRINCIPAL,'pr-watch-source',self.source])
@@ -84,6 +94,72 @@ class Fixture:
     def move(self,reference,old,new,key):
         invoke('move',['branch','update',*self.scope,'--trusted-local','--principal',PRINCIPAL,'--idempotency-key',key,
             '--ref',reference,'--expected-tip',old,'--target',new,'--object-format',self.fmt])
+
+def runner_policy(fmt):
+    f = Fixture(fmt, 'runner-policy', 'runner-policy')
+    f.transition('open', 0)
+    first = polled(invoke('allow-trusted-runner', f.watch))[0]
+    assert first['dispatch']['succeeded'] and f.count() == 1
+    auto = f.watch + ['--publish-checks', '--principal-id', PRINCIPAL, '--expected-incarnation',
+                      first['event']['repository_incarnation']]
+    assert rows(invoke('publish-allowed-check', auto))[-1]['committed_check_decisions'] == 1
+    assert len(json.loads(invoke('allowed-check-visible', f.checks))['checks']) == 1
+
+    f.move(SOURCE, f.tip, f.future, 'unsupported-runner-source')
+    f.tip = f.future
+    f.transition('update', 1)
+    authority = invoke('before-runner-refusal', f.listing)
+    raw = invoke('refuse-unsupported-runner', auto, 1)
+    refused = polled(raw)[0]
+    assert refused['event']['commit'] == f.tip and refused['event']['pull_request']['version'] == '2'
+    dispatch = refused['dispatch']
+    assert refused['execution_settled'] and dispatch['stop_reason'] == 'definition_refused'
+    assert not dispatch['succeeded'] and dispatch['executed_count'] == 0
+    assert dispatch['plan']['workflows'] == []
+    assert dispatch['plan']['source_commit'] == f.tip
+    diagnostic = dispatch['plan']['definition_refusal']
+    assert diagnostic['code'] == 'unsupported_runner' and diagnostic['blob'] == f.refused_blob
+    assert bytes.fromhex(diagnostic['path_hex']) == b'ci/pr.yml'
+    assert b'ubuntu-latest' in bytes.fromhex(diagnostic['diagnostic_hex'])
+    summary = rows(raw)[-1]
+    assert summary['non_green'] and not summary['requires_reconciliation']
+    assert summary['committed_check_decisions'] == 0 and f.count() == 1
+    assert json.loads(invoke('refused-pr-has-no-checks', f.checks))['checks'] == []
+    assert invoke('refused-pr-authority-stable', f.listing) == authority
+    record(fmt, 'unsupported-pr-runner-settles-without-executing-or-publishing', commit=f.tip)
+
+    event_dir = Path(os.fsdecode(bytes.fromhex(refused['event']['custody_directory_hex'])))
+    plan_dir = Path(os.fsdecode(bytes.fromhex(dispatch['plan']['run_directory_hex'])))
+    settlement = event_dir / 'settled'
+    plan = plan_dir / 'dispatch.json'
+    original = plan.read_bytes()
+    f.transition('close', 2)
+    authority = invoke('closed-pr-before-recovery', f.listing)
+    settlement.unlink()
+    plan.write_bytes(original + b' ')
+    invoke('reject-modified-pr-refusal-plan', auto, 2)
+    assert not settlement.exists() and f.count() == 1
+    plan.write_bytes(original)
+    resumed = invoke('recover-on-closed-pr', auto)
+    assert polled(resumed)[0]['state'] == 'pull_request_unavailable' and settlement.exists()
+    assert rows(resumed)[-1]['committed_check_decisions'] == 0 and f.count() == 1
+    assert invoke('closed-pr-no-canonical-effect', f.listing) == authority
+    record(fmt, 'closed-pr-recovers-only-original-refusal-acknowledgement', commit=f.tip)
+
+    f.move(SOURCE, f.tip, f.future2, 'restore-trusted-runner')
+    f.tip = f.future2
+    f.transition('reopen', 3)
+    raw = invoke('run-corrected-pr-with-original-watch', auto)
+    repaired = polled(raw)[0]
+    assert repaired['event']['commit'] == f.tip and repaired['event']['pull_request']['version'] == '4'
+    assert repaired['dispatch']['succeeded'] and repaired['dispatch']['executed_count'] == 1
+    assert rows(raw)[-1]['committed_check_decisions'] == 1 and f.count() == 2
+    checks = json.loads(invoke('corrected-pr-check-visible', f.checks))['checks']
+    assert [(c['job'], c['conclusion']) for c in checks] == [('policy', 'success')]
+    repeated = invoke('no-duplicate-corrected-pr-check', auto)
+    assert polled(repeated)[0]['state'] == 'previously_settled'
+    assert rows(repeated)[-1]['committed_check_decisions'] == 0 and f.count() == 2
+    record(fmt, 'trusted-pr-successor-runs-once-and-publishes-once', commit=f.tip)
 
 for fmt in ('sha1','sha256'):
     f=Fixture(fmt,'normal');before=invoke('head-before',f.listing)
@@ -202,4 +278,5 @@ for fmt in ('sha1','sha256'):
     slow.transition('close',1);slow.transition('reopen',2)
     blocked=polled(invoke('reopened-unresolved',slow.watch,1))[0]
     assert blocked['state']=='blocked_unresolved' and slow.count()==1;record(fmt,'signal-drain-preserves-pr-replay-fence')
+    runner_policy(fmt)
 (ROOT/'results.json').write_text(json.dumps(RESULTS,indent=2)+'\n')
