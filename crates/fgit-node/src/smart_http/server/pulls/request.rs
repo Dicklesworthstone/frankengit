@@ -200,8 +200,8 @@ impl<'a> Request<'a> {
                 .map_err(|_| ApiError::bad("version_exhausted"))?;
             ExpectedVersion::Exactly(version)
         };
-        let source_ref = metadata_ref(&mut fields, "source_ref", "source_ref_hex")?;
-        let target_ref = metadata_ref(&mut fields, "target_ref", "target_ref_hex")?;
+        let source_ref = command_ref(&mut fields, "source_ref", "source_ref_hex")?;
+        let target_ref = command_ref(&mut fields, "target_ref", "target_ref_hex")?;
         let source_tip = oid(&take(&mut fields, "source_tip")?, format)?;
         let target_tip = oid(&take(&mut fields, "target_tip")?, format)?;
         let data = PullRequestData {
@@ -294,7 +294,7 @@ fn take(fields: &mut BTreeMap<String, String>, name: &str) -> Result<String, Api
         .ok_or_else(|| ApiError::bad("required_field_missing"))
 }
 // Keep the original text form's missing-field and invalid-ref responses.
-fn metadata_ref(
+pub(super) fn command_ref(
     fields: &mut BTreeMap<String, String>,
     plain: &str,
     encoded: &str,

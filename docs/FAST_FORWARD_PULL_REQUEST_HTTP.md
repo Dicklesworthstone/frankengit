@@ -20,13 +20,13 @@ Exactly six fields are required:
 | --- | --- |
 | `object_format` | The repository's explicit `sha1` or `sha256` domain. |
 | `pull_request_version` | The observed positive PR aggregate version. |
-| `source_ref` | The complete source branch ref. |
+| `source_ref` or `source_ref_hex` | The complete source branch ref as text or exact native bytes in lowercase hex. |
 | `source_tip` | That branch's exact native lowercase object ID. |
-| `target_ref` | The complete target branch ref. |
+| `target_ref` or `target_ref_hex` | The complete target branch ref in either encoding. |
 | `target_tip` | That branch's exact native lowercase object ID. |
 
 Send raw 40- or 64-digit OIDs in HTTP forms, not a `sha1:` or `sha256:` prefix.
-Percent-encode ref names. The decoded form is capped at 8 KiB, wire intake at
+Choose one encoding independently for each branch. Percent-encode text ref names. Hex encodes the entire ref, including `refs/heads/`. The decoded form is capped at 8 KiB, wire intake at
 16 KiB, and chunked intake at 1,024 chunks. Fixed and chunked bodies must be
 complete before admission. Unknown fields, duplicates, exhausted versions,
 zero IDs, mismatched hash domains and candidate uploads are refused.
