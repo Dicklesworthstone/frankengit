@@ -21,15 +21,28 @@ five byte-name lifecycle commands in each Git format. Each recovered the
 original outcome through the saved key and left the branch tips intact.
 [Remote PR client](REMOTE_PULL_REQUESTS.md) · [Native operator campaign](../scripts/e2e/suites/operator/remote_pull.sh)
 
-Two distinct stock pushes while the native watcher was stopped exposed an open
+Two distinct stock pushes while the native watcher was stopped exposed a
 delivery gap in both Git formats. On restart only the second commit ran and
-published a check. The authority history contains both changes. The smallest
-catch-up increment needs a persisted watch position, verified history back to
-that position and an exact older source tree that remains authorized for
-execution. Fresh check publication currently requires the live source tip.
-Historical outcomes need their own binding so they cannot satisfy protection
-for the newer tip. Exact build-capsule cache reuse also remains open on
-`.4.12`. [Watch contract](NATIVE_REF_WORKFLOW_WATCH.md) · [Check publication](TRUSTED_WORKFLOW_CHECK_PUBLICATION.md)
+published a check, although the authority history contained both changes.
+The opt-in trusted-local watch at `b05bdd0a` reuses durable settlement
+identities as its restart position. It replays pending branch updates in
+authenticated batch order and executes the original tree after proving its
+commit remains reachable from the current visible branch.
+
+The stock Git 2.54.0 suite at `a97cb32a` passed all 12 native cases using the
+`b05bdd0a` debug executable. In SHA-1 and SHA-256, two pushes made while the
+watcher was stopped ran once each from their distinct original trees. A
+restart reconstructed missing settlement without rerunning either script.
+The older job received `TargetRefMoved` on check publication and the
+current-tip job published successfully. In each format a separate case
+refused the unreachable historical source before acquiring execution custody.
+After the branch advanced and restored reachability, the earlier update,
+recreation and new update ran in order. Fifteen focused Rust tests passed
+across the branch history, recovery, tag and CLI controls. Comment 6295 on
+`.4.12` records the source, binary and suite receipts. Broader event
+delivery, canonical publication of historical results and durable exact
+build-capsule cache reuse remain open.
+[Watch contract](NATIVE_REF_WORKFLOW_WATCH.md) · [Check publication](TRUSTED_WORKFLOW_CHECK_PUBLICATION.md) · [Stock-push campaign](../scripts/e2e/suites/workflow/stock_push_landing.sh)
 
 The proof bridge at `b4bf422a` follows the same sealed loser through
 re-preparation at the winner's head in both writer schedules. The disjoint
