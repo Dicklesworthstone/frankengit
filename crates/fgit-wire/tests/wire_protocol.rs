@@ -2,10 +2,10 @@
 
 use fgit_wire::GitObjectFormat;
 use fgit_wire::{
-    AckMode, AdvertisedRef, AnyGitOid, Capabilities, LegacyUploadPack, ObjectFilter, Packet,
-    PktLineDecoder, SidebandBand, StatelessRpcUploadPack, UploadPackRepository, UploadPackVersion,
-    V1Advertisement, V2UploadPack, WireError, WireEvent, WireLimits, encode_packets,
-    encode_sideband_64k, parse_filter, parse_sideband, sideband_pack_chunk,
+    AckMode, AdvertisedRef, AnyGitOid, Capabilities, LegacyUploadPack, ObjectFilter, PackRequest,
+    Packet, PktLineDecoder, SidebandBand, StatelessRpcUploadPack, UploadPackRepository,
+    UploadPackVersion, V1Advertisement, V2UploadPack, WireError, WireEvent, WireLimits,
+    encode_packets, encode_sideband_64k, parse_filter, parse_sideband, sideband_pack_chunk,
 };
 
 const WANT: &str = "1111111111111111111111111111111111111111";
@@ -56,6 +56,25 @@ impl UploadPackRepository for Repository {
 
     fn is_common(&self, oid: AnyGitOid) -> bool {
         oid == self.common
+    }
+
+    fn supports_shallow(&self) -> bool {
+        true
+    }
+
+    fn shallow_update(
+        &self,
+        request: &PackRequest,
+    ) -> Result<fgit_wire::closure::ShallowUpdate, WireError> {
+        // The captured initial-depth RPC uses a one-tip shallow boundary.
+        // The fixture provider, not a synthetic outer flush, owns this reply.
+        if request.deepen != Some(1) || request.wants.len() != 1 {
+            return Err(WireError::PackSourceRefused);
+        }
+        Ok(fgit_wire::closure::ShallowUpdate {
+            shallow: request.wants.clone(),
+            unshallow: Vec::new(),
+        })
     }
 }
 
@@ -240,12 +259,14 @@ fn v1_fetch_transcript_emits_multi_ack_detailed_and_pack_request() {
             &repository,
         )
         .expect("hand transcript accepted");
-    assert!(transition.output.iter().any(|packet| {
-        matches!(packet, Packet::Data(line) if line == b"ACK 2222222222222222222222222222222222222222 common\n")
-    }));
-    assert!(transition.output.iter().any(|packet| {
-        matches!(packet, Packet::Data(line) if line == b"ACK 2222222222222222222222222222222222222222 ready\n")
-    }));
+    assert_eq!(
+        transition.output,
+        vec![
+            Packet::Data(format!("ACK {HAVE} common\n").into_bytes()),
+            Packet::Data(format!("ACK {HAVE}\n").into_bytes()),
+        ],
+        "the want flush is silent and done gets an unqualified final ACK",
+    );
     let Some(WireEvent::PackRequested(request)) = transition.events.last() else {
         panic!("complete legacy request must ask for a pack");
     };
@@ -283,60 +304,41 @@ fn multi_ack_mode_emits_continue_for_each_common_have() {
 }
 
 #[test]
-fn legacy_terminal_flush_requires_no_done_and_accepts_the_negotiated_twin() {
+fn legacy_have_flush_keeps_the_connection_pending_with_or_without_no_done() {
     let repository = Repository::sha1();
     let limits = WireLimits::default();
-    let mut without_no_done = LegacyUploadPack::new(
-        UploadPackVersion::V0,
-        Capabilities::parse_v1(b"multi_ack", &limits).expect("capabilities"),
-        limits.clone(),
-    )
-    .expect("legacy request machine");
-    without_no_done
-        .push_packet(
-            &Packet::Data(format!("want {WANT} multi_ack").into_bytes()),
-            &repository,
+    for capabilities in ["multi_ack", "no-done", "multi_ack_detailed no-done"] {
+        let mut machine = LegacyUploadPack::new(
+            UploadPackVersion::V0,
+            Capabilities::parse_v1(capabilities.as_bytes(), &limits).expect("capabilities"),
+            limits.clone(),
         )
-        .expect("want without line feed is permitted");
-    let initial_nak = without_no_done
-        .push_packet(&Packet::Flush, &repository)
-        .expect("want flush");
-    assert!(matches!(
-        initial_nak.output.as_slice(),
-        [Packet::Data(line)] if line == b"NAK\n"
-    ));
-    assert_eq!(
-        without_no_done.push_packet(&Packet::Flush, &repository),
-        Err(WireError::IllegalTransition {
-            state: "legacy have phase",
-            packet: "flush",
-        })
-    );
-
-    let mut with_no_done = LegacyUploadPack::new(
-        UploadPackVersion::V0,
-        Capabilities::parse_v1(b"no-done", &limits).expect("no-done capability"),
-        limits,
-    )
-    .expect("legacy request machine");
-    with_no_done
-        .push_packet(
-            &Packet::Data(format!("want {WANT} no-done").into_bytes()),
-            &repository,
-        )
-        .expect("want with no-done is permitted");
-    let initial_nak = with_no_done
-        .push_packet(&Packet::Flush, &repository)
-        .expect("want flush");
-    assert_eq!(initial_nak.output, Vec::new());
-    let transition = with_no_done
-        .push_packet(&Packet::Flush, &repository)
-        .expect("negotiated no-done permits terminal flush");
-    assert_eq!(transition.output, Vec::new());
-    assert!(matches!(
-        transition.events.as_slice(),
-        [WireEvent::PackRequested(_)]
-    ));
+        .expect("legacy request machine");
+        machine
+            .push_packet(
+                &Packet::Data(format!("want {WANT} {capabilities}").into_bytes()),
+                &repository,
+            )
+            .expect("want without line feed is permitted");
+        let boundary = machine
+            .push_packet(&Packet::Flush, &repository)
+            .expect("want flush");
+        assert!(boundary.output.is_empty() && boundary.events.is_empty());
+        let round = machine
+            .push_packet(&Packet::Flush, &repository)
+            .expect("a have flush is a negotiation round");
+        assert_eq!(round.output, vec![Packet::Data(b"NAK\n".to_vec())]);
+        assert!(round.events.is_empty());
+        assert!(!machine.is_complete() && !machine.is_http_negotiation_complete());
+        let done = machine
+            .push_packet(&Packet::Data(b"done\n".to_vec()), &repository)
+            .expect("done selects a pack");
+        assert_eq!(done.output, vec![Packet::Data(b"NAK\n".to_vec())]);
+        assert!(matches!(
+            done.events.as_slice(),
+            [WireEvent::PackRequested(_)]
+        ));
+    }
 }
 
 #[test]
@@ -384,7 +386,7 @@ fn pinned_oracle_v2_ls_refs_request_accepts_lf_free_capabilities() {
 }
 
 #[test]
-fn pinned_oracle_v0_no_done_depth_request_accepts_lf_free_deepen_and_two_flushes() {
+fn pinned_oracle_v0_depth_request_is_a_shallow_round_not_a_pack_request() {
     let oracle_want =
         AnyGitOid::from_hex(GitObjectFormat::Sha1, ORACLE_WANT).expect("oracle want OID");
     let repository = Repository::with_want(oracle_want);
@@ -393,8 +395,9 @@ fn pinned_oracle_v0_no_done_depth_request_accepts_lf_free_deepen_and_two_flushes
         &WireLimits::default(),
     )
     .expect("oracle server capabilities");
-    let request =
-        LegacyUploadPack::new(UploadPackVersion::V0, caps, WireLimits::default()).expect("machine");
+    let request = LegacyUploadPack::new(UploadPackVersion::V0, caps, WireLimits::default())
+        .expect("machine")
+        .with_shallow_updates();
     let mut machine = StatelessRpcUploadPack::new(request, WireLimits::default())
         .expect("stateless-RPC envelope");
     let completed = machine
@@ -404,17 +407,17 @@ fn pinned_oracle_v0_no_done_depth_request_accepts_lf_free_deepen_and_two_flushes
         )
         .expect("pinned Git 2.54.0 depth transcript");
     machine.finish().expect("complete nested pkt-line stream");
-    assert_eq!(completed.output.len(), 1);
-    assert!(
-        completed
-            .output
-            .iter()
-            .all(|packet| matches!(packet, Packet::Data(line) if line == b"NAK\n"))
+    assert_eq!(
+        completed.output,
+        vec![
+            Packet::Data(format!("shallow {ORACLE_WANT}\n").into_bytes()),
+            Packet::Flush,
+        ],
     );
-    let Some(WireEvent::PackRequested(request)) = completed.events.last() else {
-        panic!("no-done terminal flush requests a pack");
-    };
-    assert_eq!(request.deepen, Some(1));
+    assert!(
+        completed.events.is_empty(),
+        "the captured request ends its initial shallow RPC, not pack negotiation",
+    );
 
     let mut refusal = LegacyUploadPack::new(
         UploadPackVersion::V0,

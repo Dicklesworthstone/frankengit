@@ -870,13 +870,19 @@ fn exchange_with_tags(
     if let Some(have) = have {
         packets.push(Packet::Data(format!("have {have}\n").into_bytes()));
     }
-    // Exercise v2's real acknowledgment branch for haves rather than letting
-    // `done` suppress all ACKs and make the non-disclosure assertion vacuous.
-    if version != 2 || have.is_none() {
+    if version == 2 && have.is_some() {
+        // Keep a real ACK round so the disclosure assertions are not vacuous.
+        // Even an exact wanted have must wait: the following independent
+        // command repeats all arguments and explicitly selects its pack.
+        let mut final_fetch = packets[1..].to_vec();
+        packets.extend([Packet::Data(b"wait-for-done\n".to_vec()), Packet::Flush]);
+        final_fetch.extend([Packet::Data(b"done\n".to_vec()), Packet::Flush]);
+        packets.extend(final_fetch);
+    } else {
         packets.push(Packet::Data(b"done\n".to_vec()));
-    }
-    if version == 2 {
-        packets.push(Packet::Flush);
+        if version == 2 {
+            packets.push(Packet::Flush);
+        }
     }
     let input = encode_packets(&packets, &WireLimits::default()).unwrap();
     let worker = std::thread::spawn(move || {

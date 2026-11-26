@@ -1276,12 +1276,13 @@ pub enum UploadPackVersion {
 /// Multi-ack behavior chosen by the client's advertised request capabilities.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum AckMode {
-    /// Only the final common object is acknowledged.
+    /// Acknowledges the first common object once, before final pack selection.
     #[default]
     None,
-    /// Each common object is reported with `continue`.
+    /// Each common object is reported with `continue`, then an unqualified final ACK.
     MultiAck,
-    /// Each common object is reported with `common`, then `ready` when done.
+    /// Each common object is reported with `common`; proven readiness adds `ready`.
+    /// Final pack selection uses an unqualified ACK.
     MultiAckDetailed,
 }
 
@@ -1967,8 +1968,9 @@ pub struct LegacyUploadPack {
 /// an outer pkt-line data record, followed by an outer flush. The wrapped
 /// payload is still parsed by [`LegacyUploadPack`], so no client bytes are
 /// decoded through a fixture-only path. Responses remain inner protocol
-/// packets: the CGI/HTTP adapter that owns response framing must serialize
-/// them after it has selected the pack payload.
+/// packets: the CGI/HTTP adapter that owns response framing must validate the
+/// complete outer envelope before releasing any response or optional pack.
+/// The outer flush closes the HTTP body; it is not another inner Git packet.
 #[derive(Clone, Debug)]
 pub struct StatelessRpcUploadPack {
     envelope: PktLineDecoder,
@@ -1983,7 +1985,7 @@ impl StatelessRpcUploadPack {
         let envelope = PktLineDecoder::new(limits)?;
         Ok(Self {
             envelope,
-            request,
+            request: request.with_stateless_http_rounds(),
             saw_payload: false,
             outer_closed: false,
         })
@@ -2013,15 +2015,11 @@ impl StatelessRpcUploadPack {
                     if !self.saw_payload {
                         return Err(WireError::MissingWant);
                     }
-                    if !self.request.is_complete() {
-                        transition.append(self.request.push_packet(&Packet::Flush, repository)?)?;
-                    }
-                    if !self.request.is_complete() {
-                        return Err(WireError::IllegalTransition {
-                            state: "stateless-RPC envelope closed before request completion",
-                            packet: "flush",
-                        });
-                    }
+                    // fetch-pack's outer flush closes one HTTP request body.
+                    // Inventing an inner flush here would complete a missing
+                    // have boundary or turn a shallow-only round into a pack.
+                    repository.negotiation_checkpoint()?;
+                    self.request.finish_stateless_http_round()?;
                     self.outer_closed = true;
                 }
                 Packet::Delimiter | Packet::ResponseEnd => {
@@ -2035,11 +2033,12 @@ impl StatelessRpcUploadPack {
         Ok(transition)
     }
 
-    /// Refuses either an incomplete outer envelope or an incomplete inner request.
+    /// Refuses an incomplete outer envelope or unterminated inner HTTP round.
+    /// A complete shallow/negotiation round need not have selected a pack.
     pub fn finish(&self) -> Result<(), WireError> {
         self.envelope.finish()?;
-        self.request.finish()?;
-        if self.outer_closed && self.request.is_complete() {
+        self.request.finish_stateless_http_round()?;
+        if self.outer_closed {
             Ok(())
         } else {
             Err(WireError::IllegalTransition {
@@ -2181,6 +2180,9 @@ impl LegacyUploadPack {
                 packet: packet_name(packet),
             });
         }
+        // Empty rounds, unknown haves and the final handoff must honor the
+        // same live scope as successful lookups, before changing any state.
+        repository.negotiation_checkpoint()?;
         match self.state {
             LegacyState::AwaitWant => self.accept_want_phase(packet, repository),
             LegacyState::AwaitHave => self.accept_have_phase(packet, repository),
@@ -2214,18 +2216,12 @@ impl LegacyUploadPack {
                 shallow_response::validate_relative_depth(&request)?;
                 let shallow_negotiated =
                     self.shallow.is_resolved() && shallow_response::changes_boundary(&request);
-                let mut output =
+                let output =
                     if self.shallow.is_resolved() && shallow_response::has_controls(&request) {
                         shallow_response::response(repository, &request, &self.limits)?
                     } else {
                         Vec::new()
                     };
-                if !self.framing.is_stateless_http()
-                    && !shallow_negotiated
-                    && self.ack_mode != AckMode::None
-                {
-                    output.push(line_packet(b"NAK\n"));
-                }
                 if self.shallow.is_resolved() && shallow_response::has_controls(&request) {
                     let _ = encode_packets(&output, &self.limits)?;
                 }
@@ -2354,34 +2350,7 @@ impl LegacyUploadPack {
         repository: &impl UploadPackRepository,
     ) -> Result<Transition, WireError> {
         if matches!(packet, Packet::Flush) {
-            if self.framing.is_stateless_http() {
-                return self.finish_http_have_batch(repository);
-            }
-            if !self.no_done {
-                return Err(WireError::IllegalTransition {
-                    state: "legacy have phase",
-                    packet: packet_name(packet),
-                });
-            }
-            self.state = LegacyState::Complete;
-            let output = self
-                .last_common
-                .map_or_else(Vec::new, |oid| match self.ack_mode {
-                    AckMode::MultiAckDetailed => vec![line_packet(
-                        format!("ACK {oid_hex} ready\n", oid_hex = oid_hex(oid)).into_bytes(),
-                    )],
-                    AckMode::None | AckMode::MultiAck => vec![line_packet(
-                        format!("ACK {oid_hex}\n", oid_hex = oid_hex(oid)).into_bytes(),
-                    )],
-                });
-            let mut transition = Transition {
-                output,
-                events: Vec::new(),
-            };
-            transition
-                .events
-                .push(WireEvent::PackRequested(self.pack_request()));
-            return Ok(transition);
+            return self.finish_have_batch(repository);
         }
         let Packet::Data(line) = packet else {
             return Err(WireError::IllegalTransition {
@@ -2397,10 +2366,7 @@ impl LegacyUploadPack {
                 let first_common = self.last_common.is_none();
                 self.last_common = Some(oid);
                 let mut transition = self.common_ack_transition(oid);
-                if self.framing.is_stateless_http()
-                    && self.ack_mode == AckMode::None
-                    && first_common
-                {
+                if self.ack_mode == AckMode::None && first_common {
                     transition
                         .output
                         .push(line_packet(format!("ACK {}\n", oid_hex(oid))));
@@ -2425,10 +2391,12 @@ impl LegacyUploadPack {
         })
     }
 
-    fn finish_http_have_batch(
+    fn finish_have_batch(
         &mut self,
         repository: &impl UploadPackRepository,
     ) -> Result<Transition, WireError> {
+        // A flush ends a have batch, not a connection or an implicit request
+        // for a pack. Only a proven negotiated no-done can finish early.
         // Readiness is conservative: exact wanted tips must be in the client's
         // common have set. A mere unrelated common object never proves ready.
         // The request-local membership index avoids rescanning or sorting the
@@ -2460,6 +2428,8 @@ impl LegacyUploadPack {
                 .push(WireEvent::PackRequested(self.pack_request()));
             self.state = LegacyState::Complete;
         } else {
+            // HTTP ends this request; a connection keeps its accumulated haves
+            // and remains ready for another batch or an explicit done.
             self.framing.complete_round();
         }
         Ok(transition)
@@ -2535,33 +2505,12 @@ impl LegacyUploadPack {
     }
 
     fn final_ack_transition(&self) -> Transition {
-        if self.framing.is_stateless_http() {
-            let output = match self.last_common {
-                Some(_) if self.ack_mode == AckMode::None => Vec::new(),
-                Some(oid) => vec![line_packet(format!("ACK {}\n", oid_hex(oid)))],
-                None => vec![line_packet(b"NAK\n")],
-            };
-            return Transition {
-                output,
-                events: Vec::new(),
-            };
-        }
         let output = match self.last_common {
-            Some(oid) => match self.ack_mode {
-                AckMode::MultiAckDetailed => vec![line_packet(
-                    format!("ACK {oid_hex} ready\n", oid_hex = oid_hex(oid)).into_bytes(),
-                )],
-                AckMode::None | AckMode::MultiAck => vec![line_packet(
-                    format!("ACK {oid_hex}\n", oid_hex = oid_hex(oid)).into_bytes(),
-                )],
-            },
-            None => {
-                if self.shallow.negotiated() || self.ack_mode == AckMode::None {
-                    vec![line_packet(b"NAK\n")]
-                } else {
-                    Vec::new()
-                }
-            }
+            // Plain ACK mode already acknowledged its first common object.
+            // A duplicate ACK here would be mistaken for the pack prefix.
+            Some(_) if self.ack_mode == AckMode::None => Vec::new(),
+            Some(oid) => vec![line_packet(format!("ACK {}\n", oid_hex(oid)))],
+            None => vec![line_packet(b"NAK\n")],
         };
         Transition {
             output,
@@ -3264,25 +3213,20 @@ impl V2UploadPack {
                     &self.limits,
                 )?;
             }
-            // Without an ancestry oracle, only exact wanted common tips prove
-            // a sufficient cut. Conservatively ask for another round otherwise;
-            // the client's explicit `done` can always terminate negotiation.
-            let ready = if self.wait_for_done {
-                false
-            } else if self.framing.is_stateless_http() {
-                any_common
-                    && self.shallows.is_empty()
-                    && self.deepen.is_none()
-                    && self.deepen_since.is_none()
-                    && self.deepen_not.is_empty()
-                    && self
-                        .wants
-                        .as_slice()
-                        .iter()
-                        .all(|oid| self.haves.contains(oid) && repository.is_common(*oid))
-            } else {
-                true
-            };
+            // Transport framing does not prove a common base. Without an
+            // ancestry oracle, only exact wanted common tips prove a sufficient
+            // cut on either carrier; explicit `done` can always finish negotiation.
+            let ready = !self.wait_for_done
+                && any_common
+                && self.shallows.is_empty()
+                && self.deepen.is_none()
+                && self.deepen_since.is_none()
+                && self.deepen_not.is_empty()
+                && self
+                    .wants
+                    .as_slice()
+                    .iter()
+                    .all(|oid| self.haves.contains(oid) && repository.is_common(*oid));
             if !ready {
                 add_output_packet(&mut output, Packet::Flush, 4, &mut used_bytes, &self.limits)?;
                 validate_response_packet_sizes(&output, &self.limits)?;
