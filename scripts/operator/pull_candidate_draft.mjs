@@ -4,6 +4,7 @@ import { validateCandidateCapture, candidateCanonical } from './pull_candidate_c
 import { candidateKeys, candidateJson, candidateFail, CandidateError } from './pull_candidate_io.mjs';
 import { candidateClock } from './pull_candidate_files.mjs';
 import { pullCommand, pullScope, PullError } from './pull_command.mjs';
+import { draftReferenceName } from './pull_review_draft.mjs';
 
 export async function draftCandidateReview(input, bundle, selection, options = {}) {
   try {
@@ -20,8 +21,16 @@ export async function draftCandidateReview(input, bundle, selection, options = {
     if (choice.candidate_commit !== artifact.fields.candidate_commit) candidateFail('confirm_exact_inspected_candidate');
     if (merge && choice.method !== artifact.method) candidateFail('candidate_draft_method_changed');
     const scope = pullScope({ ...capture.request.scope, principal_id: choice.principal_id });
-    const fields = Object.fromEntries(Object.entries(artifact.fields).filter(([key]) => key !== 'object_format')
+    const fields = Object.fromEntries(Object.entries(artifact.fields)
+      .filter(([key]) => !['object_format', 'source_ref', 'source_ref_hex', 'target_ref', 'target_ref_hex'].includes(key))
       .map(([key, value]) => [key, typeof value === 'number' ? String(value) : value]));
+    // The checked package binds both labels and exact bytes to the inspected subject.
+    // A readable C1 label can be retained in the package but needs hex in a durable command.
+    const data = capture.pull.pull_request.data;
+    for (const side of ['source', 'target']) {
+      const name = draftReferenceName(data, side);
+      fields[name] = data[name];
+    }
     if (merge) {
       fields.method = choice.method; fields.required_reviewers = choice.required_reviewers;
     } else {

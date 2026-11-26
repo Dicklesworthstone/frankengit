@@ -8,7 +8,7 @@ function writableVersion(value, minimum = 0n) {
   reviewU64(value, minimum); if (BigInt(value) === U64) failReview('review_version_exhausted'); return value;
 }
 function nativeInput(value, format) { return reviewOid(value, format).slice(format.length + 1); }
-function referenceName(subject, side) {
+export function draftReferenceName(subject, side) {
   const name = `${side}_ref`, text = subject[name];
   // Keep every previously supported text form stable. Native-valid C1 names,
   // like non-UTF-8 names, need exact bytes rather than the one-line text form.
@@ -44,7 +44,7 @@ export function draftPullReview(input, choice) {
   const fields = { pull_request_version: writableVersion(subject.pull_request_version, 1n),
     policy_epoch: subject.policy_epoch };
   for (const side of ['source', 'target']) {
-    const name = referenceName(subject, side);
+    const name = draftReferenceName(subject, side);
     fields[name] = subject[name];
   }
   for (const side of ['source', 'target']) fields[`${side}_tip`] = nativeInput(subject[`${side}_tip`], selection.scope.object_format);
@@ -79,7 +79,7 @@ function draftLifecycle(capture, choice) {
   if (update && !['title', 'body'].some(key => Object.hasOwn(choice, key))) failReview('pull_draft_edit_required');
   const fields = { [ff ? 'pull_request_version' : 'expected_version']: writableVersion(row.version, 1n) };
   for (const side of ['source', 'target']) {
-    const name = referenceName(row.data, side);
+    const name = draftReferenceName(row.data, side);
     fields[name] = row.data[name];
   }
   for (const side of ['source', 'target']) fields[`${side}_tip`] = nativeInput(row.data[`${side}_tip`], selection.scope.object_format);

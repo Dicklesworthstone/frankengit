@@ -203,20 +203,37 @@ test('draft refuses to invalidate its source package by writing a file inside it
   await loadCandidatePackage(f.package, f.hash); assert.equal(p.requests.length, 5);
 });
 
-for (const algorithm of ['sha1', 'sha256']) test(`${algorithm}: ordinary clean candidates stage through the same CLI without resolution`, LINUX_ORACLE, async t => {
-  const p = await candidatePeer(t, { algorithm, method: algorithm === 'sha256' ? 'squash' : 'merge-commit' });
-  const root = await mkdtemp(join(tmpdir(), 'fg-stage-clean-')); await chmod(root, 0o700);
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const captured = await capturePullCandidate(p.input, TOKEN), saved = await saveCandidatePackage(join(root, 'package'), captured.capture, captured.bundle);
-  // A sibling that shares the source name's prefix is permitted, not a child.
-  const f = { root, package: saved.path, hash: saved.sha256, request: join(root, 'package-staged'),
-    token: join(root, 'token'), choices: join(root, 'choices.json') };
-  await writeFile(f.token, TOKEN, { mode: 0o600 });
-  await writeFile(f.choices, candidateCanonical(choice({ f: p.fixture }, 'merge')), { mode: 0o600 });
-  const staged = await cli(t, args(f)); assert.equal(staged.code, 0, staged.err);
-  const intent = await loadPullIntent(f.request);
-  assert.equal(intent.fields.method, p.fixture.method); assert.equal(intent.fields.candidate_commit, p.fixture.candidate);
-  assert.deepEqual(await loadPullBundle(f.request, intent), p.fixture.bundle);
-  assert.equal((await loadCandidatePackage(f.package, f.hash)).capture.preparation.state, 'clean');
-  assert.equal(p.requests.length, 4);
-});
+for (const algorithm of ['sha1', 'sha256']) for (const byteNamed of [false, true]) {
+  test(`${algorithm} ${byteNamed ? 'byte-named' : 'text'}: clean candidates stage through the CLI`, LINUX_ORACLE, async t => {
+    const p = await candidatePeer(t, { algorithm, method: algorithm === 'sha256' ? 'squash' : 'merge-commit' });
+    const data = p.pull.pull_request.data;
+    if (byteNamed) {
+      const prefix = Buffer.from('refs/heads/review-').toString('hex');
+      const target = algorithm === 'sha256' ? 'refs/heads/review-\u0085' : null;
+      const raw = { source_ref: null, source_ref_hex: prefix + 'fe', target_ref: target,
+        target_ref_hex: target === null ? prefix + 'ff' : Buffer.from(target).toString('hex') };
+      for (const subject of [data, ...p.reviews.map(row => row.subject), p.preparation.subject, p.inspection.subject]) {
+        Object.assign(subject, raw);
+      }
+    }
+    const root = await mkdtemp(join(tmpdir(), 'fg-stage-clean-')); await chmod(root, 0o700);
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const captured = await capturePullCandidate(p.input, TOKEN), saved = await saveCandidatePackage(join(root, 'package'), captured.capture, captured.bundle);
+    // A sibling that shares the source name's prefix is permitted, not a child.
+    const f = { root, package: saved.path, hash: saved.sha256, request: join(root, 'package-staged'),
+      token: join(root, 'token'), choices: join(root, 'choices.json') };
+    await writeFile(f.token, TOKEN, { mode: 0o600 });
+    await writeFile(f.choices, candidateCanonical(choice({ f: p.fixture }, 'merge')), { mode: 0o600 });
+    const staged = await cli(t, args(f)); assert.equal(staged.code, 0, staged.err);
+    const intent = await loadPullIntent(f.request);
+    assert.equal(intent.fields.method, p.fixture.method); assert.equal(intent.fields.candidate_commit, p.fixture.candidate);
+    for (const name of ['source_ref', 'target_ref']) {
+      const encoded = `${name}_hex`;
+      assert.equal(intent.fields[name], byteNamed ? undefined : data[name]);
+      assert.equal(intent.fields[encoded], byteNamed ? data[encoded] : undefined);
+    }
+    assert.deepEqual(await loadPullBundle(f.request, intent), p.fixture.bundle);
+    assert.equal((await loadCandidatePackage(f.package, f.hash)).capture.preparation.state, 'clean');
+    assert.equal(p.requests.length, 4);
+  });
+}

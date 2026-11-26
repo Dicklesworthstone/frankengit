@@ -3,7 +3,7 @@
 // planner, bundle decoder, diff algorithm, review gate or authority model.
 import { createHash, webcrypto } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
-import { decimal, integer, principal, format, text, snapshot, showReply, reviewsReply, subject, matchSubject, pinned,
+import { decimal, integer, principal, format, text, snapshot, showReply, reviewsReply, subject, subjectReferences, matchSubject, pinned,
   form, oid, utf8 } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-core.mjs';
 import { preparationCommand, preparationReply, inspectionReply, multipart, makeBoundary, findBytes,
   METADATA_LIMIT, PREPARATION_LIMIT, BUNDLE_LIMIT } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-candidate.mjs';
@@ -76,9 +76,6 @@ function discovery(request, pull, pages, complete = true) {
   const number = Number(request.number), binding = sharedScope(request.scope);
   const selected = showReply(pull, number, { head: request.expected_head, scope: binding }), row = selected.reply.pull_request;
   if (!pull.found || row?.state !== 'open' || !row.data) candidateFail('candidate_requires_open_pull_request');
-  // Byte-only refs remain valid readable PR data, but the native preparation
-  // form is UTF-8. Never replacement-decode them or select a different branch.
-  if (row.data.source_ref === null || row.data.target_ref === null) candidateFail('candidate_requires_utf8_branch_form');
   if (!Array.isArray(pages) || !pages.length || pages.length > CANDIDATE_IO_LIMITS.reviewPages) candidateFail('candidate_review_page_limit');
   let after = null, epoch = null;
   const reviews = [];
@@ -94,7 +91,7 @@ function discovery(request, pull, pages, complete = true) {
   }
   if (complete && after !== null) candidateFail('candidate_review_page_limit');
   const fields = subject({ object_format: request.scope.object_format, pull_request_version: row.version, policy_epoch: epoch,
-    source_ref: row.data.source_ref, target_ref: row.data.target_ref,
+    ...subjectReferences(row.data),
     source_tip: oid(row.data.source_tip, binding.format), target_tip: oid(row.data.target_tip, binding.format) });
   for (const review of reviews) if (review.freshness === 'current') matchSubject(review.subject, fields, number, binding.format);
   return { binding, head: selected.head, fields, reviews, after };
