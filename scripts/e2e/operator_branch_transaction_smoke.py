@@ -191,6 +191,9 @@ syncBuiltinESMExports();
                 "/api/v1/outcomes", tokens["outcomes"], intent["key"])
         require(status == 200 and terminal["terminal"] and terminal["state"] == "committed",
                 "independent native lookup could not recover the original decision before restart")
+        sequence = terminal["decision"]["decision_sequence"]
+        require(type(sequence) is int and 0 < sequence < 2**64, "native outcome sequence was not an exact u64")
+        terminal["decision"]["decision_sequence"] = str(sequence)
     check_connections(gateway, 9)
 
     restarted = server("restarted")

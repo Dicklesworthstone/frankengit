@@ -21,6 +21,17 @@ five byte-name lifecycle commands in each Git format. Each recovered the
 original outcome through the saved key and left the branch tips intact.
 [Remote PR client](REMOTE_PULL_REQUESTS.md) · [Native operator campaign](../scripts/e2e/suites/operator/remote_pull.sh)
 
+On the native `1a482067` executable, both Git formats refused a receive-only
+operator credential at original-key lookup. A combined grant committed the
+three reviewed branch effects, including a non-UTF-8 name. The split-grant
+candidate serves the two outcome reads with a separately selected credential.
+Its opt-in form pins the writer, tenant, repository, and incarnation for a
+check before native admission. The older gateway refused that form in both
+formats and left the original key unregistered and the native branch page
+identical. The pinned Node suite at `a7ae1784` passed 44 operator tests,
+including the credential selected for each of the three HTTP requests.
+[Branch transaction operator](REMOTE_BRANCH_TRANSACTIONS.md) · [Native split-grant campaign](../scripts/e2e/suites/operator/remote_branch_transaction.sh)
+
 Two distinct stock pushes while the native watcher was stopped exposed a
 delivery gap in both Git formats. On restart only the second commit ran and
 published a check, although the authority history contained both changes.
