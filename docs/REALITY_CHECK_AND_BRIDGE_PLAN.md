@@ -67,6 +67,20 @@ Seven native configuration refusals, the Cargo syntax lane and the native
 unit-test groups. Comment 6299 on `.4.12` records the exact receipts.
 [Check publication](NATIVE_WATCH_CHECK_PUBLICATION.md#interrupted-publication-and-source-movement)
 
+At `9c9e06cf`, `fg serve-http --workflow-ref-hex` selects exact Git branch
+bytes. In each Git hash format, pinned stock Git 2.54.0 made two pushes to
+the same branch ending in byte `ff` while the HTTP controller was stopped.
+On restart, the controller ran both original trees in authority order,
+refused the stale check at publication, and served the current-tip success
+on a PR whose source retained the exact branch bytes. A second restart
+dispatched and published nothing again. At harness revision `ba1282a7`,
+the stock Git suite passed 18 cases and the ordinary HTTP suite passed 14.
+Both suites used the same independently verified executable. The original
+RCH artifact delivery ran out of local space, and recovery retrieved the
+same executable. Bead `.4.12` remains in progress for historical check
+publication, ordered PR and queue triggers, and durable capsule reuse.
+[HTTP workflow reference selection](NATIVE_HTTP_WORKFLOW_SERVICE.md) · [Stock-push campaign](../scripts/e2e/suites/workflow/stock_push_landing.sh)
+
 The proof bridge at `b4bf422a` follows the same sealed loser through
 re-preparation at the winner's head in both writer schedules. The disjoint
 writes both commit. The same-ref Rust controls refuse the losing precondition
