@@ -202,6 +202,12 @@ cancellation during socket cleanup and local receipt publication. Sync and sourc
 read transports identify the project honestly in their User-Agent headers.
 No credentials are persisted, and parser diagnostics do not quote malformed server
 bytes that could reflect a credential.
+Duplicate JSON object keys, including escaped aliases of the same key, are refused
+before a discovery, saved plan, or terminal record is interpreted. Parsing admits
+at most 32 nested containers and 65,536 structural nodes (containers, strings and
+scalar values), within the existing 20 MiB maximum plan envelope. An ambiguous
+publication reply leaves the started request unknown; recovery queries its
+original key without repeating the update.
 
 The plan needs stable private storage and independent operator review. Checksums
 are integrity evidence, not signatures, rollback-proof storage, or a way to trust

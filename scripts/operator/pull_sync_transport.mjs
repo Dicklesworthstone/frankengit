@@ -19,17 +19,53 @@ export function tokenValue(token) {
   if (!isCredentialToken(token)) fail('invalid_sync_credential');
   return token;
 }
-export function parseSyncJson(bytes, maximum = 8 * 1024 * 1024) {
-  if (!Buffer.isBuffer(bytes) || bytes.length > maximum) fail('sync_json_byte_limit');
-  try { return JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes), (key, value, context) => {
-    if (typeof value !== 'number') return value;
-    if (!/^(0|[1-9][0-9]*)$/.test(context?.source ?? '')) fail('invalid_sync_json_counter');
-    if (key === 'decision_sequence') {
-      if (BigInt(context.source) < 1n || BigInt(context.source) > 18446744073709551615n) fail('invalid_sync_decision_sequence');
-      return context.source;
+// JSON.parse otherwise silently discards earlier conflicting witnesses. Check
+// decoded key identities and bounded structure before interpreting discoveries,
+// saved plans or terminal records used by the unattended synchronizer.
+function checkSyncJsonStructure(source) {
+  const stack = [];
+  let nodes = 0;
+  for (let i = 0; i < source.length; i++) {
+    const c = source[i];
+    if (c === '{' || c === '[') {
+      if (++nodes > 65536 || stack.length >= 32) fail('sync_json_structure_limit');
+      stack.push({ type: c, keys: new Set() });
+    } else if (c === '}' || c === ']') {
+      if (stack.pop()?.type !== (c === '}' ? '{' : '[')) fail('invalid_sync_json');
+    } else if (c === '"') {
+      const start = i++;
+      for (; i < source.length && source[i] !== '"'; i++) if (source[i] === '\\') i++;
+      if (i >= source.length || ++nodes > 65536) fail('sync_json_structure_limit');
+      let next = i + 1; while (next < source.length && /[\x20\t\r\n]/.test(source[next])) next++;
+      if (source[next] === ':') {
+        const current = stack.at(-1), key = JSON.parse(source.slice(start, i + 1));
+        if (current?.type !== '{' || current.keys.has(key)) fail('duplicate_sync_json_key');
+        current.keys.add(key);
+      }
+    } else if (!/[\x20\t\r\n,:]/.test(c)) {
+      // Include scalars: flat numeric arrays also consume the structure budget.
+      if (++nodes > 65536) fail('sync_json_structure_limit');
+      while (i + 1 < source.length && !/[\x20\t\r\n,:\[\]{}"]/.test(source[i + 1])) i++;
     }
-    return integer(value, 'sync JSON counter');
-  }); } catch (error) {
+  }
+  if (stack.length) fail('invalid_sync_json');
+}
+export function parseSyncJson(bytes, maximum = 8 * 1024 * 1024) {
+  if (!Buffer.isBuffer(bytes) || !Number.isSafeInteger(maximum) || maximum < 1 ||
+      maximum > 20 * 1024 * 1024 || bytes.length > maximum) fail('sync_json_byte_limit');
+  try {
+    const source = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+    checkSyncJsonStructure(source);
+    return JSON.parse(source, (key, value, context) => {
+      if (typeof value !== 'number') return value;
+      if (!/^(0|[1-9][0-9]*)$/.test(context?.source ?? '')) fail('invalid_sync_json_counter');
+      if (key === 'decision_sequence') {
+        if (BigInt(context.source) < 1n || BigInt(context.source) > 18446744073709551615n) fail('invalid_sync_decision_sequence');
+        return context.source;
+      }
+      return integer(value, 'sync JSON counter');
+    });
+  } catch (error) {
     // A parser exception can quote server bytes, including reflected secrets.
     if (error instanceof PullSyncError) throw error;
     fail('invalid_sync_json');
