@@ -36,7 +36,11 @@ Open, update, close, reopen and retarget each require the complete metadata.
 For each branch, supply exactly one of `source_ref` or `source_ref_hex`, and
 one of `target_ref` or `target_ref_hex`. Hex values encode the entire Git
 name, including `refs/heads/`, in lowercase. The saved intent retains the
-original spelling for retry. Fast-forward requires UTF-8 branch names.
+original spelling for retry. Fast-forward accepts the same exact text or hex
+aliases, including a byte-only source, target, or both. Supplying both aliases
+for one side refuses even when they encode identical bytes. Publication receipts
+must match the saved ref bytes and their native UTF-8 display or null; a display
+label, replacement character, or Unicode-normalized name cannot substitute.
 Input tips are full, raw lowercase native OIDs in the selected hash domain. These form-only commands
 accept no arbitrary route, force, review assertion, policy override, bundle, or
 alternative merge-method field. Candidate review/merge is a separate explicit

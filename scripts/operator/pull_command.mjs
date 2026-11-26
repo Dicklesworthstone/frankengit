@@ -66,6 +66,33 @@ function branch(value) {
       value.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.lock'))) failPull('invalid_pull_branch');
   return value;
 }
+// Keep each chosen alias and source/target order in saved command bytes. Both
+// aliases for one side are refused by the exact field check before normalization.
+function referenceNames(input) {
+  return ['source_ref', 'target_ref'].map(name => Object.hasOwn(input ?? {}, name + '_hex') ? name + '_hex' : name);
+}
+function normalizeReferences(input, names, output) {
+  return names.map(name => {
+    if (name.endsWith('_hex')) {
+      output[name] = anchorResult(() => pullBranchHex(input[name], 'invalid_pull_branch'));
+      return output[name];
+    }
+    output[name] = branch(input[name]);
+    return Buffer.from(output[name]).toString('hex');
+  });
+}
+function matchingReferences(row, fields) {
+  return ['source_ref', 'target_ref'].every(name => {
+    const encoded = name + '_hex', raw = Object.hasOwn(fields, encoded);
+    const hex = raw ? fields[encoded] : Buffer.from(fields[name]).toString('hex');
+    let displayed = raw ? null : fields[name];
+    if (raw) {
+      try { displayed = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(Buffer.from(hex, 'hex')); }
+      catch { /* Native non-UTF-8 names have null display text. */ }
+    }
+    return row[encoded] === hex && row[name] === displayed;
+  });
+}
 function oid(value, format, wire = false) {
   if (typeof value !== 'string') failPull('invalid_pull_oid');
   const raw = wire && value.startsWith(`${format}:`) ? value.slice(format.length + 1) : value;
@@ -122,8 +149,7 @@ export function pullCommand(number, action, input, format) {
   if (isPullReview(action)) return candidateCommand(number, action, input, format);
   if (!PULL_ACTIONS.includes(action) || !['sha1', 'sha256'].includes(format)) failPull('unsupported_pull_command');
   const ff = action === 'fast-forward', append = action === 'append-comment', comment = action === 'comment' || append;
-  const references = ['source_ref', 'target_ref'].map(name =>
-    !ff && !comment && Object.hasOwn(input ?? {}, name + '_hex') ? name + '_hex' : name);
+  const references = referenceNames(input);
   const names = comment ? [...(append ? [] : ['expected_version']), 'body'] :
     [ff ? 'pull_request_version' : 'expected_version', ...references, 'source_tip', 'target_tip', ...(ff ? [] : ['title', 'body'])];
   pullFields(input, [...names, ...(comment ? ['anchor'] : [])], names);
@@ -132,15 +158,7 @@ export function pullCommand(number, action, input, format) {
   if (!ff && !comment && (action === 'open') !== (version === '0')) failPull('invalid_pull_action_version');
   const normalized = append ? {} : { [versionName]: version };
   if (!comment) {
-    // Keep the chosen alias and field order in the saved form and retry key.
-    const [source, target] = references.map(name => {
-      if (name.endsWith('_hex')) {
-        normalized[name] = anchorResult(() => pullBranchHex(input[name], 'invalid_pull_branch'));
-        return normalized[name];
-      }
-      normalized[name] = branch(input[name]);
-      return Buffer.from(normalized[name]).toString('hex');
-    });
+    const [source, target] = normalizeReferences(input, references, normalized);
     for (const side of ['source', 'target']) normalized[`${side}_tip`] = oid(input[`${side}_tip`], format);
     if (source === target || (ff && normalized.source_tip === normalized.target_tip)) failPull('invalid_pull_coordinates');
   }
@@ -222,9 +240,11 @@ export function validatePullPublication(value, input, status) {
   const version = ff ? 'pull_request_version' : 'expected_version';
   if (review) checkCandidatePublication(value, intent);
   if (!review && value[version] !== (append ? null : f[version])) failPull('pull_publication_version');
-  if (ff) for (const side of ['source', 'target']) {
-    if (value[`${side}_ref`] !== f[`${side}_ref`] || value[`${side}_ref_hex`] !== Buffer.from(f[`${side}_ref`]).toString('hex') ||
-        oid(value[`${side}_tip`], intent.scope.object_format, true) !== f[`${side}_tip`]) failPull('pull_publication_coordinates');
+  if (ff) {
+    if (!matchingReferences(value, f)) failPull('pull_publication_coordinates');
+    for (const side of ['source', 'target']) {
+      if (oid(value[`${side}_tip`], intent.scope.object_format, true) !== f[`${side}_tip`]) failPull('pull_publication_coordinates');
+    }
   }
   // Append receipts identify the terminal decision, not its assigned position.
   // Neither a later discussion read nor a caller predecessor can supply it.
@@ -248,12 +268,12 @@ export function validatePullPublication(value, input, status) {
 // checks the bundle, Git closure, current source, policy and independent votes.
 function candidateCommand(number, action, input, format) {
   if (!['sha1', 'sha256'].includes(format)) failPull('invalid_pull_format');
-  const merge = action === 'merge';
-  pullFields(input, ['pull_request_version', 'policy_epoch', 'source_ref', 'target_ref', 'source_tip', 'target_tip',
+  const merge = action === 'merge', references = referenceNames(input);
+  pullFields(input, ['pull_request_version', 'policy_epoch', ...references, 'source_tip', 'target_tip',
     'merge_base', 'candidate_commit', ...(merge ? ['required_reviewers', 'method'] : ['expected_version', 'reason'])]);
   const f = { pull_request_version: pullU64(input.pull_request_version, 1n, U64 - 1n), policy_epoch: pullU64(input.policy_epoch, 1n) };
-  for (const side of ['source', 'target']) f[`${side}_ref`] = branch(input[`${side}_ref`]);
-  if (f.source_ref === f.target_ref) failPull('invalid_pull_coordinates');
+  const [source, target] = normalizeReferences(input, references, f);
+  if (source === target) failPull('invalid_pull_coordinates');
   for (const name of ['source_tip', 'target_tip', 'merge_base', 'candidate_commit']) f[name] = oid(input[name], format);
   if (merge) {
     if (!['merge-commit', 'squash'].includes(input.method)) failPull('explicit_reviewed_merge_method_required');
@@ -321,9 +341,9 @@ function checkCandidatePublication(value, intent) {
   pullFields(s, ['number', 'pull_request_version', 'policy_epoch', 'source_ref', 'source_ref_hex', 'target_ref', 'target_ref_hex', 'source_tip', 'target_tip']);
   if (s.number !== intent.number || s.pull_request_version !== f.pull_request_version || s.policy_epoch !== f.policy_epoch ||
       value.review_expected_version !== (merge ? null : f.expected_version)) failPull('pull_review_subject_changed');
+  if (!matchingReferences(s, f)) failPull('pull_review_subject_changed');
   for (const side of ['source', 'target']) {
-    if (s[`${side}_ref`] !== f[`${side}_ref`] || s[`${side}_ref_hex`] !== Buffer.from(f[`${side}_ref`]).toString('hex') ||
-        oid(s[`${side}_tip`], format, true) !== f[`${side}_tip`]) failPull('pull_review_subject_changed');
+    if (oid(s[`${side}_tip`], format, true) !== f[`${side}_tip`]) failPull('pull_review_subject_changed');
   }
   for (const name of ['merge_base', 'candidate_commit']) if (oid(value[name], format, true) !== f[name]) failPull('pull_review_candidate_changed');
   if (merge ? value.method !== f.method || JSON.stringify(value.required_reviewers) !== JSON.stringify(f.required_reviewers)

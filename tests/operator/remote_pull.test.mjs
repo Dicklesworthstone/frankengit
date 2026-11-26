@@ -49,10 +49,10 @@ test('all metadata operations require complete coordinates, including close and 
     }
   }
 });
-for (const format of ['sha1', 'sha256']) test(`${format} durable metadata intents preserve exact branch encodings and original keys`, () => {
+for (const format of ['sha1', 'sha256']) test(`${format} durable branch intents preserve exact encodings and original keys`, () => {
   const prefix = Buffer.from('refs/heads/raw-').toString('hex');
   const identity = { nonce: '01'.repeat(16), credential_fingerprint: pullTokenFingerprint(TOKEN) };
-  for (const action of ['open', 'update', 'retarget', 'close', 'reopen']) {
+  for (const action of ['open', 'update', 'retarget', 'close', 'reopen', 'fast-forward']) {
     const value = input('https://forge.test/repo.git', action, format);
     for (const rawSides of [['source'], ['target'], ['source', 'target']]) {
       const fields = { ...value.fields };
@@ -77,10 +77,6 @@ for (const format of ['sha1', 'sha256']) test(`${format} durable metadata intent
     }
     assert.throws(() => preparePullWithIdentity({ ...value, fields: { ...rest, source_ref, source_ref_hex: prefix + 'ff' } }, identity));
   }
-  const ff = input('https://forge.test/repo.git', 'fast-forward', format);
-  delete ff.fields.source_ref;
-  ff.fields.source_ref_hex = prefix + 'fe';
-  assert.throws(() => preparePullWithIdentity(ff, identity));
 });
 test('comment stream zero is valid independently of PR version; upper bound increments exactly', () => {
   const value = input('https://forge.test/repo.git', 'comment');

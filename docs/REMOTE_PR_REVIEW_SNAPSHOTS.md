@@ -161,8 +161,14 @@ capture: only the native merge driver can decide eligibility, independence,
 ancestry and current protection. There is no readiness or merge-permission flag.
 No strategy or expected version is automatically refreshed.
 
-Byte-only branches remain inspectable but refuse drafting, because the existing
-native mutation forms require UTF-8 refs. Exhausted u64 stream versions refuse
+Byte-only branches remain exact through drafting and publication: each captured
+null-text branch becomes its `source_ref_hex` or `target_ref_hex` command field.
+Native-valid UTF-8 names containing C1 controls also use hex because the text
+form excludes those controls. Previously supported text branches keep their
+original command representation. The native mutation forms and durable sender
+accept both encodings, with one alias per side.
+Withdrawal retains the original review's bytes even after retargeting.
+Exhausted u64 stream versions refuse
 rather than wrapping. Closed or merge-only PRs can be inspected, not turned into
 new-review/merge drafts.
 
@@ -224,8 +230,8 @@ an explicit empty `body` clears the body. A title must remain nonempty. Even
 close/reopen carry the complete unchanged source/target references, tips, title
 and body because that is the existing native mutation contract. None of these
 choices accepts a tip, expected-version, force, policy or merge-method override.
-Byte-only reference names and exhausted stream versions refuse, as they do for
-candidate drafts. Merged/legacy merge-only PRs cannot be reopened by this profile.
+Byte-only reference names use the same hex command aliases as candidate drafts.
+Exhausted stream versions refuse. Merged/legacy merge-only PRs cannot be reopened by this profile.
 
 For example, use this private choice JSON to edit only the title:
 
@@ -244,9 +250,8 @@ recaptures, replans or resubmits automatically. Open-PR creation and comments
 are not inferred from this read: a comment needs its independent discussion
 version, which this snapshot does not contain.
 
-The combined verification command now runs **132 tests**: the 50 original
-reader cases, 32 recovered drafting/CLI/file cases, and 50 additional lifecycle
-and sender-integration cases. The new cases import the complete unchanged
+The focused verification command combines reader, drafting/CLI/file, lifecycle
+and sender-integration regressions. The cases import the complete
 `pull_command.mjs`, `remote_pull.mjs` and `transaction_outcome.mjs` modules. They
 run actual capture -> draft -> prepare -> submit -> recover calls over HTTP,
 with both Git hash domains, full-u64 counters, permitted/refused terminals,
@@ -255,8 +260,6 @@ fast-forward consent, lost replies and rotated-credential recovery. CLI draft
 outputs are also passed to the actual command preparer. Opaque candidate test
 bytes do not claim Git-bundle validity. All server replies remain explicit
 native-schema fixtures, not an executed Rust engine or authorization oracle.
-The three executed existing module blobs are respectively `d571b772`,
-`fe20ef08` and `9d497c67`; they are not replaced or modified by this change.
 
 The draft choice file permits up to 512 KiB of JSON so a valid 64 KiB native
 body remains editable even when JSON escaping expands each byte sixfold. The
@@ -264,3 +267,18 @@ drafter still checks the 64 KiB UTF-8 body and 256-byte title limits independent
 Six CLI cases cover exact ASCII, multibyte and escaped-body limits, overflow and
 an oversized envelope; valid cases also pass through the real sender. Before
 removing the inherited 16 KiB choice-file cap, all three valid-body cases failed.
+
+### Exact native reference bytes in durable review workflows
+
+`tests/operator/remote_pull_raw_references.test.mjs` covers capture, draft, saved
+intent validation, publication and original-key recovery for fast-forward,
+approval, change requests, withdrawal, merge-commit and squash. The raw source,
+target and paired cases run in both Git hash domains. It also checks lost replies
+with rotated credentials, exact old withdrawal subjects after retargeting,
+ambiguous aliases, branch byte limits, UTF-8 C1 names, mismatched or normalized
+receipt names, and private offline CLI drafts. Twelve whole-intent hashes captured from the
+unmodified `24337110` source keep historical text-command bytes and keys fixed.
+
+The focused verification script includes this regression. These tests use real
+client code, sockets and private files with native-schema peers; they do not
+establish native Git admission, bundle validity, authorization or deployment.

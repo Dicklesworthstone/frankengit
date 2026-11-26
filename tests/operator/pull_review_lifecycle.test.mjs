@@ -121,13 +121,16 @@ test('lost reply from a snapshot-derived close recovers with a rotated credentia
   await assert.rejects(submitPull(intent, TOKEN, { confirmKey: intent.key }), e => e.dispatched && e.outcomeUnknown);
   assert.equal((await recoverPull(intent, ROTATED)).outcome.state, 'committed'); assert.equal(w.writes, 1);
 });
-for (const action of ACTIONS) test(`${action}: wrong lifecycle state and byte-only forms refuse`, async t => {
+for (const action of ACTIONS) test(`${action}: wrong lifecycle state refuses while exact byte-only forms prepare`, async t => {
   const bad = await peer(t, { state: action === 'reopen' ? 'open' : 'closed' });
   const c = await capturePullReviews(bad.selected, TOKEN);
   assert.throws(() => draftPullReview(c, choice(action)), { code: 'pull_draft_state_conflict' });
   const p = await peer(t, { state: action === 'reopen' ? 'closed' : 'open', byteOnly: true });
   const bytes = await capturePullReviews(p.selected, TOKEN);
-  assert.throws(() => draftPullReview(bytes, choice(action)), { code: 'byte_only_review_form_unsupported' });
+  const draft = draftPullReview(bytes, choice(action));
+  assert.equal(draft.fields.source_ref_hex, bytes.pull.pull_request.data.source_ref_hex);
+  assert.equal(Object.hasOwn(draft.fields, 'source_ref'), false);
+  assert.equal(preparePull(draft, TOKEN).action, action);
 });
 test('an edit distinguishes omitted fields from empty replacement and detaches all caller changes', async t => {
   const p = await peer(t), c = await capturePullReviews(p.selected, TOKEN), saved = reviewCanonical(c);

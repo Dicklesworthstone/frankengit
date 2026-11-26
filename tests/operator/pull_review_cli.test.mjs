@@ -85,8 +85,8 @@ test('merge method/reviewer choices are explicit, detached, and never granted fr
     const bad = choice('merge'); edit(bad); assert.throws(() => draftPullReview(capture, bad));
   }
 });
-for (const kind of ['missing', 'closed', 'byte-only', 'no-vote', 'legacy-vote', 'exhausted']) test(`draft refuses unsupported ${kind} without inventing a subject`, async t => {
-  const p = await peer(t, { found: kind !== 'missing', state: kind === 'closed' ? 'closed' : 'open', byteOnly: kind === 'byte-only' });
+for (const kind of ['missing', 'closed', 'no-vote', 'legacy-vote', 'exhausted']) test(`draft refuses unsupported ${kind} without inventing a subject`, async t => {
+  const p = await peer(t, { found: kind !== 'missing', state: kind === 'closed' ? 'closed' : 'open' });
   const action = ['no-vote', 'legacy-vote'].includes(kind) ? 'withdraw' : 'approve';
   if (kind === 'no-vote') p.native.reviews.splice(2, 1);
   if (kind === 'legacy-vote') p.native.reviews[2].candidate = null;
