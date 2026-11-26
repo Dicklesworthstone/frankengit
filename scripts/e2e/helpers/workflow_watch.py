@@ -95,7 +95,10 @@ def definition_refusal(fmt, ordered):
     def poll(label, code=0):
         return [json.loads(line) for line in invoke(label, watch, code).splitlines()]
 
-    first = poll('valid-anchor')[0]['poll']
+    def poll_observation(rows):
+        return next(row['poll'] for row in rows if row['type'] == 'workflow_watch_poll')
+
+    first = poll_observation(poll('valid-anchor'))
     watch.extend(['--publish-checks', '--principal-id', PRINCIPAL,
                   '--expected-incarnation', first['event']['repository_incarnation']])
     assert poll('publish-anchor')[-1]['committed_check_decisions'] == 1
@@ -118,7 +121,7 @@ def definition_refusal(fmt, ordered):
     listing = ['pr', 'list', *f.scope, '--trusted-local', '--object-format', fmt]
     authority = invoke('authority-before-refusal', listing)
     observations = poll('reject-invalid-definition', 1)
-    rejected_poll = observations[0]['poll']
+    rejected_poll = poll_observation(observations)
     summary = observations[-1]
     dispatch = rejected_poll['dispatch']
     assert rejected_poll['event']['commit'] == rejected
@@ -147,12 +150,12 @@ def definition_refusal(fmt, ordered):
     plan.write_bytes(original)
     if not ordered:
         again = poll('recover-refusal-acknowledgement')
-        assert again[0]['poll']['state'] == 'previously_settled' and marker.exists()
+        assert poll_observation(again)['state'] == 'previously_settled' and marker.exists()
         assert again[-1]['committed_check_decisions'] == 0 and f.count() == 'x'
         f.tree = good_tree
         f.advance()
     repaired = poll('run-repaired-successor')
-    assert repaired[0]['poll']['event']['commit'] == f.tip and marker.exists()
+    assert poll_observation(repaired)['event']['commit'] == f.tip and marker.exists()
     assert repaired[-1]['committed_check_decisions'] == 1 and f.count() == 'xx'
     assert poll('suppress-repaired-repeat')[-1]['committed_check_decisions'] == 0
     assert f.count() == 'xx'
