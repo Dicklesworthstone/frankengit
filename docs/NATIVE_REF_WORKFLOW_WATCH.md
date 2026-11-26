@@ -146,9 +146,10 @@ distinct event. A force-push that makes the first pending commit unreachable
 stops catch-up before reserving it. The unit of delivery is still one net ref
 change per canonical decision batch.
 
-The ordered CLI profile retains local execution and check-source records.
-Automatic check publication continues to use the latest-state profile.
-PR, queue, tag and HTTP-owned watches continue to use their existing selection
+The ordered profile retains local execution and check-source records.
+Use `fg serve-http --workflow-ordered-branch-updates` for the same profile
+on the [HTTP-owned controller](NATIVE_HTTP_WORKFLOW_SERVICE.md#replay-missed-branch-updates).
+Automatic check publication, PR, queue and tag selection use their own
 profiles. Protected merge checks still require a current source commit.
 
 ### Continuous service

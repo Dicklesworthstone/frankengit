@@ -61,7 +61,8 @@ class Server:
     # servers explicitly enabling --allow-source should expect source reads.
     source_reads = False
 
-    def __init__(self, fixture, label, *, publish=False, attempt=30, source_reads=False):
+    def __init__(self, fixture, label, *, publish=False, attempt=30, source_reads=False,
+                 ordered=False):
         self.fixture = fixture
         self.source_reads = source_reads
         self.stop_file = fixture.root / f"{label}.stop"
@@ -69,6 +70,8 @@ class Server:
         self.diagnostic = fixture.root / f"{label}.err"
         self.endpoint = None
         args = arguments(fixture, self.stop_file, publish=publish, attempt=attempt)
+        if ordered:
+            args.append("--workflow-ordered-branch-updates")
         if source_reads:
             args.append("--allow-source")
         with self.output.open("wb") as stdout, self.diagnostic.open("wb") as stderr:

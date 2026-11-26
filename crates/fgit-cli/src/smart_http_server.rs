@@ -54,6 +54,7 @@ const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository
    --workflow-input <repository-path> [--workflow-input <repository-path> ...]
    --workflow-run-parent <absolute-private-directory>
    [--workflow-interval-ms <10..60000>] [--workflow-attempt-timeout-secs <1..3600>]
+   [--workflow-ordered-branch-updates]
    [--workflow-publish-checks --workflow-principal <id>]
    [--workflow-land-queue-head --workflow-landing-principal <id>]
    [--workflow-refresh-queue-head --workflow-refresh-principal <id>]
@@ -106,6 +107,8 @@ parent. The worker waits 1000 ms between polls and bounds each attempt to 300 se
 by default. --workflow-publish-checks and --workflow-principal require an explicit
 --expected-incarnation. Workflow file/log capture requires --artifact-root. Readiness
 follows exclusive workflow custody; execution begins after readiness is flushed.
+--workflow-ordered-branch-updates replays reachable branch changes after settlement.
+It requires a plain branch and local execution without a check publisher.
 Stopping drains execution and reports workflow_service_drained before HTTP drain.
 Select up to 64 exact workflow/job/output files with --workflow-artifact or its
 byte-safe hex form. Logs and files share the capture allowance: 16 MiB per payload
@@ -445,6 +448,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                 | "--print-credentials-header"
                 | "--continuous"
                 | "--workflow-trusted-local"
+                | "--workflow-ordered-branch-updates"
                 | "--workflow-publish-checks"
                 | "--workflow-land-queue-head"
                 | "--workflow-refresh-queue-head"

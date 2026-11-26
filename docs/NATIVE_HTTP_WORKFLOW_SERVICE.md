@@ -64,6 +64,21 @@ APIs and Git receive explicitly; omit those flags to keep them disabled. Credent
 rotation/revocation governs network grants; it does not replace the local
 operator's explicit workflow service configuration.
 
+### Replay missed branch updates
+
+Add `--workflow-ordered-branch-updates` to a plain branch controller and retain
+its private run parent across restarts. The first poll starts at the latest
+change. Subsequent polls use settled event identities to replay the earliest
+pending net branch change, one per poll. An older commit must still be
+reachable from the current visible branch. The selected commit's tree supplies
+the workflow and inputs.
+
+This profile retains execution and its evidence locally. Omit the check
+publisher, tag, PR and queue options. The same trusted-local acknowledgement,
+authority checks, custody recovery, request limits and HTTP capability flags
+apply. See [ordered branch selection](NATIVE_REF_WORKFLOW_WATCH.md#ordered-branch-execution-after-a-restart)
+for reachability and history limits.
+
 ## Checks, PRs and retained logs
 
 Execution alone does not publish checks. Supply **both**

@@ -491,22 +491,7 @@ def check_pagination(campaign, fmt):
                     final_page=len(last["checks"]), published=len(rows), snapshot=page["snapshot_token"])
 
 
-def ordered_push_restart(campaign, fmt):
-    f = Fixture(campaign, fmt, "ordered-restart")
-
-    def run_watch(label):
-        with Watcher(f, label, extra=("--ordered-branch-updates",)) as watcher:
-            watcher.ready()
-            watcher.idle()
-            rows = watcher.stop()
-        summary = rows[-1]
-        assert not summary["requires_reconciliation"] and not summary["non_green"], summary
-        events = [row["poll"] for row in rows if row["type"] == "workflow_watch_poll"
-                  and row["poll"]["state"] == "dispatched"]
-        assert all(event["execution_settled"] for event in events)
-        return [event["event"]["commit"] for event in events]
-
-    assert run_watch("initial") == [f.tips[0]]
+def push_two_workflow_trees(f):
     run, first = fresh_push_source(f)
     with receive_listener(f) as address:
         def push(label, tip):
@@ -529,6 +514,26 @@ def ordered_push_restart(campaign, fmt):
         second = upstream("run", PIN, run, "client", "--", "rev-parse", REF)
         assert upstream("run", PIN, run, "client", "--", "rev-parse", REF + "^") == first
         push("ordered-second", second)
+    return first, second
+
+
+def ordered_push_restart(campaign, fmt):
+    f = Fixture(campaign, fmt, "ordered-restart")
+
+    def run_watch(label):
+        with Watcher(f, label, extra=("--ordered-branch-updates",)) as watcher:
+            watcher.ready()
+            watcher.idle()
+            rows = watcher.stop()
+        summary = rows[-1]
+        assert not summary["requires_reconciliation"] and not summary["non_green"], summary
+        events = [row["poll"] for row in rows if row["type"] == "workflow_watch_poll"
+                  and row["poll"]["state"] == "dispatched"]
+        assert all(event["execution_settled"] for event in events)
+        return [event["event"]["commit"] for event in events]
+
+    assert run_watch("initial") == [f.tips[0]]
+    first, second = push_two_workflow_trees(f)
     final_refs = refs(f)
     assert run_watch("resumed") == [first, second]
     historical, = [event for event in event_directories(f)
@@ -572,6 +577,49 @@ def ordered_push_restart(campaign, fmt):
     assert refs(f) == final_refs and f.effects_count() == 3
     campaign.record(fmt, "ordered-push-restart", first=first, second=second,
                     executed=f.effects_count(), refused_stale_check=stale["refusal_code"])
+
+
+def ordered_http_restart(campaign, fmt):
+    f = Fixture(campaign, fmt, "ordered-http-restart")
+    credentials(f)
+    f.open_pull()
+
+    def settled_count():
+        return sum((event / "settled").is_file() for event in event_directories(f))
+
+    def run_service(label, count, expected_dispatches):
+        with Server(f, label, ordered=True) as server:
+            server.ready()
+            server.wait(lambda _: settled_count() == count)
+            status, body = server.request("GET", "/api/v1/pulls/1/checks")
+            page = json.loads(body)
+            assert status == 200 and page["complete"] and page["checks"] == [], (status, page)
+            workflow, transport = server.stop()
+        assert workflow["dispatched"] == expected_dispatches
+        assert workflow["checks_committed"] == workflow["checks_refused"] == 0
+        assert not workflow["publication_pending"] and not workflow["requires_reconciliation"]
+        assert not workflow["non_green"] and not workflow["interrupted"]
+        assert transport["completed_transports"] == 1, transport
+
+    run_service("http-initial", 1, 1)
+    first, second = push_two_workflow_trees(f)
+    assert f.effects_count() == 1 and settled_count() == 1
+    final_refs = refs(f)
+    run_service("http-catch-up", 3, 2)
+    historical, = [event for event in event_directories(f)
+                   if json.loads((event / "event.json").read_bytes())["commit"] == first]
+    marker = (historical / "settled").read_bytes()
+    (historical / "settled").rename(f.root / "http-original-settlement")
+    run_service("http-recover", 3, 0)
+    assert (historical / "settled").read_bytes() == marker
+    assert refs(f) == final_refs
+    assert f.effects.read_text().splitlines() == ["executed", "executed", "second-snapshot"]
+    reports = [json.loads(path.read_bytes()) for event in event_directories(f)
+               for path in event.glob("dispatch-*/workflow-*/report.json")]
+    assert len(reports) == 3 and all(report["workspaces_closed"] for report in reports)
+    assert {report["executed_commit"] for report in reports} == {f.tips[0], first, second}
+    campaign.record(fmt, "ordered-http-push-restart", first=first, second=second,
+                    executed=f.effects_count(), recovered_settlement=True, checks_published=0)
 
 
 def ordered_unreachable_source(campaign, fmt):
@@ -619,4 +667,5 @@ if __name__ == "__main__":
         selected_byte_refs(campaign, fmt)
         check_pagination(campaign, fmt)
         ordered_push_restart(campaign, fmt)
+        ordered_http_restart(campaign, fmt)
         ordered_unreachable_source(campaign, fmt)

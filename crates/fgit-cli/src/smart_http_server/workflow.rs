@@ -58,6 +58,9 @@ pub(super) fn parse(
     })
     .map_err(|error| error.to_string())?;
 
+    if flags.contains_key("--workflow-ordered-branch-updates") {
+        config = config.with_ordered_branch_updates();
+    }
     if flags.contains_key("--workflow-publish-checks") != flags.contains_key("--workflow-principal")
     {
         return Err(
@@ -331,6 +334,47 @@ mod tests {
             .unwrap();
         arguments[at] = "--workflow-merge-queue".into();
         arguments
+    }
+
+    #[test]
+    fn ordered_service_accepts_plain_branch_and_refuses_other_profiles() {
+        let mut arguments = server_arguments();
+        arguments.push("--workflow-ordered-branch-updates".into());
+        let options = parse_server(&arguments).unwrap();
+        assert!(options.workflow_service.is_some());
+        assert!(!options.allow_receive);
+        assert!(!options.allow_pulls);
+
+        let mut tag = arguments.clone();
+        let at = tag.iter().position(|arg| arg == "--workflow-ref").unwrap();
+        tag[at + 1] = "refs/tags/release".into();
+        let mut publication = arguments.clone();
+        publication.extend([
+            "--workflow-publish-checks".into(),
+            "--workflow-principal".into(),
+            "77".repeat(16),
+            "--expected-incarnation".into(),
+            "88".repeat(16),
+        ]);
+        let mut pull_request = arguments.clone();
+        pull_request.extend(["--workflow-pull-request".into(), "7".into()]);
+        let mut collection = arguments;
+        collection.extend([
+            "--workflow-pull-requests".into(),
+            "--expected-incarnation".into(),
+            "88".repeat(16),
+        ]);
+        let mut queue = queue_arguments();
+        queue.push("--workflow-ordered-branch-updates".into());
+        for refused in [tag, publication, pull_request, collection, queue] {
+            let Err(error) = parse_server(&refused) else {
+                panic!("ordered polling accepted an incompatible profile");
+            };
+            assert!(
+                error.contains("ordered workflow service requires a plain branch"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
