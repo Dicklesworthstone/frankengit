@@ -119,6 +119,18 @@ source-verified executable. Cargo check compiled the command and its
 compile and artifact transfer outcomes.
 [Ordered restart and upgrade](NATIVE_REF_WORKFLOW_WATCH.md#ordered-branch-execution-after-a-restart)
 
+The integrated review at `749ce41d` brings ordered HTTP check publication
+and scoped atomic branch transactions together on main `7ccf7d1d`.
+In both Git formats, a remote operator submitted two two-ref transactions
+with separate write and outcome credentials while the CI publisher was
+stopped. Both transactions retained their original decisions. Restart ran
+each exact commit tree once, oldest first. The superseded check received
+`TargetRefMoved`, and protection admitted landing after the exact new-tip
+check appeared. A repeat poll left the authority head and run count intact.
+The stock workflow campaign passed 22 cases and the native incremental
+fetch suite passed 97 assertions on the same source-matched executable.
+[Stock-push campaign](../scripts/e2e/suites/workflow/stock_push_landing.sh) · [Native incremental fetch](../scripts/e2e/suites/node/incremental_fetch.sh)
+
 The proof bridge at `b4bf422a` follows the same sealed loser through
 re-preparation at the winner's head in both writer schedules. The disjoint
 writes both commit. The same-ref Rust controls refuse the losing precondition
