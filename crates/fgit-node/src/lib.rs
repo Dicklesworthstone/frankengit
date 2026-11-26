@@ -329,6 +329,7 @@ pub(crate) fn git_daemon_capabilities(
 pub struct AdmissionUploadPackRepository {
     object_format: GitHashAlgorithm,
     refs: Vec<AdvertisedRef>,
+    refs_sorted: bool,
     head_target: Option<RefName>,
     /// Immutable visible membership shared by adapters for one verified graph.
     /// Session-local proofs and deadlines remain separate below.
@@ -417,9 +418,13 @@ impl AdmissionUploadPackRepository {
                     .map_err(AdmissionUploadPackRefusal::Wire)?,
             );
         }
+        // Establish this once for the immutable authorized view. A synthesized
+        // HEAD can precede a valid unusual name whose bytes sort before HEAD.
+        let refs_sorted = refs.windows(2).all(|pair| pair[0].name <= pair[1].name);
         Ok(Self {
             object_format,
             refs,
+            refs_sorted,
             head_target,
             closure_objects: Arc::new(PermittedObjectClosure::default()),
             tag_peels: BTreeMap::new(),
@@ -483,6 +488,10 @@ impl UploadPackRepository for AdmissionUploadPackRepository {
 
     fn advertised_refs(&self) -> &[AdvertisedRef] {
         &self.refs
+    }
+
+    fn sorted_advertised_refs(&self) -> Option<&[AdvertisedRef]> {
+        self.refs_sorted.then_some(self.refs.as_slice())
     }
 
     fn contains_want(&self, oid: AnyGitOid) -> bool {

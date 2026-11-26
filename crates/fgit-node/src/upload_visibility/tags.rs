@@ -201,11 +201,18 @@ impl<R: UploadPackRepository> UploadPackRepository for LegacyTagRepository<'_, R
     fn advertised_refs(&self) -> &[AdvertisedRef] {
         &self.refs
     }
+    fn sorted_advertised_refs(&self) -> Option<&[AdvertisedRef]> {
+        // legacy_advertised_refs sorts this complete immutable projection.
+        Some(&self.refs)
+    }
     fn contains_want(&self, oid: AnyGitOid) -> bool {
         self.source.contains_want(oid)
     }
     fn is_common(&self, oid: AnyGitOid) -> bool {
         self.source.is_common(oid)
+    }
+    fn negotiation_checkpoint(&self) -> Result<(), WireError> {
+        self.source.negotiation_checkpoint()
     }
     fn supports_shallow(&self) -> bool {
         self.source.supports_shallow()

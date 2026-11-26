@@ -11,15 +11,19 @@
 //! precise compatibility invariant: that required prelude is the *only*
 //! difference, including for a non-empty capability advertisement.
 
+use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::convert::Infallible;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 
+use fgit_admission::AdmissionSnapshot;
 use fgit_node::{
-    GitDaemonService, GitDaemonTransportRefusal, parse_git_daemon_request,
-    serve_git_daemon_upload_pack,
+    AdmissionUploadPackRepository, GitDaemonServeError, GitDaemonService,
+    GitDaemonTransportRefusal, parse_git_daemon_request, serve_git_daemon_upload_pack,
 };
+use fgit_types::RefName;
 use fgit_wire::{
-    AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, PackPayloadSource,
+    AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, PackPayloadSource, PackRequest,
     UploadPackRepository, UploadPackVersion, WireError, WireLimits,
 };
 
@@ -194,5 +198,194 @@ fn a_flush_before_any_want_ends_the_session_cleanly() {
             |_request, _pack_request| -> Result<EmptyPayload, Infallible> { Ok(EmptyPayload) },
         );
         assert!(outcome.is_err(), "{parameters:?}");
+    }
+}
+
+struct CheckpointRepository<'a> {
+    format: GitObjectFormat,
+    refs: Vec<AdvertisedRef>,
+    expired: &'a Cell<bool>,
+    checkpoints: Cell<usize>,
+}
+
+impl UploadPackRepository for CheckpointRepository<'_> {
+    fn object_format(&self) -> GitObjectFormat {
+        self.format
+    }
+    fn advertised_refs(&self) -> &[AdvertisedRef] {
+        &self.refs
+    }
+    fn contains_want(&self, oid: AnyGitOid) -> bool {
+        self.refs.iter().any(|reference| reference.oid == oid)
+    }
+    fn is_common(&self, _: AnyGitOid) -> bool {
+        false
+    }
+    fn negotiation_checkpoint(&self) -> Result<(), WireError> {
+        self.checkpoints.set(self.checkpoints.get() + 1);
+        if self.expired.get() {
+            Err(WireError::PackSourceRefused)
+        } else {
+            Ok(())
+        }
+    }
+    fn supports_shallow(&self) -> bool {
+        true
+    }
+    fn shallow_update(
+        &self,
+        _: &PackRequest,
+    ) -> Result<fgit_wire::closure::ShallowUpdate, WireError> {
+        Ok(fgit_wire::closure::ShallowUpdate {
+            shallow: Vec::new(),
+            unshallow: Vec::new(),
+        })
+    }
+}
+
+// Expire only after advertisement construction, at the first negotiation read.
+// This test therefore needs the live checkpoint to survive the legacy wrapper;
+// an early constructor check alone cannot make the expired twin pass.
+struct ExpiryOnNegotiation<'a> {
+    input: Cursor<Vec<u8>>,
+    greeting_bytes: u64,
+    expire_on_read: bool,
+    expired: &'a Cell<bool>,
+}
+
+impl Read for ExpiryOnNegotiation<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.expire_on_read && self.input.position() >= self.greeting_bytes {
+            self.expired.set(true);
+        }
+        self.input.read(buffer)
+    }
+}
+
+struct SelectedPayload(Option<Vec<u8>>);
+
+impl PackPayloadSource for SelectedPayload {
+    fn next_chunk(&mut self, _: usize) -> Result<Option<Vec<u8>>, WireError> {
+        Ok(self.0.take())
+    }
+}
+
+#[test]
+fn shallow_exclusion_retains_the_live_checkpoint_through_the_legacy_advertisement() {
+    const SELECTED: &[u8] = b"PACK-fixture-selected-after-negotiation";
+    for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
+        for parameters in [&[][..], &[b"version=1".as_slice()][..]] {
+            for expire_on_read in [false, true] {
+                let expired = Cell::new(false);
+                let tip = AnyGitOid::from_hex(format, &"ab".repeat(format.digest_len())).unwrap();
+                let repository = CheckpointRepository {
+                    format,
+                    refs: vec![
+                        AdvertisedRef::new(tip, b"refs/heads/main", &WireLimits::default())
+                            .unwrap(),
+                    ],
+                    expired: &expired,
+                    checkpoints: Cell::new(0),
+                };
+                let capabilities_text =
+                    format!("shallow deepen-not object-format={}", format.as_str());
+                let capabilities =
+                    Capabilities::parse_v1(capabilities_text.as_bytes(), &WireLimits::default())
+                        .unwrap();
+                let mut input = greeting(parameters);
+                let greeting_bytes = input.len() as u64;
+                for line in [
+                    format!("want {tip} {capabilities_text}\n"),
+                    "deepen-not main\n".to_owned(),
+                ] {
+                    input.extend_from_slice(format!("{:04x}", line.len() + 4).as_bytes());
+                    input.extend_from_slice(line.as_bytes());
+                }
+                input.extend_from_slice(b"00000009done\n");
+                let mut reader = ExpiryOnNegotiation {
+                    input: Cursor::new(input),
+                    greeting_bytes,
+                    expire_on_read,
+                    expired: &expired,
+                };
+                let mut output = Vec::new();
+                let mut built = 0;
+                let outcome = serve_git_daemon_upload_pack(
+                    &mut reader,
+                    &mut output,
+                    &repository,
+                    capabilities,
+                    WireLimits::default(),
+                    |_, request| -> Result<SelectedPayload, Infallible> {
+                        built += 1;
+                        assert_eq!(request.deepen_not, vec![tip]);
+                        Ok(SelectedPayload(Some(SELECTED.to_vec())))
+                    },
+                );
+                assert!(
+                    repository.checkpoints.get() > 0,
+                    "the source checkpoint must be forwarded"
+                );
+                if expire_on_read {
+                    assert!(
+                        matches!(
+                            &outcome,
+                            Err(GitDaemonServeError::Transport(
+                                GitDaemonTransportRefusal::Wire(WireError::PackSourceRefused)
+                            ))
+                        ),
+                        "{outcome:?}"
+                    );
+                    assert_eq!(built, 0);
+                    assert!(
+                        !output
+                            .windows(SELECTED.len())
+                            .any(|bytes| bytes == SELECTED)
+                    );
+                } else {
+                    assert!(outcome.is_ok(), "{outcome:?}");
+                    assert_eq!(built, 1);
+                    assert!(output.ends_with(SELECTED));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn native_ref_order_hint_describes_the_exact_immutable_advertisement() {
+    for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
+        let tip = AnyGitOid::from_hex(format, &"ab".repeat(format.digest_len())).unwrap();
+        let branch = RefName::try_new(b"refs/heads/main").unwrap();
+        for unusual in [false, true] {
+            for head in [false, true] {
+                let mut refs = BTreeMap::from([(branch.clone(), tip)]);
+                if unusual {
+                    refs.insert(RefName::try_new(b"AA/name").unwrap(), tip);
+                }
+                let snapshot = AdmissionSnapshot {
+                    refs,
+                    head_target: head.then_some(branch.clone()),
+                    ..AdmissionSnapshot::default()
+                };
+                let repository = AdmissionUploadPackRepository::from_snapshot(
+                    &snapshot,
+                    format,
+                    &WireLimits::default(),
+                )
+                .unwrap();
+                let sorted = repository.sorted_advertised_refs();
+                if unusual && head {
+                    assert!(
+                        sorted.is_none(),
+                        "a synthesized HEAD must not grant a false ordering hint"
+                    );
+                    assert_eq!(repository.advertised_refs()[0].name, b"HEAD");
+                    assert_eq!(repository.advertised_refs()[1].name, b"AA/name");
+                } else {
+                    assert_eq!(sorted.unwrap(), repository.advertised_refs());
+                }
+            }
+        }
     }
 }
