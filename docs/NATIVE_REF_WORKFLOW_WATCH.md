@@ -137,6 +137,11 @@ poll starts at the latest change. Later polls authenticate history to the
 nearest settled change and execute one pending commit per poll, oldest first.
 The existing scope and decision batch still identify each execution. A failed
 or interrupted execution follows the normal custody and settlement rules.
+The first ordered poll records the choice in the existing private watch
+directory before accepting new work. It keeps all prior settlements. Later
+polls in that scope require the ordered option so a latest-only restart
+cannot skip a pending push. Retain the order binding alongside the event
+directories when backing up or restoring custody.
 
 An older commit must be reachable from the currently visible branch at the
 selected head. Discovery and execution use that commit's exact tree. The

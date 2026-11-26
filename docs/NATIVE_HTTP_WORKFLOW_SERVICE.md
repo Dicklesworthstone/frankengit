@@ -77,6 +77,11 @@ pending net branch change, one per poll. An older commit must still be
 reachable from the current visible branch. The selected commit's tree supplies
 the workflow and inputs.
 
+The first ordered poll binds the delivery mode in the existing watch directory.
+Keep the ordered flag on future starts using that directory and scope. A
+latest-only restart of a bound controller refuses before HTTP readiness,
+leaving the pending branch updates for the next ordered start.
+
 Use a plain branch for ordered replay. The same trusted-local acknowledgement,
 authority checks, custody recovery, request limits and HTTP capability flags
 apply. See [ordered branch selection](NATIVE_REF_WORKFLOW_WATCH.md#ordered-branch-execution-after-a-restart)

@@ -774,6 +774,73 @@ def ordered_http_byte_ref(campaign, fmt):
                     first=first, second=second, check=latest["id"], executed=3)
 
 
+def ordered_restart_requires_ordered_selection(campaign, fmt):
+    label = "ordered-custody-restart"
+    effects = shlex.quote(str(campaign.root / f"{fmt}-{label}" / "effects"))
+    workflow = ("name: ordered-custody\non: push\njobs:\n  a:\n"
+                "    runs-on: fgit-trusted-local\n    steps:\n"
+                "      - run: if test -f ci/replayed.txt; then cat ci/replayed.txt; "
+                f"else printf 'executed\\n'; fi >> {effects}\n")
+    f = Fixture(campaign, fmt, label, workflow_source=workflow)
+    credentials(f)
+    ordinary = f.arguments()
+    ordered = [*ordinary, "--ordered-branch-updates"]
+
+    def poll(label, args, code=0):
+        return [json.loads(row) for row in campaign.invoke(label, args, code=code).splitlines()]
+
+    def settled_commits():
+        return {json.loads((event / "event.json").read_bytes())["commit"]
+                for event in event_directories(f) if (event / "settled").is_file()}
+
+    start = poll("before-order-activation", ordinary)
+    assert start[0]["poll"]["event"]["commit"] == f.tips[0]
+    assert poll("activate-ordered", ordered)[0]["poll"]["state"] == "previously_settled"
+    original, = event_directories(f)
+    original_settlement = (original / "settled").read_bytes()
+    first, second = push_two_workflow_trees(f, second_marker=True)
+    before = refs(f)
+    assert before[REF] == second
+
+    refused = poll("refuse-latest-cli-restart", ordinary, code=2)
+    assert all(row["type"] != "workflow_watch_poll" for row in refused)
+    assert "watch scope requires ordered branch updates" in refused[-1]["operation_error"], refused
+    assert refused[-1]["node_closed"] and refused[-1]["cleanup_error"] is None
+    with Server(f, "refuse-latest-http-restart") as server:
+        assert server.child.wait(timeout=20) == 2, server.diagnostic.read_bytes()
+        assert "watch scope requires ordered branch updates" in server.diagnostic.read_text()
+        assert all(row["type"] != "smart_http_listening" for row in server.rows())
+        drained, = [row for row in server.rows() if row["type"] == "workflow_service_drained"]
+        assert drained["node_closed"] and drained["service_failed"] and drained["dispatched"] == 0
+
+    assert settled_commits() == {f.tips[0]} and event_directories(f) == [original]
+    assert f.effects_count() == 1 and refs(f) == before
+    assert (original / "settled").read_bytes() == original_settlement
+
+    marker = original.parent / "ordered-branch-updates"
+    binding = marker.read_bytes()
+    assert len(binding) == 32
+    marker.write_bytes(bytes([binding[0] ^ 1]) + binding[1:])
+    corrupted = poll("refuse-corrupt-order-binding", ordered, code=2)
+    assert all(row["type"] != "workflow_watch_poll" for row in corrupted)
+    assert "watch configuration differs from original bound identity" in corrupted[-1]["operation_error"]
+    assert event_directories(f) == [original] and f.effects_count() == 1 and refs(f) == before
+    marker.write_bytes(binding)
+
+    with Server(f, "resume-original-order", ordered=True) as server:
+        server.ready()
+        server.wait(lambda _: settled_commits() == {f.tips[0], first, second})
+        recovered, _ = server.stop()
+        assert recovered["dispatched"] == 2 and not recovered["requires_reconciliation"]
+    repeated = poll("repeat-ordered-restart", ordered)
+    assert repeated[0]["poll"]["state"] == "previously_settled"
+    assert f.effects.read_text().splitlines() == ["executed", "executed", "second-snapshot"]
+    assert (original / "settled").read_bytes() == original_settlement
+    assert refs(f) == before
+    campaign.record(fmt, "ordered-custody-requires-ordered-restart", first=first, second=second,
+                    refused_cli=True, refused_http_before_readiness=True, executed=f.effects_count())
+
+
 def ordered_unreachable_source(campaign, fmt):
     f = Fixture(campaign, fmt, "ordered-unreachable")
     watch = ["workflow", "watch", *f.scope, TARGET, "--trusted-local", "--workflow", "ci",
@@ -822,4 +889,5 @@ if __name__ == "__main__":
         ordered_http_restart(campaign, fmt)
         ordered_http_publish(campaign, fmt)
         ordered_http_byte_ref(campaign, fmt)
+        ordered_restart_requires_ordered_selection(campaign, fmt)
         ordered_unreachable_source(campaign, fmt)

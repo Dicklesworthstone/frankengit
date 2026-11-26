@@ -248,6 +248,11 @@ impl OneNode {
         check_directory(parent)?;
         let root = parent.join(format!("watch-{}", hex(&scope)));
         let owner = Owner::open(&root)?;
+        if ordered {
+            reporting::bind_branch_order(&root, &scope)?;
+        } else {
+            reporting::check_branch_order(&root, &scope, false)?;
+        }
         if let Some(config) = merge_config {
             config.bind(&root)?;
         }

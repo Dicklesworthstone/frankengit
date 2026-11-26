@@ -1239,6 +1239,8 @@ impl Custody {
         let owner = Owner::open(&root).map_err(custody)?;
         let events = config.run_parent.join(format!("watch-{}", hex(&scope)));
         let _event_owner = Owner::open(&events).map_err(custody)?;
+        reporting::check_branch_order(&events, &scope, config.ordered_branch_updates)
+            .map_err(custody)?;
         if let Some(merge) = &config.merge_candidate {
             merge.bind(&events).map_err(custody)?;
         }
