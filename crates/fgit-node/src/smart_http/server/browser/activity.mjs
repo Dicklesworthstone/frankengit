@@ -38,17 +38,32 @@ const PAGE_FIELDS = ['type', 'schema_version', 'tenant_id', 'repository_id', 're
   'omits_other_event_families', 'cursor_discloses_repository_activity', 'events', 'next_after', 'resume_after', 'has_more', 'complete'];
 const EVENT_FIELDS = ['cursor', 'repository_sequence', 'event_index', 'tx_id', 'policy_epoch', 'aggregate', 'aggregate_version', 'kind', 'event_frame_hex'];
 const SCOPE_FIELDS = ['tenant_id', 'repository_id', 'repository_incarnation', 'object_format', 'issues_read', 'pulls_read'];
+const COLLABORATION_GRANTS = ['discussions_read', 'reviews_read'];
+function profileName(value) {
+  if (!['issues-pulls-v1', 'collaboration-v2'].includes(value)) refuse('Unsupported activity disclosure profile.');
+  return value;
+}
+function scopeFields(profile) {
+  return profile === 'collaboration-v2' ? [...SCOPE_FIELDS, ...COLLABORATION_GRANTS] : SCOPE_FIELDS;
+}
+function waitLimit(value) {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 30000) refuse('Activity wait must be an integer from 0 to 30000 milliseconds.');
+  return value;
+}
 export function activityPage(raw, { after = '0', limit = 20, previous = null, expectedHead = null } = {}) {
-  activityCursor(after); pageLimit(limit); fields(raw, PAGE_FIELDS);
+  activityCursor(after); pageLimit(limit);
+  const profile = profileName(raw?.disclosure_profile), collaboration = profile === 'collaboration-v2';
+  fields(raw, collaboration ? [...PAGE_FIELDS, ...COLLABORATION_GRANTS] : PAGE_FIELDS);
+  const grants = ['issues_read', 'pulls_read', ...(collaboration ? COLLABORATION_GRANTS : [])];
   if (raw.type !== 'forge_event_page' || raw.schema_version !== 1 || raw.read_only !== true ||
-      raw.disclosure_profile !== 'issues-pulls-v1' || raw.omits_other_event_families !== true ||
-      raw.cursor_discloses_repository_activity !== true || typeof raw.issues_read !== 'boolean' ||
-      typeof raw.pulls_read !== 'boolean' || (!raw.issues_read && !raw.pulls_read) ||
+      raw.omits_other_event_families !== true || raw.cursor_discloses_repository_activity !== true ||
+      grants.some(name => typeof raw[name] !== 'boolean') || !grants.some(name => raw[name]) ||
       !['sha1', 'sha256'].includes(raw.object_format)) refuse('Unsupported activity disclosure profile.');
   for (const name of ['tenant_id', 'repository_id', 'repository_incarnation', 'source_head']) opaque(raw[name]);
   if (typeof raw.snapshot_token !== 'string' || !/^alg:[1-9][0-9]{0,4}:(?:[0-9a-f]{2}){1,64}$/.test(raw.snapshot_token) ||
       Number(raw.snapshot_token.split(':')[1]) > 65535) refuse('Invalid activity snapshot token.');
-  if (previous && SCOPE_FIELDS.some(name => raw[name] !== previous[name])) {
+  if (previous && (profile !== (previous.disclosure_profile ?? 'issues-pulls-v1') ||
+      scopeFields(profile).some(name => raw[name] !== previous[name]))) {
     const error = new Error('Repository incarnation or disclosure grants changed. Reconnect explicitly.'); error.clearActivity = true; throw error;
   }
   if (expectedHead !== null && (raw.snapshot_token !== expectedHead || (previous && raw.source_head !== previous.source_head))) refuse('Activity snapshot moved. Refresh explicitly.');
@@ -125,46 +140,49 @@ async function readJson(response, signal) {
   }
 }
 function httpError(status) {
-  const error = new Error(({ 401: 'Activity credential rejected or revoked.', 403: 'Issue or pull-request read permission is missing or disabled.',
+  const error = new Error(({ 401: 'Activity credential rejected or revoked.', 403: 'The selected activity read permission is missing or disabled.',
     404: 'Repository activity is unavailable.', 409: 'Activity snapshot moved. Refresh explicitly from the last successful watermark.',
     413: 'Activity exceeds the server response limit.', 429: 'Activity read quota exceeded. Retry explicitly later.',
     503: 'Canonical activity is temporarily unavailable.' })[status] ?? `Activity read failed (HTTP ${status}).`);
   error.status = status; return error;
 }
 export class ActivityClient {
-  #root; #fetch; #timeout; #token = ''; #generation = 0; #active = null; #page = null; #scope = null;
-  constructor({ href, fetchImpl = globalThis.fetch, timeoutMs = 30000 } = {}) {
+  #root; #fetch; #timeout; #token = ''; #profile = 'issues-pulls-v1'; #generation = 0; #active = null; #page = null; #scope = null;
+  constructor({ href, fetchImpl = globalThis.fetch, timeoutMs = 35000 } = {}) {
     this.#root = rootFor(href); this.#fetch = (...args) => fetchImpl(...args);
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300000) refuse('Invalid activity read timeout.');
     this.#timeout = timeoutMs;
   }
   get connected() { return Boolean(this.#token); }
   get page() { return this.#page ? clone(this.#page) : null; }
-  connect(token) {
+  connect(token, { profile = 'issues-pulls-v1' } = {}) {
     this.disconnect();
+    this.#profile = profileName(profile);
     if (typeof token !== 'string' || !/^[0-9a-f]{64}$/.test(token)) refuse('A 64-character lowercase hexadecimal token is required.');
     this.#token = token;
   }
   cancel() { this.#generation++; this.#active?.abort(); this.#active = null; }
   disconnect() { this.cancel(); this.#token = ''; this.#page = null; this.#scope = null; }
-  open({ after = '0', limit = 20 } = {}) { return this.#read(after, limit, null); }
+  open({ after = '0', limit = 20, waitMs = 0 } = {}) { return this.#read(after, limit, null, waitMs); }
   next() {
     if (!this.#page?.has_more) return Promise.reject(new Error('No next activity page.'));
     return this.#read(this.#page.next_after, this.#pageLimit, this.#page.snapshot_token);
   }
-  refresh() {
+  refresh({ waitMs = 0 } = {}) {
     if (!this.#page) return Promise.reject(new Error('Load an activity page before refreshing its watermark.'));
-    return this.#read(this.#page.resume_after ?? '0', this.#pageLimit, null);
+    return this.#read(this.#page.resume_after ?? '0', this.#pageLimit, null, waitMs);
   }
   #pageLimit = 20;
-  async #read(after, limit, expectedHead) {
-    if (!this.connected) refuse('Connect an issue-read or pull-request-read credential first.');
-    activityCursor(after); pageLimit(limit);
+  async #read(after, limit, expectedHead, waitMs = 0) {
+    if (!this.connected) refuse('Connect a credential with a selected activity read grant first.');
+    activityCursor(after); pageLimit(limit); waitLimit(waitMs);
     this.cancel(); const generation = this.#generation, controller = new AbortController(); this.#active = controller;
     const timer = setTimeout(() => controller.abort(new DOMException('Activity read timed out.', 'TimeoutError')), this.#timeout);
     const check = () => { controller.signal.throwIfAborted(); if (generation !== this.#generation || !this.connected) refuse('Activity read superseded.'); };
     const url = new URL(this.#root); url.searchParams.set('after', after); url.searchParams.set('limit', String(limit));
+    if (this.#profile !== 'issues-pulls-v1') url.searchParams.set('profile', this.#profile);
     if (expectedHead !== null) url.searchParams.set('expected_head', expectedHead);
+    if (waitMs !== 0) url.searchParams.set('wait_ms', String(waitMs));
     let response;
     try {
       check();
@@ -175,8 +193,11 @@ export class ActivityClient {
       if (response.redirected || (response.url && response.url !== url.href)) refuse('Activity redirect refused.');
       if (response.status !== 200) throw httpError(response.status);
       const raw = await readJson(response, controller.signal); check();
+      if (raw?.disclosure_profile !== this.#profile) {
+        const error = new Error('Activity disclosure profile changed. Reconnect explicitly.'); error.clearActivity = true; throw error;
+      }
       const page = activityPage(raw, { after, limit, expectedHead, previous: this.#scope }); check();
-      this.#scope = Object.fromEntries([...SCOPE_FIELDS, 'source_head'].map(name => [name, page[name]]));
+      this.#scope = Object.fromEntries([...scopeFields(this.#profile), 'disclosure_profile', 'source_head'].map(name => [name, page[name]]));
       this.#page = page; this.#pageLimit = limit; return clone(page);
     } catch (error) {
       if (generation === this.#generation && (error.status === 401 || error.status === 403 || error.clearActivity)) this.disconnect();

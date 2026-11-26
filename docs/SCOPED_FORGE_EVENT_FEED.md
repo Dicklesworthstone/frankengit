@@ -217,6 +217,29 @@ Missing tooling is a non-pass disposition, never a mock replacement. The
 campaign's issue-only fixture does not establish live PR hidden-ref filtering;
 that boundary has native unit cases and still needs a real-binary PR campaign.
 
+## Browser activity reader
+
+At `<repository-url>/ui/activity/`, select **All granted collaboration
+activity** before connecting to request `collaboration-v2`. The original
+**Issues and pull requests** selection keeps the v1 request and response
+contract. The page displays the selected profile and each effective read
+grant, including independent discussion and review permissions. Frames remain
+opaque; the browser does not decode canonical payloads or authenticate them as
+inclusion proofs.
+
+The selection stays fixed while connected. Disconnect before changing it and
+start at cursor `0` to backfill the newly selected families. A response with a
+different profile, incarnation or effective grants clears the connection and
+the displayed observation rather than reusing a cursor across scopes.
+
+**Load from cursor** and **Refresh after watermark** accept a wait from 0 to
+30000 milliseconds. **Next page at same snapshot** remains an immediate pinned
+read. A wait does not add automatic polling or retries; **Cancel read** aborts
+it. The browser's finite request deadline still applies to the response,
+including its body, and callers that supply a shorter deadline retain that
+bound. The default browser timeout is 35 seconds so the maximum idle wait has
+time to return a response. Repository history reads can still exhaust it.
+
 ## Implementation and verification boundary
 
 Owning bead: `frankengit-root-doctrine-x2mv.4.35`; plan §§24 and 31.
