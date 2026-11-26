@@ -18,6 +18,7 @@ import time
 from workflow_http_service import Server, credentials, event_directories
 from workflow_pull_request_collection import CollectionServer
 from workflow_watch_continuous import Campaign, Fixture, PRINCIPAL, REF, REPOSITORY, TARGET, TENANT, Watcher, read_rows
+from operator_branch_transaction_smoke import CLI as BRANCH_TRANSACTION, HttpServer, OperatorCampaign, write_private
 
 PIN = "git-2.54.0"
 ORACLE = Path(__file__).resolve().parents[1] / "oracle/oracle.sh"
@@ -640,8 +641,72 @@ def ordered_http_restart(campaign, fmt):
                     executed=f.effects_count(), recovered_settlement=True, checks_published=0)
 
 
-def ordered_http_publish(campaign, fmt):
-    label = "ordered-http-publish"
+def publish_two_atomic_updates(f):
+    # Import both reviewed trees through the pinned stock client on a distinct
+    # staging branch. The two watched ref changes come only from the operator.
+    first, second = push_two_workflow_trees(f, second_marker=True, reference="refs/heads/atomic-staging")
+    before = refs(f)
+    assert before[REF] == f.tips[0] and before["refs/heads/atomic-staging"] == second
+    saved = f.root / "atomic-operator"
+    saved.mkdir(mode=0o700)
+    tokens = {}
+    with f.credentials.open("a") as output:
+        for grant in ("receive", "outcomes-read"):
+            bearer = secrets.token_hex(32)
+            tokens[grant] = write_private(saved / (grant + ".token"), bearer + "\n")
+            digest = hashlib.sha256(bearer.encode()).hexdigest()
+            output.write(f"{digest} {PRINCIPAL} {grant}\n")
+    node = shutil.which(os.environ.get("FGE_NODE", "node"))
+    assert node is not None, "Node is required for the native branch operator"
+    client = OperatorCampaign(f.campaign.binary, Path(node).resolve(), saved)
+    listener = HttpServer(client, f.node, f.credentials, "mutations")
+    listener.command[3:5] = [TENANT, REPOSITORY]
+    listener.command.extend(("--allow-source", "--allow-receive", "--allow-outcomes"))
+    companion = "refs/heads/atomic-checkpoint"
+    transactions = []
+    with listener as gateway:
+        scope = dict(tenant_id=TENANT, repository_id=REPOSITORY, repository_incarnation=f.incarnation,
+                     principal_id=PRINCIPAL, object_format=f.format)
+        for index, (old, new, side) in enumerate((
+            (f.tips[0], first, dict(operation="create", new_commit=first)),
+            (first, second, dict(operation="delete", expected_commit=first)),
+        )):
+            selection = write_private(saved / f"selection-{index}.json", json.dumps({
+                "endpoint": gateway.url, "scope": scope, "bind_writer_scope": True, "changes": [
+                    dict(operation="update", ref_hex=REF.encode().hex(), expected_commit=old, new_commit=new),
+                    {**side, "ref_hex": companion.encode().hex()},
+                ],
+            }))
+            job = saved / f"job-{index}"
+            prepared = client.node_command(BRANCH_TRANSACTION, list(map(str, [
+                "prepare", "--input", selection, "--token-file", tokens["receive"], "--request-dir", job,
+            ])))
+            selected = ["--request-dir", job, "--confirm", prepared["intent_sha256"]]
+            result = client.node_command(BRANCH_TRANSACTION, list(map(str, [
+                "send", *selected, "--token-file", tokens["receive"], "--outcome-token-file",
+                tokens["outcomes-read"], "--record", saved / f"publication-{index}.json",
+            ])))
+            assert result["dispatched"] and result["state"] == "committed"
+            assert len(result["publication"]["updates"]) == 2
+            recovered = client.node_command(BRANCH_TRANSACTION, list(map(str, [
+                "recover", *selected, "--token-file", tokens["outcomes-read"],
+                "--record", saved / f"recovered-{index}.json",
+            ])))
+            assert not recovered["dispatched"] and recovered["outcome"] == result["outcome"]
+            transactions.append(recovered["outcome"])
+            expected = {**before, REF: new}
+            if index == 0:
+                expected[companion] = first
+            assert refs(f) == expected
+    drained, = [row for row in read_rows(listener.stdout_path) if row["type"] == "smart_http_drained"]
+    assert drained["accepted"] == drained["completed_transports"] == 8 and drained["refused_transports"] == 0
+    assert transactions[0]["transaction"]["tx_id"] != transactions[1]["transaction"]["tx_id"]
+    assert int(transactions[0]["decision"]["decision_sequence"]) < int(transactions[1]["decision"]["decision_sequence"])
+    return first, second, transactions
+
+
+def ordered_http_publish(campaign, fmt, *, atomic=False):
+    label = "ordered-http-atomic-publish" if atomic else "ordered-http-publish"
     effects = shlex.quote(str(campaign.root / f"{fmt}-{label}" / "effects"))
     # The immutable workflow graph survives both pushes. A difference in its
     # input tree identifies the second execution independently of the report.
@@ -660,7 +725,12 @@ def ordered_http_publish(campaign, fmt):
         drained, _ = server.stop()
         assert drained["checks_committed"] == drained["dispatched"] == 1
 
-    first, second = push_two_workflow_trees(f, second_marker=True)
+    transactions = []
+    if atomic:
+        first, second, transactions = publish_two_atomic_updates(f)
+        assert f.effects_count() == 1 and len(event_directories(f)) == 1
+    else:
+        first, second = push_two_workflow_trees(f, second_marker=True)
     f.tips[1] = second
     f.current = 1
     f.open_pull()
@@ -708,9 +778,21 @@ def ordered_http_publish(campaign, fmt):
     assert f.effects.read_text().splitlines() == ["executed", "executed", "second-snapshot"]
     assert try_update("new-tip-after-check", 0)["command_committed"]
     assert refs(f)[TARGET] == refs(f)[REF] == second
-    campaign.record(fmt, "ordered-http-publishes-exact-current-check", first=first, second=second,
+    if atomic:
+        after_landing = campaign.invoke("authority-after-atomic-landing", position)
+        repeated = [json.loads(line) for line in campaign.invoke("repeat-atomic-watch", [
+            *f.arguments(publish=True), "--ordered-branch-updates",
+        ]).splitlines()]
+        assert all(row["type"] != "workflow_check_set_decision" for row in repeated), repeated
+        poll, = [row["poll"] for row in repeated if row["type"] == "workflow_watch_poll"]
+        assert poll["state"] == "previously_settled", poll
+        assert campaign.invoke("authority-after-repeat-atomic-watch", position) == after_landing
+        assert f.effects_count() == 3 and len(event_directories(f)) == 3
+    case = "ordered-atomic-http-protected-landing" if atomic else "ordered-http-publishes-exact-current-check"
+    campaign.record(fmt, case, first=first, second=second,
                     prior_check=previous["id"], current_check=current["id"],
-                    recovered_refusal=decision["refusal_code"], landed=second)
+                    recovered_refusal=decision["refusal_code"], landed=second,
+                    **({"branch_outcomes": transactions} if atomic else {}))
 
 
 def ordered_http_byte_ref(campaign, fmt):
@@ -888,6 +970,7 @@ if __name__ == "__main__":
         ordered_push_restart(campaign, fmt)
         ordered_http_restart(campaign, fmt)
         ordered_http_publish(campaign, fmt)
+        ordered_http_publish(campaign, fmt, atomic=True)
         ordered_http_byte_ref(campaign, fmt)
         ordered_restart_requires_ordered_selection(campaign, fmt)
         ordered_unreachable_source(campaign, fmt)
