@@ -223,7 +223,8 @@ fn bitmap_v1_binds_real_pack_order_and_encodes_full_commit_closure() {
     assert_eq!(read_u16(bitmap.bytes(), 6), 1, "FULL_DAG is mandatory");
     assert_eq!(
         read_u32(bitmap.bytes(), 8),
-        u32::try_from(object_count).expect("fixture object count fits u32")
+        2,
+        "header counts commit records, not all pack entries"
     );
     assert_eq!(
         &bitmap.bytes()[12..32],
@@ -276,11 +277,20 @@ fn bitmap_v1_binds_real_pack_order_and_encodes_full_commit_closure() {
                 .then_some((position, entry.object().id()))
         })
         .collect::<Vec<_>>();
-    for (row, (position, _)) in commit_positions.iter().enumerate() {
+    let index_names = source.objects.keys().copied().collect::<Vec<_>>();
+    assert!(
+        commit_positions
+            .iter()
+            .any(|(position, commit)| index_names[*position] != *commit),
+        "fixture must distinguish pack order from sorted index order"
+    );
+    for (row, (position, commit)) in commit_positions.iter().enumerate() {
         let offset = entries + row * (6 + ewah);
         assert_eq!(
             read_u32(bitmap.bytes(), offset),
-            u32::try_from(*position).expect("fixture pack position fits u32")
+            u32::try_from(index_names.binary_search(commit).expect("index contains commit"))
+                .expect("fixture index position fits u32"),
+            "commit record names its sorted index position"
         );
         assert_eq!(bitmap.bytes()[offset + 4], 0, "no XOR dependency");
         assert_eq!(bitmap.bytes()[offset + 5], 1, "entry is reusable");
@@ -377,4 +387,76 @@ fn bitmap_refuses_source_coordinate_that_is_not_a_commit() {
         ),
         Err(PackBitmapRefusal::SourceCommitIsNotCommit { .. })
     ));
+}
+
+/// Two divergent branches, a merge and enough distinct blobs for a second
+/// literal word. Both branches share the root but only the right has the new tree.
+fn branched_source() -> (Source, [ObjectId; 4]) {
+    let (mut source, root, left) = source_with_two_commits();
+    let mut tree_body = Vec::new();
+    let mut references = Vec::new();
+    for number in 0..80 {
+        let body = format!("leaf {number}\n").into_bytes();
+        let id = native(ObjectType::Blob, &body);
+        source.objects.insert(id, Object {
+            id,
+            kind: ObjectType::Blob,
+            body,
+            references: Vec::new(),
+            recency: 1,
+        });
+        tree_body.extend_from_slice(format!("100644 leaf-{number:02}\0").as_bytes());
+        tree_body.extend_from_slice(id.as_bytes());
+        references.push(id);
+    }
+    let tree = native(ObjectType::Tree, &tree_body);
+    source.objects.insert(tree, Object {
+        id: tree,
+        kind: ObjectType::Tree,
+        body: tree_body,
+        references,
+        recency: 2,
+    });
+    let right = commit(tree, &[root], 30, 30);
+    let merged = commit(tree, &[left, right.id], 40, 40);
+    let commits = [root, left, right.id, merged.id];
+    source.objects.insert(right.id, right);
+    source.objects.insert(merged.id, merged);
+    (source, commits)
+}
+
+#[test]
+fn branched_bitmap_identifies_each_commits_exact_multiword_closure() {
+    let (source, commits) = branched_source();
+    let tip = commits[3];
+    let pack = materialized_pack(&source, tip);
+    let count = pack.plan().entries().len();
+    assert!(count > 64);
+    let bitmap = PackBitmapV1::write(
+        bitmap_source(tip),
+        &pack,
+        PackBitmapLimits::default(),
+        &mut || true,
+    )
+    .expect("write full-DAG bitmap");
+    assert_eq!(read_u32(bitmap.bytes(), 8), 4);
+    // Independent BITM V1 fixture: four type maps and four commit records
+    // over 87 objects. Header and trailer are excluded so this pins the
+    // coordinate spaces without coupling the test to pack compression.
+    assert_eq!(
+        sha1_digest(&bitmap.bytes()[BITMAP_HEADER_BYTES..bitmap.bytes().len() - SHA1_BYTES]),
+        [
+            0x64, 0x5e, 0x16, 0xa0, 0x4b, 0x7b, 0x59, 0x65, 0x36, 0xd8, 0xdb, 0x51, 0x8c, 0x0f,
+            0xa1, 0x58, 0x65, 0x37, 0x4e, 0x38,
+        ]
+    );
+    for commit in commits {
+        for object in source.objects.keys() {
+            assert_eq!(
+                bitmap.reaches(&pack, &commit, object, &mut || true).unwrap(),
+                Some(exact_reaches(&source, commit, *object)),
+                "{commit} -> {object}"
+            );
+        }
+    }
 }

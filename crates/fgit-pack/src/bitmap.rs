@@ -6,6 +6,9 @@
 //! promoted pack's bytes, exact `PackPlan`, and writer receipt.  The output is
 //! a derived accelerator: it does not admit objects or authorize repository
 //! state, and a consumer must still authenticate the pack and authority basis.
+//! Regenerate previously exported FrankenGit bitmaps from their bound packs:
+//! older writers used the pack object count and physical entry ordinals in
+//! fields where Git expects the commit record count and sorted .idx ordinals.
 
 use crate::{Deadline, MaterializedPack, ObjectFormat, ObjectId, PackError, checkpoint};
 use core::fmt::{self, Display, Formatter};
@@ -272,7 +275,12 @@ impl PackBitmapV1 {
         output.extend_from_slice(BITMAP_SIGNATURE);
         output.extend_from_slice(&BITMAP_VERSION_V1.to_be_bytes());
         output.extend_from_slice(&BITMAP_OPT_FULL_DAG.to_be_bytes());
-        append_u32(&mut output, object_count_u32);
+        // Only indexed commit records are counted in the header. Each EWAH
+        // bitmap still spans every object in physical pack order.
+        append_u32(
+            &mut output,
+            u32::try_from(commit_positions.len()).map_err(|_| PackBitmapRefusal::SizeOverflow)?,
+        );
         output.extend_from_slice(pack_checksum.as_bytes());
 
         for object_type in [
@@ -294,10 +302,8 @@ impl PackBitmapV1 {
         let mut steps = 0_u64;
         for commit_position in &commit_positions {
             checkpoint(deadline).map_err(PackBitmapRefusal::Pack)?;
-            append_u32(
-                &mut output,
-                u32::try_from(*commit_position).map_err(|_| PackBitmapRefusal::SizeOverflow)?,
-            );
+            let commit = plan.entries()[*commit_position].object().id();
+            append_u32(&mut output, positions[&commit].index);
             output.push(0);
             output.push(BITMAP_ENTRY_REUSABLE);
             let words = reachability_words(
@@ -361,27 +367,29 @@ impl PackBitmapV1 {
         deadline: &mut impl Deadline,
     ) -> Result<Option<bool>, PackBitmapRefusal> {
         let object_count = self.validate_bound_pack(pack)?;
-        let mut commit_position = None;
+        let mut found_commit = false;
+        let mut commit_index = 0;
         let mut object_position = None;
         for (position, entry) in pack.plan().entries().iter().enumerate() {
             checkpoint(deadline).map_err(PackBitmapRefusal::Pack)?;
-            if entry.object().id() == *commit {
-                commit_position = Some(position);
-            }
-            if entry.object().id() == *object {
+            // Commit records name a position in the OID-sorted .idx. The
+            // requested object's bit instead names its physical pack position.
+            let id = entry.object().id();
+            commit_index += usize::from(id < *commit);
+            found_commit |= id == *commit;
+            if id == *object {
                 object_position = Some(position);
             }
         }
-        let (Some(commit_position), Some(object_position)) = (commit_position, object_position)
-        else {
+        let (true, Some(object_position)) = (found_commit, object_position) else {
             return Ok(None);
         };
-        if commit_position >= object_count || object_position >= object_count {
+        if commit_index >= object_count || object_position >= object_count {
             return Err(PackBitmapRefusal::MaterializationMismatch {
                 subject: "pack-plan position",
             });
         }
-        self.reaches_positions(commit_position, object_position, deadline)
+        self.reaches_positions(commit_index, object_position, deadline)
             .map(Some)
     }
 
@@ -403,7 +411,7 @@ impl PackBitmapV1 {
             || self.bytes[..4] != *BITMAP_SIGNATURE
             || read_u16(&self.bytes, 4) != Some(BITMAP_VERSION_V1)
             || read_u16(&self.bytes, 6) != Some(BITMAP_OPT_FULL_DAG)
-            || read_u32(&self.bytes, 8) != u32::try_from(object_count).ok()
+            || read_u32(&self.bytes, 8) != u32::try_from(self.receipt.commit_count).ok()
             || self.bytes.get(12..BITMAP_HEADER_BYTES)
                 != Some(self.receipt.pack_checksum.as_bytes())
             || self.bytes[self.bytes.len() - SHA1_BYTES..]
@@ -418,7 +426,7 @@ impl PackBitmapV1 {
 
     fn reaches_positions(
         &self,
-        commit_position: usize,
+        commit_index: usize,
         object_position: usize,
         deadline: &mut impl Deadline,
     ) -> Result<bool, PackBitmapRefusal> {
@@ -460,7 +468,7 @@ impl PackBitmapV1 {
                     subject: "unsupported commit bitmap entry",
                 });
             }
-            if stored_position as usize == commit_position {
+            if stored_position as usize == commit_index {
                 return ewah_bit(
                     &self.bytes,
                     offset + BITMAP_ENTRY_PREFIX_BYTES,
@@ -591,11 +599,18 @@ impl Display for PackBitmapRefusal {
 
 impl core::error::Error for PackBitmapRefusal {}
 
+// Both ordinals fit the format's checked u32 object-count envelope.
+#[derive(Clone, Copy)]
+struct ObjectPosition {
+    pack: u32,
+    index: u32,
+}
+
 fn build_positions(
     plan: &crate::PackPlan,
     source_commit: &ObjectId,
     deadline: &mut impl Deadline,
-) -> Result<(BTreeMap<ObjectId, usize>, Vec<usize>), PackBitmapRefusal> {
+) -> Result<(BTreeMap<ObjectId, ObjectPosition>, Vec<usize>), PackBitmapRefusal> {
     let mut positions = BTreeMap::new();
     let mut commits = Vec::new();
     commits
@@ -607,7 +622,11 @@ fn build_positions(
     for (position, entry) in plan.entries().iter().enumerate() {
         checkpoint(deadline).map_err(PackBitmapRefusal::Pack)?;
         let object = entry.object();
-        if positions.insert(object.id(), position).is_some() {
+        let coordinates = ObjectPosition {
+            pack: u32::try_from(position).map_err(|_| PackBitmapRefusal::SizeOverflow)?,
+            index: 0,
+        };
+        if positions.insert(object.id(), coordinates).is_some() {
             return Err(PackBitmapRefusal::DuplicateObject {
                 object: object.id(),
             });
@@ -627,12 +646,16 @@ fn build_positions(
             object: *source_commit,
         });
     }
+    for (ordinal, position) in positions.values_mut().enumerate() {
+        checkpoint(deadline).map_err(PackBitmapRefusal::Pack)?;
+        position.index = u32::try_from(ordinal).map_err(|_| PackBitmapRefusal::SizeOverflow)?;
+    }
     Ok((positions, commits))
 }
 
 fn reachability_words(
     plan: &crate::PackPlan,
-    positions: &BTreeMap<ObjectId, usize>,
+    positions: &BTreeMap<ObjectId, ObjectPosition>,
     root: usize,
     object_count: usize,
     steps: &mut u64,
@@ -684,7 +707,7 @@ fn reachability_words(
             pending
                 .try_reserve(1)
                 .map_err(|_| PackBitmapRefusal::AllocationFailed { requested: 1 })?;
-            pending.push(referenced_position);
+            pending.push(referenced_position.pack as usize);
         }
     }
     Ok(words)
