@@ -86,6 +86,14 @@ def refs(f):
     return dict(line.strip().split(" -> ", 1) for line in raw.splitlines() if " -> " in line)
 
 
+def byte_branches(f):
+    page = json.loads(f.campaign.invoke("canonical-byte-branches", [
+        "branch", "list", *f.scope, "--trusted-local", "--object-format", f.format, "--limit", 100,
+    ]))
+    assert page["node_closed"] and not page["has_more"]
+    return {bytes.fromhex(branch["reference_hex"]): branch["tip"] for branch in page["branches"]}
+
+
 def grant_tip_sync(f):
     token = secrets.token_hex(32)
     with f.credentials.open("a") as grants:
@@ -504,7 +512,10 @@ def push_two_workflow_trees(f, *, second_marker=False, reference=REF):
             porcelain = (transcript / "stdout.bin").read_bytes()
             assert os.fsencode(refspec) in porcelain and b"[up to date]" not in porcelain, porcelain
             shutil.copyfile(transcript / "receipt.tsv", f.root / f"{label}.tsv")
-            assert refs(f)[reference] == tip
+            if reference == REF:
+                assert refs(f)[reference] == tip
+            else:
+                assert byte_branches(f)[os.fsencode(reference)] == tip
         push("ordered-first", first)
         if second_marker:
             path, data = "ci/replayed.txt", b"second-snapshot\n"
@@ -742,7 +753,7 @@ def ordered_http_byte_ref(campaign, fmt):
     open_pull(1, initial_tip)
     initial, initial_drain = run_service("byte-watch-initial", 1)
     assert initial_drain["checks_committed"] == 1 and initial_drain["checks_refused"] == 0
-    before = refs(f)
+    before = byte_branches(f)
     first, second = push_two_workflow_trees(f, reference=reference)
     assert f.effects_count() == 1
     f.tips[1], f.current = second, 1
@@ -755,7 +766,7 @@ def ordered_http_byte_ref(campaign, fmt):
     assert len(records) == 3 and {row["commit"] for row in records} == {initial_tip, first, second}
     assert all(row["ref_hex"] == raw.hex() for row in records)
     assert f.effects.read_text().splitlines() == ["executed", "executed", "second-snapshot"]
-    assert refs(f) == {**before, reference: second}
+    assert byte_branches(f) == {**before, raw: second}
     resumed, idle = run_service("byte-watch-repeat", 0)
     assert resumed == latest and idle["checks_committed"] == idle["checks_refused"] == 0
     assert f.effects_count() == 3
