@@ -12,9 +12,12 @@ import { CandidateError, candidateFail, candidateKeys, candidateEndpoint, candid
 import { resolutionUpload, verifyResolutionResult, RESOLUTION_FILE_LIMIT } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-resolution.mjs';
 import { rebasePreparationCommand, rebasePreparationReply, rebaseInspectionReply } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-rebase.mjs';
 import { candidateCommitMatches, rebaseCommitterMatches } from './pull_candidate_commit.mjs';
+import { candidateRebaseAction, replayRebaseHistory, extendRebaseHistory, verifyRebaseHistoryResult,
+  REBASE_RECEIPT_FIELDS } from './pull_candidate_rebase_history.mjs';
 export { CandidateError, candidateJson, CANDIDATE_IO_LIMITS } from './pull_candidate_io.mjs';
 export const CANDIDATE_CAPTURE_SCHEMA = 'frankengit-pull-candidate-capture-v1';
 export const RESOLVED_CAPTURE_SCHEMA = 'frankengit-pull-resolved-candidate-capture-v1';
+export const REBASE_CONTINUATION_CAPTURE_SCHEMA = 'frankengit-pull-rebase-continuation-capture-v1';
 // Includes raw path bytes. Hex retention has its own enclosing capture limit.
 export const RESOLUTION_CHOICE_BYTES = 4 * 1024 * 1024;
 export function candidateResolutionChoices(input) {
@@ -116,6 +119,10 @@ function nativePreparationReply(response, request, observed, resolved = false) {
       observed.binding, webcrypto, observed.head)
     : preparationReply(response, Number(request.number), observed.fields, observed.binding, webcrypto, resolved, request.method);
 }
+function rebaseContext(request, observed, pull) {
+  return { number: Number(request.number), command: nativePreparationCommand(request, observed.fields),
+    scope: observed.binding, head: observed.head, sourceHead: pull.source_head };
+}
 function sameHead(reply, observed, request) {
   pinned(reply, sharedScope(request.scope), observed.snapshot_token);
   if (reply.source_head !== observed.source_head) candidateFail('candidate_snapshot_changed');
@@ -158,7 +165,7 @@ function retainedPreparation(metadata, bundle, status) {
   }
   candidateFail('candidate_boundary_collision');
 }
-function checkPreparationShape(metadata, method = 'merge-commit') {
+function checkPreparationShape(metadata, method = 'merge-commit', recipes = []) {
   const common = ['type', 'schema_version', 'tenant_id', 'repository_id', 'repository_incarnation', 'object_format',
     'source_head', 'snapshot_token', 'profile', 'method', 'read_only', 'objects_staged', 'transaction_created', 'published',
     'merge_authorized', 'subject', 'state', 'bundle', 'conflicts'];
@@ -166,7 +173,8 @@ function checkPreparationShape(metadata, method = 'merge-commit') {
     candidateKeys(metadata, [...common, 'merge_base', 'committer', 'timestamp', 'empty_policy',
       'original_authors_preserved', 'original_messages_preserved', 'original_signatures_copied', 'author_identity_verified',
       'series_complete', 'provisional_steps', 'candidate_commit', 'root_tree', 'stopped_commit', 'step_count', 'steps',
-      ...(metadata.state === 'clean' ? ['generated_objects', 'pack_objects', 'borrowed_objects'] : [])]);
+      ...(metadata.state === 'clean' ? ['generated_objects', 'pack_objects', 'borrowed_objects'] : []),
+      ...(recipes.length ? REBASE_RECEIPT_FIELDS : [])]);
     if (metadata.original_authors_preserved !== true || metadata.original_messages_preserved !== true ||
         metadata.original_signatures_copied !== false || metadata.author_identity_verified !== false) candidateFail('candidate_rebase_preservation_changed');
     if (!Array.isArray(metadata.steps) || metadata.steps.length > 256) candidateFail('candidate_rebase_steps_required');
@@ -242,15 +250,24 @@ async function checkInspection(inspection, artifact, preparation, request) {
 export async function validateCandidateCapture(input, suppliedBundle = null) {
   try {
     const resolved = input?.schema === RESOLVED_CAPTURE_SCHEMA;
+    const continued = input?.schema === REBASE_CONTINUATION_CAPTURE_SCHEMA;
     candidateKeys(input, ['schema', 'request', 'pull', 'review_pages', 'preparation_status', 'preparation', 'inspection',
-      ...(resolved ? ['resolution'] : [])]);
+      ...(resolved ? ['resolution'] : []), ...(continued ? ['history'] : [])]);
     const capture = boundedCapture(input), request = candidateInput(capture.request);
-    if ((!resolved && capture.schema !== CANDIDATE_CAPTURE_SCHEMA) || JSON.stringify(request) !== JSON.stringify(capture.request)) candidateFail('invalid_candidate_capture');
+    if ((!resolved && !continued && capture.schema !== CANDIDATE_CAPTURE_SCHEMA) ||
+        JSON.stringify(request) !== JSON.stringify(capture.request)) candidateFail('invalid_candidate_capture');
     // Copy before the first async digest: caller edits cannot change validation.
     if (suppliedBundle !== null && (!(suppliedBundle instanceof Uint8Array) || suppliedBundle.length > BUNDLE_LIMIT)) candidateFail('candidate_bundle_limit');
     const bundle = suppliedBundle === null ? null : Buffer.from(suppliedBundle);
     const observed = discovery(request, capture.pull, capture.review_pages);
-    let resolution = null;
+    let resolution = null, rebase = null;
+    if (continued) {
+      if (request.method !== 'rebase' || !Array.isArray(capture.history?.rounds) || !capture.history.rounds.length) {
+        candidateFail('candidate_rebase_continuation_history_required');
+      }
+      rebase = await replayRebaseHistory(capture.history, rebaseContext(request, observed, capture.pull));
+      if (JSON.stringify(rebase.history) !== JSON.stringify(capture.history)) candidateFail('noncanonical_candidate_rebase_history');
+    }
     if (resolved) {
       if (request.method === 'rebase') candidateFail('candidate_rebase_resolution_requires_original_commit_recipes');
       candidateKeys(capture.resolution, ['preparation', 'choices']);
@@ -265,10 +282,13 @@ export async function validateCandidateCapture(input, suppliedBundle = null) {
       resolution = await resolutionUpload(capture.resolution.preparation, observed.fields, metadataFor(request),
         resolutionFiles(choices), webcrypto, request.method);
     }
-    checkPreparationShape(capture.preparation, request.method);
-    const prepared = await nativePreparationReply(retainedPreparation(capture.preparation, bundle, capture.preparation_status), request, observed, resolved);
+    checkPreparationShape(capture.preparation, request.method, rebase?.recipes);
+    const retained = retainedPreparation(capture.preparation, bundle, capture.preparation_status);
+    const prepared = rebase ? await rebasePreparationReply(retained, Number(request.number), rebase.command,
+      observed.binding, webcrypto, observed.head) : await nativePreparationReply(retained, request, observed, resolved);
     sameHead(prepared.metadata, capture.pull, request);
     if (resolution) verifyResolutionResult(prepared.metadata, resolution.expected);
+    if (rebase) verifyRebaseHistoryResult(prepared.metadata, rebase);
     if (prepared.artifact === null) {
       if (bundle !== null || capture.inspection !== null) candidateFail('candidate_material_without_candidate');
     } else {
@@ -400,6 +420,75 @@ export async function resolvePullCandidate(input, inputChoices, token, options =
     return { capture: result.capture, bundle: result.bundle, usage: { requests, response_bytes: wire } };
   } catch (error) {
     throw new CandidateError(error instanceof CandidateError ? error.code : 'candidate_resolution_failed',
+      { phase, status: error instanceof CandidateError ? error.status : null });
+  }
+}
+
+// Advance exactly one original-commit decision at the retained PR snapshot.
+// A new capture keeps all previous stopped reports and choices; it is never a
+// mutable sequencer, a partial candidate, or a refreshed PR/reviewer observation.
+export async function resolveRebaseCandidate(input, inputAction, token, options = {}) {
+  let phase = 'validation';
+  try {
+    candidateToken(token);
+    candidateKeys(options, ['timeoutMs', 'signal', 'ca', 'maxWireBytes'], []);
+    const timeout = integer(options.timeoutMs ?? 30000, 'rebase continuation timeout', 1, 300000), signal = options.signal;
+    if (signal !== undefined && !(signal instanceof AbortSignal)) candidateFail('invalid_candidate_signal');
+    const ca = options.ca === undefined ? undefined : Buffer.isBuffer(options.ca) && options.ca.length > 0 && options.ca.length <= 128 * 1024
+      ? Buffer.from(options.ca) : candidateFail('invalid_candidate_ca');
+    const maxWire = integer(options.maxWireBytes ?? CANDIDATE_IO_LIMITS.wire, 'rebase continuation response bytes', 1, CANDIDATE_IO_LIMITS.wire);
+    const deadline = performance.now() + timeout;
+    const checkpoint = () => {
+      if (signal?.aborted) candidateFail('candidate_cancelled');
+      const remaining = Math.ceil(deadline - performance.now());
+      if (remaining <= 0) candidateFail('candidate_timeout');
+      return remaining;
+    };
+    checkpoint();
+    // Freeze explicit choices before any asynchronous report/body validation.
+    const action = candidateRebaseAction(inputAction, input?.request?.scope?.object_format);
+    const checked = await validateCandidateCapture(input); checkpoint();
+    const original = checked.capture, request = original.request;
+    if (request.method !== 'rebase' || ![CANDIDATE_CAPTURE_SCHEMA, REBASE_CONTINUATION_CAPTURE_SCHEMA].includes(original.schema) ||
+        !['conflicted', 'became_empty'].includes(original.preparation.state)) candidateFail('candidate_rebase_original_stop_required');
+    const observed = discovery(request, original.pull, original.review_pages);
+    const selected = await extendRebaseHistory(original.history ?? null, original.preparation, action,
+      rebaseContext(request, observed, original.pull), { check: checkpoint });
+    // Count the retained prefix plus the surrounding snapshot before network I/O.
+    boundedCapture({ ...original, schema: REBASE_CONTINUATION_CAPTURE_SCHEMA, history: selected.history });
+    let wire = 0, requests = 0;
+    const exchange = async operation => {
+      const remaining = checkpoint();
+      if (wire >= maxWire) candidateFail('candidate_wire_budget');
+      requests++;
+      const result = await candidateRequest(request.endpoint, token, operation,
+        { timeoutMs: remaining, signal, ca, maximum: Math.min(PREPARATION_LIMIT, maxWire - wire) });
+      wire += result.value.length; checkpoint(); return result;
+    };
+    phase = 'resolution';
+    const number = Number(request.number), upload = selected.upload;
+    const response = await exchange(selected.operation === 'prepare-rebase'
+      ? { kind: 'prepare-rebase', number, body: Buffer.from(upload.bytes).toString('utf8') }
+      : { kind: 'resolve-rebase', number, body: upload.bytes, type: upload.contentType });
+    const metadata = strictPreparation(response); checkPreparationShape(metadata, 'rebase', selected.recipes);
+    const prepared = await rebasePreparationReply(response, number, selected.command, observed.binding, webcrypto, observed.head);
+    checkpoint(); sameHead(metadata, original.pull, request); verifyRebaseHistoryResult(metadata, selected);
+    let inspection = null;
+    if (prepared.artifact) {
+      phase = 'inspection';
+      const command = form(prepared.artifact.fields);
+      const upload = multipart(command, prepared.artifact.bundle, makeBoundary(command, prepared.artifact.bundle, webcrypto));
+      const inspected = await exchange({ kind: 'inspect-rebase', number, body: upload.bytes, type: upload.contentType });
+      inspection = candidateJson(inspected.value);
+      await checkInspection(inspection, prepared.artifact, metadata, request); checkpoint(); sameHead(inspection, original.pull, request);
+    }
+    phase = 'validation';
+    const capture = { schema: REBASE_CONTINUATION_CAPTURE_SCHEMA, request, pull: original.pull, review_pages: original.review_pages,
+      preparation_status: response.status, preparation: metadata, inspection, history: selected.history };
+    const result = await validateCandidateCapture(capture, prepared.artifact?.bundle ?? null); checkpoint();
+    return { capture: result.capture, bundle: result.bundle, usage: { requests, response_bytes: wire } };
+  } catch (error) {
+    throw new CandidateError(error instanceof CandidateError ? error.code : 'candidate_rebase_continuation_failed',
       { phase, status: error instanceof CandidateError ? error.status : null });
   }
 }

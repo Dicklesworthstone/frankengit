@@ -98,12 +98,29 @@ export async function rebaseResolutionUpload(report, command, head, previous, ch
     const digest = await crypto.subtle.digest(algorithm === 'sha1' ? 'SHA-1' : 'SHA-256', framed);
     check(); path.result = { mode: Number.parseInt(path.mode, 8), oid: hex(new Uint8Array(digest)) };
   }
+  return rebaseRecipeUpload(command, head, recipes, crypto, check);
+}
+
+// Re-encode already validated cumulative recipes when an explicit empty-policy
+// continuation changes only the command. Callers must reconstruct saved recipes
+// from their original conflict observations before using this transport helper.
+export function rebaseRecipeUpload(command, head, recipes, crypto, check = () => {}) {
+  check();
+  command = rebasePreparationCommand(subject(command), {
+    upstream: command.upstream, committer: command.committer, timestamp: command.timestamp, empty: command.empty,
+  });
+  snapshot(head);
   const files = [], descriptors = [];
+  let bytes = 0;
   for (const recipe of recipes) for (const path of recipe.paths) {
+    check();
+    bytes += path.conflict.path_hex.length / 2 + (path.bytes?.length ?? 0);
+    if (bytes > RESOLUTION_CONTENT_LIMIT || descriptors.length >= MAX_CHOICES) fail('Whole-series resolution budget exceeded.');
     let value = recipe.original + ':' + path.conflict.path_hex + ':' + path.choice;
     if (path.choice === 'file') { value += ':' + path.mode + ':file_' + files.length; files.push(path.bytes); }
     descriptors.push(value);
   }
+  if (!descriptors.length) fail('Original-commit resolution recipes are required.');
   const encoded = form({ ...command, expected_head: head, resolution: descriptors });
   if (!files.length) return { bytes: utf8.encode(encoded), contentType: 'application/x-www-form-urlencoded', recipes };
   let boundary = null;

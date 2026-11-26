@@ -2,19 +2,23 @@
 // Read-only native candidate acquisition, private replay, and explicit drafting.
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { capturePullCandidate, resolvePullCandidate, candidateResolutionChoices, RESOLUTION_CHOICE_BYTES,
-  CANDIDATE_CAPTURE_SCHEMA, candidateInput, candidateCanonical } from './operator/pull_candidate_capture.mjs';
+import { capturePullCandidate, resolvePullCandidate, resolveRebaseCandidate, candidateResolutionChoices, RESOLUTION_CHOICE_BYTES,
+  CANDIDATE_CAPTURE_SCHEMA, REBASE_CONTINUATION_CAPTURE_SCHEMA, candidateInput, candidateCanonical } from './operator/pull_candidate_capture.mjs';
+import { candidateRebaseAction, REBASE_CHOICE_BYTES } from './operator/pull_candidate_rebase_history.mjs';
 import { CandidateError, candidateFail, candidateJson, CANDIDATE_IO_LIMITS } from './operator/pull_candidate_io.mjs';
 import { readCandidatePrivate, readCandidateToken, candidateDestination, candidateClock,
   saveCandidatePackage, loadCandidatePackage, saveCandidateJson, separateCandidateDestination } from './operator/pull_candidate_files.mjs';
 import { draftCandidateReview } from './operator/pull_candidate_draft.mjs';
 import { stageCandidateReview } from './operator/pull_candidate_stage.mjs';
 
-export const HELP = `Usage: node scripts/fg_pull_candidate.mjs <capture|resolve|inspect|draft|stage> [options]
+export const HELP = `Usage: node scripts/fg_pull_candidate.mjs <capture|resolve|resolve-rebase|inspect|draft|stage> [options]
 
 capture --input PRIVATE_JSON --token-file PRIVATE_TOKEN --output-dir NEW_PRIVATE_DIR
         [--ca-file PRIVATE_PEM] [--max-wire-bytes N] [--max-review-pages 1..8]
 resolve --package PRIVATE_CONFLICT_DIR --sha256 INDEPENDENT_MANIFEST_HASH
+        --choices PRIVATE_JSON --token-file PRIVATE_TOKEN --output-dir NEW_PRIVATE_DIR
+        [--ca-file PRIVATE_PEM] [--max-wire-bytes N]
+resolve-rebase --package PRIVATE_STOPPED_DIR --sha256 INDEPENDENT_MANIFEST_HASH
         --choices PRIVATE_JSON --token-file PRIVATE_TOKEN --output-dir NEW_PRIVATE_DIR
         [--ca-file PRIVATE_PEM] [--max-wire-bytes N]
 inspect --package PRIVATE_DIR --sha256 INDEPENDENT_MANIFEST_HASH
@@ -48,11 +52,16 @@ Resolve requires one explicit choice for every original conflict: base, ours
 mode 100644 or 100755 and content_hex (empty/binary allowed). The original
 package fixes all coordinates, commit metadata and merge method. The resolved
 package is new and keeps the original conflict report and exact choices.
-This resolve command accepts merge-commit and squash only. Rebase conflicts and
-became_empty stops remain inspectable noncandidates; native/browser rebase
-resolution uses original-commit recipes and cannot use this ordinary path list.
+This resolve command accepts merge-commit and squash only. Resolve-rebase takes
+{action:"resolve", original:EXACT_STOPPED_OID, choices:[path choices as above]}.
+To continue a became_empty stop, use {action:"continue-empty", original:EXACT_OID,
+from_empty:"stop", empty:"keep" or "drop"}. Every action is explicit. Earlier
+original-commit choices and binary bytes come only from the pinned package.
+Continuation keeps the original request, PR/review snapshot and a flat history
+of stops and decisions. Each new package is clean only after complete series
+inspection; another conflict or empty stop remains an inspectable noncandidate.
 
-Only capture and resolve contact the native node; neither publishes a repository
+Only capture, resolve and resolve-rebase contact the native node; none publishes a repository
 mutation. Stage is offline: it fingerprints the explicit private credential and
 saves a sender request directly from the pinned, inspected package, copying its
 verified bundle without an intermediate draft or separately selected bundle file.
@@ -74,11 +83,11 @@ function parse(args) {
   if (!Array.isArray(args) || args.length > 25 || args.some(v => typeof v !== 'string' || v.length > 4096) ||
       args.reduce((n, v) => n + v.length, 0) > 32768) candidateFail('invalid_candidate_arguments');
   const action = args[0], required = action === 'capture' ? ['input', 'token-file', 'output-dir']
-    : action === 'resolve' ? ['package', 'sha256', 'choices', 'token-file', 'output-dir']
+    : ['resolve', 'resolve-rebase'].includes(action) ? ['package', 'sha256', 'choices', 'token-file', 'output-dir']
     : action === 'stage' ? ['package', 'sha256', 'choices', 'token-file', 'request-dir']
     : action === 'inspect' ? ['package', 'sha256'] : action === 'draft' ? ['package', 'sha256', 'choices', 'output'] : null;
   if (!required) candidateFail('unknown_candidate_command');
-  const allowed = [...required, 'timeout-ms', ...(['capture', 'resolve'].includes(action) ? ['ca-file', 'max-wire-bytes'] : []),
+  const allowed = [...required, 'timeout-ms', ...(['capture', 'resolve', 'resolve-rebase'].includes(action) ? ['ca-file', 'max-wire-bytes'] : []),
     ...(action === 'capture' ? ['max-review-pages'] : [])], flags = {};
   for (let i = 1; i < args.length; i += 2) {
     const name = args[i].startsWith('--') ? args[i].slice(2) : '', value = args[i + 1];
@@ -120,6 +129,24 @@ export async function run(args, { output = text => write(process.stdout, text), 
       return 0;
     }
     const value = await loadCandidatePackage(flags.package, flags.sha256, options());
+    if (action === 'resolve-rebase') {
+      if (value.capture.request.method !== 'rebase' ||
+          ![CANDIDATE_CAPTURE_SCHEMA, REBASE_CONTINUATION_CAPTURE_SCHEMA].includes(value.capture.schema) ||
+          !['conflicted', 'became_empty'].includes(value.capture.preparation.state)) candidateFail('candidate_rebase_original_stop_required');
+      const destination = separateCandidateDestination(await candidateDestination(flags['output-dir'], options()), value.path);
+      const maximum = 2 * REBASE_CHOICE_BYTES + 64 * 1024;
+      const choice = candidateRebaseAction(candidateJson(await readCandidatePrivate(flags.choices, maximum, options()), maximum),
+        value.capture.request.scope.object_format);
+      const token = await readCandidateToken(flags['token-file'], options());
+      const ca = flags['ca-file'] === undefined ? undefined : await readCandidatePrivate(flags['ca-file'], 128 * 1024, options());
+      begun = true;
+      const result = await resolveRebaseCandidate(value.capture, choice, token, { ...options(), ca,
+        ...(flags['max-wire-bytes'] ? { maxWireBytes: Number(flags['max-wire-bytes']) } : {}) });
+      completed = await saveCandidatePackage(destination, result.capture, result.bundle, options());
+      await output(candidateCanonical({ type: 'pull_candidate_rebase_continued', schema_version: 1, ...completed,
+        source_package_sha256: value.sha256, usage: result.usage, published: false }));
+      return completed.state === 'clean' ? 0 : 1;
+    }
     if (action === 'resolve') {
       // Refuse unrelated or already resolved input before reading a credential.
       if (value.capture.request.method === 'rebase') candidateFail('candidate_rebase_resolution_requires_original_commit_recipes');

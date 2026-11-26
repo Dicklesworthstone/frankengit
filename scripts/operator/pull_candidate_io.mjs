@@ -90,14 +90,14 @@ function envelope(operation) {
     return { path: `${prefix}/${operation.kind}`, method: 'POST', body: operation.body,
       type: 'application/x-www-form-urlencoded', maximum: PREPARATION_LIMIT, statuses: [200, 409] };
   }
-  if (operation.kind === 'resolve') {
+  if (['resolve', 'resolve-rebase'].includes(operation.kind)) {
     candidateKeys(operation, ['kind', 'number', 'body', 'type']);
     const form = operation.type === 'application/x-www-form-urlencoded';
     if (!(operation.body instanceof Uint8Array) || !operation.body.length ||
         operation.body.length > (form ? 256 * 1024 : 5 * 1024 * 1024) ||
         (!form && !/^multipart\/form-data; boundary=[A-Za-z0-9_.-]{1,70}$/.test(operation.type))) candidateFail('invalid_candidate_resolution_upload');
-    return { path: `${prefix}/resolve`, method: 'POST', body: Buffer.from(operation.body), type: operation.type,
-      maximum: PREPARATION_LIMIT, statuses: [200] };
+    return { path: `${prefix}/${operation.kind}`, method: 'POST', body: Buffer.from(operation.body), type: operation.type,
+      maximum: PREPARATION_LIMIT, statuses: operation.kind === 'resolve-rebase' ? [200, 409] : [200] };
   }
   if (['inspect', 'inspect-rebase'].includes(operation.kind)) {
     candidateKeys(operation, ['kind', 'number', 'body', 'type']);
@@ -110,7 +110,7 @@ function envelope(operation) {
 }
 export async function candidateRequest(address, token, operation, options = {}) {
   const endpoint = candidateEndpoint(address); candidateToken(token);
-  const selected = envelope(operation), preparation = ['prepare', 'prepare-rebase', 'resolve'].includes(operation.kind);
+  const selected = envelope(operation), preparation = ['prepare', 'prepare-rebase', 'resolve', 'resolve-rebase'].includes(operation.kind);
   candidateKeys(options, ['timeoutMs', 'signal', 'ca', 'maximum'], []);
   const timeout = integer(options.timeoutMs ?? 30000, 'candidate timeout', 1, 300000);
   const maximum = Math.min(selected.maximum, integer(options.maximum ?? selected.maximum, 'candidate response limit', 1, PREPARATION_LIMIT));

@@ -105,8 +105,8 @@ without the Git oracle and makes no native bundle-admission claim.
 
 ## Command-line workflow
 
-`node scripts/fg_pull_candidate.mjs --help` exposes `capture`, `resolve`,
-`inspect`, `draft`, and `stage`. Capture and resolution contact the native node;
+`node scripts/fg_pull_candidate.mjs --help` exposes `capture`, `resolve`, `resolve-rebase`,
+`inspect`, `draft`, and `stage`. Capture and both resolution commands contact the native node;
 staging reads an explicit credential offline to save an exact sender request.
 None publishes repository state. The existing `remote_pull.mjs` remains the
 separately confirmed sender.
@@ -155,6 +155,81 @@ permission to merge. It does verify reported native commit identities and
 cross-check the supplied construction metadata against the relevant native
 commit bodies. Rebase inspection always retains the full ordered commit array
 and all its intermediate differences, even when the final comparison is empty.
+
+## Continue an original rebase
+
+For a retained rebase conflict, `resolve-rebase` requires an action file that
+explicitly names the original stopped commit. Select every conflict at that
+original commit using the raw `path_hex` values from the package:
+
+```json
+{
+  "action": "resolve",
+  "original": "EXACT_RAW_STOPPED_COMMIT_OID",
+  "choices": [
+    { "path_hex": "66696c65ff", "choice": "file", "mode": "100755", "content_hex": "00ff0d0a" }
+  ]
+}
+```
+
+Replace the illustrative original ID and path with the saved native identities.
+Choices are `base` (original parent), `ours` (current rebased parent), `theirs`
+(original commit), `delete`, or `file`. A selected side must exist. File bytes
+can be empty or binary, with explicit `100644` or `100755` mode. Earlier recipes
+come only from the independently pinned package and are retransmitted unchanged;
+a choice file cannot replace another original's decisions.
+
+```sh
+node scripts/fg_pull_candidate.mjs resolve-rebase \
+  --package /private/pr-7-stopped --sha256 RETAINED_MANIFEST_SHA256 \
+  --choices /private/original-commit-choices.json --token-file /private/read-token \
+  --output-dir /private/pr-7-continued
+```
+
+This produces a new create-only package and its own independent manifest hash.
+Another conflict remains a noncandidate (exit 1) with no bundle or inspection;
+the next invocation uses that new package and a choice for its new stopped
+original. A clean result (exit 0) includes a complete inspection of the exact
+final bundle. No PR or reviewer rediscovery occurs, and no repository mutation
+is published. The operation sends at most one continuation and one inspection.
+
+An initial or post-resolution `became_empty` stop instead requires this explicit
+transition from the original `stop` policy:
+
+```json
+{
+  "action": "continue-empty",
+  "original": "EXACT_RAW_STOPPED_COMMIT_OID",
+  "from_empty": "stop",
+  "empty": "keep"
+}
+```
+
+Choose `keep` or `drop`; the choice also governs the remaining suffix. The same
+CLI command accepts that file. It resubmits accumulated recipes when present;
+otherwise it uses native rebase preparation. The original request stays intact,
+and only the validated action history derives the effective policy. Dropping
+the entire suffix cannot manufacture a publishable candidate equal to the target:
+that native refusal remains an error, with the prior package intact.
+
+Continuation captures use the explicit
+`frankengit-pull-rebase-continuation-capture-v1` schema. Their flat, versioned
+history retains each stopped report and action, never a recursively nested
+capture. Reloading revalidates all original identities, conflicts, binary file
+hashes, consumed receipts and completed prefixes at the original snapshot.
+Current report and inspection must still join that same source head. Omitted or
+rewritten historical recipes, policy edits and changed cumulative receipts refuse
+even if a new package hash is computed. A complete series inspection is required
+before any approval, change-request or merge draft can be made.
+
+There are at most 129 history rounds and 128 resolved paths across all original
+commits. Each supplied file is bounded to 1 MiB; cumulative decoded paths and
+replacement bytes to 4 MiB; form uploads to 256 KiB; multipart to 5 MiB. The whole
+capture, including reports and hexadecimal choices, remains bounded to 16 MiB.
+These bounds and the unchanged operation deadline apply cumulatively; a partial
+history or truncated inspection is never accepted.
+
+## Draft and stage the inspected candidate
 
 To draft an approval or change request, supply a private choice file such as:
 

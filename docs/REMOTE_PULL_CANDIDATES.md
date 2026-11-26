@@ -84,13 +84,40 @@ dropped empty steps. Every actual rewritten committer header must match the
 explicit request. This is the existing native `verified-linear-series-v1`
 inspection, not a new artifact or independently recomputed Git history.
 
-The ordinary `resolvePullCandidate` API and CLI resolution path accept merge and
-squash conflicts. Rebase resolution needs cumulative recipes keyed by original
-commit, so this client refuses that path explicitly. Rebase stopped packages
-remain inspectable; the existing native/browser rebase workflow supports those
-recipes. No ordinary path-only choice list is silently interpreted as a series
-resolution, and a capture is never automatically retried with another empty
-policy.
+The ordinary `resolvePullCandidate` API and CLI `resolve` path accept merge and
+squash conflicts. The separate `resolveRebaseCandidate(capture, action, token,
+options)` API and CLI `resolve-rebase` continue a pinned rebase stop with explicit
+original-commit choices. An action is either
+`{action:'resolve', original:RAW_STOPPED_OID, choices:[...]}` or
+`{action:'continue-empty', original:RAW_STOPPED_OID, from_empty:'stop',
+empty:'keep'|'drop'}`. Conflict path choices use the existing side/delete/file
+grammar; file choices retain exact `content_hex` and explicit regular-file mode.
+The ordinary path-only list is never interpreted as a rebase recipe.
+
+Continuation never rediscovers the PR or reviewer streams. It sends one
+`resolve-rebase` request containing every accumulated original-commit recipe,
+or one `prepare-rebase` request for an explicit empty-policy transition with no
+recipes. A clean response must pass the complete series inspector before it can
+be saved as a candidate. A later conflict or empty stop is retained with no
+bundle or inspection; it can receive another separately chosen continuation.
+At most two HTTP operations occur, with one cumulative deadline and byte budget.
+
+The resulting `frankengit-pull-rebase-continuation-capture-v1` keeps the original
+`request`, PR and reviewer pages unchanged. Its flat `history` contains the
+ordered stopped preparation reports and explicit actions under
+`frankengit-pull-rebase-history-v1`; it never nests previous captures. Offline
+validation replays that history to derive the effective empty policy, original
+recipes and file object identities. Every consumed receipt must match its
+observed conflict, choice and result. Previously completed mappings and trees
+cannot change. Final clean and stopped reports must retain the original source
+head and snapshot. The package format and independent manifest pin are unchanged.
+
+An entirely dropped source suffix is not a new publishable PR candidate: the
+native profile requires a retained series with a candidate distinct from the
+target. A native refusal is returned as a bounded error; no commit is fabricated,
+no clean package is substituted and no alternate merge method is attempted.
+See [the package workflow](PULL_CANDIDATE_PACKAGES.md#continue-an-original-rebase)
+for private choice files and CLI examples.
 
 The return value contains `capture`, a detached JSON record of the request and
 complete native observations, `bundle` (a detached Buffer or null), and `usage`
@@ -142,6 +169,12 @@ body, 16 MiB aggregate commit bodies, 512 changed-path entries, 4096 hunks,
 64 text-file comparisons and 2 MiB cumulative path/hunk payload. The enclosing
 8 MiB JSON and 16 MiB capture ceilings can refuse a series below those individual
 limits; they never truncate the inspection.
+Rebase continuation additionally bounds retained history to 129 rounds, total
+resolved paths across all originals to 128, each replacement file to 1 MiB and
+cumulative decoded path/replacement bytes to 4 MiB. Each new upload includes the
+prior recipes and is bounded to 256 KiB for forms or 5 MiB for multipart. Retained
+reports, actions and hexadecimal files must also fit the existing 16 MiB capture
+ceiling. Oversized history refuses before a continuation request.
 
 Each request owns and closes one socket. HTTPS verifies hostnames/certificates;
 HTTP is limited to explicit numeric loopback. `ca` accepts an explicit bounded
@@ -170,7 +203,9 @@ The rebase client lane runs independently of that oracle:
 
 ```sh
 node --test --test-concurrency=1 tests/operator/pull_candidate_rebase.test.mjs \
-  tests/operator/pull_candidate_commit.test.mjs
+  tests/operator/pull_candidate_commit.test.mjs \
+  tests/operator/pull_candidate_rebase_history.test.mjs \
+  tests/operator/pull_candidate_rebase_continuation.test.mjs
 ```
 
 Its controlled native-schema peers use real computed SHA-1/SHA-256 commit-body
@@ -178,6 +213,9 @@ identities and deliberately opaque bundle fixtures. They test exact bundle
 custody, complete intermediate-path disclosure, actual executable CLI
 capture/inspect/stage, private packages, explicit review/merge methods, stopped
 outcomes, stale reviewer streams, raw refs and tampered-series refusal. They also
-retain ordinary merge/squash request and review compatibility. These tests do
+cover successive conflict stops, retransmission of prior binary recipes,
+conflict-to-empty continuation, explicit keep/drop, strict cumulative receipts,
+unchanged original snapshots and create-only package restarts. They retain
+ordinary merge/squash request and review compatibility. These tests do
 not establish native bundle admission, independent ancestry/replay equivalence,
 Rust-node execution or full-workspace verification.
