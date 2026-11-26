@@ -1,4 +1,4 @@
-# FrankenGit reality check and bridge plan — November 25, 2026
+# FrankenGit reality check and bridge plan — November 26, 2026
 
 **On November 23, two Linux workers completed sponsored publication and remote inbox reads in both Git hash formats. Across two machines, signed repository backups restored a Git ref, its exact file contents and modes, and an issue that a fresh HTTP listener served with the original history. A supported team deployment, independent whole-installation recovery and a qualified release remain open.**
 
@@ -31,6 +31,19 @@ formats and left the original key unregistered and the native branch page
 identical. The pinned Node suite at `a7ae1784` passed 44 operator tests,
 including the credential selected for each of the three HTTP requests.
 [Branch transaction operator](REMOTE_BRANCH_TRANSACTIONS.md) · [Native split-grant campaign](../scripts/e2e/suites/operator/remote_branch_transaction.sh)
+
+The source-matched `6e226d8a` native executable passed the split-grant
+campaign and the existing branch-transaction smoke. In both hash formats a
+mismatched writer reached the gateway and received a request-level 403 before
+key registration. A correctly scoped receive-only credential published all
+three requested effects, with the outcome reads using a separate outcomes-read
+credential. The campaign truncated the native reply after its headers and
+recovered the identical seal and decision with a rotated reader after restart,
+with zero repeat publication requests. A stale mixed batch recorded
+`ExpectedOldRefMismatch` and left the canonical refs intact. All four listeners
+drained their 30 accepted connections. Independent node and release
+qualification remain open on `.4.81`.
+[Split-grant campaign](../scripts/e2e/suites/operator/remote_branch_transaction.sh) · [Native transaction smoke](../scripts/e2e/suites/smokes/branch_transaction.sh)
 
 Two distinct stock pushes while the native watcher was stopped exposed a
 delivery gap in both Git formats. On restart only the second commit ran and
