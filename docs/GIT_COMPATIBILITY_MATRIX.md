@@ -46,6 +46,21 @@ Base status values used below are `required-v1`, `planned`, `experimental-v1`, `
 | Archive generation | required-v1 subset | Pure-Rust tar/zip generation, path safety, deterministic ordering, resource bounds |
 | Diff/merge | required-v1 core | Pure-Rust Myers/patience/histogram-style diff profiles and deterministic merge; oracle corpus for observable behavior |
 
+## Legacy fetch negotiation rounds
+
+Protocol v0/v1 connections keep one authorized want/have state across successive
+have batches. Each batch flush produces the applicable ACK/NAK response while
+the session waits for more haves or `done`; it does not require `no-done`.
+Plain ACK mode acknowledges its first common object immediately. Detailed
+multi-ACK mode ends an explicit `done` with an unqualified final ACK.
+
+The [legacy negotiation profile](GIT_LEGACY_NEGOTIATION.md) specifies the exact
+round boundaries, conservative negotiated `no-done` readiness, stateless outer
+envelopes, and live-scope/resource checks. Its constructed wire regressions are
+source-checked against pinned Git 2.54.0 and passed in the complete native wire
+crate suite. Stock-client socket qualification remains a separate gate; the
+linked profile records the exact revision and execution boundary.
+
 ## Exact-name fetches with protocol v2
 
 With `--enable-ref-in-want`, authenticated upload-pack views advertise

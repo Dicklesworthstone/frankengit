@@ -214,7 +214,7 @@ fn default_sized_have_sets_preserve_exact_wire_and_pack_order_in_every_protocol(
                 expected.extend([data(b"ready\n"), Packet::Delimiter, data(b"packfile\n")]);
                 expected
             } else {
-                let mut expected = vec![data(b"NAK\n")];
+                let mut expected = Vec::new();
                 expected.extend(
                     repository
                         .common
@@ -222,7 +222,7 @@ fn default_sized_have_sets_preserve_exact_wire_and_pack_order_in_every_protocol(
                         .chain(&duplicates)
                         .map(|id| data(format!("ACK {id} common\n"))),
                 );
-                expected.push(data(format!("ACK {} ready\n", duplicates[3])));
+                expected.push(data(format!("ACK {}\n", duplicates[3])));
                 let common_events: Vec<_> = result
                     .events
                     .iter()

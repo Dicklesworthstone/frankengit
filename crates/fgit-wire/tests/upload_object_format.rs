@@ -360,13 +360,11 @@ fn legacy_format_refusal_installs_no_flags_or_want_state() {
                 transition.output.is_empty(),
                 "no failed-request ACK mode remains"
             );
-            assert_eq!(
-                machine.push_packet(&Packet::Flush, &repo),
-                Err(WireError::IllegalTransition {
-                    state: "legacy have phase",
-                    packet: "flush",
-                }),
-                "no failed-request no-done flag remains",
+            let boundary = machine.push_packet(&Packet::Flush, &repo).unwrap();
+            assert_eq!(boundary.output, vec![data(b"NAK\n")]);
+            assert!(
+                boundary.events.is_empty() && !machine.is_complete(),
+                "a legal have boundary still does not select a pack",
             );
             let result = machine.push_packet(&data(b"done\n"), &repo).unwrap();
             let request = selected_pack(&result);

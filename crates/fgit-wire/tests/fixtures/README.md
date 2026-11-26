@@ -5,7 +5,11 @@ raw requests captured from the pinned Git 2.54.0 oracle used by the independent
 audit. The final container-only LF after their `0000` flush is stripped by the
 test helper; it is not part of the captured pkt-line stream. These two fixtures
 prove the mixed LF rule: request capabilities and controls may be LF-free while
-advertisement records remain LF-terminated.
+advertisement records remain LF-terminated. The v0 depth capture contains an
+initial shallow-negotiation HTTP request inside fetch-pack's outer envelope.
+Its outer flush ends the HTTP body; it does not add an inner have flush or
+request a pack. The test supplies an explicit shallow-boundary provider and
+checks that this first round returns shallow information without a pack handoff.
 
 The smaller `v1-*` and `v2-*` fixtures remain constructed state-machine cases:
 their role is bounded transition coverage only, not an upstream-conformance
