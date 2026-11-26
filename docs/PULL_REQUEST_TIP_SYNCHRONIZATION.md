@@ -40,11 +40,23 @@ not these examples. Discovery needs independent PR-read and source-read grants.
 The server, not this file, authenticates and authorizes the bearer. HTTP is allowed
 only to numeric loopback addresses. HTTPS verifies certificates; `--ca-file` adds
 an explicit private CA. No redirects, cookies, inferred proxies, or automatic
-network retries are used. The token file holds exactly 64 lowercase hex digits
-with at most one final newline. Tokens are not stored in the plan or printed.
+network retries are used. The token file holds either exactly 64 lowercase hex
+digits or `fgagent_` followed by 64 lowercase hex digits, with at most one final
+LF. BOMs, CRLF and other whitespace are refused. Tokens are not stored in the
+plan or printed; the credential fingerprint includes every byte of the token,
+including the sponsored prefix.
 Control files must be owner-private regular files with no hardlinks; their parent
 and the plan directory must be stable, nonsymlink, owner-private 0700 directories.
 Same-UID hostile storage replacement is outside this trusted operator profile.
+
+For a [sponsored agent credential](SPONSORED_AGENT_CREDENTIALS.md), set
+`principal_id` to the agent ID. Inspection and preparation require independent
+`pulls-read` and `source-read` grants, publication requires `pulls-write`, and
+original-key recovery requires `outcomes-read`. The native server checks the
+current grant and its repository, lifetime and revocation on each request.
+Accepting the token spelling does not authorize a request. This operator still
+publishes only the retained tip-only metadata updates: it grants no candidate
+review, merge, branch publication or approval reuse.
 
 ## Inspect and retain a plan
 

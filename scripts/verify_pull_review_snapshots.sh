@@ -7,9 +7,10 @@ for file in scripts/operator/pull_review_snapshot.mjs scripts/operator/pull_revi
   tests/operator/pull_review_snapshot_fixture.mjs tests/operator/pull_review_snapshot.test.mjs \
   tests/operator/pull_review_cli.test.mjs tests/operator/pull_review_lifecycle.test.mjs \
   tests/operator/remote_pull_raw_references.test.mjs tests/operator/remote_pull_rebase.test.mjs \
+  tests/operator/pull_agent_credentials.test.mjs \
   scripts/operator/pull_command.mjs scripts/operator/remote_pull.mjs scripts/operator/transaction_outcome.mjs; do
   node --check "$file"
 done
 node --test tests/operator/pull_review_snapshot.test.mjs tests/operator/pull_review_cli.test.mjs \
   tests/operator/pull_review_lifecycle.test.mjs tests/operator/remote_pull_raw_references.test.mjs \
-  tests/operator/remote_pull_rebase.test.mjs
+  tests/operator/remote_pull_rebase.test.mjs tests/operator/pull_agent_credentials.test.mjs

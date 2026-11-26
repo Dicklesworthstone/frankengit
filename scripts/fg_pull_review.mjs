@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { capturePullReviews, reviewCanonical, parseReviewJson, failReview, ReviewSnapshotError } from './operator/pull_review_snapshot.mjs';
 import { draftPullReview } from './operator/pull_review_draft.mjs';
 import { readReviewPrivate, reviewDestination, saveReviewJson, loadReviewCapture } from './operator/pull_review_files.mjs';
+import { isCredentialToken, MAX_CREDENTIAL_TOKEN_BYTES } from './operator/credential_token.mjs';
 export const HELP = `Usage: node scripts/fg_pull_review.mjs capture|inspect|draft [options]
 
 capture --input PRIVATE_SELECTION_JSON --token-file PRIVATE_TOKEN --output NEW_CAPTURE_JSON
@@ -64,10 +65,13 @@ export async function run(args, { output = text => write(process.stdout, text), 
     let value;
     if (action === 'capture') {
       const selected = parseReviewJson(await readReviewPrivate(flags.input, 16384));
-      const bytes = await readReviewPrivate(flags['token-file'], 65);
-      if (bytes.length !== 64 && !(bytes.length === 65 && bytes[64] === 10)) failReview('invalid_review_token_file');
-      const token = bytes.subarray(0, 64).toString('utf8');
-      if (!/^[0-9a-f]{64}$/.test(token)) failReview('invalid_review_token_file');
+      const bytes = await readReviewPrivate(flags['token-file'], MAX_CREDENTIAL_TOKEN_BYTES + 1);
+      let token;
+      try {
+        const end = bytes.at(-1) === 10 ? bytes.length - 1 : bytes.length;
+        token = bytes.subarray(0, end).toString('utf8');
+        if (!isCredentialToken(token)) failReview('invalid_review_token_file');
+      } finally { bytes.fill(0); }
       const ca = flags['ca-file'] === undefined ? undefined : await readReviewPrivate(flags['ca-file'], 131072);
       started = true;
       value = await capturePullReviews(selected, token, { signal, ca, timeoutMs: Number(flags['timeout-ms'] ?? '30000') });
