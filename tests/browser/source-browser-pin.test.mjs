@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { sourceFields, snapshotOf, sourceBinding, verifySourceCommit, mount }
+import { sourceFields, searchFields, snapshotOf, sourceBinding, verifySourceCommit, mount }
   from '../../crates/fgit-node/src/smart_http/server/browser/browser.mjs';
 import { fixture, hex, webcrypto, dom, location, response, waitFor, queuedFetch }
   from './source-browser-fixtures.mjs';
@@ -49,9 +49,14 @@ for (const format of ['sha1', 'sha256']) {
     assert.equal(d.get('content').textContent, ''); assert.equal(d.get('snapshot').textContent, '');
     assert.equal(d.get('expected-commit').value, expected); assert.equal(d.urls.size, 0);
   });
-  test(`${format}: complete proof and download are explicitly anchored to the caller's commit`, async () => {
+  for (const suffix of [null, 'ff']) test(`${format}: caller-pinned download with ${suffix === null ? 'text' : 'byte-only'} reference`, async () => {
     const f = corpus(format), commit = f.common.source_commit;
+    if (suffix !== null) {
+      f.common.ref = null;
+      f.common.ref_hex = hex(Buffer.from('refs/heads/topic-')) + suffix;
+    }
     const d = setup(f, `${format}:${commit}`, [f.tree(), f.blob(), f.log(), f.tree(), f.blob()]);
+    if (suffix !== null) d.get('reference').value = 'hex:' + f.common.ref_hex;
     d.connect(); await waitFor(() => d.buttons('content').length === 1);
     assert.match(d.get('snapshot').textContent, /Caller-supplied commit pin/);
     d.buttons('content')[0].click();
@@ -61,7 +66,11 @@ for (const format of ['sha1', 'sha256']) {
     assert.match(d.get('content').textContent, /matches your caller-supplied commit pin/);
     assert.doesNotMatch(d.get('content').textContent, /commit was selected by the server/);
     assert.match(d.get('content').textContent, /branch freshness and author identity are not independently verified/);
-    for (const call of d.calls) assert.equal(call.fields.get('expected_commit'), commit);
+    for (const call of d.calls) {
+      assert.equal(call.fields.get('expected_commit'), commit);
+      assert.equal(call.fields.get('ref'), f.common.ref);
+      assert.equal(call.fields.get('ref_hex'), suffix === null ? null : f.common.ref_hex);
+    }
     d.buttons('content').find(b => b.textContent === 'Download verified file bytes').click();
     assert.deepEqual(new Uint8Array(await d.urls.values().next().value.arrayBuffer()), f.bytes);
     d.client.disconnect(); assert.equal(d.get('expected-commit').value, ''); assert.equal(d.urls.size, 0);
@@ -123,4 +132,24 @@ test('the served form describes an independent full commit pin without claiming 
   assert.match(html, /id="expected-commit"[^>]*maxlength="71"/);
   assert.match(html, /id="commit-pin-help"/); assert.match(html, /obtained independently/);
   assert.match(html, /not a historical-object lookup/); assert.match(html, /including the first/);
+});
+
+test('byte-only and UTF-8 hex selections bind the exact reply and all search and tree fields', () => {
+  const f = corpus(), prefix = hex(Buffer.from('refs/heads/topic-'));
+  for (const [suffix, label] of [['fe', null], ['c285', 'refs/heads/topic-\u0085'], ['c3a9', 'refs/heads/topic-é']]) {
+    const refHex = prefix + suffix, selection = { ...f.selected, reference: 'hex:' + refHex };
+    const reply = { ...f.common, ref: label, ref_hex: refHex }, binding = sourceBinding(reply, selection);
+    for (const fields of [sourceFields(selection, binding, '6162'), searchFields(selection, binding, 'value')]) {
+      assert.equal(fields.ref_hex, refHex);
+      assert.equal(Object.hasOwn(fields, 'ref'), false);
+      assert.equal(fields.expected_head, binding.head);
+      assert.equal(fields.expected_commit, binding.commit);
+    }
+    assert.throws(() => sourceBinding({ ...reply, ref_hex: prefix + 'ff' }, selection), /reference/);
+    assert.throws(() => sourceBinding({ ...reply, ref: label === null ? 'refs/heads/topic-�' : null }, selection), /reference/);
+  }
+  for (const bad of ['ff', 'hex:', 'hex:f', 'hex:ABCD', 'hex:' + prefix + '00', 'hex:' + prefix + '2f2f61',
+    'hex:' + prefix + 'ff'.repeat(1024), 'refs/heads/\ud800']) {
+    assert.throws(() => sourceFields({ ...f.selected, reference: bad }, null));
+  }
 });

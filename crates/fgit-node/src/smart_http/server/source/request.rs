@@ -2,6 +2,7 @@
 //! expected OIDs are comparisons, never an arbitrary-object lookup capability.
 
 use super::super::issues::{ApiError, MAX_FORM_BYTES, parse_decimal, parse_form, parse_snapshot};
+use super::super::ref_field::required_reference;
 use fgit_forge::source_archive::SourceArchiveFormat;
 use fgit_forge::source_browse::{SourceBrowseAction, SourceBrowseQuery};
 use fgit_forge::source_search::batch::{MAX_BATCH_QUERIES, SourceQueryBatch};
@@ -105,7 +106,7 @@ impl<'a> Request<'a> {
             }
             let common = matches!(
                 name.as_str(),
-                "ref" | "object_format" | "expected_head" | "expected_commit"
+                "ref" | "ref_hex" | "object_format" | "expected_head" | "expected_commit"
             );
             let applicable = match self.operation {
                 Operation::Commit => false,
@@ -127,8 +128,8 @@ impl<'a> Request<'a> {
         if take(&mut fields, "object_format")? != format.as_str() {
             return Err(ApiError::bad("object_format_mismatch"));
         }
-        let reference = RefName::try_new(take(&mut fields, "ref")?.as_bytes())
-            .map_err(|_| ApiError::bad("invalid_ref"))?;
+        let reference =
+            required_reference(&mut fields, "ref", "ref_hex", "missing_source_field")?;
         // The existing tree readers require a commit-valued ref. Annotated-tag
         // peeling is not silently added as another object-selection algorithm.
         let expected_head = fields
@@ -347,6 +348,69 @@ mod tests {
     fn form(format: GitHashAlgorithm) -> String {
         format!("object_format={}&ref=refs%2Fheads%2Fmain", format.as_str())
     }
+    #[test]
+    fn every_current_source_operation_selects_the_exact_reference_bytes() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let expected = "a".repeat(format.digest_len() * 2);
+            for (operation, extra) in [
+                (Operation::Commit, ""),
+                (Operation::Tree, "&limit=1"),
+                (Operation::Blob, "&path_hex=61&limit=1"),
+                (Operation::Archive, "&archive_format=zip"),
+                (Operation::Search, "&needle_hex=61"),
+                (Operation::SearchBatch, "&needle_hex=61&needle_hex=62"),
+            ] {
+                for (field, name) in [
+                    ("ref=refs%2Fheads%2Fmain", b"refs/heads/main".as_slice()),
+                    ("ref_hex=726566732f68656164732f6d61696e", b"refs/heads/main"),
+                    ("ref_hex=726566732f68656164732fff", b"refs/heads/\xff"),
+                ] {
+                    let body = format!(
+                        "object_format={}&{field}&expected_commit={expected}{extra}",
+                        format.as_str()
+                    );
+                    let command = request(operation).command(body.as_bytes(), format).unwrap();
+                    let selection = match command {
+                        Command::Commit { selection }
+                        | Command::Browse { selection, .. }
+                        | Command::Archive { selection, .. }
+                        | Command::Search { selection, .. }
+                        | Command::SearchBatch { selection, .. } => selection,
+                    };
+                    assert_eq!(selection.reference.as_bytes(), name);
+                    assert_eq!(
+                        selection.expected_commit,
+                        Some(GitOid::from_hex(format, &expected).unwrap())
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn current_source_ref_fields_reject_ambiguous_or_invalid_encodings() {
+        for (selectors, code) in [
+            ("", "missing_source_field"),
+            ("&ref=../main", "invalid_ref"),
+            ("&ref_hex=726566732f68656164732f00", "invalid_ref"),
+            ("&ref_hex=", "exactly_one_ref_encoding_required"),
+            ("&ref_hex=f", "exactly_one_ref_encoding_required"),
+            ("&ref_hex=FF", "exactly_one_ref_encoding_required"),
+            ("&ref_hex=zz", "exactly_one_ref_encoding_required"),
+            (
+                "&ref=refs/heads/main&ref_hex=726566732f68656164732f6d61696e",
+                "exactly_one_ref_encoding_required",
+            ),
+            ("&ref_hex=ff&ref_hex=ff", "duplicate_field"),
+        ] {
+            let body = format!("object_format=sha1{selectors}");
+            let error = request(Operation::Tree)
+                .command(body.as_bytes(), GitHashAlgorithm::Sha1)
+                .unwrap_err();
+            assert_eq!(error.code, code);
+        }
+    }
+
     #[test]
     fn byte_paths_and_binary_needles_are_not_lossy_text() {
         for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {

@@ -1,4 +1,5 @@
 // No framework, remote dependencies, HTML interpolation, or persistent credentials.
+import { sourceReference, referenceField, referenceHex } from './source-reference.mjs';
 import { collectSourceArchive, cancelSourceBody } from './source-archive.mjs';
 
 export const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
@@ -73,9 +74,10 @@ export function sourceBinding(reply, selection, previous = null) {
         /[\u0000-\u001f\u007f-\u009f\uD800-\uDFFF]/u.test(value)) throw new Error('Invalid source identity.');
     return value;
   };
+  const ref = sourceReference(selection.reference);
   if (!/^alg:[1-9][0-9]{0,4}:(?:[0-9a-f]{2}){16,64}$/.test(pin.head) ||
       Number(pin.head.split(':')[1]) > 65535 || /^0+$/.test(pin.head.split(':')[2]) ||
-      reply.ref !== selection.reference || reply.ref_hex !== hex(encoder.encode(selection.reference))) {
+      reply.ref !== ref.text || reply.ref_hex !== ref.hex) {
     throw new Error('Source reference or snapshot identity changed.');
   }
   const value = { ...pin, tenant: identity(reply.tenant_id), repository: identity(reply.repository_id),
@@ -276,7 +278,7 @@ export async function verifySourceCommit(selection, source, readLog,
   if (!selection || !source) throw new Error('Commit verification requires a pinned source.');
   const selected = { ...selection }, pinned = { ...source };
   const id = commitHex(pinned.commit, selected.format), root = commitHex(pinned.tree, selected.format);
-  if (pinned.format !== selected.format || pinned.referenceHex !== hex(encoder.encode(selected.reference)) ||
+  if (pinned.format !== selected.format || pinned.referenceHex !== referenceHex(selected.reference) ||
       !pinned.head || !pinned.sourceHead || !pinned.tenant || !pinned.repository || !pinned.incarnation) {
     throw new Error('Incomplete pinned commit source.');
   }
@@ -349,10 +351,10 @@ export async function verifySourceCommit(selection, source, readLog,
 }
 
 export function sourceFields(selection, snapshot, path = '') {
-  if (!['sha1', 'sha256'].includes(selection.format) || !selection.reference.startsWith('refs/')) {
+  if (!['sha1', 'sha256'].includes(selection.format)) {
     throw new Error('Choose a full reference and an object format.');
   }
-  const fields = { ref: selection.reference, object_format: selection.format };
+  const fields = { ...referenceField('ref', selection.reference), object_format: selection.format };
   if (selection.expectedCommit !== undefined) {
     const expected = commitHex(selection.expectedCommit, selection.format);
     if (snapshot && commitHex(snapshot.commit, selection.format) !== expected) {

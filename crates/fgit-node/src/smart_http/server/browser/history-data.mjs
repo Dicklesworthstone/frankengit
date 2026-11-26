@@ -1,23 +1,10 @@
 // Native history is derived read data, not author authentication or write authority.
 import { fail, record, integer, text, format, oid, binding, snapshot, opaque, utf8, hex, unhex } from './pulls-core.mjs';
+import { fullRef, referenceHex } from './source-reference.mjs';
+export { fullRef, referenceField, referenceHex } from './source-reference.mjs';
 import { findBytes, joinBytes } from './pulls-candidate.mjs';
 export const HISTORY_LIMITS = Object.freeze({ reply: 8 * 1024 * 1024, commits: 4096, edges: 16384,
   metadata: 4 * 1024 * 1024, commitBytes: 65536, blob: 1024 * 1024, lines: 20000, comparisons: 128 });
-export function fullRef(value) {
-  // hex: is the branch picker's notation. Git forbids colon in a native name.
-  const raw = typeof value === 'string' && value.startsWith('hex:')
-    ? unhex(value.slice(4), 1024) : utf8.encode(text(value, 1024, 'reference'));
-  const bytes = String.fromCharCode(...raw);
-  if (!bytes.startsWith('refs/') || /[\x00-\x20\x7f~^:?*\[\\]/u.test(bytes) || bytes.includes('..') || bytes.includes('@{') ||
-      bytes.endsWith('.') || bytes.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.lock'))) fail('A complete native reference is required.');
-  return value;
-}
-export function referenceHex(ref) {
-  return ref.startsWith('hex:') ? ref.slice(4) : hex(utf8.encode(ref));
-}
-export function referenceField(name, ref) {
-  return ref.startsWith('hex:') ? { [name + '_hex']: ref.slice(4) } : { [name]: ref };
-}
 export function bytePath(value, root = false) {
   if (value === null && root) return null;
   const bytes = unhex(value, 4096);

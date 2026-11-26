@@ -14,7 +14,7 @@
     <p>Browse an authorized, snapshot-pinned view. File names and source are displayed as data, never executed.</p>
     <form id="connection">
       <label>Access token<input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="Repository read token"></label>
-      <label>Reference<input id="reference" value="refs/heads/main" autocomplete="off" spellcheck="false" required maxlength="4096"></label>
+      <label>Reference (full name or hex: bytes)<input id="reference" value="refs/heads/main" autocomplete="off" spellcheck="false" required maxlength="4096"></label>
       <label>Object format<select id="format"><option value="sha1">SHA-1</option><option value="sha256">SHA-256</option></select></label>
       <label>Expected commit (optional, obtained independently)<input id="expected-commit" autocomplete="off" spellcheck="false" maxlength="71" placeholder="Full lowercase SHA-1 or SHA-256 commit ID" aria-describedby="commit-pin-help"></label>
       <button type="submit">Open reference</button><button id="disconnect" type="button">Disconnect</button>

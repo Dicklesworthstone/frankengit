@@ -74,6 +74,7 @@ POST {REPO_URL}/api/v1/source/tree
 POST {REPO_URL}/api/v1/source/blob
 POST {REPO_URL}/api/v1/source/archive
 POST {REPO_URL}/api/v1/source/search
+POST {REPO_URL}/api/v1/source/search-batch
 ```
 
 These are body-bearing reads, not mutations. POST keeps paths and search
@@ -89,7 +90,7 @@ The common source-selection fields are:
 
 | Field | Meaning |
 |---|---|
-| `ref` | Full current repository ref, such as `refs/heads/main`. It must select a native commit. |
+| `ref` or `ref_hex` | Supply exactly one spelling of a full current ref that selects a native commit. Use `ref=refs/heads/main` for text, or `ref_hex=726566732f68656164732fff` for the exact bytes `refs/heads/` followed by `ff`. Hex uses two lowercase hexadecimal digits per byte. |
 | `object_format` | Exactly `sha1` or `sha256`, matching the repository. |
 | `expected_head` | Optional exact `snapshot_token` from an earlier source response; required for directory/file continuation. |
 | `expected_commit` | Optional nonzero lowercase commit OID in the declared native hash domain. |
@@ -117,7 +118,7 @@ for nonzero cursors. Restart a walk explicitly after a moved-snapshot error.
 
 ## Selected current commit
 
-`POST /api/v1/source/commit` accepts only the four common source-selection
+`POST /api/v1/source/commit` accepts only the common source-selection
 fields. The current visible ref must select a commit; `expected_commit` compares
 that tip and cannot select an ancestor or another admitted object. Path, object
 ID, pagination and history fields are refused. Annotated tags are not peeled.

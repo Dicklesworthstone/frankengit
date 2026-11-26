@@ -15,6 +15,10 @@ fn asset(route: &[u8], target: &str) -> Option<(&'static str, &'static str)> {
             "text/javascript; charset=utf-8",
             include_str!("history-data.mjs"),
         )),
+        b"/ui/history/source-reference.mjs" => Some((
+            "text/javascript; charset=utf-8",
+            include_str!("source-reference.mjs"),
+        )),
         b"/ui/history/history-view.mjs" => Some((
             "text/javascript; charset=utf-8",
             include_str!("history-view.mjs"),
@@ -102,6 +106,7 @@ mod tests {
             "",
             "history.mjs",
             "history-data.mjs",
+            "source-reference.mjs",
             "history-view.mjs",
             "pulls-core.mjs",
             "pulls-candidate.mjs",
