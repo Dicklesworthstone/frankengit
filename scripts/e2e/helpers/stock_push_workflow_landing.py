@@ -542,7 +542,36 @@ def ordered_push_restart(campaign, fmt):
                          for event in event_directories(f)]
     assert {report["executed_commit"] for report in execution_reports} == {f.tips[0], first, second}
     assert len(execution_reports) == 3 and all(report["workspaces_closed"] for report in execution_reports)
-    campaign.record(fmt, "ordered-push-restart", first=first, second=second, executed=f.effects_count())
+
+    def publish(label, commit, exit_code):
+        run_directory, = [path.parent for event in event_directories(f)
+                          for path in event.glob("dispatch-*/workflow-*/report.json")
+                          if json.loads(path.read_bytes())["executed_commit"] == commit]
+        marker = hashlib.sha256((run_directory / "attempt.json").read_bytes()).hexdigest()
+        history = json.loads(campaign.invoke(label + "-recover", [
+            "workflow", "recover", run_directory, TENANT, REPOSITORY, "--journal-id", marker]))
+        entry, index = next((entry, index) for entry in history["entries"]
+                            for index, fact in enumerate(entry["facts"])
+                            if fact["status"] == "completed" and fact["job"] == "a")
+        assert entry["source_commit"] == commit
+        return json.loads(campaign.invoke(label, [
+            "workflow", "publish", *f.scope, REF, "--trusted-local", "--run-directory", run_directory,
+            "--journal-id", marker, "--batch", entry["batch_sha256"], "--fact-index", index,
+            "--principal-id", PRINCIPAL, "--idempotency-key", label, "--minimum-pin", history["snapshot"],
+            "--object-format", fmt, "--expected-incarnation", f.incarnation], code=exit_code))
+
+    f.tips[0] = second
+    f.open_pull()
+    stale = publish("ordered-stale-check", first, 3)
+    assert stale["outcome"] == "refused" and stale["refusal_code"] == "TargetRefMoved"
+    before = json.loads(campaign.invoke("ordered-before-check", [
+        "pr", "checks", *f.scope, 1, "--trusted-local", "--object-format", fmt]))
+    assert before["source_current"] and before["source_tip"] == second and before["checks"] == []
+    current = publish("ordered-current-check", second, 0)
+    assert current["outcome"] == "committed" and f.check()["conclusion"] == "success"
+    assert refs(f) == final_refs and f.effects_count() == 3
+    campaign.record(fmt, "ordered-push-restart", first=first, second=second,
+                    executed=f.effects_count(), refused_stale_check=stale["refusal_code"])
 
 
 if __name__ == "__main__":
