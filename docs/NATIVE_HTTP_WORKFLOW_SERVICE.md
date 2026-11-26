@@ -43,6 +43,10 @@ fg serve-http NODE TENANT REPOSITORY 127.0.0.1:8080 \
 All workflow selection flags are explicit. `--workflow-input` repeats for distinct,
 non-overlapping repository paths, including [nested prefixes](TRUSTED_WORKFLOW_INPUTS.md);
 the workflow directory must be included in those inputs.
+Supply exactly one ref selector. `--workflow-ref` takes a full branch or tag
+name. `--workflow-ref-hex` takes the exact full name encoded as lowercase byte pairs.
+The byte selector preserves non-UTF-8 Git names through execution, settlement and
+optional check publication.
 `--workflow-format` must match the repository's SHA-1 or SHA-256 object format.
 The polling interval accepts 10–60000 milliseconds and defaults to 1000. Each
 attempt accepts a 1–3600 second deadline and defaults to 300. Pending publication,

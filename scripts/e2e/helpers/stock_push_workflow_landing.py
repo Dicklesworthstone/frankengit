@@ -491,17 +491,20 @@ def check_pagination(campaign, fmt):
                     final_page=len(last["checks"]), published=len(rows), snapshot=page["snapshot_token"])
 
 
-def push_two_workflow_trees(f, *, second_marker=False):
+def push_two_workflow_trees(f, *, second_marker=False, reference=REF):
     run, first = fresh_push_source(f)
     with receive_listener(f) as address:
         def push(label, tip):
+            if reference != REF:
+                upstream("run", PIN, run, "client", "--", "update-ref", reference, tip)
+            refspec = f"{reference}:{reference}"
             upstream("push-loopback", PIN, run, label, address, f"/{REPOSITORY}.git",
-                     "client", "plain", f"{REF}:{REF}")
+                     "client", "plain", refspec)
             transcript = run / "transcripts" / label
-            porcelain = (transcript / "stdout.bin").read_text()
-            assert f"{REF}:{REF}" in porcelain and "[up to date]" not in porcelain, porcelain
+            porcelain = (transcript / "stdout.bin").read_bytes()
+            assert os.fsencode(refspec) in porcelain and b"[up to date]" not in porcelain, porcelain
             shutil.copyfile(transcript / "receipt.tsv", f.root / f"{label}.tsv")
-            assert refs(f)[REF] == tip
+            assert refs(f)[reference] == tip
         push("ordered-first", first)
         if second_marker:
             path, data = "ci/replayed.txt", b"second-snapshot\n"
@@ -699,6 +702,67 @@ def ordered_http_publish(campaign, fmt):
                     recovered_refusal=decision["refusal_code"], landed=second)
 
 
+def ordered_http_byte_ref(campaign, fmt):
+    f = Fixture(campaign, fmt, "ordered-http-byte-ref")
+    credentials(f)
+    raw = b"refs/heads/topic-\xff"
+    reference = os.fsdecode(raw)
+    initial_tip = f.tips[0]
+    created = json.loads(campaign.invoke("create-ordered-byte-source", [
+        "branch", "create", *f.scope, "--trusted-local", "--object-format", fmt,
+        "--principal", PRINCIPAL, "--idempotency-key", "byte-source",
+        "--ref-hex", raw.hex(), "--target", initial_tip,
+    ]))
+    assert created["command_committed"], created
+
+    def open_pull(number, tip):
+        campaign.invoke("open-ordered-byte-pr", [
+            "pr", "open", *f.scope, number, "--trusted-local", "--object-format", fmt,
+            "--principal", PRINCIPAL, "--idempotency-key", f"ordered-byte-pr-{number}",
+            "--expected-version", 0, "--source-ref-hex", raw.hex(), "--target-ref", TARGET,
+            "--expected-source", tip, "--expected-target", f.base,
+            "--title", "Checks on the exact byte-named branch", "--body", "Raw source ref.",
+        ])
+
+    def run_service(label, expected_runs, code=0):
+        with Server(f, label, ordered=True, publish=True, reference_bytes=raw) as server:
+            server.ready()
+            check = server.check()
+            number = f.current + 1
+            status, body = server.request("GET", f"/api/v1/pulls/{number}")
+            assert status == 200, (status, body)
+            subject = json.loads(body)["pull_request"]["data"]
+            assert subject["source_ref"] is None and subject["source_ref_hex"] == raw.hex()
+            assert subject["source_tip"] == f.tips[f.current]
+            server.wait(lambda _: all((event / "reported").is_file() for event in event_directories(f)))
+            drained, _ = server.stop(code=code)
+        assert drained["dispatched"] == expected_runs and not drained["requires_reconciliation"]
+        return check, drained
+
+    open_pull(1, initial_tip)
+    initial, initial_drain = run_service("byte-watch-initial", 1)
+    assert initial_drain["checks_committed"] == 1 and initial_drain["checks_refused"] == 0
+    before = refs(f)
+    first, second = push_two_workflow_trees(f, reference=reference)
+    assert f.effects_count() == 1
+    f.tips[1], f.current = second, 1
+    open_pull(2, second)
+    latest, catch_up = run_service("byte-watch-resume", 2, code=1)
+    assert catch_up["checks_committed"] == catch_up["checks_refused"] == 1
+    assert catch_up["non_green"] and not catch_up["publication_pending"]
+    assert latest["id"] != initial["id"]
+    records = [json.loads((event / "event.json").read_bytes()) for event in event_directories(f)]
+    assert len(records) == 3 and {row["commit"] for row in records} == {initial_tip, first, second}
+    assert all(row["ref_hex"] == raw.hex() for row in records)
+    assert f.effects.read_text().splitlines() == ["executed", "executed", "second-snapshot"]
+    assert refs(f) == {**before, reference: second}
+    resumed, idle = run_service("byte-watch-repeat", 0)
+    assert resumed == latest and idle["checks_committed"] == idle["checks_refused"] == 0
+    assert f.effects_count() == 3
+    campaign.record(fmt, "ordered-http-byte-ref-pushes", source_ref_hex=raw.hex(),
+                    first=first, second=second, check=latest["id"], executed=3)
+
+
 def ordered_unreachable_source(campaign, fmt):
     f = Fixture(campaign, fmt, "ordered-unreachable")
     watch = ["workflow", "watch", *f.scope, TARGET, "--trusted-local", "--workflow", "ci",
@@ -746,4 +810,5 @@ if __name__ == "__main__":
         ordered_push_restart(campaign, fmt)
         ordered_http_restart(campaign, fmt)
         ordered_http_publish(campaign, fmt)
+        ordered_http_byte_ref(campaign, fmt)
         ordered_unreachable_source(campaign, fmt)
