@@ -100,7 +100,12 @@ export async function prepared(response, fields, scope, patchSha, expectedPaths,
   }
   return { fields: { ...coordinates(fields), candidate_commit: candidate }, scope, bundle, sha256, tree, paths: [...paths.values()], metadata: reply };
 }
-export async function inspected(reply, artifact, crypto) {
+export async function inspected(reply, artifact, metadata, crypto) {
+  // Reconstruct the exact native commit from the captured request, not the
+  // server's mutually consistent candidate ID and inspection body. A valid
+  // hash alone cannot show that the server kept the user's attribution/time
+  // and literal message (including its final newline).
+  const requested = commitMetadata(metadata);
   const { fields, scope } = artifact, algorithm = scope.format;
   pinned(reply, scope); noEffects(reply); matchReference(reply, fields.ref);
   if (reply.type !== 'source_inspection' || reply.all_changed_paths !== true || reply.binary_bodies_included !== false ||
@@ -108,6 +113,8 @@ export async function inspected(reply, artifact, crypto) {
       reply.bundle_bytes !== artifact.bundle.length || reply.bundle_sha256 !== artifact.sha256 || !Array.isArray(reply.parents) ||
       reply.parents.length !== 1 || oid(reply.parents[0], algorithm) !== fields.expected_commit) fail('Inspected source identity changed.');
   const bytes = unhex(reply.candidate_commit_body_hex, 2 * 1024 * 1024);
+  const expected = utf8.encode(`tree ${artifact.tree}\nparent ${fields.expected_commit}\nauthor ${requested.author} ${requested.timestamp} +0000\ncommitter ${requested.committer} ${requested.timestamp} +0000\n\n${requested.message}`);
+  if (bytes.length !== expected.length || !bytes.every((byte, i) => byte === expected[i])) fail('Native commit differs from the requested metadata.');
   if (await objectHash('commit', bytes, algorithm, crypto) !== fields.candidate_commit) fail('Native commit hash mismatch.');
   const separator = findBytes(bytes, new Uint8Array([10, 10])); if (separator < 0) fail('Malformed native commit.');
   const headers = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, separator)).split('\n');

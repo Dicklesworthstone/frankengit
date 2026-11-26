@@ -330,7 +330,7 @@ export class SourceEditClient {
     const inspectUpload = sourceUpload(artifact.fields, artifact.bundle, 'bundle', inspectBoundary);
     const { value: reply } = await this.#transport.request('source/inspect', { method: 'POST', body: inspectUpload.bytes,
       contentType: inspectUpload.contentType, maximum: 32 * 1024 * 1024 });
-    await inspected(reply, artifact, crypto); this.#check(serial, epoch);
+    await inspected(reply, artifact, metadata, crypto); this.#check(serial, epoch);
     this.#artifact = { ...artifact, inspection: reply };
     return this.candidate;
   }

@@ -183,7 +183,14 @@ checks expected old/new Git blob identities. Browser bundles are limited to
 
 The actual returned bundle then passes native read-only inspection. The browser
 checks its SHA-1 or SHA-256 native commit-object identity, single ordered parent,
-tree identity, complete changed-path report and prepared effects. A failed or
+tree identity, complete changed-path report and prepared effects. It also
+reconstructs the complete commit body from the originally captured author,
+committer, explicit timestamp in UTC and literal message bytes. Coherent replies
+with a different attribution, timestamp, timezone, message or extra header
+cannot become a selectable candidate merely by supplying a matching new hash.
+Unicode, a leading message BOM, CRLF and the presence or absence of a final
+newline are retained exactly. These are declared commit identities, not proof
+that the author controls the named email address. A failed or
 cancelled preparation cannot retain an older selectable candidate. WebCrypto
 hash checks detect identity mismatches; they do not substitute for native
 validation, transport trust, verified-read proofs, or authorization.

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { SourceEditClient } from '../../crates/fgit-node/src/smart_http/server/browser/source-edit.mjs';
 import { Transport, hex, utf8 } from '../../crates/fgit-node/src/smart_http/server/browser/pulls-core.mjs';
 import { fullFilePatch, normalizeEdits, sourcePath, PATCH_LIMIT, FILE_LIMIT } from '../../crates/fgit-node/src/smart_http/server/browser/source-edit-patch.mjs';
-import { sourceEnvelope, prepared, inspected, digest, sourceUpload, coordinates, commitMetadata } from '../../crates/fgit-node/src/smart_http/server/browser/source-edit-protocol.mjs';
+import { sourceEnvelope, prepared, inspected, digest, sourceUpload, coordinates, commitMetadata, objectHash } from '../../crates/fgit-node/src/smart_http/server/browser/source-edit-protocol.mjs';
 import { fixture, token, crypto, href, edit, metadata, multipart, decodeUpload } from './source-edit-fixtures.mjs';
 async function connected(f) { const c = new SourceEditClient({ href, fetchImpl: f.fetchImpl, cryptoImpl: crypto }); await c.connect(token); return c; }
 async function candidate(f) { const c = await connected(f); await c.select('refs/heads/main', f.algorithm); await c.prepareEdits(f.edits, metadata); return c; }
@@ -38,6 +38,71 @@ for (const algorithm of ['sha1', 'sha256']) {
     await c.preparePatch(f.patch.bytes, metadata); assert.equal(c.candidate.fields.candidate_commit, f.candidate);
     assert.deepEqual(f.calls.slice(-2).map(c => c.endpoint), ['source/prepare', 'source/inspect']);
   });
+}
+
+// Coherent substitutions are more dangerous than a wrong digest: both native
+// replies agree, the parent/tree/file effects are intact, and WebCrypto proves
+// the substituted commit's real identity. It must still match the user's input.
+async function substituteCommit(f, body) {
+  const bytes = utf8.encode(body), candidate = await objectHash('commit', bytes, f.algorithm, crypto);
+  f.prepared.candidate_commit = candidate;
+  f.inspection.candidate_commit = candidate;
+  f.inspection.candidate_commit_body_hex = hex(bytes);
+  f.terminal.candidate_commit = candidate;
+  return candidate;
+}
+for (const algorithm of ['sha1', 'sha256']) {
+  for (const method of ['prepareEdits', 'preparePatch']) {
+    for (const [name, change] of [
+      ['author', body => body.replace('author Alice <a@example.invalid>', 'author Mallory <m@example.invalid>')],
+      ['committer', body => body.replace('committer Alice <a@example.invalid>', 'committer Mallory <m@example.invalid>')],
+      ['author time', body => body.replace('author Alice <a@example.invalid> 1', 'author Alice <a@example.invalid> 2')],
+      ['committer time', body => body.replace('committer Alice <a@example.invalid> 1', 'committer Alice <a@example.invalid> 2')],
+      ['author timezone', body => body.replace('author Alice <a@example.invalid> 1 +0000', 'author Alice <a@example.invalid> 1 +0530')],
+      ['committer timezone', body => body.replace('committer Alice <a@example.invalid> 1 +0000', 'committer Alice <a@example.invalid> 1 -0700')],
+      ['message', body => body.replace('Exact source edit', 'A different source edit')],
+      ['message newline', body => body.slice(0, -1)],
+      ['extra commit header', body => body.replace('\n\n', '\nencoding UTF-8\n\n')],
+    ]) test(algorithm + ' ' + method + ': coherent ' + name + ' substitution cannot pass requested metadata verification', async () => {
+      const f = await fixture(algorithm), c = await connected(f);
+      await c.select('refs/heads/main', algorithm);
+      const original = new TextDecoder().decode(Buffer.from(f.inspection.candidate_commit_body_hex, 'hex'));
+      const substituted = await substituteCommit(f, change(original));
+      assert.notEqual(substituted, f.candidate);
+      await assert.rejects(c[method](method === 'prepareEdits' ? f.edits : f.patch.bytes, metadata), /requested metadata/);
+      assert.equal(c.candidate, null); assert.equal(c.pending, null);
+      await assert.rejects(c.stageApply());
+      assert(!f.calls.some(call => call.endpoint === 'source/apply'));
+    });
+    test(algorithm + ' ' + method + ': exact Unicode metadata and literal message bytes remain publishable', async () => {
+      const f = await fixture(algorithm), c = await connected(f);
+      await c.select('refs/heads/main', algorithm);
+      const submitted = { author: 'Zoë 開発 <zoe@example.invalid>', committer: 'Build 🛠 <build@example.invalid>',
+        timestamp: 1795694400, message: '\uFEFFLiteral café\r\n\nNo final newline 🧪' };
+      const body = 'tree ' + f.tree + '\nparent ' + f.base + '\nauthor ' + submitted.author + ' ' + submitted.timestamp +
+        ' +0000\ncommitter ' + submitted.committer + ' ' + submitted.timestamp + ' +0000\n\n' + submitted.message;
+      const candidate = await substituteCommit(f, body), captured = { ...submitted };
+      const preparing = c[method](method === 'prepareEdits' ? f.edits : f.patch.bytes, submitted);
+      Object.assign(submitted, { author: metadata.author, committer: metadata.committer, timestamp: 2, message: 'Later UI draft\n' });
+      const ready = await preparing;
+      assert.equal(ready.fields.candidate_commit, candidate);
+      const command = decodeUpload(f.calls.find(call => call.endpoint === 'source/prepare').options).command;
+      for (const field of ['author', 'committer', 'timestamp', 'message']) assert.equal(command.get(field), String(captured[field]));
+      const pending = await c.stageApply(); assert.equal(pending.fields.candidate_commit, candidate);
+      assert.equal((await c.send()).outcome, 'committed');
+    });
+    test(algorithm + ' ' + method + ': changing the UI draft during preparation cannot authorize substituted metadata', async () => {
+      const f = await fixture(algorithm), c = await connected(f), submitted = { ...metadata };
+      await c.select('refs/heads/main', algorithm);
+      const original = new TextDecoder().decode(Buffer.from(f.inspection.candidate_commit_body_hex, 'hex'));
+      await substituteCommit(f, original.replace('Exact source edit', 'Later draft'));
+      f.config.prepare = () => { submitted.message = 'Later draft\n'; };
+      await assert.rejects(c[method](method === 'prepareEdits' ? f.edits : f.patch.bytes, submitted), /requested metadata/);
+      assert.equal(submitted.message, 'Later draft\n');
+      assert.equal(c.candidate, null); await assert.rejects(c.stageApply());
+      assert(!f.calls.some(call => call.endpoint === 'source/apply'));
+    });
+  }
 }
 for (const [name, change] of [
   ['parent', r => r.parents.push(r.parents[0])], ['candidate hash', r => r.candidate_commit_body_hex += '00'],
