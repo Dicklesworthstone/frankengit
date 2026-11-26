@@ -129,3 +129,37 @@ test('disconnect during a body read never permits late rows or export after reco
   pending.resolve(response(page({ events: [], resume_after: null }))); await secondRead;
   assert.match(f.el('events').textContent, /No granted event/); assert.doesNotMatch(f.el('events').textContent, /issue\/1/);
 });
+
+test('collaboration selection is explicit, bound until disconnect, and renders independent grants', async () => {
+  const raw = page({ disclosure_profile: 'collaboration-v2', issues_read: false, pulls_read: false,
+    discussions_read: true, reviews_read: true, events: [event('1:0', { aggregate: 'discussion/1' })] });
+  const f = fixture([response(raw)]);
+  assert.equal(f.el('profile').disabled, false);
+  f.el('profile').value = 'collaboration-v2'; await f.connect();
+  assert.equal(f.el('profile').disabled, true);
+  f.el('wait').value = '30000'; await f.click('load');
+  assert.equal(f.requests[0].url.searchParams.get('profile'), 'collaboration-v2');
+  assert.equal(f.requests[0].url.searchParams.get('wait_ms'), '30000');
+  assert.match(f.el('scope').textContent, /collaboration-v2/);
+  assert.match(f.el('scope').textContent, /Granted families: discussions, review votes/);
+  await f.click('save');
+  assert.equal(JSON.parse(f.saved[0].text).disclosure_profile, 'collaboration-v2');
+  assert.ok(!f.saved[0].text.includes(token));
+  f.el('after').value = '88:0'; await f.click('disconnect');
+  assert.equal(f.el('profile').disabled, false); assert.equal(f.el('after').value, '0');
+  assert.equal(f.el('scope').textContent, 'No authenticated activity observation.');
+});
+test('wait controls are bounded and do not change pinned continuation requests', async () => {
+  const raw = page({ has_more: true, complete: false, next_after: '1:0' });
+  const f = fixture([response(raw), response(page({ events: [] })), response(page({ events: [] }))]);
+  await f.connect(); f.el('wait').value = '10'; await f.click('load'); await f.click('next'); await f.click('refresh');
+  assert.equal(f.requests[0].url.searchParams.get('wait_ms'), '10');
+  assert.equal(f.requests[1].url.searchParams.has('wait_ms'), false);
+  assert.equal(f.requests[1].url.searchParams.get('expected_head'), head);
+  assert.equal(f.requests[2].url.searchParams.get('wait_ms'), '10');
+  assert.equal(f.requests[2].url.searchParams.has('expected_head'), false);
+  for (const value of ['-1', '30001', '1.5', '01', '']) {
+    f.el('wait').value = value; await f.click('load'); await f.click('refresh');
+  }
+  assert.equal(f.requests.length, 3); assert.match(f.el('status').textContent, /0 to 30000/);
+});

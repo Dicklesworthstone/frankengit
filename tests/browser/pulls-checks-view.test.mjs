@@ -125,14 +125,15 @@ test('hostile job strings are rendered as inert text with directional controls e
   assert.equal(h.nodes.selected.textContent.includes(token), false);
 });
 
-test('byte-only refs support checks and candidate preparation without conversion into editable metadata', async () => {
+test('byte-only refs support checks, candidate preparation and exact-byte metadata editing', async () => {
   const bytes = data().source_ref_hex + 'ff';
   const selected = observation({ pull_request: row(1, { data: data({ source_ref: null, source_ref_hex: bytes }) }) });
   const h = harness(() => json(checks({ source_ref_hex: bytes })), selected); await h.open(); await h.load();
   assert.match(h.nodes.selected.textContent, /test · action_required/);
   assert.ok(h.nodes.selected.textContent.includes(bytes)); assert.equal(h.nodes['prepare-candidate'].disabled, false);
-  for (const id of ['source-ref', 'target-ref', 'pr-number', 'title']) assert.equal(h.nodes[id].value, '');
-  assert.match(h.nodes.selected.textContent, /Metadata editing through the text form is unavailable/);
+  assert.equal(h.nodes['source-ref'].value, bytes); assert.equal(h.nodes['source-ref-encoding'].value, 'hex');
+  assert.equal(h.nodes['target-ref'].value, data().target_ref); assert.equal(h.nodes['target-ref-encoding'].value, 'text');
+  assert.equal(h.nodes['pr-number'].value, '1'); assert.equal(h.nodes.title.value, data().title);
 });
 
 test('disconnect prevents late checks from restoring private views or overwriting the new state', async () => {

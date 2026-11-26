@@ -8,6 +8,11 @@ export function config(endpoint = 'http://127.0.0.1:9419/repo.git', format = 'sh
     scope: { tenant_id: 'a1'.repeat(16), repository_id: 'a2'.repeat(16), repository_incarnation: 'a3'.repeat(16),
       object_format: format, issues_read: true, pulls_read: false }, after: '0', page_size: 20 };
 }
+export function collaborationConfig(endpoint, format = 'sha1') {
+  const legacy = config(endpoint, format);
+  return { ...legacy, schema_version: 2, disclosure_profile: 'collaboration-v2',
+    scope: { ...legacy.scope, discussions_read: true, reviews_read: true } };
+}
 export function row(sequence = '1', index = '0') {
   return { cursor: `${sequence}:${index}`, repository_sequence: sequence, event_index: index,
     tx_id: 'opaque-tx', policy_epoch: '0', aggregate: 'issue-1', aggregate_version: '1', kind: 25, event_frame_hex: '00ff80' };
@@ -15,7 +20,7 @@ export function row(sequence = '1', index = '0') {
 export function page(configuration, { rows = [row()], resume = undefined, more = false, head = '01' } = {}) {
   const watermark = resume === undefined ? rows.at(-1)?.cursor ?? null : resume;
   return { type: 'forge_event_page', schema_version: 1, ...configuration.scope, source_head: `opaque-head-${head}`,
-    snapshot_token: `alg:1:${head.repeat(32)}`, read_only: true, disclosure_profile: 'issues-pulls-v1',
+    snapshot_token: `alg:1:${head.repeat(32)}`, read_only: true, disclosure_profile: configuration.disclosure_profile ?? 'issues-pulls-v1',
     omits_other_event_families: true, cursor_discloses_repository_activity: true, events: rows,
     next_after: more ? watermark : null, resume_after: watermark, has_more: more, complete: !more };
 }

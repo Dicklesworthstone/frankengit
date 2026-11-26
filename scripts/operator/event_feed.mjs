@@ -1,4 +1,4 @@
-// External, read-only consumer of the native issues-pulls-v1 event feed.
+// External, read-only consumer of explicitly selected native event-feed profiles.
 // The native codec and disclosure policy stay on the server. Frames remain
 // opaque; consistency checking is not proof of authority or completeness.
 import { createHash } from 'node:crypto';
@@ -7,7 +7,7 @@ import { request as httpsRequest } from 'node:https';
 import { ACTIVITY_LIMITS, activityCursor, activityPage } from '../../crates/fgit-node/src/smart_http/server/browser/activity.mjs';
 
 export const EVENT_LIMITS = Object.freeze({ response: ACTIVITY_LIMITS.reply, pages: 64,
-  bytes: 32 * 1024 * 1024, timeoutMs: 300000, configuration: 8192 });
+  bytes: 32 * 1024 * 1024, timeoutMs: 300000, waitMs: 30000, configuration: 8192 });
 export class EventFeedError extends Error {
   constructor(code, status = null) { super(code); this.name = 'EventFeedError'; this.code = code; this.status = status; }
 }
@@ -37,17 +37,26 @@ export function eventEndpoint(value) {
   return value;
 }
 const SCOPE_FIELDS = ['tenant_id', 'repository_id', 'repository_incarnation', 'object_format', 'issues_read', 'pulls_read'];
+const COLLABORATION_SCOPE_FIELDS = [...SCOPE_FIELDS, 'discussions_read', 'reviews_read'];
+const CONFIGURATION_FIELDS = ['type', 'schema_version', 'endpoint', 'scope', 'after', 'page_size'];
 export function eventConfiguration(value) {
-  eventKeys(value, ['type', 'schema_version', 'endpoint', 'scope', 'after', 'page_size']);
-  if (value.type !== 'frankengit_event_subscription' || value.schema_version !== 1) eventFail('invalid_event_configuration');
-  eventKeys(value.scope, SCOPE_FIELDS);
+  eventKeys(value, [...CONFIGURATION_FIELDS, 'disclosure_profile'], CONFIGURATION_FIELDS);
+  const collaboration = value.schema_version === 2;
+  if (value.type !== 'frankengit_event_subscription' || ![1, 2].includes(value.schema_version) ||
+      (collaboration ? value.disclosure_profile !== 'collaboration-v2' : Object.hasOwn(value, 'disclosure_profile'))) eventFail('invalid_event_configuration');
+  const scopeFields = collaboration ? COLLABORATION_SCOPE_FIELDS : SCOPE_FIELDS;
+  eventKeys(value.scope, scopeFields);
   for (const name of SCOPE_FIELDS.slice(0, 3)) {
     if (typeof value.scope[name] !== 'string' || !/^[0-9a-f]{32}$/.test(value.scope[name])) eventFail('invalid_event_scope');
   }
-  if (!['sha1', 'sha256'].includes(value.scope.object_format) || typeof value.scope.issues_read !== 'boolean' ||
-      typeof value.scope.pulls_read !== 'boolean' || (!value.scope.issues_read && !value.scope.pulls_read)) eventFail('invalid_event_scope');
-  return Object.freeze({ type: value.type, schema_version: 1, endpoint: eventEndpoint(value.endpoint),
-    scope: Object.freeze(Object.fromEntries(SCOPE_FIELDS.map(name => [name, value.scope[name]]))),
+  const grants = scopeFields.slice(4).map(name => value.scope[name]);
+  if (!['sha1', 'sha256'].includes(value.scope.object_format) || grants.some(value => typeof value !== 'boolean') ||
+      !grants.some(Boolean)) eventFail('invalid_event_scope');
+  // Do not add defaults to a v1 configuration: its exact bytes already bind
+  // retained archives. A broader profile always starts a separately chosen archive.
+  return Object.freeze({ type: value.type, schema_version: value.schema_version, endpoint: eventEndpoint(value.endpoint),
+    ...(collaboration ? { disclosure_profile: 'collaboration-v2' } : {}),
+    scope: Object.freeze(Object.fromEntries(scopeFields.map(name => [name, value.scope[name]]))),
     after: eventCursor(value.after), page_size: eventInteger(value.page_size, 1, 100) });
 }
 export function eventCredential(value) {
@@ -96,7 +105,12 @@ export function eventBytes(value) {
 }
 export function validateEventPage(value, configuration, after = configuration.after) {
   const config = eventConfiguration(configuration);
-  try { return activityPage(value, { after: eventCursor(after), limit: config.page_size, previous: config.scope }); }
+  try {
+    const profile = config.disclosure_profile ?? 'issues-pulls-v1';
+    if (value?.disclosure_profile !== profile) eventFail('invalid_event_page_or_scope');
+    const previous = config.schema_version === 2 ? { ...config.scope, disclosure_profile: profile } : config.scope;
+    return activityPage(value, { after: eventCursor(after), limit: config.page_size, previous });
+  }
   catch (error) { if (error instanceof EventFeedError) throw error; eventFail('invalid_event_page_or_scope'); }
 }
 
@@ -104,8 +118,9 @@ export function validateEventPage(value, configuration, after = configuration.af
 // no redirects, ambient cookies, automatic retry, proxy environment or mutation.
 export async function readEventPage(configuration, credential, options = {}) {
   const config = eventConfiguration(configuration), token = eventCredential(credential);
-  eventKeys(options, ['after', 'timeoutMs', 'maximumBytes', 'signal', 'ca'], []);
+  eventKeys(options, ['after', 'timeoutMs', 'maximumBytes', 'waitMs', 'signal', 'ca'], []);
   const after = eventCursor(options.after ?? config.after);
+  const waitMs = eventInteger(options.waitMs ?? 0, 0, EVENT_LIMITS.waitMs);
   const timeout = eventInteger(options.timeoutMs ?? 30000, 1, EVENT_LIMITS.timeoutMs);
   const maximum = eventInteger(options.maximumBytes ?? EVENT_LIMITS.response, 1, EVENT_LIMITS.response);
   const signal = options.signal;
@@ -115,6 +130,11 @@ export async function readEventPage(configuration, credential, options = {}) {
   if (signal?.aborted) eventFail('event_cancelled');
   const url = new URL(`${config.endpoint}/api/v1/events`);
   url.search = new URLSearchParams({ after, limit: String(config.page_size) }).toString();
+  if (config.schema_version === 2) url.searchParams.set('profile', config.disclosure_profile);
+  // Idle waiting is part of this request's existing transport budget. Capture
+  // passes its remaining total budget; no page or wait renews that deadline.
+  const boundedWait = Math.min(waitMs, Math.max(0, timeout - 1));
+  if (boundedWait > 0) url.searchParams.set('wait_ms', String(boundedWait));
   const deadline = performance.now() + timeout;
   return new Promise((resolve, reject) => {
     let request, response, result, failure, timer, finished = false, closed = false, delivered = false;
@@ -200,7 +220,8 @@ export function validateEventCapture(value, expectedConfiguration) {
 }
 export async function captureEventPages(configuration, credential, options = {}) {
   const config = eventConfiguration(configuration); eventCredential(credential);
-  eventKeys(options, ['maxPages', 'maxBytes', 'timeoutMs', 'signal', 'ca'], []);
+  eventKeys(options, ['maxPages', 'maxBytes', 'timeoutMs', 'waitMs', 'signal', 'ca'], []);
+  const waitMs = eventInteger(options.waitMs ?? 0, 0, EVENT_LIMITS.waitMs);
   const maximumPages = eventInteger(options.maxPages ?? 16, 1, EVENT_LIMITS.pages);
   const maximumBytes = eventInteger(options.maxBytes ?? EVENT_LIMITS.bytes, 1, EVENT_LIMITS.bytes);
   const timeout = eventInteger(options.timeoutMs ?? 30000, 1, EVENT_LIMITS.timeoutMs);
@@ -215,7 +236,7 @@ export async function captureEventPages(configuration, credential, options = {})
     if (remaining < 1) eventFail('event_timeout');
     if (bytes === maximumBytes) eventFail('event_capture_limit');
     const received = await readEventPage(config, credential, { after, timeoutMs: remaining,
-      maximumBytes: Math.min(EVENT_LIMITS.response, maximumBytes - bytes), signal, ca });
+      maximumBytes: Math.min(EVENT_LIMITS.response, maximumBytes - bytes), waitMs, signal, ca });
     pages.push(received.page); bytes += received.bytes;
     after = received.page.resume_after ?? '0';
     if (!received.page.has_more) break;

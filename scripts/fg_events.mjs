@@ -9,7 +9,7 @@ import { ARCHIVE_LIMITS, readEventPrivate, initializeEventArchive, openEventArch
 const USAGE = `usage: node scripts/fg_events.mjs init --archive PATH --config FILE --token-file FILE --trusted-local
        node scripts/fg_events.mjs capture --archive PATH --config FILE --token-file FILE --trusted-local
          [--max-pages 1..64] [--max-bytes 1..33554432] [--timeout-ms 1..300000]
-         [--expected-tail SHA256] [--ca-file FILE]
+         [--expected-tail SHA256] [--ca-file FILE] [--wait-ms 0..30000]
        node scripts/fg_events.mjs watch --archive PATH --config FILE --token-file FILE --trusted-local
          [capture options] [--poll-ms 100..60000] [--max-sweeps 1..1000000]
        node scripts/fg_events.mjs inspect --archive PATH --config FILE --trusted-local
@@ -17,6 +17,10 @@ const USAGE = `usage: node scripts/fg_events.mjs init --archive PATH --config FI
 
 The config independently pins endpoint, tenant, repository, incarnation, native
 hash format, exact read grants, initial cursor and page size. init is local-only.
+Legacy schema-1 configurations keep issues-pulls-v1. Schema 2 explicitly selects
+collaboration-v2, including exact discussion/review read grants.
+--wait-ms waits at an empty native tail within the existing --timeout-ms budget;
+it is an operation option and never changes the retained archive binding.
 Token/config/CA files must be private, owned, singly linked regular files.
 Archive paths and their parents must be operator-controlled; POSIX only.
 Capture syncs each complete immutable page before emitting its cursor receipt.
@@ -38,7 +42,7 @@ function parse(args) {
   const allowed = ['--archive', '--config', '--trusted-local'];
   if (action !== 'inspect') allowed.push('--token-file');
   if (action !== 'init') allowed.push('--expected-tail');
-  if (['capture', 'watch'].includes(action)) allowed.push('--ca-file', '--max-pages', '--max-bytes', '--timeout-ms');
+  if (['capture', 'watch'].includes(action)) allowed.push('--ca-file', '--max-pages', '--max-bytes', '--timeout-ms', '--wait-ms');
   if (action === 'watch') allowed.push('--poll-ms', '--max-sweeps');
   if (action === 'inspect') allowed.push('--page');
   const flags = new Map();
@@ -60,6 +64,7 @@ function parse(args) {
   };
   return { action, flags, maxPages: number('--max-pages', 16, 1, EVENT_LIMITS.pages),
     maxBytes: number('--max-bytes', EVENT_LIMITS.bytes, 1, EVENT_LIMITS.bytes), timeoutMs: number('--timeout-ms', 30000, 1, EVENT_LIMITS.timeoutMs),
+    waitMs: number('--wait-ms', 0, 0, EVENT_LIMITS.waitMs),
     pollMs: number('--poll-ms', 1000, 100, 60000), maxSweeps: number('--max-sweeps', 1000, 1, 1000000),
     page: flags.has('--page') ? number('--page', 1, 1, ARCHIVE_LIMITS.pages) : undefined };
 }
@@ -117,7 +122,7 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
     for (let sweep = 0; sweep < rounds; sweep++) {
       checkpoint();
       const result = await captureEventArchive(f.get('--archive'), config, await token(f.get('--token-file'), checkpoint), {
-        maxPages: options.maxPages, maxBytes: options.maxBytes, timeoutMs: options.timeoutMs, signal: stop.signal, ca,
+        maxPages: options.maxPages, maxBytes: options.maxBytes, timeoutMs: options.timeoutMs, waitMs: options.waitMs, signal: stop.signal, ca,
         ...(expectedTail !== undefined ? { expectedTail } : {}), onPage: receipt => emit(stdout, { ...receipt, type: 'frankengit_event_page_saved' }, stop.signal) });
       expectedTail = result.tail_sha256;
       await emit(stdout, { ...result, type: 'frankengit_event_capture_complete', sweep: sweep + 1 }, stop.signal);

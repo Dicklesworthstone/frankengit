@@ -182,3 +182,51 @@ test('invalid input does not dispatch, and reconnect discards old observations',
   await client.open(); assert.throws(() => client.connect('bad')); assert.equal(client.connected, false); assert.equal(client.page, null);
   await assert.rejects(client.open()); assert.equal(requests.length, 1);
 });
+
+for (const profile of ['issues-pulls-v1', 'collaboration-v2']) {
+  test(`${profile}: explicit bounded waiting preserves default URLs and the original deadline`, async () => {
+    const raw = profile === 'collaboration-v2' ? page({ disclosure_profile: profile,
+      issues_read: false, pulls_read: false, discussions_read: false, reviews_read: true })
+      : page();
+    const { client, requests } = fixture([response(raw), response({ ...raw, events: [] })]);
+    client.connect(token, { profile });
+    await client.open({ waitMs: 30000 });
+    assert.equal(requests[0].url.searchParams.get('wait_ms'), '30000');
+    assert.equal(requests[0].url.searchParams.get('profile'), profile === 'collaboration-v2' ? profile : null);
+    await client.refresh();
+    assert.equal(requests[1].url.searchParams.get('wait_ms'), null);
+    assert.equal(requests[1].url.searchParams.get('after'), '1:0');
+    assert.equal(requests[1].url.searchParams.get('expected_head'), null);
+  });
+}
+test('collaboration continuation retains its profile and pin without repeating a tail wait', async () => {
+  const raw = page({ disclosure_profile: 'collaboration-v2', discussions_read: true, reviews_read: false,
+    next_after: '1:0', has_more: true, complete: false });
+  const tail = { ...raw, events: [], next_after: null, has_more: false, complete: true };
+  const { client, requests } = fixture([response(raw), response(tail)]);
+  client.connect(token, { profile: 'collaboration-v2' });
+  await client.open({ waitMs: 12 }); await client.next();
+  assert.equal(requests[1].url.searchParams.get('profile'), 'collaboration-v2');
+  assert.equal(requests[1].url.searchParams.get('expected_head'), head);
+  assert.equal(requests[1].url.searchParams.has('wait_ms'), false);
+});
+test('invalid waits dispatch nothing and a substituted profile clears the connection', async () => {
+  const { client, requests } = fixture([response(page({ disclosure_profile: 'collaboration-v2',
+    discussions_read: true, reviews_read: false }))]);
+  for (const waitMs of [-1, 30001, 0.1, '1', null, NaN, Infinity]) await assert.rejects(client.open({ waitMs }));
+  assert.equal(requests.length, 0);
+  await assert.rejects(client.open(), /profile changed/);
+  assert.equal(client.connected, false); assert.equal(client.page, null);
+  assert.throws(() => client.connect(token, { profile: 'future-profile' }));
+  assert.equal(client.connected, false);
+});
+test('a waited read remains cancellable and never extends a caller-selected timeout', async () => {
+  const pending = deferred(), { client, requests } = fixture([pending.promise], { timeoutMs: 5 });
+  await assert.rejects(client.open({ waitMs: 30000 }), error => error.name === 'TimeoutError');
+  assert.equal(requests.length, 1); assert.equal(requests[0].init.signal.aborted, true);
+  pending.resolve(response(page())); await tick(); assert.equal(client.page, null);
+  const next = deferred(), stopped = fixture([next.promise]);
+  const reading = assert.rejects(stopped.client.open({ waitMs: 30000 }));
+  await tick(); stopped.client.cancel(); await reading;
+  next.resolve(response(page())); await tick(); assert.equal(stopped.client.page, null);
+});

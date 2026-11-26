@@ -15,6 +15,7 @@ use super::super::issues::{
     ApiError, Reply, admission_error, parse_decimal, parse_form, quote, read_form, ref_fields,
 };
 use super::super::{Profile, Status, bearer_only, retry_key};
+use super::request::command_ref;
 use crate::smart_http::drive_request_while;
 use crate::{
     GitDaemonSessionDeadline, GitDaemonSessionWorkScaling, LoopbackReceiveSession, OneNode,
@@ -103,8 +104,10 @@ impl<'a> Request<'a> {
                 "object_format"
                     | "pull_request_version"
                     | "source_ref"
+                    | "source_ref_hex"
                     | "source_tip"
                     | "target_ref"
+                    | "target_ref_hex"
                     | "target_tip"
             ) {
                 return Err(ApiError::bad("unknown_or_inapplicable_field"));
@@ -124,11 +127,9 @@ impl<'a> Request<'a> {
             .map_err(|_| ApiError::bad("version_exhausted"))?;
         let command = Command {
             version,
-            source_ref: RefName::try_new(take(&mut fields, "source_ref")?.as_bytes())
-                .map_err(|_| ApiError::bad("invalid_ref"))?,
+            source_ref: command_ref(&mut fields, "source_ref", "source_ref_hex")?,
             source_tip: oid(&take(&mut fields, "source_tip")?, format)?,
-            target_ref: RefName::try_new(take(&mut fields, "target_ref")?.as_bytes())
-                .map_err(|_| ApiError::bad("invalid_ref"))?,
+            target_ref: command_ref(&mut fields, "target_ref", "target_ref_hex")?,
             target_tip: oid(&take(&mut fields, "target_tip")?, format)?,
         };
         // Pure validation using the engine's own vocabulary, not a new seal.

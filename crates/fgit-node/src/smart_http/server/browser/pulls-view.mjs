@@ -152,7 +152,7 @@ export function fastForwardProposal(observed, scope) {
   const row = selected.reply.pull_request;
   if (!row || row.state !== 'open' || !row.data) fail('Fast-forward requires an open PR with recorded metadata.');
   return { number: row.number, fields: fastForwardCommand({ object_format: selected.binding.format,
-    pull_request_version: row.version, source_ref: row.data.source_ref, target_ref: row.data.target_ref,
+    pull_request_version: row.version, ...subjectReferences(row.data),
     source_tip: row.data.source_tip, target_tip: row.data.target_tip }) };
 }
 
@@ -178,7 +178,7 @@ const IDS = ['connection', 'token', 'recovery-only', 'original-principal', 'conn
   'label-filter', 'label-filter-values', 'label-filter-apply',
   'comments-load', 'comments-limit', 'conversation', 'comment-paging', 'comment-form', 'comment-version', 'comment-location', 'comment-general', 'comment-body', 'comment-stage',
   'selected', 'snapshot', 'reviews-load', 'reviews', 'review-paging', 'metadata', 'pr-number', 'metadata-action', 'expected-version',
-  'object-format', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body', 'metadata-stage', 'new-pr',
+  'object-format', 'source-ref', 'source-ref-encoding', 'target-ref', 'target-ref-encoding', 'source-tip', 'target-tip', 'title', 'body', 'metadata-stage', 'new-pr',
   'prepare', 'candidate-method', 'candidate-profile', 'rebase-fields', 'rebase-upstream', 'rebase-empty', 'policy-epoch', 'author', 'committer', 'timestamp', 'message', 'prepare-candidate', 'candidate', 'candidate-download',
   'candidate-import', 'candidate-import-file', 'candidate-import-submit', 'inspection-download', 'resolution', 'resolution-paths', 'resolve-candidate', 'review', 'review-action', 'review-version', 'reason', 'review-stage',
   'merge', 'merge-heading', 'merge-method-guidance', 'merge-reviewer-fields', 'required-reviewers', 'merge-stage', 'pending', 'confirm', 'send', 'recover', 'discard', 'receipt-download', 'receipt-import', 'receipt-import-file', 'receipt-import-submit'];
@@ -190,6 +190,10 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   nodes['candidate-method'].value ||= 'merge-commit';
   nodes['candidate-profile'].value ||= 'path-merge-v1';
   nodes['rebase-empty'].value ||= 'stop';
+  function resetMetadataEncodings() {
+    nodes['source-ref-encoding'].value = 'text'; nodes['target-ref-encoding'].value = 'text';
+  }
+  resetMetadataEncodings();
   function resetSearch() {
     for (const id of ['search-query', 'search-opened-by', 'search-source-ref', 'search-target-ref']) nodes[id].value = '';
     nodes['search-state'].value = 'all'; nodes['search-case-sensitive'].checked = false;
@@ -249,6 +253,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     for (const id of ['refresh', 'new-pr', 'select-number', 'select-load', 'candidate-import-file', 'candidate-import-submit', 'label-filter-values', 'label-filter-apply', ...SEARCH_IDS]) nodes[id].disabled = !connected || busy;
     nodes.refresh.textContent = listPage?.query ? 'Refresh current search' : 'Refresh PR list';
     nodes['metadata-stage'].disabled = !connected || busy || Boolean(pending);
+    for (const side of ['source', 'target']) nodes[`${side}-ref-encoding`].disabled = !connected || busy || Boolean(pending);
     nodes['prepare-candidate'].disabled = !connected || busy || !selected?.row?.data || selected.row.state !== 'open';
     const preparingRebase = nodes['candidate-method'].value === 'rebase';
     nodes['rebase-fields'].hidden = !preparingRebase;
@@ -287,16 +292,12 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     resolution.setDisabled(!connected || busy || !resolving);
     for (const id of ['review-stage', 'merge-stage']) nodes[id].disabled = !candidate || busy || Boolean(pending);
     const method = candidateMethod(candidate), inspectedFastForward = method === 'fast-forward-only', squash = method === 'squash', rebase = method === 'rebase';
-    const rawFastForward = inspectedFastForward && (Object.hasOwn(candidate.fields, 'source_ref_hex') || Object.hasOwn(candidate.fields, 'target_ref_hex'));
-    if (rawFastForward) nodes['merge-stage'].disabled = true;
     nodes['merge-heading'].textContent = inspectedFastForward ? 'Fast-forward inspected source' : rebase ? 'Reviewed rebase' : squash ? 'Reviewed squash' : 'Reviewed merge';
     nodes['merge-stage'].textContent = inspectedFastForward ? 'Prepare fast-forward — do not send' : rebase ? 'Prepare rebase merge — do not send' : squash ? 'Prepare squash — do not send' : 'Prepare merge — do not send';
     nodes['merge-reviewer-fields'].hidden = inspectedFastForward;
     nodes['required-reviewers'].disabled = inspectedFastForward || !candidate || busy || Boolean(pending);
     nodes['required-reviewers'].required = !inspectedFastForward;
-    nodes['merge-method-guidance'].textContent = rawFastForward
-      ? 'This source-tip candidate can be reviewed with its exact reference bytes. Fast-forward publication through this form requires text branch references.'
-      : inspectedFastForward
+    nodes['merge-method-guidance'].textContent = inspectedFastForward
       ? 'Publish the exact inspected source tip with the native fast-forward method. Current branch protection determines required approvals. The request preserves the inspected PR version and both branch tips; it sends no candidate bundle or caller-selected reviewer list.'
       : rebase ? 'Publish the complete inspected series on the target while preserving the source branch. Required checks and path-specific reviews cover every rewritten commit, including temporary changes.'
       : squash ? 'Publish the inspected squash with the target as its only parent and the explicit reviewer requirements below. Current branch protection also applies.'
@@ -325,6 +326,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     inlineButtons = [];
     selected = null; listPage = null; reviewPage = null; fastForward = null; labelsPanel = null; resolution.clear();
     resetSearch();
+    resetMetadataEncodings();
     for (const id of ['selected', 'snapshot', 'pr-list', 'list-paging', 'reviews', 'review-paging', 'candidate']) nodes[id].replaceChildren();
     for (const id of ['select-number', 'pr-number', 'expected-version', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body',
       'policy-epoch', 'author', 'committer', 'timestamp', 'message', 'review-version', 'reason', 'required-reviewers', 'label-filter-values']) nodes[id].value = '';
@@ -416,14 +418,15 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   }
   function fieldsFromRow(row, format) {
     const data = row.data;
-    if (!data || data.source_ref === null || data.target_ref === null) fail('This record has byte-only refs or no editable metadata. The text form cannot represent it.');
-    return { expected_version: row.version, object_format: format, source_ref: data.source_ref, target_ref: data.target_ref,
+    if (!data) fail('This record has no editable metadata.');
+    return { expected_version: row.version, object_format: format, ...subjectReferences(data),
       source_tip: oid(data.source_tip, format), target_tip: oid(data.target_tip, format), title: data.title, body: data.body };
   }
   const metadataIds = { expected_version: 'expected-version', object_format: 'object-format', source_ref: 'source-ref', target_ref: 'target-ref',
     source_tip: 'source-tip', target_tip: 'target-tip', title: 'title', body: 'body' };
   function clearProposal() {
     clearComments();
+    resetMetadataEncodings();
     for (const id of ['pr-number', 'expected-version', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body']) nodes[id].value = '';
   }
   function clearComments(keepDraft = false) {
@@ -571,10 +574,13 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
       nodes.selected.append(markdownBody(doc, row.data.body, row.data.body_rendered, {
         cryptoImpl, current: () => client.connected && generation === renderGeneration && selected?.row === row,
       }).element);
-      if (row.data.source_ref !== null && row.data.target_ref !== null) {
-        for (const [name, value] of Object.entries(fieldsFromRow(row, result.binding.format))) nodes[metadataIds[name]].value = String(value);
-        nodes['pr-number'].value = String(row.number); nodes['metadata-action'].value = 'update';
-      } else item(doc, nodes.selected, 'p', 'Byte-only refs retain their exact native bytes for candidate preparation, conflict resolution and review. Metadata editing through the text form is unavailable.');
+      const fields = fieldsFromRow(row, result.binding.format);
+      for (const [name, value] of Object.entries(fields)) {
+        const field = name.endsWith('_ref_hex') ? name.slice(0, -4) : name;
+        nodes[metadataIds[field]].value = String(value);
+      }
+      for (const side of ['source', 'target']) nodes[`${side}-ref-encoding`].value = Object.hasOwn(fields, `${side}_ref_hex`) ? 'hex' : 'text';
+      nodes['pr-number'].value = String(row.number); nodes['metadata-action'].value = 'update';
     }
     if (row.merge) item(doc, nodes.selected, 'pre', `Merged commit: ${row.merge.merge_commit}\nOriginal target: ${row.merge.target_tip_before}`);
   }
@@ -737,11 +743,19 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     clearComments();
     invalidateCandidate(); selected = null; labelsPanel = null; nodes.selected.replaceChildren(); nodes.snapshot.replaceChildren(); nodes.reviews.replaceChildren(); nodes['review-paging'].replaceChildren();
     for (const id of ['pr-number', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body']) nodes[id].value = '';
+    resetMetadataEncodings();
     nodes['expected-version'].value = '0'; nodes['object-format'].value = client.binding?.format ?? 'sha1'; nodes['metadata-action'].value = 'open';
     status('New PR proposal. Choose an explicit unused number and both exact tips; nothing has been submitted.'); controls();
   });
   on('metadata', 'submit', () => run('stage', async guard => {
-    const fields = Object.fromEntries(Object.entries(metadataIds).map(([name, id]) => [name, name === 'expected_version' ? number(id) : nodes[id].value]));
+    const fields = Object.fromEntries(Object.entries(metadataIds).map(([name, id]) => {
+      if (name === 'source_ref' || name === 'target_ref') {
+        const encoding = nodes[`${id}-encoding`].value;
+        if (!['text', 'hex'].includes(encoding)) fail('Choose branch name text or exact lowercase hex bytes.');
+        return [encoding === 'hex' ? `${name}_hex` : name, nodes[id].value];
+      }
+      return [name, name === 'expected_version' ? number(id) : nodes[id].value];
+    }));
     await client.stageMetadata(number('pr-number', 1), nodes['metadata-action'].value, fields); guard(); nodes.confirm.checked = false;
     status('Metadata request prepared locally. Review the exact saved request, then explicitly send it.');
   }));

@@ -39,13 +39,32 @@ for (const format of ['sha1', 'sha256']) {
   });
 }
 
-test('closed, absent, equal-tip, byte-only, corrupt and cross-scope observations fail closed', async () => {
+for (const format of ['sha1', 'sha256']) test(`${format}: byte-named branches survive page staging and terminal readback`, async () => {
+  for (const sides of [['source'], ['target'], ['source', 'target']]) {
+    const observed = observation(format), data = observed.reply.pull_request.data;
+    for (const side of sides) {
+      data[`${side}_ref`] = null;
+      data[`${side}_ref_hex`] = Buffer.from('refs/heads/raw-').toString('hex') + (side === 'source' ? 'fe' : 'ff');
+    }
+    const f = await fixture({ observed });
+    await f.stage(); await f.send();
+    assert.equal(f.client.pending, null);
+    assert.match(f.node('status').textContent, /Canonical committed/);
+    const sent = new URLSearchParams(f.calls.find(call => call.method === 'POST').bytes);
+    for (const side of sides) {
+      assert.equal(sent.get(`${side}_ref_hex`), data[`${side}_ref_hex`]);
+      assert.ok(!sent.has(`${side}_ref`));
+    }
+    f.disconnect();
+  }
+});
+
+test('closed, absent, equal-tip, corrupt and cross-scope observations fail closed', async () => {
   const cases = [
     value => { value.reply.pull_request.state = 'closed'; },
     value => { value.reply.found = false; value.reply.pull_request = null; },
     value => { value.reply.pull_request.version = Number.MAX_SAFE_INTEGER; },
     value => { value.reply.pull_request.data.source_tip = value.reply.pull_request.data.target_tip; },
-    value => { value.reply.pull_request.data.source_ref = null; value.reply.pull_request.data.source_ref_hex = '726566732f68656164732fff'; },
     value => { value.reply.pull_request.data.source_ref_hex = '61'; },
     value => { value.reply.pull_request.data.object_format = 'sha256'; },
     value => { value.reply.repository_incarnation = 'other-incarnation'; },
@@ -57,7 +76,7 @@ test('closed, absent, equal-tip, byte-only, corrupt and cross-scope observations
     assert.equal(fastForwardProposal(observation(), observation().binding).number, 7, 'near-identical permitted twin');
   }
   assert.throws(() => fastForwardProposal(observation(), null));
-  for (const change of cases.slice(0, 5).filter((_, index) => index !== 1)) {
+  for (const change of cases.slice(0, 4).filter((_, index) => index !== 1)) {
     const value = observation(); change(value); const f = await fixture({ observed: value });
     assert.equal(f.node('fast-forward-stage').disabled, true);
     f.node('fast-forward-stage').dispatchEvent(new Event('click', { cancelable: true }));

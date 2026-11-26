@@ -39,6 +39,42 @@ fn exact_coordinates_are_preserved_in_both_native_hash_domains() {
 }
 
 #[test]
+fn fast_forward_accepts_one_exact_encoding_per_branch_in_either_hash_domain() {
+    let raw_source = "source_ref_hex=726566732f68656164732ffe";
+    let raw_target = "target_ref_hex=726566732f68656164732fff";
+    let source = "source_ref=refs%2Fheads%2Ftopic";
+    let target = "target_ref=refs%2Fheads%2Fmain";
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let base = fields(format);
+        for (source_form, source_bytes) in [
+            (source, b"refs/heads/topic".as_slice()),
+            (raw_source, b"refs/heads/\xfe"),
+        ] {
+            for (target_form, target_bytes) in [
+                (target, b"refs/heads/main".as_slice()),
+                (raw_target, b"refs/heads/\xff"),
+            ] {
+                let body = base
+                    .replace(source, source_form)
+                    .replace(target, target_form);
+                let command = request().command(body.as_bytes(), format).unwrap();
+                assert_eq!(command.source_ref.as_bytes(), source_bytes);
+                assert_eq!(command.target_ref.as_bytes(), target_bytes);
+            }
+        }
+        for invalid in [
+            format!("{base}&{raw_target}"),
+            base.replace(source, "source_ref_hex=FF"),
+            base.replace(source, "source_ref_hex=0"),
+            base.replace(source, "source_ref_hex=726566732f68656164732f6d61696e"),
+            base.replace(target, "target_ref_hex=726566732f68656164732f2e2e"),
+        ] {
+            assert!(request().command(invalid.as_bytes(), format).is_err());
+        }
+    }
+}
+
+#[test]
 fn unknown_duplicate_missing_and_inapplicable_fields_never_reach_admission() {
     let base = fields(GitHashAlgorithm::Sha1);
     for replacement in [

@@ -4,7 +4,7 @@ const shown = value => JSON.stringify(value).replace(/[\u202a-\u202e\u2066-\u206
   char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
 export function mountActivity(doc, options = {}) {
   const client = options.client ?? new ActivityClient({ href: options.href ?? globalThis.location.href });
-  const ids = ['token', 'connect', 'disconnect', 'after', 'limit', 'load', 'next', 'refresh', 'cancel', 'save',
+  const ids = ['token', 'profile', 'connect', 'disconnect', 'after', 'limit', 'wait', 'load', 'next', 'refresh', 'cancel', 'save',
     'status', 'scope', 'snapshot', 'watermark', 'page-note', 'events'];
   const el = Object.fromEntries(ids.map(id => {
     const element = doc.getElementById(id); if (!element) throw new Error(`Missing activity control: ${id}`);
@@ -15,14 +15,14 @@ export function mountActivity(doc, options = {}) {
   const status = text => { el.status.textContent = text; };
   function render() {
     const page = client.page, connected = client.connected;
-    el.connect.disabled = busy; el.token.disabled = busy;
-    for (const id of ['after', 'limit', 'load']) el[id].disabled = busy || !connected;
+    el.connect.disabled = busy; el.token.disabled = busy; el.profile.disabled = busy || connected;
+    for (const id of ['after', 'limit', 'wait', 'load']) el[id].disabled = busy || !connected;
     el.next.disabled = busy || !connected || !page?.has_more;
     el.refresh.disabled = busy || !connected || !page;
     el.save.disabled = busy || !connected || !page;
     el.cancel.disabled = !busy; el.disconnect.disabled = !connected && !busy;
     el.events.setAttribute('aria-busy', String(busy)); el.events.replaceChildren();
-    el.scope.textContent = page ? `Tenant ${shown(page.tenant_id)}; repository ${shown(page.repository_id)}; incarnation ${shown(page.repository_incarnation)}; ${page.object_format}. Granted families: ${[page.issues_read ? 'issues' : '', page.pulls_read ? 'pull requests' : ''].filter(Boolean).join(', ')}.` : 'No authenticated activity observation.';
+    el.scope.textContent = page ? `Tenant ${shown(page.tenant_id)}; repository ${shown(page.repository_id)}; incarnation ${shown(page.repository_incarnation)}; ${page.object_format}. Profile ${page.disclosure_profile}. Granted families: ${[page.issues_read ? (page.disclosure_profile === 'collaboration-v2' ? 'issues and milestones' : 'issues') : '', page.pulls_read ? (page.disclosure_profile === 'collaboration-v2' ? 'pull requests and conversations' : 'pull requests') : '', page.discussions_read ? 'discussions' : '', page.reviews_read ? 'review votes' : ''].filter(Boolean).join(', ')}.` : 'No authenticated activity observation.';
     el.snapshot.textContent = page ? `Observed head ${shown(page.source_head)}\nSnapshot token ${page.snapshot_token}` : '';
     el.watermark.textContent = page ? `Resume after ${page.resume_after ?? '0'}${page.next_after !== null ? `; next page after ${page.next_after}` : ''}` : '';
     el['page-note'].textContent = page ? `${page.events.length} disclosed events in this page. ${page.has_more ? 'More canonical positions remain at this snapshot, even when this filtered page is empty.' : 'End of this observation, not proof that no newer activity exists.'} Other families and hidden-ref events are omitted; cursor gaps can reveal repository activity.` : '';
@@ -39,6 +39,12 @@ export function mountActivity(doc, options = {}) {
       frame.append(node('summary', `Canonical event frame (${event.event_frame_hex.length / 2} bytes; opaque hexadecimal)`), node('pre', event.event_frame_hex));
       item.append(frame); el.events.append(item);
     }
+  }
+  function selectedWait() {
+    if (!/^(0|[1-9][0-9]{0,4})$/.test(el.wait.value) || Number(el.wait.value) > 30000) {
+      throw new Error('Wait must be an integer from 0 to 30000 milliseconds.');
+    }
+    return Number(el.wait.value);
   }
   async function perform(work) {
     if (busy) return;
@@ -59,7 +65,7 @@ export function mountActivity(doc, options = {}) {
   el.connect.addEventListener('click', () => {
     if (busy) return;
     revision++; const token = el.token.value; el.token.value = '';
-    try { client.connect(token); status('Credential held in memory. Load a page to authenticate its activity grants.'); }
+    try { client.connect(token, { profile: el.profile.value || 'issues-pulls-v1' }); status('Credential held in memory. Load a page to authenticate its activity grants.'); }
     catch (error) { status(error.message); }
     render();
   });
@@ -70,10 +76,10 @@ export function mountActivity(doc, options = {}) {
   });
   el.load.addEventListener('click', () => perform(() => {
     if (!/^[1-9][0-9]{0,2}$/.test(el.limit.value)) throw new Error('Page size must be an integer from 1 to 100.');
-    return client.open({ after: el.after.value, limit: Number(el.limit.value) });
+    return client.open({ after: el.after.value, limit: Number(el.limit.value), waitMs: selectedWait() });
   }));
   el.next.addEventListener('click', () => perform(() => client.next()));
-  el.refresh.addEventListener('click', () => perform(() => client.refresh()));
+  el.refresh.addEventListener('click', () => perform(() => client.refresh({ waitMs: selectedWait() })));
   el.save.addEventListener('click', () => {
     if (busy || !client.connected) return;
     const page = client.page; if (!page) return;

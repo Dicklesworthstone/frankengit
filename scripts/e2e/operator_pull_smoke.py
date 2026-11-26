@@ -434,7 +434,20 @@ def run_case(campaign: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
                 "--trusted-local", "--object-format", fmt, "--principal", PRINCIPAL,
                 "--idempotency-key", "byte-subject-" + ref_hex, "--ref-hex", ref_hex, "--target", oid))
             require(receipt["command_committed"], "native byte-named branch creation failed")
-        before_raw = campaign.run("at", root, TENANT, REPOSITORY, "latest", "refs")
+        def byte_branches() -> dict[str, str]:
+            page = json.loads(campaign.run("branch", "list", root, TENANT, REPOSITORY,
+                                          "--trusted-local", "--object-format", fmt, "--limit", "100"))
+            require(page["node_closed"] is True and page["has_more"] is False
+                    and page["next_after_hex"] is None, "native branch inventory was incomplete")
+            rows = {row["reference_hex"]: row["tip"] for row in page["branches"]}
+            require(len(rows) == len(page["branches"]), "duplicate byte reference in native branch inventory")
+            return rows
+
+        before_raw = byte_branches()
+        require(before_raw == {**{name.encode().hex(): oid for name, oid in after_refs.items()},
+                               TARGET.encode().hex(): objects["candidate"],
+                               raw_source: objects["source"], raw_target: objects["base"]},
+                "initial inventory did not preserve both byte-named branches and the reviewed merge")
         metadata = fields(0, "CI on a byte-named branch", TARGET, objects["candidate"])
         del metadata["source_ref"]
         metadata["source_ref_hex"] = raw_source
@@ -455,9 +468,28 @@ def run_case(campaign: OperatorCampaign, oracle_run: Path, fmt: str) -> None:
                     and pr["data"]["target_reference_hex"] == expected_target
                     and all(pr["data"][key] == metadata[key] for key in ("source_tip", "target_tip", "title", "body")),
                     "durable PR command changed its selected branch, state, tips or metadata")
-        require(len(transactions) == 5 and campaign.run("at", root, TENANT, REPOSITORY, "latest", "refs") == before_raw,
+        require(len(transactions) == 5 and byte_branches() == before_raw,
                 "metadata lifecycle reused a decision or moved a ref")
         campaign.facts[f"{fmt}_byte_named_metadata_and_recovery"] = True
+
+        # The two names render identically through a lossy UTF-8 display.
+        # Verify which branch moved using the byte-exact native inventory.
+        opened = readback(7)
+        ff_fields = {"pull_request_version": str(opened["version"]), "source_ref_hex": raw_source,
+                     "target_ref_hex": raw_target, "source_tip": objects["source"], "target_tip": objects["base"]}
+        stale = submit("byte-ff-stale", "fast-forward",
+                       {**ff_fields, "pull_request_version": str(opened["version"] - 1)}, number=7, expected=1)
+        require(stale["outcome"]["state"] == "refused" and readback(7) == opened and byte_branches() == before_raw,
+                "stale byte-named fast-forward changed the PR or branch inventory")
+        landed = submit("byte-ff", "fast-forward", ff_fields, number=7)
+        merged = readback(7)
+        require(landed["outcome"]["state"] == "committed" and merged["version"] == opened["version"] + 1
+                and merged["state"] == "merged" and merged["data"] == opened["data"]
+                and merged["merge"]["commit"] == objects["source"],
+                "byte-named fast-forward lost the selected PR or source tip")
+        require(byte_branches() == {**before_raw, raw_target: objects["source"]},
+                "byte-named fast-forward moved a different ref or changed an unrelated tip")
+        campaign.facts[f"{fmt}_byte_named_fast_forward_and_recovery"] = True
     campaign.facts[f"{fmt}_owned_service_drained"] = True
     print(f"OPERATOR_PULL {fmt}: native lifecycle, discussion, exact reviews/merges, recovery, grants and drain", flush=True)
 

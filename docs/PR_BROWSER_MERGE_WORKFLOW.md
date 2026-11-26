@@ -44,16 +44,40 @@ references, policy or versions. An explicitly selected outcome-only recovery
 connection may use a replacement credential for the original principal; it
 cannot re-inspect, reconstruct or resend the mutation.
 
-PR metadata creation/update/close/reopen still uses the separate text-only
-form. The PR fast-forward publication command below is also text-only. A
-source-tip candidate imported with hex references may be inspected and
-reviewed, but its fast-forward publication control remains unavailable. This
-does not restrict the native raw-reference queue landing workflow.
+Fast-forward publication accepts text or lowercase hex for each branch. A
+selected PR supplies its recorded branch bytes. An imported source-tip candidate
+supplies the exact reference encodings retained during inspection. Both paths
+use the same six-field HTTP command and explicit send confirmation.
+
+## Metadata and lifecycle commands with exact branch bytes
+
+The metadata form supports opening, updating, closing, reopening and retargeting
+PRs whose branch names are not UTF-8. Each source and target field has its own
+encoding selector. Loading a PR fills a text name when available and otherwise
+fills the exact lowercase hexadecimal bytes; these are the same native identities
+used for candidate preparation and publication. Selecting another PR replaces the
+complete proposal, including both encodings, so a prior PR's metadata cannot remain
+under the new selection.
+
+For a new PR or a new retarget destination, choose text or lowercase hex and enter
+the complete name, including `refs/heads/`. Changing the selector does not convert
+the existing value. Each branch remains limited to 1,024 decoded bytes. Invalid
+hex, incomplete names, unsupported encodings and two aliases for the same branch
+are rejected before dispatch. A text source and a hex target naming the same
+branch are still equal and cannot form a PR.
+
+Preparing a metadata command copies the selected encodings, names, tips, version,
+title and body into the existing saved-request lifecycle. Further edits to the
+form cannot change that pending command. Sending requires separate confirmation;
+lost replies retain the same bytes and idempotency key for export, restore,
+outcome lookup or exact retry. Existing text-only commands keep their original
+form serialization. The native endpoint still owns authorization, lifecycle and
+version checks; this form does not move branch tips or bypass those checks.
 
 ## Fast-forward merges from the PR page
 
 The served `/ui/pulls/` page now offers **Prepare fast-forward merge** for an
-open PR with representable recorded branch names and distinct source/target
+open PR with valid recorded branch names and distinct source/target
 tips. This completes the browser interaction on top of the existing
 [fast-forward HTTP command](FAST_FORWARD_PULL_REQUEST_HTTP.md), rather than
 introducing another publication path.
@@ -78,13 +102,14 @@ interrupted or lost reply retains the original pending request. Outcome lookup
 does not resend it, and absence does not prove non-commit. Export/restore uses
 the existing credential-fingerprint-bound receipt with its original command and
 idempotency key; no token or candidate bundle is written into this receipt.
-Closed/merged PRs, byte-only names, equal tips, wrong scope/hash domains, and
+Closed/merged PRs, equal tips, wrong scope/hash domains, and
 exhausted exact-integer versions do not become actionable proposals.
 
 ## Reproduction and evidence boundary
 
 ```sh
 node --test tests/browser/pulls-fast-forward-view.test.mjs
+node --test tests/browser/pulls-metadata-raw-references.test.mjs
 node --test tests/browser/pulls-raw-references.test.mjs tests/browser/queues-candidate.test.mjs
 CHROME=/path/to/chromium node tests/browser/pulls-fast-forward-chromium.mjs
 ```
@@ -101,6 +126,12 @@ merge staging, binary conflict resolution, exact retry bytes/keys, replacement
 credential recovery, and the actual PR view controller. Their HTTP/DOM
 boundaries are controlled; they do not establish native admission or
 live-browser interoperability.
+
+The metadata tests drive the shipped form and controller through all five
+lifecycle actions with mixed and byte-only branch names in both Git hash
+formats. They cover local validation, exact saved requests, lost-reply recovery,
+retry and replacing one observation with another. Their DOM and HTTP boundaries
+are controlled as well.
 
 The Chromium command drives the checked-in HTML and modules in Chromium over a
 bounded local HTTP fixture under a restrictive CSP. It requires an explicitly

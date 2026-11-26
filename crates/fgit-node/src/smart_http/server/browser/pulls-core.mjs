@@ -62,7 +62,7 @@ function branchBytes(value) {
 }
 // Preserve the selected wire encoding. In particular, existing text commands
 // must keep their original form bytes and credential-bound idempotency keys.
-function commandReference(fields, name) {
+export function commandReference(fields, name) {
   const encoded = `${name}_hex`, hasText = Object.hasOwn(fields, name), hasHex = Object.hasOwn(fields, encoded);
   if (hasText === hasHex) fail(`Supply exactly one ${name} encoding.`);
   if (hasHex) return { name: encoded, value: fields[encoded], hex: branchBytes(fields[encoded]) };

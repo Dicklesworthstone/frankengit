@@ -28,17 +28,21 @@ that review. The existing browser/native inspection workflow remains separate.
 `preparePull(input, token, bundleBytes)` accepts the existing endpoint and scope
 shape plus the PR number, action, and these exact fields:
 
-- All four actions: `pull_request_version`, `policy_epoch`, `source_ref`,
-  `target_ref`, `source_tip`, `target_tip`, `merge_base`, and `candidate_commit`.
+- All four actions: `pull_request_version`, `policy_epoch`, source and target
+  branch references, `source_tip`, `target_tip`, `merge_base`, and `candidate_commit`.
 - Review actions: `expected_version` of the authenticated reviewer's own stream
   and a nonblank `reason` (at most 4,096 UTF-8 bytes). A withdrawal needs an
   existing nonzero reviewer-stream version and takes no bundle.
 - Merge: `required_reviewers` (1–32 distinct principal IDs, excluding the
   submitting principal) and `method`, explicitly `merge-commit` or `squash`.
 
-Numbers, versions and policy epochs are canonical decimal strings. References
-are exact UTF-8 branch names; native OIDs are raw lowercase hex in the selected
-SHA-1 or SHA-256 domain. The source/target refs must differ. Neither reviewer
+Numbers, versions and policy epochs are canonical decimal strings. Supply exactly
+one of `source_ref` or `source_ref_hex`, and one of `target_ref` or
+`target_ref_hex`. Text carries the exact UTF-8 name; lowercase hex carries the
+complete native bytes, including `refs/heads/`. Both encodings keep their original
+spelling and field order in the saved intent and retry key. Native OIDs are raw
+lowercase hex in the selected SHA-1 or SHA-256 domain. The source/target ref
+bytes must differ, including when one uses text and the other uses hex. Neither reviewer
 identity nor a policy override is accepted as a form field. An explicit required
 reviewer set does not override stricter native branch protection.
 

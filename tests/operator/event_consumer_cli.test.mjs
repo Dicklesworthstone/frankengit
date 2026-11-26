@@ -10,7 +10,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { main } from '../../scripts/fg_events.mjs';
 import { eventBytes } from '../../scripts/operator/event_feed.mjs';
 import { openEventArchive } from '../../scripts/operator/event_archive.mjs';
-import { config, page, row, peer, json, TOKEN } from './event_feed_fixture.mjs';
+import { config, collaborationConfig, page, row, peer, json, TOKEN } from './event_feed_fixture.mjs';
 const CLI = resolve('scripts/fg_events.mjs');
 function start(args) {
   const child = spawn(process.execPath, [CLI, ...args], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NODE_OPTIONS: '' } });
@@ -248,4 +248,60 @@ test('SIGKILL after staging a complete synced page cannot select that abandoned 
     await recovered.append(page(f.configuration)); assert.equal(recovered.summary().pages, 1);
     assert((await readdir(f.root)).some(name => name.startsWith('.stage-')), 'unselected residue is retained, not used or silently erased');
   } finally { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await closed; await f.close(); }
+});
+
+test('CLI collaboration watch selects the native profile and bounded wait while inspect remains offline', async () => {
+  let cfg;
+  const server = await peer((request, response) => {
+    const query = new URL(request.url, 'http://fixture.test').searchParams;
+    assert.equal(query.get('profile'), 'collaboration-v2'); assert.equal(query.get('wait_ms'), '1000');
+    json(response, page(cfg));
+  });
+  cfg = collaborationConfig(server.endpoint); cfg.scope.issues_read = false; cfg.scope.pulls_read = false;
+  const f = await initialized(cfg);
+  try {
+    const binding = await readFile(join(f.root, 'binding', 'record.json'));
+    const watched = await run(f.args('watch', ['--wait-ms', '1000', '--timeout-ms', '3000', '--max-sweeps', '1']));
+    assert.equal(watched.code, 1, watched.stderr); assert.equal(server.requests.length, 1);
+    const summary = records(watched.stdout).at(-1); assert.equal(summary.pages, 1);
+    const inspected = await run(f.args('inspect', ['--page', '1', '--expected-tail', summary.tail_sha256]));
+    assert.equal(inspected.code, 0, inspected.stderr);
+    assert.equal(records(inspected.stdout)[0].selected_page.page.disclosure_profile, 'collaboration-v2');
+    assert.deepEqual(await readFile(join(f.root, 'binding', 'record.json')), binding);
+    const before = server.requests.length;
+    for (const extra of [['--wait-ms', '30001'], ['--wait-ms', '-1'], ['--wait-ms', '01'], ['--wait-ms', '1.5'],
+      ['--wait-ms', '1', '--wait-ms', '2']]) {
+      const rejected = await run(f.args('capture', extra)); assert.equal(rejected.code, 2); assert.equal(rejected.stdout, '');
+    }
+    for (const action of ['init', 'inspect']) assert.equal((await run(f.args(action, ['--wait-ms', '1']))).code, 2);
+    assert.equal(server.requests.length, before);
+  } finally { await server.close(); await f.close(); }
+});
+
+test('SIGTERM drains a collaboration long poll and leaves the last saved page intact for restart', async () => {
+  let cfg;
+  const server = await peer((request, response, ordinal) => {
+    if (ordinal === 1) json(response, page(cfg));
+    else {
+      const query = new URL(request.url, 'http://fixture.test').searchParams;
+      assert.equal(query.get('profile'), 'collaboration-v2'); assert.equal(query.get('wait_ms'), '30000');
+      assert.equal(query.get('after'), '1:0');
+    }
+  });
+  cfg = collaborationConfig(server.endpoint);
+  const f = await initialized(cfg);
+  try {
+    const captured = await run(f.args('capture')); assert.equal(captured.code, 0, captured.stderr);
+    const saved = await readFile(join(f.root, 'page-00000001', 'record.json'));
+    const child = start(f.args('watch', ['--wait-ms', '30000', '--timeout-ms', '60000']));
+    await waitFor(() => server.requests.length === 2);
+    child.child.kill('SIGTERM');
+    const stopped = await child.complete;
+    assert.equal(stopped.code, 130, stopped.stderr); assert.equal(stopped.signal, null);
+    assert.deepEqual(await readFile(join(f.root, 'page-00000001', 'record.json')), saved);
+    assert.deepEqual((await readdir(f.root)).sort(), ['binding', 'page-00000001']);
+    const inspection = await run(f.args('inspect')); assert.equal(inspection.code, 0, inspection.stderr);
+    assert.equal(records(inspection.stdout)[0].resume_after, '1:0');
+    assert.equal(server.requests.length, 2);
+  } finally { await server.close(); await f.close(); }
 });

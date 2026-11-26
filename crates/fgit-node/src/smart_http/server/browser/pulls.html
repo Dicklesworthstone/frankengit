@@ -96,11 +96,14 @@
         <label>Action <select id="metadata-action"><option value="open">Open</option><option value="update">Update</option><option value="close">Close</option><option value="reopen">Reopen closed PR</option><option value="retarget">Change target branch</option></select></label>
         <label>Expected PR version (0 for new) <input id="expected-version" inputmode="numeric" required></label>
         <label>Object format <select id="object-format"><option value="sha1">SHA-1</option><option value="sha256">SHA-256</option></select></label>
-        <label>Source ref <input id="source-ref" placeholder="refs/heads/topic" spellcheck="false" required></label>
-        <label>Target ref <input id="target-ref" placeholder="refs/heads/main" spellcheck="false" required></label>
+        <label>Source ref <input id="source-ref" maxlength="2048" placeholder="refs/heads/topic" spellcheck="false" aria-describedby="metadata-ref-help" required></label>
+        <label>Source encoding <select id="source-ref-encoding"><option value="text">Branch name text</option><option value="hex">Exact bytes in lowercase hex</option></select></label>
+        <label>Target ref <input id="target-ref" maxlength="2048" placeholder="refs/heads/main" spellcheck="false" aria-describedby="metadata-ref-help" required></label>
+        <label>Target encoding <select id="target-ref-encoding"><option value="text">Branch name text</option><option value="hex">Exact bytes in lowercase hex</option></select></label>
         <label>Exact source tip <input id="source-tip" spellcheck="false" required></label>
         <label>Exact target tip <input id="target-tip" spellcheck="false" required></label>
       </div>
+      <p id="metadata-ref-help">Use the complete branch name, including refs/heads/. For names that are not UTF-8, choose lowercase hex for the entire name. Loading a PR selects the encoding that preserves its exact bytes. Changing an encoding does not convert the entered value.</p>
       <label>Title <input id="title" maxlength="256" required></label>
       <label>Body <textarea id="body" rows="6" maxlength="65536"></textarea></label>
       <button id="metadata-stage" type="submit">Prepare metadata request — do not send</button>

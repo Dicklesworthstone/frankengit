@@ -1,6 +1,6 @@
 // Exact commands and terminal decisions. Transport errors never prove rollback.
 import { keys, record, integer, principal, opaque, text, oid, binding, subject, SUBJECT_FIELDS, metadataCommand,
-  matchSubject, form, utf8, fail, hex, format, branch, reference, unhex, snapshot, rootFor, readBytes, apiError, pullLabels } from './pulls-core.mjs';
+  matchSubject, form, utf8, fail, hex, format, commandReference, reference, unhex, snapshot, rootFor, readBytes, apiError, pullLabels } from './pulls-core.mjs';
 import { BUNDLE_LIMIT, multipart, checkedBundle, digest, mergeMethod } from './pulls-candidate.mjs';
 import { sourceCommentAnchor, sourceCommentFields } from './pulls-comments.mjs';
 export const RECEIPT_LIMIT = 24 * 1024 * 1024;
@@ -54,13 +54,14 @@ export function collaborationCommand(action, fields) {
 // Fast-forward publishes an existing native tip. It has no constructed candidate,
 // review assertion, policy-epoch claim or bundle; the native engine checks gates.
 export function fastForwardCommand(fields) {
-  keys(fields, ['object_format', 'pull_request_version', 'source_ref', 'source_tip', 'target_ref', 'target_tip']);
+  keys(fields, ['object_format', 'pull_request_version', 'source_ref', 'source_ref_hex', 'source_tip', 'target_ref', 'target_ref_hex', 'target_tip']);
   const algorithm = format(fields.object_format);
+  const source = commandReference(fields, 'source_ref'), target = commandReference(fields, 'target_ref');
   const result = { object_format: algorithm,
     pull_request_version: integer(fields.pull_request_version, 'PR version', 1, Number.MAX_SAFE_INTEGER - 1),
-    source_ref: branch(fields.source_ref), source_tip: oid(fields.source_tip, algorithm),
-    target_ref: branch(fields.target_ref), target_tip: oid(fields.target_tip, algorithm) };
-  if (result.source_ref === result.target_ref || result.source_tip === result.target_tip) fail('Fast-forward requires distinct branches and tips.');
+    [source.name]: source.value, source_tip: oid(fields.source_tip, algorithm),
+    [target.name]: target.value, target_tip: oid(fields.target_tip, algorithm) };
+  if (source.hex === target.hex || result.source_tip === result.target_tip) fail('Fast-forward requires distinct branches and tips.');
   if (form(result).length > 8192) fail('Fast-forward command exceeds 8 KiB.');
   return result;
 }
@@ -133,8 +134,11 @@ export function publication(reply, pending, status) {
     if (reply.type !== 'fast_forward_merge_publication' || reply.number !== pending.number ||
         reply.pull_request_version !== fields.pull_request_version) fail('Wrong terminal fast-forward command.');
     for (const side of ['source', 'target']) {
-      reference(reply, `${side}_ref`);
-      if (reply[`${side}_ref`] !== fields[`${side}_ref`] ||
+      const name = `${side}_ref`, expected = commandReference(fields, name);
+      const bytes = unhex(expected.hex, 1024);
+      let label = null;
+      try { label = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); } catch { /* Non-UTF-8 ref. */ }
+      if (reference(reply, name) !== label || reply[`${name}_hex`] !== expected.hex ||
           oid(reply[`${side}_tip`], fields.object_format) !== fields[`${side}_tip`]) fail('Terminal fast-forward coordinates changed.');
     }
   } else {

@@ -11,12 +11,18 @@
   <header>
     <h1>Repository activity</h1>
     <nav aria-label="Repository"><a href="../">Source</a> · <a href="../issues/">Issues</a> · <a href="../pulls/">Pull requests</a> · <a href="../history/">Git history</a></nav>
-    <p>Read the native, authenticated issue and pull-request event feed without changing repository state.</p>
+    <p>Read authenticated issue, pull-request, milestone, discussion and review activity without changing repository state.</p>
   </header>
   <main>
     <section aria-labelledby="connection-heading">
       <h2 id="connection-heading">Connection</h2>
-      <label for="token">Bearer token with issues-read or pulls-read permission</label>
+      <label for="profile">Activity to request</label>
+      <select id="profile">
+        <option value="issues-pulls-v1" selected>Issues and pull requests</option>
+        <option value="collaboration-v2">All granted collaboration activity</option>
+      </select>
+      <p>The collaboration feed includes milestones, discussions, PR conversations and review votes only when your token grants access. Disconnect to change this selection; start at cursor 0 to backfill a different profile.</p>
+      <label for="token">Bearer token with an activity read permission (issues-read, pulls-read, discussions-read or reviews-read)</label>
       <input id="token" type="password" autocomplete="off" spellcheck="false" maxlength="64">
       <button id="connect" type="button">Connect</button>
       <button id="disconnect" type="button" disabled>Disconnect and clear</button>
@@ -28,12 +34,14 @@
       <input id="after" type="text" value="0" maxlength="31" spellcheck="false" disabled>
       <label for="limit">Maximum canonical positions examined per page (1–100)</label>
       <input id="limit" type="number" value="20" min="1" max="100" step="1" disabled>
+      <label for="wait">Wait for new activity at the tail (milliseconds, 0–30000)</label>
+      <input id="wait" type="number" value="0" min="0" max="30000" step="1" disabled>
       <button id="load" type="button" disabled>Load from cursor</button>
       <button id="next" type="button" disabled>Next page at same snapshot</button>
       <button id="refresh" type="button" disabled>Refresh after watermark</button>
       <button id="cancel" type="button" disabled>Cancel read</button>
       <button id="save" type="button" disabled>Export displayed page</button>
-      <p>Load uses the entered cursor and size. Next preserves the selected snapshot and size. Refresh reads after the last successful watermark at a newly observed head, including after a snapshot conflict. Nothing polls or retries automatically.</p>
+      <p>Load uses the entered cursor and size. Next preserves the selected snapshot and size. Refresh reads after the last successful watermark at a newly observed head, including after a snapshot conflict. Load and Refresh may wait at an empty tail for the chosen duration. Any cursor progress returns immediately, even when filtered. Cancel stops the read. Nothing polls or retries automatically.</p>
       <p id="status" role="status" aria-live="polite">Connect and load an activity page.</p>
     </section>
     <section aria-labelledby="observation-heading">
