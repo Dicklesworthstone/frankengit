@@ -683,7 +683,7 @@ def ordered_http_publish(campaign, fmt):
                    if json.loads((event / "event.json").read_bytes())["commit"] == first]
     original = f.root / "reported-before-recovery"
     (historical / "reported").rename(original)
-    position = ["at", *f.scope, "latest", "summary"]
+    position = ["at", *f.scope, "latest"]
     before = campaign.invoke("authority-before-report-recovery", position)
     recovered = [json.loads(line) for line in campaign.invoke("recover-original-check-refusal", [
         *f.arguments(publish=True), "--ordered-branch-updates"], code=1).splitlines()]
