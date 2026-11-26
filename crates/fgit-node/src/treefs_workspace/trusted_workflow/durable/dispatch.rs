@@ -28,6 +28,7 @@ pub(super) struct Snapshot {
     pub(super) head: RepositoryAuthorityHeadId,
     pub(super) commit: GitOid,
     pub(super) ancestor_of: Option<GitOid>,
+    pub(super) settle_definition_refusal: bool,
 }
 
 impl From<(RepositoryAuthorityHeadId, GitOid)> for Snapshot {
@@ -36,6 +37,7 @@ impl From<(RepositoryAuthorityHeadId, GitOid)> for Snapshot {
             head,
             commit,
             ancestor_of: None,
+            settle_definition_refusal: false,
         }
     }
 }
@@ -318,9 +320,7 @@ impl OneNode {
         path_basis: Option<PathBasis>,
         reserve: Option<impl FnOnce() -> Result<(), TrustedWorkflowFailure> + Send>,
     ) -> Result<TrustedWorkflowDispatch, TrustedWorkflowFailure> {
-        let retain_definition_refusal = reserve.is_some()
-            && matches!(event, "push" | "pull_request")
-            && reference.as_bytes().starts_with(b"refs/heads/");
+        let retain_definition_refusal = expected.settle_definition_refusal && reserve.is_some();
         let bytes = ByteCount::try_new("workflow source", FETCH_BYTES, FETCH_BYTES)
             .map_err(|_| TrustedWorkflowFailure::InvalidInput("source budget"))?;
         let declared = paths

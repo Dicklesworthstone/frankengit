@@ -645,6 +645,9 @@ impl OneNode {
                     head: execution_head,
                     commit: execution_commit,
                     ancestor_of: selected.ancestor_of,
+                    // This is an ordinary source watch. Merge candidates have
+                    // already returned through their separate start owner.
+                    settle_definition_refusal: !tag,
                 },
                 limits,
                 artifacts,

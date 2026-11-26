@@ -82,7 +82,7 @@ def commit(root, parents, message, timestamp=1):
 
 
 class Fixture:
-    def __init__(self, fmt, method, label, conflict=False):
+    def __init__(self, fmt, method, label, conflict=False, runner="fgit-trusted-local"):
         self.fmt, self.method = fmt, method
         self.root = ROOT / f"{fmt}-{method}-{label}"
         self.root.mkdir()
@@ -114,7 +114,7 @@ class Fixture:
         )
         build = (
             "name: exact-merge-watch\non:\n  pull_request:\n    branches:\n      - main\n"
-            "    paths:\n      - right\njobs:\n  build:\n    runs-on: fgit-trusted-local\n"
+            f"    paths:\n      - right\njobs:\n  build:\n    runs-on: {runner}\n"
             f"    steps:\n      - run: {action}\n"
         ).encode()
         excluded_action = f"printf excluded >> {shlex.quote(str(self.excluded))}; exit 99"
@@ -372,11 +372,27 @@ def conflict(fmt):
         assert not f.checks(7)["checks"]
     record(f, "conflicting-parents-never-publish-ci-ref-or-checks-and-never-start-scripts")
 
+def unsupported_candidate_runner(fmt):
+    f = Fixture(fmt, "merge-commit", "unsupported-runner", runner="ubuntu-latest")
+    refused = rows(invoke("candidate-refuses-runner", f.watch, 2))
+    assert "UnsupportedRunner" in refused[-1]["operation_error"]
+    assert refused[-1]["requires_reconciliation"]
+    assert not f.count() and not f.checks(7)["checks"]
+    assert f.require_original_refs()[CI_REF] == f.candidate
+    event, = f.runs.glob("watch-*/event-*")
+    assert (event / "execution-started").is_file()
+    assert not (event / "check-sources").exists() and not (event / "settled").exists()
+    restarted = poll(invoke("candidate-refusal-still-blocks", f.watch, 1))
+    assert restarted["state"] == "blocked_unresolved" and not restarted["execution_settled"]
+    assert not f.count() and not f.checks(7)["checks"]
+    record(f, "unsupported-candidate-runner-retains-start-fence-and-original-publication")
+
 
 if __name__ == "__main__":
     for object_format in ("sha1", "sha256"):
         for merge_method in ("merge-commit", "squash"):
             success(object_format, merge_method)
         conflict(object_format)
+        unsupported_candidate_runner(object_format)
 
     (ROOT / "results.json").write_text(json.dumps(RESULTS, indent=2) + "\n", encoding="utf-8")
