@@ -102,6 +102,32 @@ test('preparation pins the entire writer scope into the exact form and accepts o
     [tenant_id, repository_id, repository_incarnation, principal_id].join(':'));
   assert.equal(f.calls.length, 0);
 });
+test('split credentials send the pinned writer only to publication and the reader to both lookups', async t => {
+  const f = await local(t, 'sha256');
+  await writeFile(f.inputPath, JSON.stringify({ ...f.input, bind_writer_scope: true }));
+  const prepared = await f.prepare(), pin = prepared.value.intent_sha256;
+  const intent = await loadIntent(f.job, pin), expected = new URLSearchParams(intent.body).get('expected_scope');
+  f.state.hook = (call, _request, response) => {
+    const writing = call.path.endsWith('/branches/transaction');
+    if (call.headers.authorization !== 'Bearer ' + (writing ? TOKEN : ROTATED) ||
+        writing && call.form.get('expected_scope') !== expected) {
+      response.writeHead(403); response.end(); return true;
+    }
+    // The schema peer models ref commands. Its test hook consumes the scope assertion.
+    if (writing) call.form.delete('expected_scope');
+    return false;
+  };
+  const record = join(f.root, 'split.json');
+  const sent = await f.invoke(['send', '--request-dir', f.job, '--confirm', pin, '--token-file', f.token,
+    '--outcome-token-file', f.rotated, '--record', record]);
+  assert.equal(sent.code, 0);
+  assert.equal(sent.value.outcome.state, 'committed');
+  assert.deepEqual(f.calls.map(call => [call.path.split('/').at(-1), call.headers.authorization]), [
+    ['outcomes', 'Bearer ' + ROTATED], ['transaction', 'Bearer ' + TOKEN], ['outcomes', 'Bearer ' + ROTATED],
+  ]);
+  assert.equal(f.calls[1].body, intent.body);
+  assert.ok(!(await readFile(record)).includes(Buffer.from(ROTATED)));
+});
 test('invalid private files, aliases and Git worktree custody are refused', async t => {
   const f = await local(t);
   await chmod(f.token, 0o644); assert.equal((await f.prepare()).code, 2); await chmod(f.token, 0o600);

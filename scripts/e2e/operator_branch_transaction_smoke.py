@@ -212,6 +212,7 @@ syncBuiltinESMExports();
         recovered_refusal = invoke("recover", stale_job, "recovered_refusal", "rotated", status=1)
         require(refused["state"] == "refused" and refused["dispatched"]
                 and refused["outcome"]["terminal"] and not recovered_refusal["dispatched"]
+                and refused["outcome"]["decision"]["code"] == "ExpectedOldRefMismatch"
                 and refused["outcome"] == recovered_refusal["outcome"] and refs(snapshot()) == wanted,
                 "the stale lease published a partial effect or lost its terminal refusal")
     check_connections(restarted, 6)
