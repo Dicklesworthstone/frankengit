@@ -59,8 +59,12 @@ publication in both hash formats. All four corresponding ASCII-name imports
 succeeded. Bead `.4.60`, comment 6286, records the eight inputs and original
 ref bytes. Main now includes the byte-preserving importer from `6dec391e`,
 source revalidation from `d9559819` and the new raw-ref recovery tests in
-`5ef8e378`. The original native comparison still needs replay on the newer
-executable.
+`5ef8e378`. The complete native import and CLI test targets passed 19 tests at
+that revision. The same executable accepted all eight original inputs. A
+reopened branch listing matched stock Git's complete reference and object IDs
+in SHA-1 and SHA-256, including byte FF, in loose and packed layouts. Bead
+`.4.60`, comment 6293, retains the exact replay and executable. Its broader
+Tier A acceptance remains open.
 [Native import reader](../crates/fgit-node/src/loose_import/source_io.rs)
 
 At `a2b7bd4c`, a release-proof check now catches a lost transaction outcome in
