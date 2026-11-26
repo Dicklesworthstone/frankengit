@@ -574,6 +574,39 @@ def ordered_push_restart(campaign, fmt):
                     executed=f.effects_count(), refused_stale_check=stale["refusal_code"])
 
 
+def ordered_unreachable_source(campaign, fmt):
+    f = Fixture(campaign, fmt, "ordered-unreachable")
+    watch = ["workflow", "watch", *f.scope, TARGET, "--trusted-local", "--workflow", "ci",
+             "--input", "ci", "--run-parent", f.runs, "--object-format", fmt,
+             "--ordered-branch-updates"]
+
+    def poll(label, code=0):
+        return [json.loads(line) for line in campaign.invoke(label, watch, code=code).splitlines()]
+
+    def branch(action, key, *fields):
+        result = json.loads(campaign.invoke(key, [
+            "branch", action, *f.scope, "--trusted-local", "--principal", PRINCIPAL,
+            "--object-format", fmt, "--ref", TARGET, "--idempotency-key", key, *fields]))
+        assert result["command_committed"], result
+
+    assert poll("before-recreation")[0]["poll"]["event"]["commit"] == f.base
+    branch("update", "unobserved-update", "--expected-tip", f.base, "--target", f.tips[0])
+    branch("delete", "delete-unobserved", "--expected-tip", f.tips[0])
+    branch("create", "recreate-at-ancestor", "--target", f.base)
+    missing = poll("unreachable-history", code=2)
+    assert not any(row["type"] == "workflow_watch_poll" for row in missing)
+    assert "RefUnavailable" in missing[-1]["operation_error"], missing
+    assert len(event_directories(f)) == f.effects_count() == 1
+
+    branch("update", "restore-reachability", "--expected-tip", f.base, "--target", f.tips[1])
+    tips = [poll(f"replay-restored-{i}")[0]["poll"]["event"]["commit"] for i in range(3)]
+    assert tips == [f.tips[0], f.base, f.tips[1]]
+    repeated = poll("after-restored-replay")
+    assert repeated[0]["poll"]["state"] == "previously_settled"
+    assert len(event_directories(f)) == f.effects_count() == 4
+    campaign.record(fmt, "ordered-unreachable-source", recovered_in_order=tips)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
@@ -586,3 +619,4 @@ if __name__ == "__main__":
         selected_byte_refs(campaign, fmt)
         check_pagination(campaign, fmt)
         ordered_push_restart(campaign, fmt)
+        ordered_unreachable_source(campaign, fmt)
