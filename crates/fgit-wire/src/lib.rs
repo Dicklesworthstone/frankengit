@@ -49,6 +49,7 @@ mod filter_syntax;
 mod object_info;
 /// Bounded SANS-I/O receive-pack parsing and structural pack quarantine.
 pub mod receive;
+mod ref_prefixes;
 mod request_ids;
 mod shallow_response;
 /// Bounded smart HTTP discovery, routing, and streaming message framing.
@@ -1325,9 +1326,10 @@ pub trait UploadPackRepository {
     fn contains_want(&self, oid: AnyGitOid) -> bool;
     /// Whether a client `have` is already common with the advertised closure.
     fn is_common(&self, oid: AnyGitOid) -> bool;
-    /// Check the live request before negotiation-only work or disclosure.
-    /// Called for absent/hidden haves and empty rounds too. Static repository
-    /// views need no deadline; live adapters preserve their original scope.
+    /// Check the live request before ref discovery or negotiation work and disclosure.
+    /// Called while validating and selecting refs, for absent/hidden haves,
+    /// and for empty rounds too. Static repository views need no deadline;
+    /// live adapters preserve their original scope.
     fn negotiation_checkpoint(&self) -> Result<(), WireError> {
         Ok(())
     }
@@ -1813,6 +1815,16 @@ fn validate_advertised_refs(
     object_format: GitObjectFormat,
     limits: &WireLimits,
 ) -> Result<(), WireError> {
+    validate_advertised_refs_while(refs, object_format, limits, &mut || Ok(()))
+}
+
+fn validate_advertised_refs_while(
+    refs: &[AdvertisedRef],
+    object_format: GitObjectFormat,
+    limits: &WireLimits,
+    checkpoint: &mut impl FnMut() -> Result<(), WireError>,
+) -> Result<(), WireError> {
+    checkpoint()?;
     if refs.len() > limits.max_advertised_refs {
         return Err(WireError::TooManyAdvertisedRefs {
             limit: limits.max_advertised_refs,
@@ -1820,6 +1832,7 @@ fn validate_advertised_refs(
     }
     let mut previous: Option<&[u8]> = None;
     for reference in refs {
+        checkpoint()?;
         if reference.oid.algorithm() != object_format {
             return Err(WireError::ObjectFormatMismatch {
                 expected: object_format,
@@ -3052,15 +3065,19 @@ impl V2UploadPack {
         &mut self,
         repository: &impl UploadPackRepository,
     ) -> Result<Transition, WireError> {
-        validate_advertised_refs(
-            repository.advertised_refs(),
+        let references = repository.advertised_refs();
+        validate_advertised_refs_while(
+            references,
             repository.object_format(),
             &self.limits,
+            &mut || repository.negotiation_checkpoint(),
         )?;
+        let prefixes = ref_prefixes::RefPrefixes::new(&self.ref_prefixes)?;
+        repository.negotiation_checkpoint()?;
         let mut output = Vec::new();
         let mut used_bytes = 0_usize;
         if self.ls_refs.contains(LsRefsOptions::UNBORN)
-            && self.ref_matches_prefixes(b"HEAD")
+            && prefixes.matches(b"HEAD")
             && let Some(target) = repository.unborn_symref_target()
         {
             parse_ref_name(target, &self.limits)?;
@@ -3090,8 +3107,9 @@ impl V2UploadPack {
                 &self.limits,
             )?;
         }
-        for reference in repository.advertised_refs() {
-            if !self.ref_matches_prefixes(&reference.name) {
+        for reference in references {
+            repository.negotiation_checkpoint()?;
+            if !prefixes.matches(&reference.name) {
                 continue;
             }
             let mut line = oid_hex(reference.oid).into_bytes();
@@ -3140,6 +3158,7 @@ impl V2UploadPack {
             )?;
         }
         add_output_packet(&mut output, Packet::Flush, 4, &mut used_bytes, &self.limits)?;
+        repository.negotiation_checkpoint()?;
         // Protocol v2 allows several commands per connection: a stock clone
         // sends ls-refs and then fetch on one socket. Report this request's
         // attributes first, then reset the per-command state so the next
@@ -3159,14 +3178,6 @@ impl V2UploadPack {
             output,
             events: vec![event],
         })
-    }
-
-    fn ref_matches_prefixes(&self, name: &[u8]) -> bool {
-        self.ref_prefixes.is_empty()
-            || self
-                .ref_prefixes
-                .iter()
-                .any(|prefix| name.starts_with(prefix))
     }
 
     fn require_fetch_feature(&self, feature: &[u8]) -> Result<(), WireError> {
