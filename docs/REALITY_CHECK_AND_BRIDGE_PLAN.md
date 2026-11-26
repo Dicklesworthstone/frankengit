@@ -81,6 +81,20 @@ same executable. Bead `.4.12` remains in progress for historical check
 publication, ordered PR and queue triggers, and durable capsule reuse.
 [HTTP workflow reference selection](NATIVE_HTTP_WORKFLOW_SERVICE.md) · [Stock-push campaign](../scripts/e2e/suites/workflow/stock_push_landing.sh)
 
+On the `9c9e06cf` executable, a CLI or HTTP restart with latest-only
+selection could settle the second of two offline pushes and skip the first
+even after ordered mode resumed. Pinned stock Git reproduced the gap through
+both entry points in SHA-1 and SHA-256. At `1a482067`, the first ordered
+poll durably binds that mode to the existing custody scope. A latest-only
+restart refuses new execution. HTTP also refuses before readiness. Resuming
+the same scope in ordered mode ran both original trees, preserved the
+earlier settlement and repeated no jobs. The stock Git suite passed 20
+native cases and the ordinary HTTP suite passed 14 on the same
+source-verified executable. Cargo check compiled the command and its
+`fg_at` integration target. Bead `.4.12` records the separate native,
+compile and artifact transfer outcomes.
+[Ordered restart and upgrade](NATIVE_REF_WORKFLOW_WATCH.md#ordered-branch-execution-after-a-restart)
+
 The proof bridge at `b4bf422a` follows the same sealed loser through
 re-preparation at the winner's head in both writer schedules. The disjoint
 writes both commit. The same-ref Rust controls refuse the losing precondition

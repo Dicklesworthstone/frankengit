@@ -141,7 +141,9 @@ The first ordered poll records the choice in the existing private watch
 directory before accepting new work. It keeps all prior settlements. Later
 polls in that scope require the ordered option so a latest-only restart
 cannot skip a pending push. Retain the order binding alongside the event
-directories when backing up or restoring custody.
+directories when backing up or restoring custody. When upgrading a running
+ordered watch, retain its existing ordered option on the first start so it
+can record the binding.
 
 An older commit must be reachable from the currently visible branch at the
 selected head. Discovery and execution use that commit's exact tree. The
