@@ -107,12 +107,12 @@ def run_case(campaign, directory, fmt):
         return ["--request-dir", str(job), "--confirm", reply["intent_sha256"]], json.loads(
             (job / "intent.json").read_text(encoding="utf-8"))
 
-    def invoke(action, job, name, writer, reader=None, status=0, error=False, blocked=False):
+    def invoke(action, job, name, writer, reader=None, status=0, error=False, preload=None):
         args = [action, *job, "--token-file", str(tokens[writer]),
                 "--record", str(directory / (name + "-record.json"))]
         if reader is not None:
             args.extend(("--outcome-token-file", str(tokens[reader])))
-        return campaign.node_command(CLI, args, status, error_reply=error, block_stdout=blocked)
+        return campaign.node_command(CLI, args, status, error_reply=error, preload=preload)
 
     def recorded(name):
         return json.loads((directory / (name + "-record.json")).read_text(encoding="utf-8"))
@@ -155,19 +155,42 @@ def run_case(campaign, directory, fmt):
         require(status == 200 and observation["state"] == "key_not_observed"
                 and observation["transaction"] is None, "the mismatched writer registered a native transaction")
 
-        # A full unread stdout pipe models a caller that cannot consume the
-        # final reply after the native server has committed and closed it.
-        lost = invoke("send", job, "lost_output", "writer", "outcomes", 3, True, True)
-        terminal = recorded("lost_output")
-        require(lost["record_saved"] and terminal["dispatched"] and terminal["error"] is None
-                and terminal["outcome"]["state"] == "committed"
-                and terminal["publication"]["outcome"] == "committed", "lost output erased the native outcome")
+        # Truncate the real native response after its headers. The original
+        # request still reaches the native publish boundary over its socket.
+        hook = write_private(directory / "lose-publication.mjs", """import http from 'node:http';
+import { writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+const request = http.request;
+const receipt = new URL('./truncated-response.json', import.meta.url);
+http.request = function (...args) {
+  const req = Reflect.apply(request, this, args);
+  if (req.method === 'POST' && args[0].pathname.endsWith('/source/branches/transaction')) {
+    req.prependOnceListener('response', res => {
+      writeFileSync(receipt, JSON.stringify({status: res.statusCode}), {mode: 0o600, flag: 'wx'});
+      res.destroy(new Error('planted reply truncation'));
+    });
+  }
+  return req;
+};
+syncBuiltinESMExports();
+""")
+        lost = invoke("send", job, "lost_reply", "writer", "outcomes", 3, True, hook)
+        unresolved = recorded("lost_reply")
+        truncation = json.loads((directory / "truncated-response.json").read_text())
+        require(truncation["status"] == 200 and lost["record_saved"]
+                and unresolved["dispatched"] and unresolved["error"]["phase"] == "publication"
+                and unresolved["outcome"]["state"] == "key_not_observed"
+                and unresolved["publication"] is None, "truncated publication was presented as confirmed")
         after = snapshot()
         wanted = refs(before)
         del wanted[DELETE]
         wanted.update({UPDATE: git["target"], RAW: git["source"]})
         require(refs(after) == wanted and after["source_head"] != before["source_head"],
                 "native atomic publication did not produce the three reviewed effects")
+        status, terminal = native_request(campaign, gateway, fmt + "-published-before-restart",
+                "/api/v1/outcomes", tokens["outcomes"], intent["key"])
+        require(status == 200 and terminal["terminal"] and terminal["state"] == "committed",
+                "independent native lookup could not recover the original decision before restart")
     check_connections(gateway, 9)
 
     restarted = server("restarted")
@@ -177,7 +200,7 @@ def run_case(campaign, directory, fmt):
         recovered = invoke("recover", job, "rotated", "rotated")
         repeated = invoke("send", job, "repeat", "writer", "rotated")
         for observation in (recovered, repeated):
-            require(not observation["dispatched"] and observation["outcome"] == terminal["outcome"],
+            require(not observation["dispatched"] and observation["outcome"] == terminal,
                     "restart retrieval changed the original seal, decision or scope")
         require(snapshot() == after, "original-key recovery changed canonical refs or their head")
 
@@ -192,7 +215,7 @@ def run_case(campaign, directory, fmt):
                 and refused["outcome"] == recovered_refusal["outcome"] and refs(snapshot()) == wanted,
                 "the stale lease published a partial effect or lost its terminal refusal")
     check_connections(restarted, 6)
-    return {"publication": terminal["outcome"], "refusal": refused["outcome"], "refs": wanted}
+    return {"publication": terminal, "refusal": refused["outcome"], "refs": wanted}
 
 
 def main():

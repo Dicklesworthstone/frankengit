@@ -196,8 +196,8 @@ confirmation retention, concurrent result publication, cancellation, strict
 credentials and output failure.
 
 The native campaign uses a prebuilt `fg` and pinned Node to exercise split
-grants, mismatched writers and readers, exact byte-named effects, retained
-output, restart recovery, and an atomic stale-lease refusal in both formats.
+grants, mismatched writers and readers, exact byte-named effects, a truncated
+native response, restart recovery, and an atomic stale-lease refusal in both formats.
 The suite retains the native terminal decisions and canonical ref map.
 
 ~~~sh
