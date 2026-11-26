@@ -63,6 +63,13 @@ Once all decisions are terminal the watcher may select the new ref event; an
 unresolved outcome is not promoted to a terminal refusal. Acknowledgement never
 changes a source ref or merges a pull request.
 
+This applies to ordered branch replay as well. Older executions retain their
+original evidence, and a check submitted for a superseded commit receives
+`TargetRefMoved`. That refusal counts toward the watch's non-green exit.
+The watch continues after each known terminal refusal and can publish a
+successful observation for the exact current tip. A lost local acknowledgement
+recovers the original terminal decision under the same child key.
+
 Each emitted `workflow_check_set` is a verified plan; each
 `workflow_check_set_decision` is a real historical canonical outcome.
 `workflow_watch_publication` summarizes observed commits/refusals and local

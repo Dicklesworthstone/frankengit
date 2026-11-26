@@ -557,7 +557,11 @@ fn check_reporting_requires_explicit_opt_in_publisher_and_incarnation_together()
         ],
     ]
     .concat();
+    let options_with_ordered = [complete.clone(), vec!["--ordered-branch-updates".into()]].concat();
     assert!(options(&complete).unwrap().publisher.is_some());
+    let ordered = options(&options_with_ordered).unwrap();
+    assert!(ordered.ordered_branch_updates);
+    assert_eq!(ordered.publisher, options(&complete).unwrap().publisher);
     for flag in [
         "--publish-checks",
         "--principal-id",
@@ -568,6 +572,8 @@ fn check_reporting_requires_explicit_opt_in_publisher_and_incarnation_together()
         let count = if flag == "--publish-checks" { 1 } else { 2 };
         bad.drain(index..index + count);
         assert!(options(&bad).is_err(), "{flag}");
+        bad.push("--ordered-branch-updates".into());
+        assert!(options(&bad).is_err(), "{flag} in ordered mode");
     }
     for extra in [
         vec!["--publish-checks".into()],

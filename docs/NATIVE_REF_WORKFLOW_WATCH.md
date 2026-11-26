@@ -149,8 +149,10 @@ change per canonical decision batch.
 The ordered profile retains local execution and check-source records.
 Use `fg serve-http --workflow-ordered-branch-updates` for the same profile
 on the [HTTP-owned controller](NATIVE_HTTP_WORKFLOW_SERVICE.md#replay-missed-branch-updates).
-Automatic check publication, PR, queue and tag selection use their own
-profiles. Protected merge checks still require a current source commit.
+Add `--publish-checks` with the explicit publisher and incarnation to report
+through [ordinary check admission](NATIVE_WATCH_CHECK_PUBLICATION.md#interrupted-publication-and-source-movement).
+A superseded commit receives a canonical refusal and the watch retains its
+original execution. PR, queue and tag selection use their own profiles.
 
 ### Continuous service
 

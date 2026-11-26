@@ -108,7 +108,8 @@ by default. --workflow-publish-checks and --workflow-principal require an explic
 --expected-incarnation. Workflow file/log capture requires --artifact-root. Readiness
 follows exclusive workflow custody; execution begins after readiness is flushed.
 --workflow-ordered-branch-updates replays reachable branch changes after settlement.
-It requires a plain branch and local execution without a check publisher.
+It requires a plain branch. An explicit check publisher still uses the current-tip
+guard, and refusals for superseded results count as non-green.
 Stopping drains execution and reports workflow_service_drained before HTTP drain.
 Select up to 64 exact workflow/job/output files with --workflow-artifact or its
 byte-safe hex form. Logs and files share the capture allowance: 16 MiB per payload

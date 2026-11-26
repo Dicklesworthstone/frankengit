@@ -356,6 +356,17 @@ mod tests {
             "--expected-incarnation".into(),
             "88".repeat(16),
         ]);
+        let configured = parse_server(&publication)
+            .unwrap()
+            .workflow_service
+            .unwrap();
+        assert_eq!(
+            configured.publisher(),
+            Some(PrincipalId::from_hex(&"77".repeat(16)).unwrap())
+        );
+        publication.pop();
+        publication.pop();
+        assert!(parse_server(&publication).is_err());
         let mut pull_request = arguments.clone();
         pull_request.extend(["--workflow-pull-request".into(), "7".into()]);
         let mut collection = arguments;
@@ -366,7 +377,7 @@ mod tests {
         ]);
         let mut queue = queue_arguments();
         queue.push("--workflow-ordered-branch-updates".into());
-        for refused in [tag, publication, pull_request, collection, queue] {
+        for refused in [tag, pull_request, collection, queue] {
             let Err(error) = parse_server(&refused) else {
                 panic!("ordered polling accepted an incompatible profile");
             };

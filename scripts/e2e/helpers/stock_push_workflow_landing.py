@@ -491,7 +491,7 @@ def check_pagination(campaign, fmt):
                     final_page=len(last["checks"]), published=len(rows), snapshot=page["snapshot_token"])
 
 
-def push_two_workflow_trees(f):
+def push_two_workflow_trees(f, *, second_marker=False):
     run, first = fresh_push_source(f)
     with receive_listener(f) as address:
         def push(label, tip):
@@ -503,13 +503,17 @@ def push_two_workflow_trees(f):
             shutil.copyfile(transcript / "receipt.tsv", f.root / f"{label}.tsv")
             assert refs(f)[REF] == tip
         push("ordered-first", first)
-        workflow = (f"name: second-snapshot\non: push\njobs:\n  a:\n"
+        if second_marker:
+            path, data = "ci/replayed.txt", b"second-snapshot\n"
+        else:
+            path = "ci/build.yml"
+            data = (f"name: second-snapshot\non: push\njobs:\n  a:\n"
                     f"    runs-on: fgit-trusted-local\n    steps:\n"
                     f"      - run: printf 'second-snapshot\\n' >> {shlex.quote(str(f.effects))}\n").encode()
         stream = (f"commit {REF}\ncommitter CI Source <source@example.test> 1720000001 +0000\n"
                   f"data 6\nsecond\nfrom {first}\nM 100644 inline pushed.txt\n"
-                  f"data 10\nnext bytes\nM 100644 inline ci/build.yml\ndata {len(workflow)}\n").encode()
-        stream += workflow + b"\n\ndone\n"
+                  f"data 10\nnext bytes\nM 100644 inline {path}\ndata {len(data)}\n").encode()
+        stream += data + b"\n\ndone\n"
         upstream("run", PIN, run, "client", "--", "fast-import", "--quiet", data=stream)
         second = upstream("run", PIN, run, "client", "--", "rev-parse", REF)
         assert upstream("run", PIN, run, "client", "--", "rev-parse", REF + "^") == first
@@ -622,6 +626,79 @@ def ordered_http_restart(campaign, fmt):
                     executed=f.effects_count(), recovered_settlement=True, checks_published=0)
 
 
+def ordered_http_publish(campaign, fmt):
+    label = "ordered-http-publish"
+    effects = shlex.quote(str(campaign.root / f"{fmt}-{label}" / "effects"))
+    # The immutable workflow graph survives both pushes. A difference in its
+    # input tree identifies the second execution independently of the report.
+    workflow = ("name: ordered-publication\non: push\njobs:\n  a:\n"
+                "    runs-on: fgit-trusted-local\n    steps:\n"
+                "      - run: if test -f ci/replayed.txt; then cat ci/replayed.txt; "
+                f"else printf 'executed\\n'; fi >> {effects}\n")
+    f = Fixture(campaign, fmt, label, workflow_source=workflow)
+    credentials(f)
+    f.open_pull()
+
+    with Server(f, "initial-publisher", ordered=True, publish=True) as server:
+        server.ready()
+        previous = server.check()
+        server.wait(lambda _: all((event / "reported").is_file() for event in event_directories(f)))
+        drained, _ = server.stop()
+        assert drained["checks_committed"] == drained["dispatched"] == 1
+
+    first, second = push_two_workflow_trees(f, second_marker=True)
+    f.tips[1] = second
+    f.current = 1
+    f.open_pull()
+    installed = json.loads(campaign.invoke("protect-ordered-check", [
+        "protection", "set", *f.scope, "--trusted-local", "--principal", PRINCIPAL,
+        "--admin", PRINCIPAL, "--idempotency-key", "ordered-protection",
+        "--expected-version", 0, "--expected-epoch", 1, "--object-format", fmt,
+        "--require-check", f"{TARGET}:{REF}:{PRINCIPAL}:{previous['graph_root']}:a",
+    ]))
+    assert installed["committed"], installed
+
+    def try_update(key, expected):
+        return json.loads(campaign.invoke(key, [
+            "branch", "update", *f.scope, "--trusted-local", "--principal", PRINCIPAL,
+            "--idempotency-key", key, "--object-format", fmt,
+            "--ref", TARGET, "--expected-tip", f.base, "--target", second,
+        ], code=expected))
+
+    refused = try_update("new-tip-before-check", 3)
+    assert refused["refusal_code"] == "ProtectedRefTransitionDenied", refused
+    with Server(f, "catch-up-publisher", ordered=True, publish=True) as server:
+        server.ready()
+        current = server.check()
+        server.wait(lambda _: len(event_directories(f)) == 3 and all(
+            (event / "reported").is_file() for event in event_directories(f)))
+        drained, _ = server.stop(code=1)
+    assert current["id"] != previous["id"] and current["graph_root"] == previous["graph_root"]
+    assert drained["dispatched"] == 2 and drained["checks_committed"] == drained["checks_refused"] == 1
+    assert drained["non_green"] and not drained["requires_reconciliation"]
+    assert not drained["publication_pending"] and not drained["interrupted"]
+    assert refs(f)[TARGET] == f.base and refs(f)[REF] == second
+
+    historical, = [event for event in event_directories(f)
+                   if json.loads((event / "event.json").read_bytes())["commit"] == first]
+    original = f.root / "reported-before-recovery"
+    (historical / "reported").rename(original)
+    position = ["at", *f.scope, "latest", "summary"]
+    before = campaign.invoke("authority-before-report-recovery", position)
+    recovered = [json.loads(line) for line in campaign.invoke("recover-original-check-refusal", [
+        *f.arguments(publish=True), "--ordered-branch-updates"], code=1).splitlines()]
+    decision, = [row for row in recovered if row["type"] == "workflow_check_set_decision"]
+    assert decision["refusal_code"] == "TargetRefMoved" and decision["historical_outcome"], decision
+    assert (historical / "reported").read_bytes() == original.read_bytes()
+    assert campaign.invoke("authority-after-report-recovery", position) == before
+    assert f.effects.read_text().splitlines() == ["executed", "executed", "second-snapshot"]
+    assert try_update("new-tip-after-check", 0)["command_committed"]
+    assert refs(f)[TARGET] == refs(f)[REF] == second
+    campaign.record(fmt, "ordered-http-publishes-exact-current-check", first=first, second=second,
+                    prior_check=previous["id"], current_check=current["id"],
+                    recovered_refusal=decision["refusal_code"], landed=second)
+
+
 def ordered_unreachable_source(campaign, fmt):
     f = Fixture(campaign, fmt, "ordered-unreachable")
     watch = ["workflow", "watch", *f.scope, TARGET, "--trusted-local", "--workflow", "ci",
@@ -668,4 +745,5 @@ if __name__ == "__main__":
         check_pagination(campaign, fmt)
         ordered_push_restart(campaign, fmt)
         ordered_http_restart(campaign, fmt)
+        ordered_http_publish(campaign, fmt)
         ordered_unreachable_source(campaign, fmt)

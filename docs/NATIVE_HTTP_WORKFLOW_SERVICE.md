@@ -73,8 +73,7 @@ pending net branch change, one per poll. An older commit must still be
 reachable from the current visible branch. The selected commit's tree supplies
 the workflow and inputs.
 
-This profile retains execution and its evidence locally. Omit the check
-publisher, tag, PR and queue options. The same trusted-local acknowledgement,
+Use a plain branch for ordered replay. The same trusted-local acknowledgement,
 authority checks, custody recovery, request limits and HTTP capability flags
 apply. See [ordered branch selection](NATIVE_REF_WORKFLOW_WATCH.md#ordered-branch-execution-after-a-restart)
 for reachability and history limits.
@@ -87,6 +86,10 @@ Execution alone does not publish checks. Supply **both**
 The original reporting identity remains permanently bound to its custody scope.
 Pending publication recovers under original identities before new execution;
 failed or skipped job observations are never promoted to success.
+Ordered replay can use the same publisher. A superseded job receives the
+ordinary `TargetRefMoved` decision and counts as non-green. The controller
+continues through settled events and can publish the exact current tip. A
+graceful stop exits 1 if the service observed a refusal.
 
 Optional `--workflow-pull-request NUMBER` selects the native same-repository PR
 profile. The PR must be open and its source branch must match `--workflow-ref`.
