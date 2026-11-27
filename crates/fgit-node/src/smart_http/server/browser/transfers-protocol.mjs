@@ -127,11 +127,11 @@ export async function exportInventory(transport, selection, checkpoint = () => {
   const selected = structuredClone(selection), refs = []; let after = null, sourceHead = null, bytes = 0;
   do {
     checkpoint();
-    const query = { object_format: selected.scope.format, namespace: 'all', limit: 100, expected_head: selected.head };
+    const query = { object_format: selected.scope.format, namespace: 'all', cursor_encoding: 'hex', limit: 100, expected_head: selected.head };
     if (after !== null) query.after = after;
     const { value: page } = await transport.request('source/refs', { method: 'POST', body: form(query), maximum: 1024 * 1024 });
     checkpoint(); pinned(page, selected.scope, selected.head);
-    if (page.type !== 'source_refs' || page.namespace !== 'all' || page.after !== after || page.limit !== 100 ||
+    if (page.type !== 'source_refs' || page.namespace !== 'all' || page.cursor_encoding !== 'hex' || page.after !== after || page.limit !== 100 ||
         page.read_only !== true || page.transaction_created !== false || page.published !== false ||
         page.direct_refs_only !== true || !Array.isArray(page.refs) || page.refs.length > 100 ||
         (sourceHead !== null && page.source_head !== sourceHead)) fail('Invalid full-export reference page.');
@@ -145,9 +145,7 @@ export async function exportInventory(transport, selection, checkpoint = () => {
       refs.push({ ref_hex: name, object_id: oid(row.object_id, selected.scope.format) });
     }
     if (page.next_after !== null) {
-      if (typeof page.next_after !== 'string') fail('Unrepresentable export continuation.');
-      const cursor = bundleRef(hex(utf8.encode(page.next_after)));
-      if (page.refs.length !== 100 || refs.at(-1)?.ref_hex !== cursor || refs.length >= REF_LIMIT) fail('Incomplete or oversized export inventory.');
+      if (page.refs.length !== 100 || refs.at(-1)?.ref_hex !== page.next_after || refs.length >= REF_LIMIT) fail('Incomplete or oversized export inventory.');
     }
     after = page.next_after;
   } while (after !== null);

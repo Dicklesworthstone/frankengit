@@ -62,9 +62,9 @@ export class TransferClient {
       this.#noPending(); this.cancel(); format(algorithm);
       const serial = this.#serial, epoch = this.#transport.epoch;
       const { value: r } = await this.#transport.request('source/refs', { method: 'POST',
-        body: form({ object_format: algorithm, namespace: 'all', limit: 1 }), maximum: 32 * 1024 });
+        body: form({ object_format: algorithm, namespace: 'all', cursor_encoding: 'hex', limit: 1 }), maximum: 32 * 1024 });
       const selected = pinned(r, this.#scope);
-      if (r.type !== 'source_refs' || r.namespace !== 'all' || r.after !== null || r.limit !== 1 ||
+      if (r.type !== 'source_refs' || r.namespace !== 'all' || r.cursor_encoding !== 'hex' || r.after !== null || r.limit !== 1 ||
           r.read_only !== true || r.transaction_created !== false || r.published !== false || r.direct_refs_only !== true ||
           !Array.isArray(r.refs) || r.refs.length > 1 || selected.binding.format !== algorithm) fail('Invalid target repository selection.');
       this.#check(serial, epoch); this.#scope = selected.binding;

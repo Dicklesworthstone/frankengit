@@ -47,6 +47,8 @@ try {
     run(['branch', 'topic'], dir);
     // A second page exercises the real complete-snapshot read, not a one-row twin.
     for (let i = 0; i < 101; i++) run(['update-ref', `refs/tags/export-${String(i).padStart(3, '0')}`, 'HEAD'], dir);
+    // Two branches and the first 97 tags sort before this byte-only 100th ref.
+    run(['update-ref', '--stdin'], dir, Buffer.concat([Buffer.from('create refs/tags/export-096'), Buffer.from([255]), Buffer.from(' HEAD\n')]));
     const path = join(dir, 'export.bundle'); run(['bundle', 'create', path, '--all'], dir);
     const input = new Uint8Array(readFileSync(path)), rows = inventory(dir), calls = [], head = `alg:1:${'1'.repeat(64)}`;
     const common = { schema_version: 1, tenant_id: 'oracle-tenant', repository_id: 'oracle-repo', repository_incarnation: 'oracle-incarnation', object_format: algorithm };
@@ -56,9 +58,10 @@ try {
         const endpoint = new URL(url).pathname.split('/api/v1/')[1], fields = new URLSearchParams(init.body); calls.push({ endpoint, url: String(url), init, fields });
         if (endpoint === 'source/refs') {
           const after = fields.get('after'), limit = Number(fields.get('limit'));
-          const selected = rows.filter(r => after === null || r.ref_hex > Buffer.from(after).toString('hex'));
-          const refs = selected.slice(0, limit), next_after = selected.length > limit ? refs.at(-1).ref : null;
-          return new Response(JSON.stringify({ ...common, type: 'source_refs', namespace: 'all', after, limit, next_after,
+          assert.equal(fields.get('cursor_encoding'), 'hex');
+          const selected = rows.filter(r => after === null || r.ref_hex > after);
+          const refs = selected.slice(0, limit), next_after = selected.length > limit ? refs.at(-1).ref_hex : null;
+          return new Response(JSON.stringify({ ...common, type: 'source_refs', namespace: 'all', cursor_encoding: 'hex', after, limit, next_after,
             source_head: 'oracle-head', snapshot_token: head, read_only: true, transaction_created: false,
             published: false, direct_refs_only: true, refs }), { headers: { 'Content-Type': 'application/json' } });
         }
@@ -73,6 +76,8 @@ try {
     await client.connect('ab'.repeat(32)); await client.select(algorithm); await client.exportBundle({ verifyInventory: true });
     check(`${algorithm}: all real Git refs match pinned inventory`, () => assert.deepEqual(client.exported.refs, rows.map(({ ref_hex, object_id }) => ({ ref_hex, object_id }))));
     check(`${algorithm}: multiple inventory pages stay pinned`, () => {
+      assert.equal(rows[99].ref, null);
+      assert(calls.some(c => c.endpoint === 'source/refs' && c.fields.get('after') === rows[99].ref_hex));
       assert(calls.filter(c => c.endpoint === 'source/refs' && c.fields.get('limit') === '100').length > 1);
       for (const call of calls.slice(1)) assert.equal(call.fields.get('expected_head'), head);
     });

@@ -11,7 +11,7 @@ export const oid = algorithm => 'b'.repeat(algorithm === 'sha1' ? 40 : 64);
 export const row = (name, algorithm = 'sha1') => ({ ref: name, ref_hex: hex(encode(name)), object_id: oid(algorithm) });
 export function page(algorithm = 'sha1', rows = [row('refs/heads/main', algorithm)], extra = {}) {
   return { type: 'source_refs', schema_version: 1, tenant_id: 'tenant', repository_id: 'repository', repository_incarnation: 'incarnation',
-    object_format: algorithm, namespace: 'all', source_head: 'head-object', snapshot_token: head, after: null, limit: 100, next_after: null,
+    object_format: algorithm, namespace: 'all', cursor_encoding: 'hex', source_head: 'head-object', snapshot_token: head, after: null, limit: 100, next_after: null,
     read_only: true, transaction_created: false, published: false, direct_refs_only: true, refs: rows, ...extra };
 }
 // Valid framing/checksums with a single compressed blob. The advertised target

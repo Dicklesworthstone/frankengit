@@ -27,9 +27,9 @@ export async function connectedTransfer(fixture = completeBundle(), { customize 
       const override = await customize(path, fields, init); if (override) return override;
       if (path === 'source/refs') {
         const after = fields.get('after'), limit = Number(fields.get('limit'));
-        const rows = fixture.rows.filter(row => after === null || row.ref > after).slice(0, limit);
-        const more = rows.length && fixture.rows.at(-1).ref !== rows.at(-1).ref;
-        return json(page(fixture.format, rows, { after, limit, next_after: more ? rows.at(-1).ref : null }));
+        const rows = fixture.rows.filter(row => after === null || row.ref_hex > after).slice(0, limit);
+        const more = rows.length && fixture.rows.at(-1).ref_hex !== rows.at(-1).ref_hex;
+        return json(page(fixture.format, rows, { after, limit, next_after: more ? rows.at(-1).ref_hex : null }));
       }
       if (path === 'source/bundle/export') return binary(fixture.bytes, fixture.format);
       throw new Error(`Unexpected API request: ${path}`);

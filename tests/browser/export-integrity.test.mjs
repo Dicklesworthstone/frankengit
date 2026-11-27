@@ -51,7 +51,7 @@ test('sample-only legacy export cannot claim a complete ref inventory', async ()
   const { client, calls } = await ready(); await client.exportBundle();
   assert.equal(calls.length, 2); assert.throws(() => client.exportManifest());
 });
-for (const [field, value] of Object.entries({ namespace: 'branches', after: 'refs/heads/other', limit: 1, read_only: false,
+for (const [field, value] of Object.entries({ cursor_encoding: 'utf8', namespace: 'branches', after: 'refs/heads/other', limit: 1, read_only: false,
   transaction_created: true, published: true, direct_refs_only: false, repository_incarnation: 'other', source_head: null, snapshot_token: 'invalid' })) {
   test(`inventory rejects changed ${field}`, async () => {
     const { client, calls } = await ready('sha1', (path, fields) => path === 'source/refs' && fields.get('limit') === '100' ? json(page('sha1', undefined, { [field]: value })) : null);
@@ -71,19 +71,21 @@ for (const [name, modify] of [
 });
 test('all pages remain tied to one head and raw byte order', async () => {
   const rows = Array.from({ length: 101 }, (_, i) => row(`refs/heads/a${String(i).padStart(3, '0')}`)); const calls = [];
+  rows[99] = { ...rows[99], ref: null, ref_hex: rows[99].ref_hex + 'ff' };
   const selected = { scope: { tenant: 'tenant', repository: 'repository', incarnation: 'incarnation', format: 'sha1' }, head };
   const transport = { request: async (_path, init) => {
     const f = new URLSearchParams(init.body); calls.push(f);
-    return { value: calls.length === 1 ? page('sha1', rows.slice(0, 100), { next_after: rows[99].ref }) : page('sha1', rows.slice(100), { after: rows[99].ref }) };
+    return { value: calls.length === 1 ? page('sha1', rows.slice(0, 100), { next_after: rows[99].ref_hex }) : page('sha1', rows.slice(100), { after: rows[99].ref_hex }) };
   } };
   assert.equal((await exportInventory(transport, selected)).refs.length, 101);
-  assert.equal(calls[1].get('expected_head'), head); assert.equal(calls[1].get('after'), rows[99].ref);
+  assert(calls.every(fields => fields.get('cursor_encoding') === 'hex'));
+  assert.equal(calls[1].get('expected_head'), head); assert.equal(calls[1].get('after'), rows[99].ref_hex);
 });
 for (const field of ['repository_incarnation', 'snapshot_token', 'source_head']) test(`later inventory page cannot change ${field}`, async () => {
   const rows = Array.from({ length: 100 }, (_, i) => row(`refs/heads/a${String(i).padStart(3, '0')}`)); let n = 0;
   const { client } = await ready('sha1', (path, fields) => {
     if (path !== 'source/refs' || fields.get('limit') !== '100') return null;
-    return json(++n === 1 ? page('sha1', rows, { next_after: rows[99].ref }) : page('sha1', [row('refs/heads/z')], { after: rows[99].ref, [field]: 'other' }));
+    return json(++n === 1 ? page('sha1', rows, { next_after: rows[99].ref_hex }) : page('sha1', [row('refs/heads/z')], { after: rows[99].ref_hex, [field]: 'other' }));
   }); await assert.rejects(client.exportBundle({ verifyInventory: true }));
 });
 test('inventory with only ref-count budget progress refuses rather than claiming exhaustion', async () => {
@@ -91,7 +93,7 @@ test('inventory with only ref-count budget progress refuses rather than claiming
   const { client, calls } = await ready('sha1', (path, fields) => {
     if (path !== 'source/refs' || fields.get('limit') !== '100') return null;
     const rows = Array.from({ length: 100 }, () => row(`refs/heads/a${String(n++).padStart(5, '0')}`));
-    return json(page('sha1', rows, { after: fields.get('after'), next_after: rows.at(-1).ref }));
+    return json(page('sha1', rows, { after: fields.get('after'), next_after: rows.at(-1).ref_hex }));
   }); await assert.rejects(client.exportBundle({ verifyInventory: true }));
   assert(calls.length <= Math.ceil(REF_LIMIT / 100) + 1); assert(!calls.some(c => c.path === 'source/bundle/export'));
 });

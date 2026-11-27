@@ -24,7 +24,7 @@ export function decodeUpload(call) {
 export function fixture(algorithm = 'sha1', input = bundleBytes(algorithm)) {
   const common = { schema_version: 1, tenant_id: '1'.repeat(32), repository_id: '2'.repeat(32),
     repository_incarnation: '3'.repeat(32), object_format: algorithm };
-  const selection = { ...common, type: 'source_refs', namespace: 'all', after: null, limit: 1, next_after: null, refs: [],
+  const selection = { ...common, type: 'source_refs', namespace: 'all', cursor_encoding: 'hex', after: null, limit: 1, next_after: null, refs: [],
     direct_refs_only: true, source_head: 'authority-head', snapshot_token: head, read_only: true, transaction_created: false, published: false };
   const exportHeaders = { 'Content-Type': 'application/x-git-bundle', 'Content-Length': String(input.length),
     'X-Fgit-Bundle-Profile': 'full-v1', 'X-Fgit-Object-Format': algorithm, 'X-Fgit-Tenant': common.tenant_id,

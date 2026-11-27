@@ -75,9 +75,9 @@ sum of raw name bytes to 256 KiB; each page contains at most 100 refs. Manifests
 are at most 1 MiB. This is deliberately narrower than native export's envelope.
 Resource exhaustion refuses rather than silently treating a prefix as complete.
 
-The current native ref API accepts only UTF-8 continuation names. A byte-only
-final row can be verified, but a byte-only cursor on an intermediate page is
-still refused by the native endpoint. Prerequisite/incremental and filtered
+Repository selection and every reference page request hex cursors. A non-UTF-8
+name can therefore end any page, including the first selection row. The next
+request carries its exact ref bytes and the original snapshot token. Prerequisite/incremental and filtered
 bundles remain unsupported by this full-export workflow. No hidden-ref,
 publication or object-admission rule is weakened.
 
