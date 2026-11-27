@@ -15,6 +15,9 @@ const MAGIC: &[u8; 8] = b"FGRES001";
 const INTENT_BYTES: usize = 48;
 const SIGNED_MAGIC: &[u8; 8] = b"FGRES002";
 const SIGNED_INTENT_BYTES: usize = 80;
+const LFS_MAGIC: &[u8; 8] = b"FGRES003";
+const SIGNED_LFS_MAGIC: &[u8; 8] = b"FGRES004";
+const MAX_INTENT_BYTES: usize = SIGNED_INTENT_BYTES + 32;
 
 /// Retain the OS lock through restore execution. It is advisory: repository
 /// serving and hostile same-UID filesystem mutation remain outside this profile.
@@ -23,6 +26,7 @@ const SIGNED_INTENT_BYTES: usize = 80;
 pub(super) struct Intent {
     root: PathBuf,
     _lock: File,
+    lfs: bool,
 }
 impl Intent {
     #[cfg(test)]
@@ -34,11 +38,22 @@ impl Intent {
         Self::reserve_bound(root, pin, instance, None)
     }
 
+    #[cfg(test)]
     pub(super) fn reserve_bound(
         root: &Path,
         pin: [u8; 32],
         instance: StoreInstanceId,
         approval: Option<[u8; 32]>,
+    ) -> Result<Self, String> {
+        Self::reserve_complete(root, pin, instance, approval, None)
+    }
+
+    pub(super) fn reserve_complete(
+        root: &Path,
+        pin: [u8; 32],
+        instance: StoreInstanceId,
+        approval: Option<[u8; 32]>,
+        lfs: Option<[u8; 32]>,
     ) -> Result<Self, String> {
         create_private(root)?;
         let lock = private_options()
@@ -53,7 +68,7 @@ impl Intent {
             .open(root.join(INTENT))
             .map_err(|e| e.to_string())?;
         marker
-            .write_all(&bound_binding(pin, instance, approval))
+            .write_all(&complete_binding(pin, instance, approval, lfs))
             .and_then(|()| marker.sync_all())
             .map_err(|e| e.to_string())?;
         drop(marker);
@@ -62,6 +77,7 @@ impl Intent {
         Ok(Self {
             root: root.to_path_buf(),
             _lock: lock,
+            lfs: lfs.is_some(),
         })
     }
 
@@ -74,11 +90,22 @@ impl Intent {
         Self::open_bound(root, pin, instance, None)
     }
 
+    #[cfg(test)]
     pub(super) fn open_bound(
         root: &Path,
         pin: [u8; 32],
         instance: StoreInstanceId,
         approval: Option<[u8; 32]>,
+    ) -> Result<Self, String> {
+        Self::open_complete(root, pin, instance, approval, None)
+    }
+
+    pub(super) fn open_complete(
+        root: &Path,
+        pin: [u8; 32],
+        instance: StoreInstanceId,
+        approval: Option<[u8; 32]>,
+        lfs: Option<[u8; 32]>,
     ) -> Result<Self, String> {
         if !has_kind(root, true)? {
             return Err("resume requires an existing restore root".into());
@@ -92,15 +119,15 @@ impl Intent {
         let mut bytes = Vec::new();
         File::open(&marker)
             .map_err(|e| e.to_string())?
-            .take((SIGNED_INTENT_BYTES + 1) as u64)
+            .take((MAX_INTENT_BYTES + 1) as u64)
             .read_to_end(&mut bytes)
             .map_err(|e| e.to_string())?;
         // Compare the exact versioned intent before opening any database,
         // moving quarantined data or settling a publication alias. Neither
         // omission nor addition of signed policy can reinterpret a prior run.
-        if bytes != bound_binding(pin, instance, approval) {
+        if bytes != complete_binding(pin, instance, approval, lfs) {
             return Err(
-                "resume intent does not match archive checksum, destination instance and exact signed approval/trust policy".into(),
+                "resume intent does not match archive checksum, destination instance, exact signed approval/trust policy and LFS companion checksum".into(),
             );
         }
         let lock_path = root.join(LOCK);
@@ -117,6 +144,7 @@ impl Intent {
         Ok(Self {
             root: root.to_path_buf(),
             _lock: lock,
+            lfs: lfs.is_some(),
         })
     }
 
@@ -127,7 +155,7 @@ impl Intent {
     /// Return a partially moved, still-unpublished image to quarantine before
     /// ANY database reopen. In particular, never open a database without its
     /// moved WAL. All path/type/collision checks precede the first rename.
-    /// Only three fixed data paths may move; no archive-controlled path is used.
+    /// Only fixed data paths may move; no archive-controlled path is used.
     pub(super) fn quarantine(&self) -> Result<PathBuf, String> {
         require_absent(&self.root.join("authority.fsqlite"))?;
         let quarantine = self.root.join(".restore-quarantine");
@@ -135,20 +163,26 @@ impl Intent {
         let objects_at_root = has_kind(&self.root.join("objects"), true)?;
         let manifests_at_root = has_kind(&self.root.join("manifests"), true)?;
         let wal_at_root = has_kind(&self.root.join("authority.fsqlite-wal"), false)?;
+        let lfs_at_root = has_kind(&self.root.join("lfs"), true)?;
         require_absent(&self.root.join("authority.fsqlite-journal"))?;
         require_absent(&self.root.join("authority.fsqlite-shm"))?;
-        if !exists && (objects_at_root || manifests_at_root || wal_at_root) {
+        if !exists && (objects_at_root || manifests_at_root || wal_at_root || lfs_at_root) {
             return Err("resume found moved data without its quarantine; no paths changed".into());
         }
         let objects_in_quarantine = has_kind(&quarantine.join("objects"), true)?;
         let manifests_in_quarantine = has_kind(&quarantine.join("manifests"), true)?;
         let wal_in_quarantine = has_kind(&quarantine.join("authority.fsqlite-wal"), false)?;
+        let lfs_in_quarantine = has_kind(&quarantine.join("lfs"), true)?;
+        if !self.lfs && (lfs_at_root || lfs_in_quarantine) {
+            return Err("source-only restore found unowned LFS custody; no paths changed".into());
+        }
         let database = has_kind(&quarantine.join("authority.fsqlite"), false)?;
         has_kind(&quarantine.join("authority.fsqlite-journal"), false)?;
         has_kind(&quarantine.join("authority.fsqlite-shm"), false)?;
         if (objects_at_root && objects_in_quarantine)
             || (manifests_at_root && manifests_in_quarantine)
             || (wal_at_root && wal_in_quarantine)
+            || (lfs_at_root && lfs_in_quarantine)
         {
             return Err("resume found conflicting data locations; no paths changed".into());
         }
@@ -164,6 +198,7 @@ impl Intent {
             ("objects", objects_at_root),
             ("manifests", manifests_at_root),
             ("authority.fsqlite-wal", wal_at_root),
+            ("lfs", lfs_at_root),
         ] {
             if moved {
                 fs::rename(self.root.join(name), quarantine.join(name))
@@ -235,6 +270,24 @@ fn bound_binding(pin: [u8; 32], instance: StoreInstanceId, approval: Option<[u8;
     if let Some(approval) = approval {
         bytes[..8].copy_from_slice(SIGNED_MAGIC);
         bytes.extend_from_slice(&approval);
+    }
+    bytes
+}
+
+fn complete_binding(
+    pin: [u8; 32],
+    instance: StoreInstanceId,
+    approval: Option<[u8; 32]>,
+    lfs: Option<[u8; 32]>,
+) -> Vec<u8> {
+    let mut bytes = bound_binding(pin, instance, approval);
+    if let Some(lfs) = lfs {
+        bytes[..8].copy_from_slice(if approval.is_some() {
+            SIGNED_LFS_MAGIC
+        } else {
+            LFS_MAGIC
+        });
+        bytes.extend_from_slice(&lfs);
     }
     bytes
 }

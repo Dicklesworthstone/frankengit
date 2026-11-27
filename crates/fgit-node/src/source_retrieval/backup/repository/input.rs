@@ -68,7 +68,6 @@ impl PinnedArchive<File> {
 impl<R: Read + Seek> PinnedArchive<R> {
     /// Verify one already-owned reader without reopening its pathname. Native
     /// composition can wrap the reader in its original operation's I/O ledger.
-    #[cfg(unix)]
     pub(super) fn from_reader(
         input: R,
         expected: [u8; 32],

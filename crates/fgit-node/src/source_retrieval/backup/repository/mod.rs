@@ -7,6 +7,7 @@ mod blob_io;
 mod checkpoint;
 mod donor;
 mod input;
+mod lfs;
 mod payload;
 mod profile;
 mod reconstruct;
@@ -34,12 +35,59 @@ use archive::{Identity, MAX_OBJECT_BYTES};
 use profile::{Deadline, Profile, ProfileFlags};
 use std::time::Duration;
 
+/// An independently pinned optional payload companion. Its source identity and
+/// complete inventory are checked against the source archive, not a directory.
+#[derive(Clone, Debug)]
+struct LfsInput {
+    path: PathBuf,
+    expected: [u8; 32],
+}
+
+#[derive(Default)]
+struct LfsInputFlags {
+    path: Option<PathBuf>,
+    expected: Option<[u8; 32]>,
+}
+impl LfsInputFlags {
+    fn accepts(flag: &str) -> bool {
+        matches!(flag, "--lfs-archive" | "--expected-lfs-sha256")
+    }
+
+    fn set(&mut self, flag: &str, value: &str) -> Result<(), String> {
+        match flag {
+            "--lfs-archive" if self.path.is_none() && !value.is_empty() => {
+                self.path = Some(PathBuf::from(value));
+            }
+            "--expected-lfs-sha256" if self.expected.is_none() => {
+                self.expected = Some(restore::digest(value)?);
+            }
+            _ => return Err(format!("invalid or duplicate LFS companion option: {flag}")),
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<Option<LfsInput>, String> {
+        match (self.path, self.expected) {
+            (None, None) => Ok(None),
+            (Some(path), Some(expected)) => Ok(Some(LfsInput { path, expected })),
+            _ => Err("--lfs-archive and --expected-lfs-sha256 are required together".into()),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct LfsExport {
+    root: PathBuf,
+    output: PathBuf,
+}
+
 pub const USAGE: &str =
     "usage: fg backup export <storage-root> <new-backup-file> <tenant-id> <repository-id>
          --trusted-local [--object-format sha1|sha256]
          [--max-archive-bytes <1..1099511627776>] [--timeout-secs <1..86400>]
          [--max-blob-bytes <1..1099511627776>]
          [--max-objects <1..1000000>]
+         [--lfs-root <existing-custody-root> --lfs-output <new-companion-file>]
          [--donor-backup <file> --donor-sha256 <64-lowercase-hex>
           --donor-scratch <new-private-root> --donor-verification-instance <positive-integer>
           [--donor-max-ancestry-hops <1..65536>]]
@@ -54,7 +102,9 @@ The head must remain unchanged across metadata capture, graph work and recheck.
 No implicit retry, live directory copying, external Git, or remote authorization.
 
 This is a bounded trusted-local SOURCE recovery transport, not a signed capsule
-or a full service backup. External artifacts, private keys, runner workspaces,
+or a full service backup. By default external artifacts are excluded. Explicit
+paired LFS options include only the complete native pointer-selected payload set.
+Other external artifacts, private keys, runner workspaces,
 search indexes and routing are excluded. Stable trusted parent paths required.
 Default archive budget: 1 GiB; default operation deadline: 300 seconds.
 An explicit leading fg --timeout-secs cap narrows the selected leaf timeout.
@@ -69,6 +119,20 @@ cooperative, and cannot interrupt a blocking filesystem call.
 Blobs default to 32 MiB; --max-blob-bytes selects a separate streaming allowance.
 Export streams blobs in bounded chunks and independently verifies the staged file.
 Export never overwrites an existing file. Save its SHA-256 independently.
+
+--lfs-root and --lfs-output are optional together and require a Unix host.
+LFS selection scans every admitted Git blob in the exact source snapshot,
+including retained history. Unsupported/conflicting pointers and missing or
+corrupt selected payloads refuse; unrelated custody objects are not included.
+The existing FGSRC source and FGLF companion formats remain separate. Retain
+both SHA-256 checksums independently. --max-archive-bytes bounds each file;
+--max-objects also bounds distinct LFS objects. LFS payloads retain their native
+512 MiB per-object limit; --max-blob-bytes applies only to Git blob bodies.
+Both streams are verified before the source node closes. Publication is
+create-only, companion first and source second, not an atomic two-file operation.
+A later failure may leave the verified companion; inspect both named outputs
+before retry. The receipt reports the exact companion checksum and inventory.
+LFS companion export cannot be combined with donor-assisted export options.
 
 An explicit donor uses a separately retained archive SHA-256 plus complete native
 authority/inventory/graph verification. Its exact head must be an ancestor of
@@ -91,9 +155,10 @@ struct Options {
     format: GitHashAlgorithm,
     profile: Profile,
     donor: Option<donor::Options>,
+    lfs: Option<LfsExport>,
 }
 fn parse(args: &[String]) -> Result<Options, String> {
-    if !(6..=26).contains(&args.len())
+    if !(6..=30).contains(&args.len())
         || args[0] != "export"
         || args.iter().any(|arg| arg.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 32768
@@ -106,6 +171,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut format = None;
     let mut profile = ProfileFlags::default();
     let mut donor = donor::Flags::default();
+    let (mut lfs_root, mut lfs_output) = (None, None);
     let mut cursor = 5;
     while let Some(flag) = args.get(cursor) {
         cursor += 1;
@@ -126,6 +192,21 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     .ok_or_else(|| format!("missing value for {flag}"))?;
                 cursor += 1;
                 profile.set(flag, value)?;
+            }
+            "--lfs-root" | "--lfs-output" => {
+                let value = args
+                    .get(cursor)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| format!("missing value for {flag}"))?;
+                cursor += 1;
+                let slot = if flag == "--lfs-root" {
+                    &mut lfs_root
+                } else {
+                    &mut lfs_output
+                };
+                if slot.replace(PathBuf::from(value)).is_some() {
+                    return Err(format!("duplicate LFS companion option: {flag}"));
+                }
             }
             _ if donor::Flags::accepts(flag) => {
                 let value = args
@@ -150,6 +231,17 @@ fn parse(args: &[String]) -> Result<Options, String> {
     if destination.file_name().is_none() {
         return Err("destination must name a new file".into());
     }
+    let lfs = match (lfs_root, lfs_output) {
+        (None, None) => None,
+        (Some(root), Some(output)) if output.file_name().is_some() => {
+            Some(LfsExport { root, output })
+        }
+        _ => return Err("--lfs-root and a named --lfs-output are required together".into()),
+    };
+    let donor = donor.finish()?;
+    if donor.is_some() && lfs.is_some() {
+        return Err("donor-assisted export and LFS companion export cannot be combined".into());
+    }
     Ok(Options {
         root: args[1].clone().into(),
         destination,
@@ -157,7 +249,8 @@ fn parse(args: &[String]) -> Result<Options, String> {
         repository: RepositoryId::from_hex(&args[4]).map_err(|e| e.to_string())?,
         format: format.unwrap_or(GitHashAlgorithm::Sha1),
         profile: profile.finish(),
-        donor: donor.finish()?,
+        donor,
+        lfs,
     })
 }
 fn limits(transfer: TransferLimits) -> GraphLimits {
@@ -201,6 +294,7 @@ fn export(
     file: &mut File,
     deadline: Deadline,
     donor: Option<&mut donor::Prepared>,
+    lfs_file: Option<&mut File>,
 ) -> Result<String, String> {
     deadline.check()?;
     let metadata = std::fs::symlink_metadata(&options.root).map_err(|e| e.to_string())?;
@@ -340,6 +434,31 @@ fn export(
             if let Some(evidence) = &header.checkpoint {
                 evidence.verify(node, &request, &selected, deadline, false)?;
             }
+            let lfs_receipt = match (&options.lfs, lfs_file) {
+                (Some(companion), Some(lfs_file)) => {
+                    // The inventory comes from the complete, graph-verified
+                    // source archive, including historical admitted pointers.
+                    // Recheck the same open source file on every pass.
+                    let mut source = input::PinnedArchive::from_reader(
+                        &mut *file,
+                        written.digest,
+                        options.profile.transfer,
+                        deadline,
+                    )?;
+                    let inventory =
+                        lfs::Inventory::collect(&mut source, deadline, options.profile.transfer)?;
+                    Some(lfs::export(
+                        &companion.root,
+                        &header,
+                        &inventory,
+                        lfs_file,
+                        options.profile.transfer,
+                        deadline,
+                    )?)
+                }
+                (None, None) => None,
+                _ => return Err("LFS companion staging disagrees with export options".into()),
+            };
             let current = node
                 .runtime()
                 .block_on(node.authenticate_authority_head_in(&request))
@@ -348,7 +467,13 @@ fn export(
             if !matches_head(&authority, current.receipt()) {
                 return Err("repository head moved during backup; no backup published".into());
             }
-            Ok(receipt(&header, report, verified, provenance.as_ref()))
+            let mut report = receipt(&header, report, verified, provenance.as_ref());
+            if let Some(lfs) = lfs_receipt {
+                report.pop();
+                report.push_str(&lfs.fields());
+                report.push_str(",\"lfs_payloads_included\":true}");
+            }
+            Ok(report)
         },
     )?;
     deadline.check()?;
@@ -443,6 +568,27 @@ pub fn run(args: &[String], output: &mut impl Write) -> Result<(), String> {
     run_with_timeout(args, output, None)
 }
 
+/// Stage both files before completing either export. The inner companion is
+/// published only after the source node closes and its exact head recheck has
+/// passed. Source publication follows. These are two create-only files, not an
+/// atomic pair: a later failure explicitly retains the verified companion.
+fn build_export(
+    options: &Options,
+    source_file: &mut File,
+    deadline: Deadline,
+    donor: Option<&mut donor::Prepared>,
+) -> Result<String, String> {
+    if let Some(lfs) = &options.lfs {
+        publish_streamed(
+            &lfs.output,
+            |lfs_file| export(options, source_file, deadline, donor, Some(lfs_file)),
+            || deadline.check(),
+        )
+    } else {
+        export(options, source_file, deadline, donor, None)
+    }
+}
+
 pub(super) fn run_with_timeout(
     args: &[String],
     output: &mut impl Write,
@@ -493,7 +639,27 @@ pub(super) fn run_with_timeout(
     let deadline = options.profile.start();
     deadline.check()?;
     require_absent(&options.destination)?;
-    let receipt = if let Some(donor) = &options.donor {
+    if let Some(lfs) = &options.lfs {
+        require_absent(&lfs.output)?;
+        // Resolve existing parents to catch relative and symlink aliases even
+        // though neither output file exists yet.
+        let source_parent = super::parent(&options.destination)
+            .canonicalize()
+            .map_err(|e| e.to_string())?;
+        let lfs_parent = super::parent(&lfs.output)
+            .canonicalize()
+            .map_err(|e| e.to_string())?;
+        if source_parent.join(
+            options
+                .destination
+                .file_name()
+                .ok_or("missing source filename")?,
+        ) == lfs_parent.join(lfs.output.file_name().ok_or("missing LFS filename")?)
+        {
+            return Err("source archive and LFS companion require distinct output files".into());
+        }
+    }
+    let publication = if let Some(donor) = &options.donor {
         let (mut prepared, separation) = donor.prepare(
             &options.root,
             &options.destination,
@@ -505,19 +671,26 @@ pub(super) fn run_with_timeout(
             &options.destination,
             |file| {
                 separation.check(|| deadline.check())?;
-                let receipt = export(&options, file, deadline, Some(&mut prepared))?;
+                let receipt = build_export(&options, file, deadline, Some(&mut prepared))?;
                 separation.check(|| deadline.check())?;
                 Ok(receipt)
             },
             || separation.check(|| deadline.check()),
-        )?
+        )
     } else {
         publish_streamed(
             &options.destination,
-            |file| export(&options, file, deadline, None),
+            |file| build_export(&options, file, deadline, None),
             || deadline.check(),
-        )?
+        )
     };
+    let receipt = publication.map_err(|error| {
+        if let Some(lfs) = &options.lfs {
+            format!("{error}; paired export may have retained its verified LFS companion at {}; inspect both output paths before retry", lfs.output.display())
+        } else {
+            error
+        }
+    })?;
     emit(output, &receipt)
         .map_err(|error| format!("repository backup published; receipt output failed: {error}"))
 }

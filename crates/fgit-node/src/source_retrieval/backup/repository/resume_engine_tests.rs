@@ -13,6 +13,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT: AtomicU64 = AtomicU64::new(1);
 #[path = "checkpoint_restore_tests.rs"]
 mod checkpoint_restore_tests;
+#[cfg(unix)]
+#[path = "lfs_restore_tests.rs"]
+mod lfs_restore_tests;
 #[path = "signed_tests.rs"]
 mod signed_tests;
 const TENANT: &str = "11111111111111111111111111111111";
@@ -162,6 +165,7 @@ fn options(input: &Path, output: PathBuf, expected: [u8; 32]) -> Options {
         profile: Profile::default(),
         resume: false,
         approval: None,
+        lfs: None,
     }
 }
 fn snapshot(root: &Path) -> ExportBundle {

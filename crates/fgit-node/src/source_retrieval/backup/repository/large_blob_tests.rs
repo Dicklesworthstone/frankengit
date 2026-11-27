@@ -237,6 +237,7 @@ fn explicit_large_blob_export_preflight_and_interrupted_restore_roundtrip_in_bot
             profile,
             resume: false,
             approval: None,
+            lfs: None,
         };
         let mut reached = false;
         let error = execute_with_checkpoints(&options, |stage| {

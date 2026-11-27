@@ -21,6 +21,7 @@ pub(in super::super) const USAGE: &str =
          [--max-archive-bytes <1..1099511627776>] [--timeout-secs <1..86400>]
          [--max-blob-bytes <1..1099511627776>]
          [--max-objects <1..1000000>]
+         [--lfs-archive <companion-file> --expected-lfs-sha256 <64-lowercase-hex>]
          [--approval <DSSE-file> --trust-key <SPKI-public-PEM>
           --tenant-id <hex> --repository-id <hex> --incarnation-id <hex>
           --object-format sha1|sha256 --minimum-head-generation <positive-u64>]
@@ -30,6 +31,13 @@ key/namespace/floor and signed digest/size/lifetime before creating scratch.
 --expected-sha256 remains independently required. The native archive header must
 match those signed declarations; signatures do not replace native graph checks.
 
+Optional LFS options are required together and need a Unix host. The separately
+pinned FGLF companion must match the source's exact original snapshot identity
+and complete native pointer inventory. The source --expected-sha256 remains
+required; a signed approval covers that source archive, not the LFS companion.
+LFS is bound independently by its checksum and the native Git pointers.
+Omitting both options retains source-only verification and unchanged wire formats.
+
 Verify the independently pinned archive, portable authority image, exact selected
 Git inventory, required-kind graph and original payload commitments BEFORE a
 restore. This uses the SAME backend/materializer/graph checks as restore, without
@@ -38,6 +46,8 @@ is needed. Metadata lives only in a private .verify-quarantine child.
 FGSRC002 also verifies its bounded retained outcome evidence against the exact
 authority-selected root through a read-only archive view; no leaves are placed.
 Legacy FGSRC001 does not claim retained checkpoint preservation.
+LFS preflight streams and verifies companion payloads without installing them.
+Neither Git nor LFS payloads are installed in the verification scratch root.
 
 The scratch root must be absent under a stable trusted parent. Never serve or
 concurrently modify it. Success closes the node and removes this invocation's
@@ -51,13 +61,17 @@ Commit, tree and tag bodies keep their independent 32 MiB metadata limit.
 The complete Git inventory defaults to 100000 objects. --max-objects permits
 up to 1000000 without widening authority, graph-edge, reference or byte limits.
 An explicit leading fg --timeout-secs cap narrows the selected leaf timeout.
+--max-archive-bytes bounds each selected archive, and --max-objects also bounds
+distinct LFS objects. LFS payloads retain their native 512 MiB per-object limit;
+--max-blob-bytes applies only to Git blobs. All source/LFS passes share the deadline.
 This verifies SOURCE recovery inputs, not destination disk readback, the newest
-full backup checkpoint, a complete signed capsule, external artifacts, routing or external-effect replay.
+full backup checkpoint, a complete signed capsule, other external artifacts,
+routing or external-effect replay. Optional LFS evidence is reported separately.
 Exit 0: complete scoped preflight and cleanup; 2: refusal, incomplete verification,
 cleanup failure or receipt-output failure.";
 
 fn parse(args: &[String]) -> Result<Options, String> {
-    if !(8..=30).contains(&args.len())
+    if !(8..=34).contains(&args.len())
         || args[0] != "verify"
         || args.iter().any(|arg| arg.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 32768
@@ -69,6 +83,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let (mut trusted, mut expected, mut instance) = (false, None, None);
     let mut profile = ProfileFlags::default();
     let mut approval = ApprovalFlags::default();
+    let mut lfs = super::super::LfsInputFlags::default();
     let mut cursor = 3;
     while let Some(flag) = args.get(cursor) {
         cursor += 1;
@@ -100,6 +115,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 profile.set(flag, value)?;
             }
             _ if ApprovalFlags::accepts(flag) => approval.set(flag, value)?,
+            _ if super::super::LfsInputFlags::accepts(flag) => lfs.set(flag, value)?,
             _ => return Err(format!("unknown or duplicate verification option: {flag}")),
         }
     }
@@ -121,6 +137,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         profile: profile.finish(),
         resume: false,
         approval: approval.finish()?,
+        lfs: lfs.finish()?,
     })
 }
 
@@ -227,6 +244,7 @@ pub(in super::super) fn verify_selected_pinned_in<R: Read + Seek>(
         profile,
         resume: false,
         approval: None,
+        lfs: None,
     };
     let verified =
         verify_pinned_with_checkpoints(archive, &options, Some(approval), deadline, |_| Ok(()))?;
@@ -262,7 +280,7 @@ pub(in super::super) fn verification_receipt<R: Read + Seek>(
                 "\"git_payloads_written\":false,\"destination_authority_published\":false,",
                 "\"node_closed\":true,\"scratch_removed\":true,\"destination_readback_verified\":false,",
                 "\"newest_checkpoint_verified\":false,\"signature_verified\":{}{},",
-                "\"external_artifacts_verified\":false,\"routing_published\":false{}}}"
+                "\"external_artifacts_verified\":false,\"routing_published\":false{}{}}}"
             ),
             quote(&hex(&archive.seal().digest)),
             archive.seal().bytes,
@@ -280,6 +298,10 @@ pub(in super::super) fn verification_receipt<R: Read + Seek>(
             approval.is_some(),
             approval_receipt_fields(approval),
             super::super::checkpoint::receipt(header.checkpoint.as_ref()),
+            verified.lfs.map_or_else(String::new, |receipt| format!(
+                "{},\"lfs_payloads_verified\":true",
+                receipt.fields()
+            )),
         ),
     }
 }
@@ -290,6 +312,7 @@ pub(in super::super) fn verification_receipt<R: Read + Seek>(
 pub(in super::super) struct VerifiedSourceArchive<R = File> {
     archive: PinnedArchive<R>,
     graph: GraphReport,
+    lfs: Option<super::super::lfs::Receipt>,
 }
 
 impl<R: Read + Seek> VerifiedSourceArchive<R> {
@@ -354,6 +377,7 @@ pub(in super::super) fn verify_pinned_in<R: Read + Seek>(
         profile,
         resume: false,
         approval: None,
+        lfs: None,
     };
     verify_pinned_with_checkpoints(archive, &options, None, deadline, |_| Ok(()))
 }
@@ -371,6 +395,7 @@ fn verify_pinned_with_checkpoints<R: Read + Seek>(
     if archive.header().authority.instance == options.instance.raw() {
         return Err("verification instance must differ from source; no scratch created".into());
     }
+    let mut lfs = super::prepare_lfs(options, &mut archive, deadline)?;
     deadline.check()?;
     create_private(&options.output)?;
     let quarantine = options.output.join(".verify-quarantine");
@@ -398,6 +423,9 @@ fn verify_pinned_with_checkpoints<R: Read + Seek>(
             },
         )?;
         checkpoint(Stage::GraphCheckedAndNodeClosed)?;
+        if let Some(companion) = &mut lfs {
+            companion.verify_archive(deadline)?;
+        }
         check_approval_current(approval, deadline)?;
         // There is deliberately no PreparedPublication and no restore intent.
         // This command cannot publish a root or authorize a later resume.
@@ -421,7 +449,11 @@ fn verify_pinned_with_checkpoints<R: Read + Seek>(
     sync_directory(super::parent(&options.output)).map_err(|error| {
         format!("archive verified and scratch removed; parent sync failed: {error}")
     })?;
-    Ok(VerifiedSourceArchive { archive, graph })
+    Ok(VerifiedSourceArchive {
+        archive,
+        graph,
+        lfs: lfs.map(|companion| companion.receipt()),
+    })
 }
 
 pub(in super::super) fn run(

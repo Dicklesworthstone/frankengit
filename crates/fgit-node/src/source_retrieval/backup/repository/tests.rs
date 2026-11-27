@@ -40,6 +40,53 @@ fn export_requires_explicit_authorization_and_unambiguous_bounded_options() {
     assert!(parse(&invalid).is_err());
     assert!(parse(&[]).is_err());
 }
+
+#[test]
+fn export_lfs_pair_is_explicit_and_donor_separation_is_not_bypassed() {
+    assert!(parse(&args(&[])).unwrap().lfs.is_none());
+    let options = parse(&args(&[
+        "--lfs-root",
+        "/custody",
+        "--lfs-output",
+        "/companion.fglf",
+    ]))
+    .unwrap();
+    let companion = options.lfs.unwrap();
+    assert_eq!(companion.root, PathBuf::from("/custody"));
+    assert_eq!(companion.output, PathBuf::from("/companion.fglf"));
+    for extra in [
+        vec!["--lfs-root", "/custody"],
+        vec!["--lfs-output", "/companion.fglf"],
+        vec!["--lfs-root", "", "--lfs-output", "/companion.fglf"],
+        vec!["--lfs-root", "/custody", "--lfs-output", "/"],
+        vec![
+            "--lfs-root",
+            "/custody",
+            "--lfs-output",
+            "/companion.fglf",
+            "--lfs-root",
+            "/other",
+        ],
+    ] {
+        assert!(parse(&args(&extra)).is_err(), "{extra:?}");
+    }
+    let error = parse(&args(&[
+        "--lfs-root",
+        "/custody",
+        "--lfs-output",
+        "/companion.fglf",
+        "--donor-backup",
+        "/donor.fg",
+        "--donor-sha256",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "--donor-scratch",
+        "/donor-check",
+        "--donor-verification-instance",
+        "993",
+    ]))
+    .unwrap_err();
+    assert!(error.contains("cannot be combined"), "{error}");
+}
 #[test]
 fn snapshot_join_checks_key_token_generation_and_exact_bytes_separately() {
     let token = AuthorityVersionToken::from_opaque_bytes([7; 16]);

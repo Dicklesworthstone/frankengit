@@ -20,14 +20,26 @@ match the independently retained pin. A new explicit invocation has a new finite
 resource/deadline envelope; there is no implicit or unlimited retry loop. Changing
 a resource limit does not change the intended repository snapshot.
 
+If the first attempt selected an
+[optional LFS companion](REPOSITORY_SOURCE_BACKUP.md#optional-git-lfs-companion),
+repeat `--lfs-archive FILE --expected-lfs-sha256 HASH` with its original checksum.
+The intent binds companion presence and bytes: a retry cannot add LFS to a
+source-only attempt, omit a selected companion or select different bytes. The
+companion pathname may change while its original checksum and exact native
+source binding remain the same. Existing signed source approval requirements
+also remain unchanged; that signature does not cover the companion.
+
 ## What can resume
 
 An immutable `.restore-intent` is synced before any authority import or Git
-object placement. It contains exactly 48 bytes: `FGRES001` (8 bytes), the trusted
+object placement. The unsigned source-only form contains exactly 48 bytes:
+`FGRES001` (8 bytes), the trusted
 archive SHA-256 (32 bytes), and the destination store instance (big-endian u64).
 It binds the request; it **does not attest to progress or success**. An empty,
 truncated, unsupported, mismatched, or absent intent refuses. Interrupted roots
 created by older binaries without an intent are deliberately not adopted.
+The optional LFS profile uses its own versioned intent containing the companion
+checksum; it preserves the existing source-only encoding.
 
 A retained `.restore-lock` file is exclusively locked through `File::try_lock`
 for restore execution. A competing cooperating restore refuses rather than
@@ -80,7 +92,13 @@ receipt adds `resume_requested` and `already_published` booleans; these describe
 this invocation, not a new canonical state. The intent and lock files remain so
 another lost-response retry can verify the result again.
 
-Routing, external-effect workers, credentials, external artifacts, signatures,
+With a selected companion, the same fixed-path recovery rules also cover `lfs`:
+an unpublished moved custody directory returns to quarantine before preparation,
+conflicting locations refuse, and LFS readback must pass before authority is
+published. An already-published retry verifies `<storage-root>/lfs` read-only and
+refuses missing or corrupt selected payloads without repairing them.
+
+Routing, external-effect workers, credentials, other external artifact classes,
 and full service readiness remain outside this command. Operator review before
 serving remains mandatory. The lock does not make unrelated node tools cooperate.
 

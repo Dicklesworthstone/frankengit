@@ -170,6 +170,7 @@ fn checksum_failure_precedes_destination_creation() {
         profile: Profile::default(),
         resume: false,
         approval: None,
+        lfs: None,
     })
     .unwrap_err();
     assert!(error.contains("checksum mismatch"));
@@ -250,6 +251,7 @@ fn a_resume_input_refusal_preserves_prior_publication_uncertainty() {
         profile: Profile::default(),
         resume: true,
         approval: None,
+        lfs: None,
     })
     .unwrap_err();
     assert!(

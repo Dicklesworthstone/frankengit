@@ -13,7 +13,8 @@ fg backup verify source.fg /trusted/parent/new-verification-scratch \
   --max-archive-bytes 1073741824 --timeout-secs 300
 ```
 
-The archive is the only recovery input. The original node and Git directory may
+In the default source-only profile, the archive is the only recovery input.
+The original node and Git directory may
 be unavailable. The scratch root must not exist, and its parent must be stable
 and trusted. The instance identifier is a fresh positive SQL-range identifier,
 not the source store's identifier. There is no resume or overwrite mode.
@@ -38,6 +39,20 @@ Preflight is a third mode of the same graph routine used to install objects and
 read them back during restore. It calls neither payload placement nor final
 publication. No `authority.fsqlite` is installed at the scratch root, no restore
 intent is created, and no routing or outbox effects are activated.
+
+### Optional LFS preflight
+
+Add `--lfs-archive FILE --expected-lfs-sha256 HASH` together to verify the native
+LFS companion. Its independent checksum, exact original source identity and
+complete pointer-selected inventory must match the source archive before scratch
+creation. The source `--expected-sha256` remains required. LFS payloads are
+streamed and checked without creating payload custody or installing them into
+the scratch root. A signed source approval, when supplied, does not sign the
+companion; its separate pin and native Git pointer binding remain required.
+All passes share the invocation's deadline, and each archive must fit the
+selected archive-byte bound. See the complete
+[optional LFS workflow](REPOSITORY_SOURCE_BACKUP.md#optional-git-lfs-companion)
+for commands, separate payload limits and receipt scope.
 
 ## Bounds, cleanup and outcome
 

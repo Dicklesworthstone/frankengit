@@ -4,6 +4,8 @@
 one portable embedded authority snapshot **and every Git object in the exact
 same authority-selected closure**, including admitted history no longer
 reachable from current refs. Physical orphan files are not recovery roots.
+An optional, independently pinned LFS companion includes all payloads referenced
+by the Git blobs in that same snapshot; the default remains source-only.
 
 This is a trusted-local source-recovery transport, not a Repository Capsule,
 signed backup profile, latest-checkpoint selection protocol, or complete service
@@ -103,6 +105,109 @@ exact archive does not prove it was the newest checkpoint. Restoring an older
 source snapshot here is a new isolated copy, never an in-place rollback or an
 activation of production routing.
 
+## Optional Git LFS companion
+
+The native `export`, `verify` and `restore` commands can carry LFS custody alongside
+the source archive. The source file keeps its existing `FGSRC001` or `FGSRC002`
+encoding, and the companion uses the existing `FGLF` transport. The files retain
+separate whole-file SHA-256 checksums; neither checksum replaces the other.
+
+Export requires both `--lfs-root` and `--lfs-output`. The root selects an existing
+LFS custody store for the source tenant, repository and incarnation. Both output
+files must be new, distinct paths under trusted, stable parents:
+
+```sh
+fg backup export ./fgit-data ./source-backup.fg \
+  11111111111111111111111111111111 22222222222222222222222222222222 \
+  --trusted-local --object-format sha1 \
+  --lfs-root "$EXISTING_LFS_ROOT" --lfs-output ./source-backup.lfs
+```
+
+LFS companion export and donor-assisted export are separate supported profiles;
+combining `--lfs-root`/`--lfs-output` with donor options is refused.
+
+The inventory is derived from every verified Git blob in the complete native
+archive, including admitted historical objects no longer reachable from refs.
+It recognizes the supported canonical Git LFS v1 pointers, deduplicates identical
+OID/length pairs, and includes exactly that payload set. Unsupported or malformed
+pointer candidates, conflicting sizes for one OID, missing selected payloads and
+corrupt custody refuse the export. Physical custody files that are not selected
+by these pointers do not enter the companion.
+
+Both streams are staged and independently verified before the source head is
+revalidated and the node closes. Publication then creates the companion first
+and the source archive second. **The two files are not published atomically.**
+A later failure may leave the verified companion even if source publication
+fails; the error identifies that possibility. Inspect both named paths before
+retrying. Neither file is overwritten, and an existing companion does not imply
+that its source archive was successfully published.
+
+Save the source checksum and `lfs_companion.sha256` from the successful export
+receipt through independently trusted custody. Verification and restore require
+the companion path and its checksum together, in addition to the unchanged
+source checksum:
+
+```sh
+fg backup verify ./source-backup.fg ./new-verification-scratch \
+  --trusted-local --expected-sha256 "$INDEPENDENTLY_TRUSTED_SHA256" \
+  --verification-instance "$UNUSED_VERIFICATION_INSTANCE" \
+  --lfs-archive ./source-backup.lfs \
+  --expected-lfs-sha256 "$INDEPENDENTLY_TRUSTED_LFS_SHA256"
+
+fg backup restore ./source-backup.fg ./recovered-node \
+  --trusted-local --expected-sha256 "$INDEPENDENTLY_TRUSTED_SHA256" \
+  --destination-instance "$UNUSED_DESTINATION_INSTANCE" \
+  --lfs-archive ./source-backup.lfs \
+  --expected-lfs-sha256 "$INDEPENDENTLY_TRUSTED_LFS_SHA256"
+```
+
+The companion must match the source archive's **original** tenant, repository,
+incarnation, Git format, authority-head generation, token and head-body checksum.
+Its complete sorted OID/length inventory must equal the source's native pointer
+inventory; missing and extra objects both refuse. Destination CAS-token reminting
+does not change this source binding. The checksum and exact selection join are
+checked before the restore destination or verification scratch is created.
+
+`verify` checks source and companion bytes without installing Git or LFS payloads.
+`restore` installs LFS payloads in the private restore quarantine, verifies actual
+stored bytes, and moves custody to `./recovered-node/lfs` before final authority
+publication. Final-location readback must also succeed. Authority publication
+does not authorize skipping custody verification, and a later failure explicitly
+reports that the destination authority is already visible.
+When serving the restored repository, select that retained directory explicitly
+with `fg serve-http --lfs-root ./recovered-node/lfs` and the other required
+service arguments. Restore does not enable or activate the LFS HTTP service.
+
+For `restore --resume`, supply the same source checksum, destination instance and
+optional LFS checksum as the first attempt. The immutable intent binds whether
+LFS was selected as well as its checksum, so retry cannot add, drop or replace
+the companion. An input file may move to another pathname if its bytes still
+match the original pin. An already-published retry verifies both native source
+and LFS custody read-only; missing or corrupt payloads are refused without repair.
+The existing source-only intent bytes remain unchanged.
+
+If signed approval options are supplied, the existing approval authenticates the
+**source archive only**. LFS is independently pinned and bound to the native Git
+pointers; this does not extend that signature to the companion or create a
+signed pair. The optional companion is available on the direct `export`,
+`verify` and `restore` commands, not checkpoint selection, replication or other
+backup commands. Existing source-only flows retain their scope.
+
+This custody lane requires a Unix host and shares the original operation
+deadline. `--max-archive-bytes` bounds each archive independently, including the
+companion's aggregate payload and framing; it is not a combined two-file limit.
+`--max-objects` also bounds the unique LFS inventory. Each LFS payload retains
+the native custody limit of 512 MiB. `--max-blob-bytes` controls Git blob bodies
+and does not change that LFS limit.
+
+Successful receipts add `lfs_companion` with its checksum, archive bytes, object
+count, payload bytes and `exact_snapshot: true`. The operation-specific
+`lfs_payloads_included`, `lfs_payloads_verified` or `lfs_payloads_restored` flag
+describes only this selected LFS scope. The general `external_artifacts_*` field
+remains false: packages, workflow artifacts and other external payload classes
+are outside this profile. For independent custody inspection or import into a
+different repository incarnation, use [portable Git LFS custody](GIT_LFS_PORTABILITY.md).
+
 ## Scope and limits
 
 Included: the single-head authority bundle's immutable rows and issuance ledger,
@@ -113,7 +218,8 @@ commitments are preserved and checked. Commit/tree/tag edge types, reference
 kinds, local connectivity and acyclicity use the existing graph checker.
 Gitlinks are external commit data, not local traversal permission.
 
-Not included: physical orphans, separate external artifacts/packages, signing
+With the explicit companion, the selected LFS payloads above are also included.
+Not included: physical orphans, other external artifacts/packages, signing
 keys, credentials, host configuration outside authority, runner workspaces,
 materialized search/graph indexes, external-effect delivery, or routing. Review
 restored outbox state and external dependencies before serving or executing

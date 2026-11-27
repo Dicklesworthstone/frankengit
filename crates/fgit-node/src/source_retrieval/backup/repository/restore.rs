@@ -31,6 +31,7 @@ pub(super) const USAGE: &str =
          [--resume] [--max-archive-bytes <1..1099511627776>] [--timeout-secs <1..86400>]
          [--max-blob-bytes <1..1099511627776>]
          [--max-objects <1..1000000>]
+         [--lfs-archive <companion-file> --expected-lfs-sha256 <64-lowercase-hex>]
          [--approval <DSSE-file> --trust-key <SPKI-public-PEM>
           --tenant-id <hex> --repository-id <hex> --incarnation-id <hex>
           --object-format sha1|sha256 --minimum-head-generation <positive-u64>]
@@ -42,12 +43,22 @@ independently required. Approval lifetime is checked again immediately before
 authority publication. Signed resume requires the exact original approval and
 trust policy; neither an unsigned resume nor changed policy may reinterpret it.
 
+The optional LFS archive and its independently trusted checksum are required
+together. The companion must match the source's exact original snapshot identity
+and complete native pointer inventory. The source --expected-sha256 remains
+required. An optional signed approval covers the source archive only; LFS uses
+its separate checksum plus native Git pointer binding, not that signature.
+Omitting both LFS options preserves the source-only profile. Unix host required
+for LFS custody. Other external artifact classes remain outside this command.
+
 By default reserve an EMPTY new root. --resume requires an existing restore intent
 for the SAME independently trusted checksum and destination instance. It accepts
 only empty/rolled-back authority or the exact complete imported snapshot. An
 already published copy is verified read-only; newer or different state refuses.
 No existing repository is overwritten, rewound, merged, or silently repaired.
 Source CAS tokens are reminted only on first import, never on an exact retry.
+The intent also binds LFS presence and checksum. Resume cannot add, omit or
+replace the selected companion; another pathname is allowed only for exact bytes.
 
 Checksum and streamed identity checks precede directory creation. All later
 passes rehash the same open input against that pin; payload memory does not grow
@@ -59,6 +70,9 @@ The complete Git inventory defaults to 100000 objects. --max-objects permits
 up to 1000000 without widening authority, graph-edge, reference or byte limits.
 An explicit leading fg --timeout-secs cap narrows the selected leaf timeout.
 An explicit resume gets a new bounded attempt, not an unbounded automatic retry.
+--max-archive-bytes bounds each selected archive, and --max-objects also bounds
+distinct LFS objects. LFS payloads keep their native 512 MiB per-object limit;
+--max-blob-bytes applies only to Git blobs. All source/LFS passes share the deadline.
 
 Metadata, objects and manifests are staged under .restore-quarantine. Graph/selection,
 original commitments and disk readback verify before final authority publication.
@@ -67,7 +81,11 @@ opens the database. Conflicting locations refuse. Authority is still installed
 last, and the final image is reopened and verified before success or cleanup.
 FGSRC002 restores and directly verifies the original selected retained outcome
 checkpoint before publication and on final reopen. Its section is bounded at
-32 MiB. FGSRC001 remains source-only and never claims missing leaves survived.
+32 MiB. FGSRC001 does not claim retained outcome leaves survived.
+With an explicit companion, LFS payloads are installed and verified in quarantine,
+moved to <storage-root>/lfs before authority, and read back at the final location.
+Already-published retries verify LFS custody read-only and never repair it.
+FGSRC source and FGLF companion encodings are unchanged.
 
 The immutable .restore-intent and OS-locked .restore-lock remain for retries.
 The lock excludes other cooperating restore commands, not running node services.
@@ -75,7 +93,8 @@ Do not serve or concurrently modify the root/quarantine. Trusted parent paths
 are required. Legacy interrupted roots without an intent cannot be resumed.
 Deadlines cannot interrupt blocking I/O. Failed state is retained, not deleted.
 
-This is SOURCE recovery, not a complete signed capsule, external-artifact backup, routing
+This is SOURCE recovery with optional LFS, not a complete signed capsule or general
+external-artifact backup, routing
 activation or authorization to replay external effects. Review restored outbox
 state and external dependencies before serving. The checksum pins one chosen
 checkpoint; it does not prove this was the newest source checkpoint.
@@ -91,6 +110,7 @@ struct Options {
     profile: Profile,
     resume: bool,
     approval: Option<ApprovalOptions>,
+    lfs: Option<super::LfsInput>,
 }
 pub(super) fn digest(value: &str) -> Result<[u8; 32], String> {
     if value.len() != 64
@@ -111,7 +131,7 @@ pub(super) fn digest(value: &str) -> Result<[u8; 32], String> {
     Ok(result)
 }
 fn parse(args: &[String]) -> Result<Options, String> {
-    if !(8..=31).contains(&args.len())
+    if !(8..=35).contains(&args.len())
         || args[0] != "restore"
         || args.iter().any(|arg| arg.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 32768
@@ -123,6 +143,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let (mut trusted, mut expected, mut instance, mut resume) = (false, None, None, false);
     let mut profile = ProfileFlags::default();
     let mut approval = ApprovalFlags::default();
+    let mut lfs = super::LfsInputFlags::default();
     let mut cursor = 3;
     while let Some(flag) = args.get(cursor) {
         cursor += 1;
@@ -158,6 +179,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 profile.set(flag, value)?;
             }
             _ if ApprovalFlags::accepts(flag) => approval.set(flag, value)?,
+            _ if super::LfsInputFlags::accepts(flag) => lfs.set(flag, value)?,
             _ => return Err(format!("unknown or duplicate restore option: {flag}")),
         }
     }
@@ -176,6 +198,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         profile: profile.finish(),
         resume,
         approval: approval.finish()?,
+        lfs: lfs.finish()?,
     })
 }
 fn create_private(path: &Path) -> Result<(), String> {
@@ -396,7 +419,12 @@ struct PreparedPublication {
     destination: PathBuf,
 }
 impl PreparedPublication {
+    #[cfg(test)]
     fn prepare(quarantine: &Path, destination: &Path) -> Result<Self, String> {
+        Self::prepare_complete(quarantine, destination, false)
+    }
+
+    fn prepare_complete(quarantine: &Path, destination: &Path, lfs: bool) -> Result<Self, String> {
         let database = quarantine.join("authority.fsqlite");
         regular(&database)?;
         require_absent(&destination.join("authority.fsqlite"))?;
@@ -417,7 +445,16 @@ impl PreparedPublication {
             .map_err(|e| e.to_string())?;
         // Validate every fixed destination and source kind before the first
         // rename. Manifests and both object namespaces precede authority.
-        for name in ["objects", "manifests"] {
+        let paths = if lfs {
+            &["objects", "manifests", "lfs"][..]
+        } else {
+            &["objects", "manifests"][..]
+        };
+        if !lfs {
+            require_absent(&quarantine.join("lfs"))?;
+            require_absent(&destination.join("lfs"))?;
+        }
+        for name in paths {
             require_absent(&destination.join(name))?;
             let metadata =
                 fs::symlink_metadata(quarantine.join(name)).map_err(|e| e.to_string())?;
@@ -440,7 +477,7 @@ impl PreparedPublication {
         require_absent(&destination.join("authority.fsqlite-wal"))?;
         // One location per path makes every interrupted combination resumable.
         // All names are fixed; archive contents never supply paths.
-        for name in ["objects", "manifests"] {
+        for name in paths {
             let target = destination.join(name);
             fs::rename(quarantine.join(name), &target).map_err(|e| e.to_string())?;
             sync_directory(&target).map_err(|e| e.to_string())?;
@@ -529,6 +566,7 @@ enum Stage {
     Intent,
     Authority,
     Objects,
+    Lfs,
     QuarantineVerified,
     DataPrepared,
     Published,
@@ -537,6 +575,29 @@ enum Stage {
 }
 fn execute(options: &Options) -> Result<String, String> {
     execute_with_checkpoints(options, |_| Ok(()))
+}
+
+/// Complete both immutable input checks before reserving any destination. The
+/// Git archive's selected inventory is still independently checked against its
+/// authority during the ordinary native graph preflight.
+fn prepare_lfs<R: Read + Seek>(
+    options: &Options,
+    archive: &mut PinnedArchive<R>,
+    deadline: Deadline,
+) -> Result<Option<super::lfs::Companion>, String> {
+    let Some(input) = &options.lfs else {
+        return Ok(None);
+    };
+    let inventory = super::lfs::Inventory::collect(archive, deadline, options.profile.transfer)?;
+    super::lfs::Companion::open(
+        &input.path,
+        input.expected,
+        archive.header(),
+        &inventory,
+        options.profile.transfer,
+        deadline,
+    )
+    .map(Some)
 }
 fn execute_with_checkpoints(
     options: &Options,
@@ -627,6 +688,7 @@ pub(super) fn execute_selected_guarded_in<R: Read + Seek>(
         profile,
         resume,
         approval: None,
+        lfs: None,
     };
     execute_prepared_in(
         &options,
@@ -662,11 +724,26 @@ fn execute_prepared_in<R: Read + Seek>(
         Ok(())
     })()
     .map_err(|error| before_resume_inspection(options, error))?;
+    let mut lfs = prepare_lfs(options, &mut archive, deadline)
+        .map_err(|error| before_resume_inspection(options, error))?;
     let binding = approval.map(VerifiedApproval::binding_digest);
+    let lfs_binding = lfs.as_ref().map(|companion| companion.receipt().digest());
     let intent = if options.resume {
-        resume::Intent::open_bound(&options.output, options.expected, options.instance, binding)
+        resume::Intent::open_complete(
+            &options.output,
+            options.expected,
+            options.instance,
+            binding,
+            lfs_binding,
+        )
     } else {
-        resume::Intent::reserve_bound(&options.output, options.expected, options.instance, binding)
+        resume::Intent::reserve_complete(
+            &options.output,
+            options.expected,
+            options.instance,
+            binding,
+            lfs_binding,
+        )
     }
     .map_err(|error| before_resume_inspection(options, error))?;
     let already_published = intent
@@ -714,6 +791,11 @@ fn execute_prepared_in<R: Read + Seek>(
                 },
             )?;
             checkpoint(Stage::Objects)?;
+            if let Some(companion) = &mut lfs {
+                companion.install(&quarantine.join("lfs"), deadline)?;
+                companion.verify_stored(&quarantine.join("lfs"), deadline)?;
+                checkpoint(Stage::Lfs)?;
+            }
             let reopened = with_node(
                 config(&quarantine, archive.header(), options.profile)?,
                 |node| {
@@ -730,10 +812,14 @@ fn execute_prepared_in<R: Read + Seek>(
             if reopened != graph {
                 return Err("restored graph changed across quarantine reopen".into());
             }
+            if let Some(companion) = &mut lfs {
+                companion.verify_stored(&quarantine.join("lfs"), deadline)?;
+            }
             checkpoint(Stage::QuarantineVerified)?;
             check_approval_current(approval, deadline)?;
             guard()?;
-            let publication = PreparedPublication::prepare(&quarantine, &options.output)?;
+            let publication =
+                PreparedPublication::prepare_complete(&quarantine, &options.output, lfs.is_some())?;
             checkpoint(Stage::DataPrepared)?;
             deadline.check()?;
             Ok((publication, expected, graph))
@@ -784,6 +870,11 @@ fn execute_prepared_in<R: Read + Seek>(
     if prior_graph.is_some_and(|prior| prior != graph) {
         return Err("destination authority is visible; final graph report mismatch".into());
     }
+    if let Some(companion) = &mut lfs {
+        companion.verify_stored(&options.output.join("lfs"), deadline).map_err(|error| {
+            format!("destination authority is visible; final LFS readback verification failed: {error}")
+        })?;
+    }
     checkpoint(Stage::FinalVerified)
         .map_err(|e| format!("destination authority is visible; {e}"))?;
     guard().map_err(|error| {
@@ -803,7 +894,7 @@ fn execute_prepared_in<R: Read + Seek>(
                 "\"original_payload_commitments_verified\":true,\"source_tokens_preserved\":false,",
                 "\"reopened_and_verified\":true,\"node_closed\":true,\"routing_published\":false,",
                 "\"external_artifacts_restored\":false,\"signature_verified\":{}{},",
-                "\"archive_bytes\":{},\"streaming\":true,\"resume_requested\":{},\"already_published\":{}{}}}"
+                "\"archive_bytes\":{},\"streaming\":true,\"resume_requested\":{},\"already_published\":{}{}{}}}"
             ),
             quote(&hex(&options.expected)),
             quote(&header.identity.tenant.to_string()),
@@ -820,7 +911,11 @@ fn execute_prepared_in<R: Read + Seek>(
             archive.seal().bytes,
             options.resume,
             already_published,
-            super::checkpoint::receipt(header.checkpoint.as_ref())
+            super::checkpoint::receipt(header.checkpoint.as_ref()),
+            lfs.as_ref().map_or_else(String::new, |companion| format!(
+                "{},\"lfs_payloads_restored\":true",
+                companion.receipt().fields()
+            )),
         ),
     })
 }

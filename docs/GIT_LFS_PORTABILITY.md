@@ -14,6 +14,15 @@ authority recovery still use the existing `fg backup` and Git bundle commands.
 This companion covers LFS payloads referenced by its named native inventory;
 it is not a complete service backup.
 
+For a source snapshot and its LFS payloads captured together, the direct
+`fg backup export`, `verify` and `restore` commands now support an
+[optional exact-snapshot companion](REPOSITORY_SOURCE_BACKUP.md#optional-git-lfs-companion).
+That workflow requires separate source and LFS checksums, verifies the complete
+native pointer inventory, and installs custody before restored authority is
+published. Its companion must match the source snapshot exactly. The standalone
+`fg lfs import` workflow below retains its explicit target-selection semantics
+for imports into another repository incarnation.
+
 ## Inspect the destination and obtain its pins
 
 All commands require Linux, explicit `--trusted-local`, and whole-repository
