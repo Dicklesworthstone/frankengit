@@ -15,7 +15,7 @@ const USAGE: &str =
   [--merge-candidate-ref <separate-ci-branch> --merge-principal <id>
    --merge-author <name-and-email> --merge-committer <name-and-email>
    --merge-timestamp <positive-unix-seconds> --merge-message <text>
-   [--merge-profile path|exact-renames|builtin-attributes-v1] [--merge-method merge-commit|squash]]
+   [--merge-profile path|exact-renames|builtin-attributes-v1|recursive-path-merge-v1] [--merge-method merge-commit|squash]]
   [--expected-incarnation <id>] [--polls <1..10000>] [--interval-ms <10..60000>]
   [--ordered-branch-updates]
   [--land-queue-head --landing-principal <id>]

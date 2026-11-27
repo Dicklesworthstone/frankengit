@@ -110,10 +110,126 @@ fn builtin_attributes_selection_is_advertised_and_preserves_pinned_input() {
 }
 
 #[test]
+fn recursive_receipts_keep_real_ancestry_and_refuse_missing_or_mismatched_evidence() {
+    let properties = properties(PREPARE);
+    let Value::Array(choices) = &properties["merge_profile"].object().unwrap()["enum"] else {
+        panic!("profile schema must enumerate supported versions")
+    };
+    assert!(choices.contains(&text("recursive-path-merge-v1")));
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut args = input(format);
+        let baseline = parse(&args, format).unwrap();
+        args.insert("merge_profile".into(), text("recursive-path-merge-v1"));
+        let mut parsed = parse(&args, format).unwrap();
+        assert_eq!(parsed.profile, MergeProfile::RecursivePathMergeV1);
+        assert_eq!(parsed.selection.subject, baseline.selection.subject);
+        assert_eq!(parsed.selection.expected_head, baseline.selection.expected_head);
+        assert_eq!(parsed.metadata, baseline.metadata);
+        let oid = |byte: &str| GitOid::from_hex(format, &byte.repeat(format.digest_len())).unwrap();
+        let base = oid("33");
+        let second = oid("44");
+        let tree = oid("55");
+        let receipt = RecursiveMergeBase {
+            bases: vec![base, second],
+            tree,
+        };
+        let conflict = fgit_forge::preparation::MergeConflict {
+            path: b"file".to_vec(),
+            kind: ConflictKind::Content,
+            base: Some(MergeEntry {
+                name: b"file".to_vec(),
+                mode: 0o100644,
+                oid: oid("66"),
+            }),
+            ours: Some(MergeEntry {
+                name: b"file".to_vec(),
+                mode: 0o100644,
+                oid: oid("77"),
+            }),
+            theirs: Some(MergeEntry {
+                name: b"file".to_vec(),
+                mode: 0o100644,
+                oid: oid("88"),
+            }),
+        };
+        let outcome = |recursive_base| MergePreparation::Conflicted {
+            base,
+            recursive_base,
+            conflicts: vec![conflict.clone()],
+        };
+        let result = render(format, &parsed, &outcome(Some(receipt.clone())), None).unwrap();
+        assert_eq!(result["candidate_arguments"], Value::Null);
+        assert_eq!(result["publication_arguments"], Value::Null);
+        assert_eq!(result["merge_base"], text(raw_oid(base)));
+        assert_eq!(
+            result["recursive_base"],
+            object([
+                ("bases", Value::Array(vec![text(raw_oid(base)), text(raw_oid(second))])),
+                ("tree", text(raw_oid(tree))),
+            ])
+        );
+        let other_format = match format {
+            GitHashAlgorithm::Sha1 => GitHashAlgorithm::Sha256,
+            GitHashAlgorithm::Sha256 => GitHashAlgorithm::Sha1,
+        };
+        let foreign = GitOid::from_hex(other_format, &"55".repeat(other_format.digest_len())).unwrap();
+        for invalid in [
+            None,
+            Some(RecursiveMergeBase { bases: vec![], tree }),
+            Some(RecursiveMergeBase { bases: vec![second], tree }),
+            Some(RecursiveMergeBase { bases: vec![second, base], tree }),
+            Some(RecursiveMergeBase { bases: vec![base, base], tree }),
+            Some(RecursiveMergeBase { bases: vec![base, foreign], tree }),
+            Some(RecursiveMergeBase { bases: vec![base, second], tree: foreign }),
+            Some(RecursiveMergeBase { bases: vec![base, second], tree: oid("00") }),
+        ] {
+            assert!(render(format, &parsed, &outcome(invalid), None).is_err());
+        }
+        assert!(render(format, &baseline, &outcome(Some(receipt.clone())), None).is_err());
+        assert!(
+            !render(format, &baseline, &outcome(None), None)
+                .unwrap()
+                .contains_key("recursive_base")
+        );
+        parsed.limits.max_commits = 1;
+        assert!(render(format, &parsed, &outcome(Some(receipt)), None).is_err());
+        let singleton = RecursiveMergeBase { bases: vec![base], tree };
+        assert!(render(format, &parsed, &outcome(Some(singleton)), None).is_ok());
+    }
+}
+
+#[test]
+fn recursive_ancestor_conflicts_and_work_refusals_remain_distinct_errors() {
+    use fgit_forge::preparation::MergeSourceError;
+    for (error, code) in [
+        (
+            PreparationError::RecursiveBaseConflict { bases: vec![], conflicts: vec![] },
+            "recursive_merge_base_conflict",
+        ),
+        (PreparationError::Source(MergeSourceError::Cancelled), "preparation_cancelled"),
+        (PreparationError::Source(MergeSourceError::BudgetExceeded), "resource_limit"),
+        (PreparationError::Budget("recursive construction"), "resource_limit"),
+        (PreparationError::NoCommonAncestor, "no_common_ancestor"),
+        (PreparationError::MultipleMergeBases(vec![]), "multiple_merge_bases"),
+        (PreparationError::InvalidTree, "pull_preparation_failed"),
+    ] {
+        assert_eq!(
+            preparation_error(NodeWorkspaceRefusal::MergePreparation(error)).code,
+            code,
+        );
+    }
+}
+
+#[test]
 fn explicit_profiles_and_native_work_limits_are_closed_before_io() {
     let format = GitHashAlgorithm::Sha1;
     let good = input(format);
-    for profile in ["path-merge-v1", "exact-renames-v1"] {
+    for profile in [
+        "path-merge-v1",
+        "exact-renames-v1",
+        "builtin-attributes-v1",
+        "recursive-path-merge-v1",
+    ] {
         let mut args = good.clone();
         args.insert("merge_profile".into(), text(profile));
         assert!(parse(&args, format).is_ok());
@@ -179,6 +295,7 @@ fn conflicts_and_up_to_date_results_cannot_smuggle_a_publishable_artifact() {
     };
     let outcome = MergePreparation::Conflicted {
         base,
+        recursive_base: None,
         conflicts: vec![conflict.clone()],
     };
     assert_eq!(
@@ -188,6 +305,7 @@ fn conflicts_and_up_to_date_results_cannot_smuggle_a_publishable_artifact() {
     assert!(render(format, &parsed, &outcome, Some(b"forged bundle")).is_err());
     let bad = MergePreparation::Conflicted {
         base,
+        recursive_base: None,
         conflicts: Vec::new(),
     };
     assert!(render(format, &parsed, &bad, None).is_err());
@@ -199,6 +317,7 @@ fn conflicts_and_up_to_date_results_cannot_smuggle_a_publishable_artifact() {
             &parsed,
             &MergePreparation::Conflicted {
                 base,
+                recursive_base: None,
                 conflicts: vec![bad_path]
             },
             None
@@ -409,6 +528,7 @@ fn clean_rendering_rejects_a_plan_with_a_different_parent_method() {
         let plan = PreparedMerge {
             style: MergeCommitStyle::Squash,
             base,
+            recursive_base: None,
             target: parsed.selection.subject.target_tip,
             source: parsed.selection.subject.source_tip,
             tree,

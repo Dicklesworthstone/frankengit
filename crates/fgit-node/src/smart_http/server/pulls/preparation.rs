@@ -17,11 +17,11 @@ use fgit_admission::ProjectionFailure;
 use fgit_authority::IdempotencyKey;
 use fgit_forge::preparation::renames::RenameRefusal;
 use fgit_forge::preparation::resolution::ResolutionError;
-use fgit_forge::preparation::{MergeSourceError, PreparationError, PreparationLimits};
+use fgit_forge::preparation::{PreparationError, PreparationLimits};
 use fgit_types::RefusalCode;
 use fgit_wire::smart_http::{BodyFraming, HttpLimits, Service, head::Envelope};
 use fgit_wire::visibility::RefVisibility;
-pub(in crate::smart_http::server) use output::{Reply, build_queue};
+pub(in crate::smart_http::server) use output::{Reply, append_recursive_base, build_queue};
 pub(super) use request::Request;
 use std::io::Read;
 
@@ -230,15 +230,15 @@ fn native_preparation_error(error: &PreparationError) -> ApiError {
         PreparationError::MultipleMergeBases(_) => {
             ApiError::new(Status::Conflict, "multiple_merge_bases")
         }
+        PreparationError::RecursiveBaseConflict { .. } => {
+            ApiError::new(Status::Conflict, "recursive_merge_base_conflict")
+        }
         PreparationError::InvalidPrefix
         | PreparationError::InvalidLimits
         | PreparationError::InvalidMetadata
         | PreparationError::ObjectFormat => ApiError::bad("invalid_preparation_request"),
-        PreparationError::Budget(_)
-        | PreparationError::Source(MergeSourceError::BudgetExceeded) => ApiError::too_large(),
-        PreparationError::Source(MergeSourceError::Cancelled) => {
-            ApiError::from_status(Status::Timeout, false)
-        }
+        error if error.is_resource_limit() => ApiError::too_large(),
+        error if error.is_cancelled() => ApiError::from_status(Status::Timeout, false),
         _ => ApiError::unavailable(),
     }
 }
@@ -246,6 +246,7 @@ fn native_preparation_error(error: &PreparationError) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fgit_forge::preparation::MergeSourceError;
     #[test]
     fn preparation_failures_never_manufacture_mutation_ambiguity_or_terminal_refusals() {
         for error in [
@@ -272,6 +273,38 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn recursive_base_conflicts_are_safe_read_conflicts_without_an_artifact() {
+        let error = preparation_error(&NodeWorkspaceRefusal::MergePreparation(
+            PreparationError::RecursiveBaseConflict {
+                bases: Vec::new(),
+                conflicts: Vec::new(),
+            },
+        ));
+        assert_eq!(error.status, Status::Conflict);
+        assert_eq!(error.code, "recursive_merge_base_conflict");
+        assert!(!error.outcome_unknown);
+    }
+
+    #[test]
+    fn graph_resource_and_cancellation_failures_keep_their_transport_classification() {
+        use fgit_diff::MergeBaseError;
+        for graph in [
+            MergeBaseError::CommitLimitExceeded { limit: 1 },
+            MergeBaseError::EdgeLimitExceeded { limit: 1 },
+            MergeBaseError::Source(MergeSourceError::BudgetExceeded),
+        ] {
+            let error = native_preparation_error(&PreparationError::Graph(graph));
+            assert_eq!(error.status, ApiError::too_large().status);
+            assert!(!error.outcome_unknown);
+        }
+        let error = native_preparation_error(&PreparationError::Graph(MergeBaseError::Source(
+            MergeSourceError::Cancelled,
+        )));
+        assert_eq!(error.status, Status::Timeout);
+        assert!(!error.outcome_unknown);
+    }
+
     #[test]
     fn resolution_errors_distinguish_bad_choices_from_unavailable_evidence() {
         assert_eq!(

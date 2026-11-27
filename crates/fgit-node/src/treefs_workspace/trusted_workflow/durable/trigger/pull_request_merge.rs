@@ -80,6 +80,7 @@ impl PullRequestMergeWatchConfig {
             MergeProfile::PathMergeV1 => "path",
             MergeProfile::ExactRenamesV1 => "exact-renames",
             MergeProfile::BuiltinAttributesV1 => "builtin-attributes-v1",
+            MergeProfile::RecursivePathMergeV1 => "recursive-path-merge-v1",
         }
     }
     pub(super) const fn style_name(&self) -> &'static str {
@@ -588,9 +589,18 @@ mod profile_binding_tests {
         let path = config(MergeProfile::PathMergeV1);
         let renames = config(MergeProfile::ExactRenamesV1);
         let attributes = config(MergeProfile::BuiltinAttributesV1);
+        let recursive = config(MergeProfile::RecursivePathMergeV1);
         assert_eq!(path.profile_name(), "path");
         assert_eq!(renames.profile_name(), "exact-renames");
         assert_eq!(attributes.profile_name(), "builtin-attributes-v1");
+        assert_eq!(recursive.profile_name(), "recursive-path-merge-v1");
+        assert_ne!(recursive.identity(), path.identity());
+        assert_ne!(recursive.identity(), renames.identity());
+        assert_ne!(recursive.identity(), attributes.identity());
+        assert_eq!(
+            recursive.identity(),
+            config(MergeProfile::RecursivePathMergeV1).identity()
+        );
         assert_ne!(attributes.identity(), path.identity());
         assert_ne!(attributes.identity(), renames.identity());
         assert_eq!(

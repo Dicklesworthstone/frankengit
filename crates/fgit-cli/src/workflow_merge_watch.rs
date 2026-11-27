@@ -107,9 +107,10 @@ pub(crate) fn parse(fields: &BTreeMap<&str, &str>) -> Result<Option<Options>, St
         "path" => MergeProfile::PathMergeV1,
         "exact-renames" => MergeProfile::ExactRenamesV1,
         "builtin-attributes-v1" => MergeProfile::BuiltinAttributesV1,
+        "recursive-path-merge-v1" => MergeProfile::RecursivePathMergeV1,
         _ => {
             return Err(
-                "--merge-profile must be path, exact-renames or builtin-attributes-v1".into(),
+                "--merge-profile must be path, exact-renames, builtin-attributes-v1 or recursive-path-merge-v1".into(),
             );
         }
     };
@@ -244,6 +245,21 @@ mod tests {
         selected.insert("--merge-profile", "builtin-attributes-v1");
         let parsed = parse(&selected).unwrap().unwrap();
         assert_eq!(parsed.profile, MergeProfile::BuiltinAttributesV1);
+        assert_eq!(parsed.reference, baseline.reference);
+        assert_eq!(parsed.principal, baseline.principal);
+        assert_eq!(parsed.metadata, baseline.metadata);
+        assert_eq!(parsed.style, baseline.style);
+        #[cfg(target_os = "linux")]
+        assert_eq!(parsed.node_config().unwrap().profile(), parsed.profile);
+    }
+
+    #[test]
+    fn recursive_profile_reaches_native_watch_without_changing_custody_or_metadata() {
+        let baseline = parse(&fields()).unwrap().unwrap();
+        let mut selected = fields();
+        selected.insert("--merge-profile", "recursive-path-merge-v1");
+        let parsed = parse(&selected).unwrap().unwrap();
+        assert_eq!(parsed.profile, MergeProfile::RecursivePathMergeV1);
         assert_eq!(parsed.reference, baseline.reference);
         assert_eq!(parsed.principal, baseline.principal);
         assert_eq!(parsed.metadata, baseline.metadata);

@@ -63,7 +63,10 @@ fn coordinates(node: &OneNode) -> ResolutionInputs {
             PreparationLimits::default(),
         ))
         .unwrap();
-    let MergePreparation::Conflicted { base, conflicts } = automatic.outcome else {
+    let MergePreparation::Conflicted {
+        base, conflicts, ..
+    } = automatic.outcome
+    else {
         panic!("the source edits must overlap");
     };
     assert_eq!(conflicts.len(), 1);

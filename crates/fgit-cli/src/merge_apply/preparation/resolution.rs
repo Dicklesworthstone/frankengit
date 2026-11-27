@@ -595,6 +595,7 @@ mod tests {
                     plan: PreparedMerge {
                         style,
                         base: input.inputs.base,
+                        recursive_base: None,
                         target: input.inputs.target,
                         source: input.inputs.source,
                         tree: oid("44"),

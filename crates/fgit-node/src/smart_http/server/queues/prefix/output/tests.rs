@@ -3,7 +3,7 @@ use super::*;
 use fgit_crypto::{DigestAlgorithm, sha256_digest};
 use fgit_forge::event::review::ReviewSubject;
 use fgit_forge::preparation::queue_prefix::PreparedPrefix;
-use fgit_forge::preparation::{MergeConflict, MergeMetadata};
+use fgit_forge::preparation::{MergeConflict, MergeMetadata, RecursiveMergeBase};
 use fgit_forge::{AggregateVersion, PullRequestNumber, QueueNumber};
 use fgit_schema::json::{self, Value};
 use fgit_types::{
@@ -41,6 +41,7 @@ fn fixture(format: GitHashAlgorithm) -> PreparedQueuePrefixBundle {
         PrefixStep {
             source: entries[0].subject.source_tip,
             base: target,
+            recursive_base: None,
             projected_target: target,
             tree: oid(format, 4),
             commit: oid(format, 6),
@@ -48,6 +49,7 @@ fn fixture(format: GitHashAlgorithm) -> PreparedQueuePrefixBundle {
         PrefixStep {
             source: entries[1].subject.source_tip,
             base: target,
+            recursive_base: None,
             projected_target: oid(format, 6),
             tree: oid(format, 5),
             commit: oid(format, 7),
@@ -170,6 +172,43 @@ fn clean_prefix_keeps_original_subjects_separate_from_the_projected_chain_and_ex
 }
 
 #[test]
+fn recursive_prefix_reports_each_effective_base_without_changing_original_subjects() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut prepared = fixture(format);
+        prepared.profile = MergeProfile::RecursivePathMergeV1;
+        let PrefixPreparation::Clean(plan) = &mut prepared.outcome else {
+            panic!("clean fixture");
+        };
+        for (index, step) in plan.steps.iter_mut().enumerate() {
+            step.recursive_base = Some(RecursiveMergeBase {
+                bases: vec![step.base, oid(format, 8 + index as u8)],
+                tree: oid(format, 10 + index as u8),
+            });
+        }
+        let wire = render(format, prepared, 64 * 1024, &mut || true).unwrap();
+        let document = metadata(&wire);
+        assert_eq!(field(&document, "profile").text(), Some("recursive-path-merge-v1"));
+        for (index, step) in array(&document, "projected_steps").iter().enumerate() {
+            let recursive = field(step, "recursive_base");
+            assert_eq!(
+                array(recursive, "bases")[0].text().unwrap(),
+                oid(format, 1).to_string()
+            );
+            assert_eq!(
+                array(recursive, "bases")[1].text().unwrap(),
+                oid(format, 8 + index as u8).to_string()
+            );
+            assert_eq!(
+                field(recursive, "tree").text().unwrap(),
+                oid(format, 10 + index as u8).to_string()
+            );
+            assert!(!array(&document, "original_subjects")[index]
+                .object().unwrap().contains_key("recursive_base"));
+        }
+    }
+}
+
+#[test]
 fn every_later_stop_is_conflict_json_without_an_artifact_or_shortened_success() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         for conflict in [false, true] {
@@ -181,10 +220,11 @@ fn every_later_stop_is_conflict_json_without_an_artifact_or_shortened_success() 
                 index: 1,
                 source: prepared.entries[1].subject.source_tip,
                 projected_target: plan.steps[0].commit,
-                completed: vec![plan.steps[0]],
+                completed: vec![plan.steps[0].clone()],
                 reason: if conflict {
                     PrefixStop::Conflicted {
                         base: oid(format, 1),
+                        recursive_base: None,
                         conflicts: vec![MergeConflict {
                             path: b"src/\xff".to_vec(),
                             kind: ConflictKind::Content,

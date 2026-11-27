@@ -132,6 +132,7 @@ impl<'a> Request<'a> {
             None | Some("path-merge-v1") => MergeProfile::PathMergeV1,
             Some("exact-renames-v1") => MergeProfile::ExactRenamesV1,
             Some("builtin-attributes-v1") => MergeProfile::BuiltinAttributesV1,
+            Some("recursive-path-merge-v1") => MergeProfile::RecursivePathMergeV1,
             Some(_) => return Err(ApiError::bad("unsupported_merge_profile")),
         };
         let style = match fields.remove("method").as_deref() {
@@ -723,7 +724,7 @@ mod tests {
                 "duplicate_field"
             );
         }
-        for profile in ["path-merge-v1", "exact-renames-v1"] {
+        for profile in ["path-merge-v1", "exact-renames-v1", "recursive-path-merge-v1"] {
             let bytes = form(format)
                 + &format!(
                     "&merge_base={}&resolution=61:ours&profile={profile}",
@@ -750,6 +751,7 @@ mod tests {
                 for (profile, expected_profile) in [
                     ("path-merge-v1", MergeProfile::PathMergeV1),
                     ("exact-renames-v1", MergeProfile::ExactRenamesV1),
+                    ("recursive-path-merge-v1", MergeProfile::RecursivePathMergeV1),
                 ] {
                     let bytes = form(format) + &format!("&profile={profile}&method={method}");
                     let parsed = request(false).command(bytes.as_bytes(), format).unwrap();

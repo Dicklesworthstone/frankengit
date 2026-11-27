@@ -534,9 +534,10 @@ fn preparation(
         "path-v1" => MergeProfile::PathMergeV1,
         "exact-renames-v1" => MergeProfile::ExactRenamesV1,
         "builtin-attributes-v1" => MergeProfile::BuiltinAttributesV1,
+        "recursive-path-merge-v1" => MergeProfile::RecursivePathMergeV1,
         _ => {
             return Err(
-                "--profile must be path-v1, exact-renames-v1 or builtin-attributes-v1".into(),
+                "--profile must be path-v1, exact-renames-v1, builtin-attributes-v1 or recursive-path-merge-v1".into(),
             );
         }
     };

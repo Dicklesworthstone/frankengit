@@ -474,6 +474,7 @@ fn preparation_identity(
         MergeProfile::PathMergeV1 => 1,
         MergeProfile::ExactRenamesV1 => 2,
         MergeProfile::BuiltinAttributesV1 => 3,
+        MergeProfile::RecursivePathMergeV1 => 4,
     }]);
     hash.update(&(entries.len() as u64).to_be_bytes());
     for (entry, step) in entries.iter().zip(&plan.steps) {
@@ -493,6 +494,15 @@ fn preparation_identity(
             step.commit,
         ] {
             part(&mut hash, id.to_string().as_bytes())?;
+        }
+        // The new profile binds the complete semantic base receipt. Legacy
+        // profiles retain their original identity bytes exactly.
+        if let Some(recursive) = &step.recursive_base {
+            hash.update(&(recursive.bases.len() as u64).to_be_bytes());
+            for base in &recursive.bases {
+                part(&mut hash, base.to_string().as_bytes())?;
+            }
+            part(&mut hash, recursive.tree.to_string().as_bytes())?;
         }
         part(&mut hash, entry.metadata.author.as_bytes())?;
         part(&mut hash, entry.metadata.committer.as_bytes())?;

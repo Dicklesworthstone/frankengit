@@ -9,7 +9,7 @@ use fgit_types::RepositoryIncarnationId;
 
 use super::options::{Operation, Options, head_token, hex};
 use super::output::{bounded, scope};
-use crate::merge_apply::preparation::{publish_new_bundle, render_conflict};
+use crate::merge_apply::preparation::{publish_new_bundle, render_conflict, render_recursive_base};
 use crate::publication_support::quote;
 
 pub(super) const MAX_BUNDLE_BYTES: usize = 128 * 1024 * 1024;
@@ -49,7 +49,7 @@ pub(super) fn finish(
                 format!(
                     concat!(
                         "\"merge_base\":{},\"candidate_commit\":{},\"root_tree\":{},",
-                        "\"object_count\":{},\"bundle_bytes\":{},\"bundle_path\":{}"
+                        "\"object_count\":{},\"bundle_bytes\":{},\"bundle_path\":{}{}"
                     ),
                     quote(&plan.base.to_string()),
                     quote(&plan.commit.to_string()),
@@ -57,11 +57,18 @@ pub(super) fn finish(
                     plan.objects.len(),
                     bundle.len(),
                     quote(&preparation.output.to_string_lossy()),
+                    plan.recursive_base.as_ref().map_or_else(String::new, |base| {
+                        format!(",{}", render_recursive_base(base))
+                    }),
                 ),
                 Some(bundle),
             )
         }
-        MergePreparation::Conflicted { base, conflicts } => {
+        MergePreparation::Conflicted {
+            base,
+            recursive_base,
+            conflicts,
+        } => {
             if artifact.bundle.is_some() {
                 return Err("conflicted preparation unexpectedly carried a bundle".into());
             }
@@ -69,13 +76,16 @@ pub(super) fn finish(
                 "conflicted",
                 5,
                 format!(
-                    "\"merge_base\":{},\"conflicts\":[{}]",
+                    "\"merge_base\":{},\"conflicts\":[{}]{}",
                     quote(&base.to_string()),
                     conflicts
                         .iter()
                         .map(render_conflict)
                         .collect::<Vec<_>>()
                         .join(","),
+                    recursive_base.as_ref().map_or_else(String::new, |base| {
+                        format!(",{}", render_recursive_base(base))
+                    }),
                 ),
                 None,
             )
@@ -118,6 +128,7 @@ pub(super) fn finish(
             MergeProfile::PathMergeV1 => "path-v1",
             MergeProfile::ExactRenamesV1 => "exact-renames-v1",
             MergeProfile::BuiltinAttributesV1 => "builtin-attributes-v1",
+            MergeProfile::RecursivePathMergeV1 => "recursive-path-merge-v1",
         }),
         quote(outcome),
         bundle.is_some(),

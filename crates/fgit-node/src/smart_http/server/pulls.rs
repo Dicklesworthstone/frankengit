@@ -18,7 +18,7 @@ use super::ref_field as subject;
 // Queue preparation shares only the bounded artifact formatter and native
 // read-error mapping. Queue selection and its independent grants remain local.
 pub(super) use preparation::{
-    Reply as PreparationReply, build_queue as queue_preparation_reply,
+    Reply as PreparationReply, append_recursive_base, build_queue as queue_preparation_reply,
     preparation_error as candidate_preparation_error,
 };
 

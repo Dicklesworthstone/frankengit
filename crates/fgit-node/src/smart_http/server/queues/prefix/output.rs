@@ -12,7 +12,7 @@ use fgit_forge::preparation::{ConflictKind, MergeEntry, MergeProfile};
 use fgit_types::{GitHashAlgorithm, GitOid};
 
 use super::super::super::issues::{ApiError, quote, ref_fields};
-use super::super::super::pulls::PreparationReply;
+use super::super::super::pulls::{PreparationReply, append_recursive_base};
 use super::super::super::{Binding, Status};
 use crate::{OneNode, PreparedQueuePrefixBundle, QueuePrefixEntry};
 
@@ -116,6 +116,7 @@ fn build_bound(
             MergeProfile::PathMergeV1 => "path-merge-v1",
             MergeProfile::ExactRenamesV1 => "exact-renames-v1",
             MergeProfile::BuiltinAttributesV1 => "builtin-attributes-v1",
+            MergeProfile::RecursivePathMergeV1 => "recursive-path-merge-v1",
         }),
         number.get(),
         expected_version.get(),
@@ -157,6 +158,7 @@ fn build_bound(
                 &plan.steps,
                 first.target_tip,
                 format,
+                profile,
                 live,
             )?;
             if last != plan.final_commit {
@@ -196,6 +198,7 @@ fn build_bound(
                 completed,
                 first.target_tip,
                 format,
+                profile,
                 live,
             )?;
             if last != *projected_target {
@@ -219,10 +222,21 @@ fn build_bound(
                     &mut metadata,
                     "\"reason\":\"already_integrated\",\"merge_base\":null,\"conflicts\":[]}}",
                 )?,
-                PrefixStop::Conflicted { base, conflicts } => {
+                PrefixStop::Conflicted {
+                    base,
+                    recursive_base,
+                    conflicts,
+                } => {
                     if conflicts.is_empty() || conflicts.len() > 128 {
                         return Err(ApiError::unavailable());
                     }
+                    append_recursive_base(
+                        &mut metadata,
+                        profile,
+                        *base,
+                        recursive_base.as_ref(),
+                        live,
+                    )?;
                     append(
                         &mut metadata,
                         &format!(
@@ -263,6 +277,7 @@ fn projected_steps(
     steps: &[PrefixStep],
     initial: GitOid,
     format: GitHashAlgorithm,
+    profile: MergeProfile,
     live: &mut impl FnMut() -> bool,
 ) -> Result<GitOid, ApiError> {
     let mut target = initial;
@@ -284,11 +299,18 @@ fn projected_steps(
         {
             return Err(ApiError::unavailable());
         }
+        append(metadata, &format!("{}{{", comma(index)))?;
+        append_recursive_base(
+            metadata,
+            profile,
+            step.base,
+            step.recursive_base.as_ref(),
+            live,
+        )?;
         append(
             metadata,
             &format!(
-                "{}{{\"index\":{},\"source_tip\":{},\"projected_target_tip\":{},\"merge_base\":{},\"commit\":{},\"tree\":{}}}",
-                comma(index),
+                "\"index\":{},\"source_tip\":{},\"projected_target_tip\":{},\"merge_base\":{},\"commit\":{},\"tree\":{}}}",
                 index,
                 quote(&step.source.to_string()),
                 quote(&step.projected_target.to_string()),

@@ -179,7 +179,11 @@ fn one_entry_preserves_the_existing_native_merge_profile_and_object_contract() {
     for format in FORMATS {
         let (source, _, target, tips) = fixture(format);
         let metadata = metadata();
-        for profile in [MergeProfile::PathMergeV1, MergeProfile::ExactRenamesV1] {
+        for profile in [
+            MergeProfile::PathMergeV1,
+            MergeProfile::ExactRenamesV1,
+            MergeProfile::RecursivePathMergeV1,
+        ] {
             let prefix = clean(run(
                 &source,
                 target,
@@ -202,8 +206,73 @@ fn one_entry_preserves_the_existing_native_merge_profile_and_object_contract() {
             assert_eq!(prefix.final_commit, single.commit);
             assert_eq!(prefix.steps[0].tree, single.tree);
             assert_eq!(prefix.steps[0].base, single.base);
+            assert_eq!(prefix.steps[0].recursive_base, single.recursive_base);
             assert_eq!(prefix.objects, single.objects);
         }
+    }
+}
+
+#[test]
+fn recursive_prefix_reuses_generated_history_without_publishing_virtual_bases() {
+    use crate::preparation::RecursiveMergeBase;
+
+    for format in FORMATS {
+        let mut source = Source::new(format);
+        let root_files: &[File<'_>] = &[(b"a", b"0\n", 0o100644), (b"b", b"0\n", 0o100644)];
+        let a_files: &[File<'_>] = &[(b"a", b"1\n", 0o100644), (b"b", b"0\n", 0o100644)];
+        let b_files: &[File<'_>] = &[(b"a", b"0\n", 0o100644), (b"b", b"1\n", 0o100644)];
+        let root = source.write_commit(root_files, &[], "root");
+        let a = source.write_commit(a_files, &[root], "a");
+        let b = source.write_commit(b_files, &[root], "b");
+        let target = source.write_commit(b_files, &[a, b], "revert a");
+        let first = source.write_commit(a_files, &[b, a], "revert b");
+        let next_files: &[File<'_>] = &[
+            (b"a", b"0\n", 0o100644),
+            (b"b", b"0\n", 0o100644),
+            (b"c", b"next\n", 0o100644),
+        ];
+        let next = source.write_commit(next_files, &[target, first], "follow-up");
+        let original = source.objects.clone();
+        let metadata = metadata();
+        let request = inputs(&[first, next], &metadata);
+        let plan = clean(run(
+            &source,
+            target,
+            &request,
+            PreparationLimits::default(),
+            MergeProfile::RecursivePathMergeV1,
+        ));
+        let mut oracle = Source::new(format);
+        let comparison = oracle.write_tree(&[
+            (b"a", b"1\n", 0o100644),
+            (b"b", b"1\n", 0o100644),
+        ]);
+        let root_tree = source.commits[&root].tree;
+        let mut initial_bases = vec![a, b];
+        initial_bases.sort();
+        assert_eq!(plan.steps[0].tree, root_tree);
+        assert_eq!(plan.steps[0].recursive_base, Some(RecursiveMergeBase {
+            bases: initial_bases,
+            tree: comparison,
+        }));
+        let mut later_bases = vec![target, first];
+        later_bases.sort();
+        assert_eq!(plan.steps[1].projected_target, plan.steps[0].commit);
+        assert_eq!(plan.steps[1].tree, source.commits[&next].tree);
+        assert_eq!(plan.steps[1].recursive_base, Some(RecursiveMergeBase {
+            bases: later_bases,
+            tree: root_tree,
+        }));
+        assert_eq!(plan.objects.iter().filter(|object| object.kind == GitObjectKind::Commit).count(), 2);
+        assert!(plan.objects.iter().all(|object| object.id != comparison));
+        assert_eq!(source.objects, original);
+        assert_eq!(plan, clean(run(&source, target, &request, PreparationLimits::default(), MergeProfile::RecursivePathMergeV1)));
+        // First: comparison tree, result tree, commit. The discarded comparison
+        // still consumes work when the second step synthesizes it again.
+        let limits = PreparationLimits { max_objects: 3, ..PreparationLimits::default() };
+        clean(run(&source, target, &request[..1], limits, MergeProfile::RecursivePathMergeV1));
+        assert!(matches!(run(&source, target, &request, limits, MergeProfile::RecursivePathMergeV1), Err(PreparationError::Budget("objects"))));
+        assert!(matches!(run(&source, target, &request, PreparationLimits::default(), MergeProfile::PathMergeV1), Err(PreparationError::MultipleMergeBases(_))));
     }
 }
 
@@ -261,6 +330,7 @@ fn a_later_conflict_stops_the_exact_entry_without_exposing_partial_objects() {
                     PrefixStop::Conflicted {
                         base: actual_base,
                         conflicts,
+                        recursive_base: None,
                     },
             } = run(
                 &source,

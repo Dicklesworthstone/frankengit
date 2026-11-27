@@ -73,7 +73,7 @@ const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository
    [--workflow-merge-principal <id>
     --workflow-merge-author <name-and-email> --workflow-merge-committer <name-and-email>
     --workflow-merge-timestamp <positive-unix-seconds> --workflow-merge-message <text>
-    [--workflow-merge-profile path|exact-renames|builtin-attributes-v1]
+    [--workflow-merge-profile path|exact-renames|builtin-attributes-v1|recursive-path-merge-v1]
     [--workflow-merge-method merge-commit|squash]]]
 
 Continuous mode has no lifetime request cap or idle retirement. It requires an

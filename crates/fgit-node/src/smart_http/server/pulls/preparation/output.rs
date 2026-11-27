@@ -11,10 +11,11 @@ use fgit_crypto::sha256_digest;
 use fgit_forge::event::review::ReviewSubject;
 use fgit_forge::preparation::resolution::{ResolutionKind, ResolvedMerge, ResolvedPath};
 use fgit_forge::preparation::{
-    ConflictKind, MergeCommitStyle, MergeEntry, MergePreparation, MergeProfile,
+    ConflictKind, MergeCommitStyle, MergeEntry, MergePreparation, MergeProfile, PreparationLimits,
+    RecursiveMergeBase,
 };
 use fgit_forge::{AggregateVersion, QueueNumber};
-use fgit_types::RepositoryAuthorityHeadId;
+use fgit_types::{GitOid, RepositoryAuthorityHeadId};
 use fgit_wire::smart_http::HttpVersion;
 use std::io::{self, Write};
 
@@ -361,6 +362,7 @@ fn build_inner(
             MergeProfile::PathMergeV1 => "path-merge-v1",
             MergeProfile::ExactRenamesV1 => "exact-renames-v1",
             MergeProfile::BuiltinAttributesV1 => "builtin-attributes-v1",
+            MergeProfile::RecursivePathMergeV1 => "recursive-path-merge-v1",
         }),
         quote(match style {
             MergeCommitStyle::TwoParent => "merge-commit",
@@ -418,6 +420,13 @@ fn build_inner(
             {
                 return Err(ApiError::unavailable());
             }
+            append_recursive_base(
+                &mut metadata,
+                profile,
+                plan.base,
+                plan.recursive_base.as_ref(),
+                live,
+            )?;
             append(
                 &mut metadata,
                 &format!(
@@ -440,10 +449,15 @@ fn build_inner(
             )?;
             Status::Success
         }
-        MergePreparation::Conflicted { base, conflicts } => {
+        MergePreparation::Conflicted {
+            base,
+            recursive_base,
+            conflicts,
+        } => {
             if bundle.is_some() || conflicts.is_empty() || conflicts.len() > 128 {
                 return Err(ApiError::unavailable());
             }
+            append_recursive_base(&mut metadata, profile, *base, recursive_base.as_ref(), live)?;
             append(
                 &mut metadata,
                 &format!(
@@ -490,6 +504,54 @@ fn build_inner(
         bundle_digest.as_deref(),
         maximum,
         live,
+    )
+}
+
+/// Additional construction evidence for the opt-in recursive profile. The
+/// ordinary merge-base coordinate remains a real ancestor used by admission;
+/// the virtual tree is never represented as a commit or an ancestor. Keep the
+/// legacy wire bytes unchanged by omitting the field for every older profile.
+pub(in crate::smart_http::server) fn append_recursive_base(
+    metadata: &mut String,
+    profile: MergeProfile,
+    base: GitOid,
+    recursive: Option<&RecursiveMergeBase>,
+    live: &mut impl FnMut() -> bool,
+) -> Result<(), ApiError> {
+    let recursive = match (profile, recursive) {
+        (MergeProfile::RecursivePathMergeV1, Some(recursive)) => recursive,
+        (MergeProfile::RecursivePathMergeV1, None) | (_, Some(_)) => {
+            return Err(ApiError::unavailable());
+        }
+        (_, None) => return Ok(()),
+    };
+    if recursive.bases.is_empty()
+        || recursive.bases.len() > PreparationLimits::default().max_commits
+        || recursive.bases.first() != Some(&base)
+        || recursive.tree.is_zero()
+        || recursive.tree.algorithm() != base.algorithm()
+        || recursive.bases.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(ApiError::unavailable());
+    }
+    append(metadata, "\"recursive_base\":{\"bases\":[")?;
+    for (index, id) in recursive.bases.iter().enumerate() {
+        checkpoint(live)?;
+        if id.is_zero() || id.algorithm() != base.algorithm() {
+            return Err(ApiError::unavailable());
+        }
+        append(
+            metadata,
+            &format!(
+                "{}{}",
+                if index == 0 { "" } else { "," },
+                quote(&id.to_string())
+            ),
+        )?;
+    }
+    append(
+        metadata,
+        &format!("],\"tree\":{}}},", quote(&recursive.tree.to_string())),
     )
 }
 
@@ -595,6 +657,73 @@ fn mixed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recursive_base_receipts_keep_real_witness_separate_and_preserve_legacy_bytes() {
+        use fgit_types::GitHashAlgorithm;
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let oid = |byte: u8| {
+                GitOid::from_hex(format, &format!("{byte:02x}").repeat(format.digest_len())).unwrap()
+            };
+            let base = oid(1);
+            let receipt = RecursiveMergeBase {
+                bases: vec![base, oid(2)],
+                tree: oid(3),
+            };
+            let mut out = String::from("{");
+            append_recursive_base(
+                &mut out, MergeProfile::RecursivePathMergeV1, base, Some(&receipt), &mut || true,
+            ).unwrap();
+            assert_eq!(out, format!(
+                "{{\"recursive_base\":{{\"bases\":[\"{}\",\"{}\"],\"tree\":\"{}\"}},",
+                base, oid(2), oid(3),
+            ));
+            for profile in [
+                MergeProfile::PathMergeV1,
+                MergeProfile::ExactRenamesV1,
+                MergeProfile::BuiltinAttributesV1,
+            ] {
+                let mut legacy = String::from("original prefix");
+                append_recursive_base(&mut legacy, profile, base, None, &mut || true).unwrap();
+                assert_eq!(legacy, "original prefix");
+                assert!(append_recursive_base(
+                    &mut String::new(), profile, base, Some(&receipt), &mut || true,
+                ).is_err());
+            }
+            assert!(append_recursive_base(
+                &mut String::new(), MergeProfile::RecursivePathMergeV1, base, None, &mut || true,
+            ).is_err());
+            assert!(append_recursive_base(
+                &mut String::new(), MergeProfile::RecursivePathMergeV1, base, Some(&receipt), &mut || false,
+            ).is_err());
+            for bases in [
+                vec![],
+                vec![oid(2)],
+                vec![oid(2), base],
+                vec![base, base],
+                vec![base; PreparationLimits::default().max_commits + 1],
+            ] {
+                let malformed = RecursiveMergeBase { bases, tree: receipt.tree };
+                assert!(append_recursive_base(
+                    &mut String::new(), MergeProfile::RecursivePathMergeV1, base,
+                    Some(&malformed), &mut || true,
+                ).is_err());
+            }
+            let other_format = if format == GitHashAlgorithm::Sha1 {
+                GitHashAlgorithm::Sha256
+            } else {
+                GitHashAlgorithm::Sha1
+            };
+            let wrong_tree = RecursiveMergeBase {
+                bases: receipt.bases.clone(),
+                tree: GitOid::from_hex(other_format, &"01".repeat(other_format.digest_len())).unwrap(),
+            };
+            assert!(append_recursive_base(
+                &mut String::new(), MergeProfile::RecursivePathMergeV1, base,
+                Some(&wrong_tree), &mut || true,
+            ).is_err());
+        }
+    }
+
     #[test]
     fn binary_transport_is_exact_self_delimited_and_not_base64_or_utf8_converted() {
         let bundle = b"# v2 git bundle\n\nPACK\0\xff\r\n".to_vec();

@@ -9,10 +9,11 @@
 mod tests;
 
 use super::{
-    AncestryQueryWork, BTreeMap, CommitInput, GitHashAlgorithm, GitOid, Graph, MergeBaseLimits,
-    MergeBaseResult, MergeCommitStyle, MergeConflict, MergeEntry, MergeMetadata, MergeObjectSource,
-    MergeProfile, MergeSourceError, PlannedMergeObject, Planner, PreparationError,
-    PreparationLimits, emit_merge_commit, frontier_merge_bases_all, renames,
+    AncestryQueryWork, BTreeMap, BTreeSet, CommitInput, GitHashAlgorithm, GitOid, Graph,
+    MergeBaseLimits, MergeBaseResult, MergeCommitStyle, MergeConflict, MergeEntry, MergeMetadata,
+    MergeObjectSource, MergeProfile, MergeSourceError, PlannedMergeObject, Planner,
+    PreparationError, PreparationLimits, RecursiveMergeBase, emit_merge_commit,
+    frontier_merge_bases_all, recursive_base, renames,
 };
 
 /// An entire prefix shares the ordinary preparation ceilings; this count is
@@ -26,10 +27,11 @@ pub struct PrefixInput<'a> {
 }
 
 /// Construction coordinates, not an original canonical PR review subject.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PrefixStep {
     pub source: GitOid,
     pub base: GitOid,
+    pub recursive_base: Option<RecursiveMergeBase>,
     pub projected_target: GitOid,
     pub tree: GitOid,
     pub commit: GitOid,
@@ -49,6 +51,7 @@ pub struct PreparedPrefix {
 pub enum PrefixStop {
     Conflicted {
         base: GitOid,
+        recursive_base: Option<RecursiveMergeBase>,
         conflicts: Vec<MergeConflict>,
     },
     AlreadyIntegrated,
@@ -114,32 +117,57 @@ pub fn prepare_queue_prefix<S: MergeObjectSource>(
             original: source,
             generated: &generated,
         };
-        let mut step_work = AncestryQueryWork::default();
-        let bases = frontier_merge_bases_all(
-            &Graph {
-                source: &overlay,
-                format,
-            },
-            target,
-            input.source,
-            MergeBaseLimits {
-                max_commits: limits.max_commits - work.visited_commits,
-                max_edges: limits.max_edges - work.examined_edges,
-            },
-            &mut step_work,
-            || source.checkpoint(),
-        );
-        // The frontier resets its output counter on every query. Charge the
-        // completed work before interpreting either its result or refusal.
-        work.visited_commits += step_work.visited_commits;
-        work.examined_edges += step_work.examined_edges;
-        let bases = bases.map_err(PreparationError::Graph)?;
-        source.checkpoint()?;
-        let base = match bases {
-            MergeBaseResult::NoCommonAncestor => return Err(PreparationError::NoCommonAncestor),
-            MergeBaseResult::Bases(bases) if bases.len() == 1 => bases[0],
-            MergeBaseResult::Bases(bases) => {
-                return Err(PreparationError::MultipleMergeBases(bases));
+        let retained = if profile == MergeProfile::RecursivePathMergeV1 {
+            planner.objects.keys().copied().collect()
+        } else {
+            BTreeSet::new()
+        };
+        let recursive_base = if profile == MergeProfile::RecursivePathMergeV1 {
+            Some(recursive_base::select(
+                &overlay,
+                &mut planner,
+                target,
+                input.source,
+                &mut work,
+            )?)
+        } else {
+            None
+        };
+        let base = if let Some(evidence) = &recursive_base {
+            *evidence
+                .bases
+                .first()
+                .ok_or(PreparationError::NoCommonAncestor)?
+        } else {
+            let mut step_work = AncestryQueryWork::default();
+            let bases = frontier_merge_bases_all(
+                &Graph {
+                    source: &overlay,
+                    format,
+                },
+                target,
+                input.source,
+                MergeBaseLimits {
+                    max_commits: limits.max_commits - work.visited_commits,
+                    max_edges: limits.max_edges - work.examined_edges,
+                },
+                &mut step_work,
+                || source.checkpoint(),
+            );
+            // The frontier resets its output counter on every query. Charge the
+            // completed work before interpreting either its result or refusal.
+            work.visited_commits += step_work.visited_commits;
+            work.examined_edges += step_work.examined_edges;
+            let bases = bases.map_err(PreparationError::Graph)?;
+            source.checkpoint()?;
+            match bases {
+                MergeBaseResult::NoCommonAncestor => {
+                    return Err(PreparationError::NoCommonAncestor);
+                }
+                MergeBaseResult::Bases(bases) if bases.len() == 1 => bases[0],
+                MergeBaseResult::Bases(bases) => {
+                    return Err(PreparationError::MultipleMergeBases(bases));
+                }
             }
         };
         if base == input.source {
@@ -151,11 +179,14 @@ pub fn prepare_queue_prefix<S: MergeObjectSource>(
                 reason: PrefixStop::AlreadyIntegrated,
             });
         }
-        let base_tree = overlay.commit(base)?.tree;
+        let base_tree = match &recursive_base {
+            Some(evidence) => evidence.tree,
+            None => overlay.commit(base)?.tree,
+        };
         let our_tree = overlay.commit(target)?.tree;
         let their_tree = overlay.commit(input.source)?.tree;
         let tree = match profile {
-            MergeProfile::PathMergeV1 => {
+            MergeProfile::PathMergeV1 | MergeProfile::RecursivePathMergeV1 => {
                 planner.directory(Some(base_tree), our_tree, their_tree, &[], 0, false)?
             }
             MergeProfile::ExactRenamesV1 => {
@@ -186,11 +217,18 @@ pub fn prepare_queue_prefix<S: MergeObjectSource>(
                 completed: steps,
                 reason: PrefixStop::Conflicted {
                     base,
+                    recursive_base,
                     conflicts: planner.conflicts,
                 },
             });
         }
         let tree = tree.ok_or(PreparationError::InvalidTree)?;
+        if recursive_base
+            .as_ref()
+            .is_some_and(|evidence| evidence.bases.len() > 1)
+        {
+            renames::retain_candidate_objects(&mut planner, tree, &retained)?;
+        }
         let commit = emit_merge_commit(
             &mut planner,
             target,
@@ -217,6 +255,7 @@ pub fn prepare_queue_prefix<S: MergeObjectSource>(
         steps.push(PrefixStep {
             source: input.source,
             base,
+            recursive_base,
             projected_target: target,
             tree,
             commit,

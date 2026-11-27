@@ -112,6 +112,29 @@ fn builtin_attributes_selection_retains_the_original_queue_landing_guard() {
 }
 
 #[test]
+fn recursive_preparation_keeps_both_hash_domains_and_exact_queue_subject() {
+    for (format, width) in [("sha1", 20), ("sha256", 32)] {
+        let mut args = candidate_args("prepare");
+        args.extend(["--object-format", format].map(str::to_owned));
+        replace(&mut args, "--expected-source-tip", &"aa".repeat(width));
+        replace(&mut args, "--expected-target-tip", &"bb".repeat(width));
+        let Operation::Prepare(expected) = options::parse(&args).unwrap().operation else {
+            panic!()
+        };
+        replace(&mut args, "--profile", "recursive-path-merge-v1");
+        let Operation::Prepare(selected) = options::parse(&args).unwrap().operation else {
+            panic!()
+        };
+        assert_eq!(selected.profile, MergeProfile::RecursivePathMergeV1);
+        assert_eq!(selected.number, expected.number);
+        assert_eq!(selected.expected_version, expected.expected_version);
+        assert_eq!(selected.subject, expected.subject);
+        assert_eq!(selected.metadata, expected.metadata);
+        assert_eq!(selected.output, expected.output);
+    }
+}
+
+#[test]
 fn candidate_metadata_and_native_hash_formats_are_explicit() {
     for (format, width) in [("sha1", 20), ("sha256", 32)] {
         for action in ["prepare", "land-candidate"] {

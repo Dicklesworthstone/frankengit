@@ -3,7 +3,9 @@
 //! `PathMergeV1` merges exact paths, recurses through changed directories, and
 //! uses the existing line merge for regular-file content. It does not run Git,
 //! hooks, attributes, external drivers, rename heuristics, or virtual-base
-//! synthesis. Multiple best bases and conflicts never produce a candidate.
+//! synthesis. `RecursivePathMergeV1` additionally combines multiple best bases
+//! against their own ancestors when every intermediate merge is clean.
+//! Conflicts never produce a candidate.
 //! The node adapter supplies identity-verified, authority-selected objects.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -19,6 +21,7 @@ use fgit_types::{GitHashAlgorithm, GitOid};
 mod attributes;
 pub mod queue_prefix;
 pub mod rebase;
+mod recursive_base;
 pub mod renames;
 pub mod replay;
 pub mod resolution;
@@ -37,6 +40,10 @@ pub enum MergeProfile {
     /// Exact-path merges using stable, repository-owned attribute rules and
     /// built-in text/binary decisions. Never runs filters or external drivers.
     BuiltinAttributesV1,
+    /// Exact-path merging with deterministic, conflict-free recursive synthesis
+    /// of multiple best common ancestors. The other profiles keep their unique
+    /// base requirement. Never uses an empty or arbitrarily chosen ancestor.
+    RecursivePathMergeV1,
 }
 
 /// Parent shape is independent of the tree merge profile. Squash retains the
@@ -172,9 +179,24 @@ pub struct PlannedMergeObject {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecursiveMergeBase {
+    /// Every real best common ancestor, in ascending native-identity order.
+    pub bases: Vec<GitOid>,
+    /// Exact effective comparison tree, synthesized recursively when needed.
+    /// It is derived evidence, not a selected commit or an admission witness.
+    pub tree: GitOid,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedMerge {
     pub style: MergeCommitStyle,
+    /// Real selected common-ancestor witness for admission. For the recursive
+    /// profile this is the smallest member of `recursive_base.bases`; the
+    /// comparison uses the explicitly recorded effective tree, not this
+    /// witness's tree.
     pub base: GitOid,
+    /// Present only for RecursivePathMergeV1, including its single-base case.
+    pub recursive_base: Option<RecursiveMergeBase>,
     pub target: GitOid,
     pub source: GitOid,
     pub tree: GitOid,
@@ -189,6 +211,7 @@ pub enum MergePreparation {
     Clean(PreparedMerge),
     Conflicted {
         base: GitOid,
+        recursive_base: Option<RecursiveMergeBase>,
         conflicts: Vec<MergeConflict>,
     },
     AlreadyUpToDate {
@@ -207,12 +230,45 @@ pub enum PreparationError {
     Graph(MergeBaseError<GitOid, MergeSourceError>),
     NoCommonAncestor,
     MultipleMergeBases(Vec<GitOid>),
+    /// A recursive comparison base itself conflicts. These conflicts are not
+    /// final-tip conflicts and cannot authorize a partially synthesized tree.
+    RecursiveBaseConflict {
+        bases: Vec<GitOid>,
+        conflicts: Vec<MergeConflict>,
+    },
     InvalidTree,
     Budget(&'static str),
     Content {
         path: Vec<u8>,
         error: ContentMergeError,
     },
+}
+
+impl PreparationError {
+    /// Cancellation retains the same meaning across direct source reads and
+    /// the exact ancestry walk; transport adapters must not lose that boundary.
+    pub fn is_cancelled(&self) -> bool {
+        matches!(
+            self,
+            Self::Source(MergeSourceError::Cancelled)
+                | Self::Graph(MergeBaseError::Source(MergeSourceError::Cancelled))
+        )
+    }
+
+    /// A bounded refusal, including aggregate graph work and source budgets.
+    /// Malformed input and unavailable objects remain distinct from exhaustion.
+    pub fn is_resource_limit(&self) -> bool {
+        matches!(
+            self,
+            Self::Budget(_)
+                | Self::Source(MergeSourceError::BudgetExceeded)
+                | Self::Graph(
+                    MergeBaseError::Source(MergeSourceError::BudgetExceeded)
+                        | MergeBaseError::CommitLimitExceeded { .. }
+                        | MergeBaseError::EdgeLimitExceeded { .. }
+                )
+        )
+    }
 }
 
 impl std::fmt::Display for PreparationError {
@@ -377,44 +433,55 @@ pub fn prepare_merge_with_options<S: MergeObjectSource>(
     {
         return Err(PreparationError::ObjectFormat);
     }
-    let bases = source_merge_bases(
-        source,
-        format,
-        target,
-        incoming,
-        MergeBaseLimits {
-            max_commits: limits.max_commits,
-            max_edges: limits.max_edges,
-        },
-    )
-    .map_err(PreparationError::Graph)?;
-    source.checkpoint()?;
-    let base = match bases {
-        MergeBaseResult::NoCommonAncestor => return Err(PreparationError::NoCommonAncestor),
-        MergeBaseResult::Bases(bases) if bases.len() == 1 => bases[0],
-        MergeBaseResult::Bases(bases) => return Err(PreparationError::MultipleMergeBases(bases)),
+    let mut planner = Planner::new(source, format, limits);
+    let recursive_base = if profile == MergeProfile::RecursivePathMergeV1 {
+        Some(recursive_base::select(
+            source,
+            &mut planner,
+            target,
+            incoming,
+            &mut AncestryQueryWork::default(),
+        )?)
+    } else {
+        None
+    };
+    let base = if let Some(evidence) = &recursive_base {
+        *evidence
+            .bases
+            .first()
+            .ok_or(PreparationError::NoCommonAncestor)?
+    } else {
+        let bases = source_merge_bases(
+            source,
+            format,
+            target,
+            incoming,
+            MergeBaseLimits {
+                max_commits: limits.max_commits,
+                max_edges: limits.max_edges,
+            },
+        )
+        .map_err(PreparationError::Graph)?;
+        source.checkpoint()?;
+        match bases {
+            MergeBaseResult::NoCommonAncestor => return Err(PreparationError::NoCommonAncestor),
+            MergeBaseResult::Bases(bases) if bases.len() == 1 => bases[0],
+            MergeBaseResult::Bases(bases) => {
+                return Err(PreparationError::MultipleMergeBases(bases));
+            }
+        }
     };
     if base == incoming {
         return Ok(MergePreparation::AlreadyUpToDate { target });
     }
-    let base_tree = source.commit(base)?.tree;
+    let base_tree = match &recursive_base {
+        Some(evidence) => evidence.tree,
+        None => source.commit(base)?.tree,
+    };
     let our_tree = source.commit(target)?.tree;
     let their_tree = source.commit(incoming)?.tree;
-    let mut planner = Planner {
-        source,
-        format,
-        limits,
-        entries: 0,
-        content_merges: 0,
-        emitted_objects: 0,
-        output_bytes: 0,
-        objects: BTreeMap::new(),
-        trees: BTreeMap::new(),
-        conflicts: Vec::new(),
-        resolutions: BTreeMap::new(),
-    };
     let tree = match profile {
-        MergeProfile::PathMergeV1 => {
+        MergeProfile::PathMergeV1 | MergeProfile::RecursivePathMergeV1 => {
             planner.directory(Some(base_tree), our_tree, their_tree, &[], 0, false)?
         }
         MergeProfile::ExactRenamesV1 => {
@@ -436,12 +503,23 @@ pub fn prepare_merge_with_options<S: MergeObjectSource>(
             .sort_by(|left, right| left.path.cmp(&right.path));
         return Ok(MergePreparation::Conflicted {
             base,
+            recursive_base,
             conflicts: planner.conflicts,
         });
     }
     let tree = tree.ok_or(PreparationError::InvalidTree)?;
-    finish_merge_with_style(planner, base, target, incoming, tree, metadata, style)
-        .map(MergePreparation::Clean)
+    if recursive_base
+        .as_ref()
+        .is_some_and(|evidence| evidence.bases.len() > 1)
+    {
+        // Comparison-only trees and blobs are not candidate dependencies. Keep
+        // any generated objects the final tree actually uses, without refunding
+        // any work spent constructing discarded virtual bases.
+        renames::retain_candidate_objects(&mut planner, tree, &BTreeSet::new())?;
+    }
+    let mut plan = finish_merge_with_style(planner, base, target, incoming, tree, metadata, style)?;
+    plan.recursive_base = recursive_base;
+    Ok(MergePreparation::Clean(plan))
 }
 
 /// Explicit resolution retains its existing two-parent commit contract.
@@ -477,6 +555,7 @@ fn finish_merge_with_style<S: MergeObjectSource>(
     Ok(PreparedMerge {
         style,
         base,
+        recursive_base: None,
         target,
         source: incoming,
         tree,
@@ -920,6 +999,7 @@ impl<'a, S: MergeObjectSource> Planner<'a, S> {
 #[cfg(test)]
 mod tests {
     mod ancestry;
+    mod recursive_base;
     mod shared_trees;
     mod squash;
 

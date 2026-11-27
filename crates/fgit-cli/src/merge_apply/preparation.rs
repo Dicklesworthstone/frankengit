@@ -11,14 +11,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fgit_forge::preparation::{
     MergeCommitStyle, MergeConflict, MergeEntry, MergeMetadata, MergePreparation, MergeProfile,
-    PreparationLimits,
+    PreparationLimits, RecursiveMergeBase,
 };
 use fgit_node::{NativeMergeMethod, NodeConfig, OneNode};
 use fgit_types::{GitHashAlgorithm, HeadGeneration, RefName, RepositoryId, TenantId};
 
 use super::super::publication_support::{quote, set_once};
 
-pub(super) const USAGE: &str = "usage: fg merge prepare <storage-root> <tenant-id> <repository-id> <target-ref> <output-bundle> --trusted-local --profile path-v1|exact-renames-v1|builtin-attributes-v1 --source-ref <branch> --author <name-and-email> [--committer <name-and-email>] --timestamp <unix-seconds> --message <message> [--method merge-commit|squash] [--object-format sha1|sha256]";
+pub(super) const USAGE: &str = "usage: fg merge prepare <storage-root> <tenant-id> <repository-id> <target-ref> <output-bundle> --trusted-local --profile path-v1|exact-renames-v1|builtin-attributes-v1|recursive-path-merge-v1 --source-ref <branch> --author <name-and-email> [--committer <name-and-email>] --timestamp <unix-seconds> --message <message> [--method merge-commit|squash] [--object-format sha1|sha256]";
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 struct Options {
@@ -40,7 +40,7 @@ pub(super) fn run(arguments: &[String]) -> Result<(), String> {
     }
     if arguments == ["prepare", "--help"] {
         println!(
-            "{USAGE}\n\nSelect path-v1 for the legacy path merge, exact-renames-v1 for unique content-identical moves, or builtin-attributes-v1 for path merging with stable, bounded built-in .gitattributes rules. Applicable external drivers and unsupported attribute syntax refuse. No Git ort equivalence, rename heuristics, virtual bases, external programs or hooks are implied. Conflicts produce JSON and no bundle. Repository state is never changed."
+            "{USAGE}\n\nSelect path-v1 for the legacy path merge, exact-renames-v1 for unique content-identical moves, or builtin-attributes-v1 for path merging with stable, bounded built-in .gitattributes rules. Applicable external drivers and unsupported attribute syntax refuse. Select recursive-path-merge-v1 for clean recursive comparison trees with real ancestry witnesses; conflicting ancestor merges refuse. No Git ort equivalence, rename heuristics, external programs or hooks are implied. Conflicts produce JSON and no bundle. Repository state is never changed."
         );
         return Ok(());
     }
@@ -137,9 +137,16 @@ pub(super) fn run(arguments: &[String]) -> Result<(), String> {
                 format!("\"object_count\":{}", plan.objects.len()),
                 format!("\"bundle_bytes\":{}", bundle.len()),
             ]);
+            if let Some(base) = &plan.recursive_base {
+                fields.push(render_recursive_base(base));
+            }
             false
         }
-        MergePreparation::Conflicted { base, conflicts } => {
+        MergePreparation::Conflicted {
+            base,
+            recursive_base,
+            conflicts,
+        } => {
             if artifact.bundle.is_some() {
                 return Err("conflicted preparation unexpectedly carried a bundle".to_owned());
             }
@@ -156,6 +163,9 @@ pub(super) fn run(arguments: &[String]) -> Result<(), String> {
                         .join(",")
                 ),
             ]);
+            if let Some(base) = recursive_base {
+                fields.push(render_recursive_base(base));
+            }
             true
         }
         MergePreparation::AlreadyUpToDate { target } => {
@@ -198,8 +208,21 @@ const fn profile_name(profile: MergeProfile) -> &'static str {
         MergeProfile::PathMergeV1 => "path-v1",
         MergeProfile::ExactRenamesV1 => "exact-renames-v1",
         MergeProfile::BuiltinAttributesV1 => "builtin-attributes-v1",
+        MergeProfile::RecursivePathMergeV1 => "recursive-path-merge-v1",
     }
 }
+pub(crate) fn render_recursive_base(base: &RecursiveMergeBase) -> String {
+    format!(
+        "\"recursive_base\":{{\"bases\":[{}],\"tree\":\"{}\"}}",
+        base.bases
+            .iter()
+            .map(|id| quote(&id.to_string()))
+            .collect::<Vec<_>>()
+            .join(","),
+        base.tree,
+    )
+}
+
 fn render_entry(entry: Option<&MergeEntry>) -> String {
     entry.map_or_else(
         || "null".to_owned(),
@@ -261,8 +284,9 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                         "path-v1" => MergeProfile::PathMergeV1,
                         "exact-renames-v1" => MergeProfile::ExactRenamesV1,
                         "builtin-attributes-v1" => MergeProfile::BuiltinAttributesV1,
+                        "recursive-path-merge-v1" => MergeProfile::RecursivePathMergeV1,
                         _ => return Err(
-                            "--profile must be path-v1, exact-renames-v1 or builtin-attributes-v1"
+                            "--profile must be path-v1, exact-renames-v1, builtin-attributes-v1 or recursive-path-merge-v1"
                                 .to_owned(),
                         ),
                     };
@@ -309,7 +333,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         );
     }
     let profile = profile.ok_or(
-        "--profile is required; select path-v1, exact-renames-v1 or builtin-attributes-v1 explicitly",
+        "--profile is required; select path-v1, exact-renames-v1, builtin-attributes-v1 or recursive-path-merge-v1 explicitly",
     )?;
     let incoming = incoming.ok_or("--source-ref is required")?;
     if target == incoming
@@ -501,6 +525,7 @@ mod tests {
             ("path-v1", MergeProfile::PathMergeV1),
             ("exact-renames-v1", MergeProfile::ExactRenamesV1),
             ("builtin-attributes-v1", MergeProfile::BuiltinAttributesV1),
+            ("recursive-path-merge-v1", MergeProfile::RecursivePathMergeV1),
         ] {
             let mut selected = args();
             let at = selected.iter().position(|arg| arg == "--profile").unwrap();

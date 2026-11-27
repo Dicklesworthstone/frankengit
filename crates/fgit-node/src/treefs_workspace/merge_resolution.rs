@@ -320,7 +320,10 @@ mod tests {
                 PreparationLimits::default(),
             ))
             .unwrap();
-        let MergePreparation::Conflicted { base, conflicts } = auto.outcome else {
+        let MergePreparation::Conflicted {
+            base, conflicts, ..
+        } = auto.outcome
+        else {
             panic!("fixture must conflict");
         };
         assert_eq!(conflicts.len(), 1);

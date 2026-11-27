@@ -437,6 +437,7 @@ fn conflicted_queue_head_returns_no_publishable_candidate_or_canonical_side_effe
         let MergePreparation::Conflicted {
             base: observed,
             conflicts,
+            ..
         } = prepared.outcome
         else {
             panic!("conflicting edits must not manufacture a merge result");

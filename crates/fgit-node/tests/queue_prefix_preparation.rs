@@ -184,6 +184,42 @@ fn real_two_pr_prefix_preserves_original_subjects_and_exports_one_deterministic_
             attributes.preparation_id, renamed.preparation_id,
             "identical candidate bytes still bind the selected attribute policy"
         );
+        let recursive = prepare(
+            &f,
+            2,
+            &entries,
+            &RefVisibility::new(),
+            MergeProfile::RecursivePathMergeV1,
+        )
+        .unwrap();
+        let PrefixPreparation::Clean(recursive_plan) = &recursive.outcome else {
+            panic!("the recursive profile also preserves the unique-base prefix");
+        };
+        assert_eq!(recursive.bundle, prepared.bundle);
+        assert_eq!(recursive_plan.final_commit, plan.final_commit);
+        assert_eq!(recursive_plan.objects, plan.objects);
+        for (step, legacy) in recursive_plan.steps.iter().zip(&plan.steps) {
+            let receipt = step.recursive_base.as_ref().unwrap();
+            assert_eq!(receipt.bases, [f.base]);
+            let mut without_receipt = step.clone();
+            without_receipt.recursive_base = None;
+            assert_eq!(&without_receipt, legacy);
+        }
+        assert_ne!(recursive.preparation_id, Some(id));
+        assert_ne!(recursive.preparation_id, renamed.preparation_id);
+        assert_ne!(recursive.preparation_id, attributes.preparation_id);
+        assert_eq!(
+            prepare(
+                &f,
+                2,
+                &entries,
+                &RefVisibility::new(),
+                MergeProfile::RecursivePathMergeV1,
+            )
+            .unwrap()
+            .preparation_id,
+            recursive.preparation_id
+        );
         let mut changed = entries.clone();
         changed[1].metadata.message = b"different explicit second commit message\n".to_vec();
         let changed = prepare(
@@ -450,7 +486,9 @@ fn a_real_later_pr_conflict_returns_only_diagnostics_without_identity_or_bundle(
             source,
             projected_target,
             completed,
-            reason: PrefixStop::Conflicted { base, conflicts },
+            reason: PrefixStop::Conflicted {
+                base, conflicts, ..
+            },
         } = stopped.outcome
         else {
             panic!("the conflict cannot turn into a shorter successful prefix");

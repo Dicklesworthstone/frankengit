@@ -3,8 +3,8 @@
 use super::*;
 use fgit_crypto::{GitObjectKind, git_object_id, sha256_digest};
 use fgit_forge::preparation::{
-    ConflictKind, MergeEntry, MergeMetadata, MergePreparation, MergeProfile, MergeSourceError,
-    PreparationError, PreparationLimits,
+    ConflictKind, MergeEntry, MergeMetadata, MergePreparation, MergeProfile, PreparationError,
+    PreparationLimits, RecursiveMergeBase,
 };
 use fgit_node::NodeWorkspaceRefusal;
 
@@ -77,6 +77,7 @@ pub(super) fn configuration(args: &Object, format: GitHashAlgorithm) -> Result<I
         "path-merge-v1" => MergeProfile::PathMergeV1,
         "exact-renames-v1" => MergeProfile::ExactRenamesV1,
         "builtin-attributes-v1" => MergeProfile::BuiltinAttributesV1,
+        "recursive-path-merge-v1" => MergeProfile::RecursivePathMergeV1,
         _ => return Err(ToolError::invalid("invalid_merge_profile")),
     };
     let style = match string(args, "method")?.unwrap_or("merge-commit") {
@@ -122,6 +123,7 @@ pub(super) fn properties(operation: &str) -> Object {
                     text("path-merge-v1"),
                     text("exact-renames-v1"),
                     text("builtin-attributes-v1"),
+                    text("recursive-path-merge-v1"),
                 ]),
             ),
         ]),
@@ -198,6 +200,7 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
                 MergeProfile::PathMergeV1 => "path-merge-v1",
                 MergeProfile::ExactRenamesV1 => "exact-renames-v1",
                 MergeProfile::BuiltinAttributesV1 => "builtin-attributes-v1",
+                MergeProfile::RecursivePathMergeV1 => "recursive-path-merge-v1",
             }),
         ),
         ("method".into(), text(merge_method_name(input.style))),
@@ -285,6 +288,13 @@ pub(super) fn render_with_publication(
             for id in [plan.base, plan.tree, plan.commit] {
                 check_oid(id, format)?;
             }
+            render_recursive_base(
+                &mut result,
+                input,
+                format,
+                plan.base,
+                plan.recursive_base.as_ref(),
+            )?;
             let candidate = CandidateBinding {
                 merge_base: plan.base,
                 commit: plan.commit,
@@ -341,8 +351,13 @@ pub(super) fn render_with_publication(
                 ),
             ]);
         }
-        MergePreparation::Conflicted { base, conflicts } => {
+        MergePreparation::Conflicted {
+            base,
+            recursive_base,
+            conflicts,
+        } => {
             check_oid(*base, format)?;
+            render_recursive_base(&mut result, input, format, *base, recursive_base.as_ref())?;
             if bundle.is_some()
                 || conflicts.is_empty()
                 || conflicts.len() > input.limits.max_conflicts
@@ -393,6 +408,43 @@ pub(super) fn render_with_publication(
     Ok(result)
 }
 
+fn render_recursive_base(
+    result: &mut Object,
+    input: &Input,
+    format: GitHashAlgorithm,
+    anchor: GitOid,
+    receipt: Option<&RecursiveMergeBase>,
+) -> Result<(), ToolError> {
+    let Some(receipt) = receipt else {
+        return if input.profile == MergeProfile::RecursivePathMergeV1 {
+            Err(invalid_report())
+        } else {
+            Ok(())
+        };
+    };
+    if input.profile != MergeProfile::RecursivePathMergeV1
+        || receipt.bases.first() != Some(&anchor)
+        || receipt.bases.len() > input.limits.max_commits
+        || receipt.bases.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(invalid_report());
+    }
+    for id in receipt.bases.iter().copied().chain(std::iter::once(receipt.tree)) {
+        check_oid(id, format)?;
+    }
+    result.insert(
+        "recursive_base".into(),
+        object([
+            (
+                "bases",
+                Value::Array(receipt.bases.iter().map(|id| text(raw_oid(*id))).collect()),
+            ),
+            ("tree", text(raw_oid(receipt.tree))),
+        ]),
+    );
+    Ok(())
+}
+
 pub(super) fn valid_path(path: &[u8]) -> bool {
     path.len() <= 4096
         && !path.contains(&0)
@@ -429,20 +481,22 @@ pub(super) fn preparation_error(error: NodeWorkspaceRefusal) -> ToolError {
     match error {
         NodeWorkspaceRefusal::StaleWorkspaceBase => ToolError::failed("pull_subject_moved"),
         NodeWorkspaceRefusal::RefUnavailable => ToolError::failed("reference_unavailable"),
-        NodeWorkspaceRefusal::Cancelled { .. }
-        | NodeWorkspaceRefusal::MergePreparation(PreparationError::Source(
-            MergeSourceError::Cancelled,
-        )) => ToolError::failed("preparation_cancelled"),
+        NodeWorkspaceRefusal::Cancelled { .. } => ToolError::failed("preparation_cancelled"),
+        NodeWorkspaceRefusal::MergePreparation(error) if error.is_cancelled() => {
+            ToolError::failed("preparation_cancelled")
+        }
         NodeWorkspaceRefusal::MergePreparation(PreparationError::NoCommonAncestor) => {
             ToolError::failed("no_common_ancestor")
         }
         NodeWorkspaceRefusal::MergePreparation(PreparationError::MultipleMergeBases(_)) => {
             ToolError::failed("multiple_merge_bases")
         }
-        NodeWorkspaceRefusal::MergePreparation(PreparationError::Budget(_))
-        | NodeWorkspaceRefusal::MergePreparation(PreparationError::Source(
-            MergeSourceError::BudgetExceeded,
-        )) => ToolError::failed("resource_limit"),
+        NodeWorkspaceRefusal::MergePreparation(PreparationError::RecursiveBaseConflict { .. }) => {
+            ToolError::failed("recursive_merge_base_conflict")
+        }
+        NodeWorkspaceRefusal::MergePreparation(error) if error.is_resource_limit() => {
+            ToolError::failed("resource_limit")
+        }
         _ => ToolError::failed("pull_preparation_failed"),
     }
 }

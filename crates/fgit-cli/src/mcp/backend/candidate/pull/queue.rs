@@ -133,6 +133,7 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
                 MergeProfile::PathMergeV1 => "path-merge-v1",
                 MergeProfile::ExactRenamesV1 => "exact-renames-v1",
                 MergeProfile::BuiltinAttributesV1 => "builtin-attributes-v1",
+                MergeProfile::RecursivePathMergeV1 => "recursive-path-merge-v1",
             }),
         ),
         ("method".into(), text("merge-commit")),

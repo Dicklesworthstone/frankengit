@@ -535,7 +535,7 @@ fn rebuild<S: MergeObjectSource>(
     Err(PreparationError::InvalidTree)
 }
 
-fn retain_candidate_objects<S: MergeObjectSource>(
+pub(super) fn retain_candidate_objects<S: MergeObjectSource>(
     planner: &mut Planner<'_, S>,
     root: GitOid,
     retained: &BTreeSet<GitOid>,
