@@ -256,7 +256,10 @@ input and does not consume detached approvals itself.
 `--native-timeout-secs` selects one 1..3600-second native operation deadline,
 including authentication, snapshot staging and child processing. Authentication
 time is subtracted from the child's allowance; it does not earn a fresh budget.
-Final approval checks share the same deadline. This remains cooperative for
+Final approval checks share the same deadline. Native verification checks its
+deadline at each checkpoint. During continuous decoder work, native signal
+polls are spaced by one millisecond, with an immediate check before report
+delivery. This remains cooperative for
 operating-system filesystem calls.
 
 The returned `source_attestation` is independent of the native report: its

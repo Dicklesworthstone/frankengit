@@ -10,9 +10,9 @@ use engine::{checkpoint, execute, report};
 pub(super) use options::{Options, parse};
 
 use std::io::Write;
-use std::time::Instant;
 #[cfg(test)]
-use std::{path::PathBuf, time::Duration};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use fgit_crypto::lowercase_hex;
@@ -89,14 +89,24 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
     let timeout = fgit_cli::command_timeout_override_duration()
         .map_or(options.timeout, |global| global.min(options.timeout));
     let mut stopped = false;
+    // Inflate can check liveness for every stored byte. Keep the whole-command
+    // deadline on every check, with a bounded cadence for polling signal futures.
+    const SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(1);
+    let mut next_signal_poll = started;
     let mut live = || {
-        if !stopped && (signals.requested() || started.elapsed() >= timeout) {
-            stopped = true;
+        if stopped {
+            return false;
+        }
+        let now = Instant::now();
+        stopped = now.duration_since(started) >= timeout;
+        if !stopped && now >= next_signal_poll {
+            stopped = signals.requested();
+            next_signal_poll = now + SIGNAL_POLL_INTERVAL;
         }
         !stopped
     };
     let output = execute(&options, &mut live)?;
-    checkpoint(&mut live)?;
+    checkpoint(&mut || !signals.requested() && live())?;
     let mut stdout = std::io::stdout().lock();
     writeln!(stdout, "{output}")
         .and_then(|()| stdout.flush())

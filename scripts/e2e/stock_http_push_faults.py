@@ -14,7 +14,9 @@ receive-pack request:
   retry then publishes exactly once.
 
 A push to a protected branch is refused through report-status, and the ref
-is never created. Prints one JSON summary; the suite asserts on it.
+is never created. The restart profile kills the original native server
+after each cut, then opens the same node before the first authority readback.
+Prints one JSON summary; the suite asserts on it.
 """
 
 from __future__ import annotations
@@ -24,15 +26,17 @@ import hashlib
 import json
 import re
 import secrets
+import signal
 import socket
 import subprocess
 import tempfile
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from continuous_http_smoke import private_file
-from smart_http_smoke import PRINCIPAL, REPOSITORY, TENANT, isolated_environment, require
+from smart_http_smoke import PRINCIPAL, REPOSITORY, SECRETS, TENANT, isolated_environment, redact, require
 
 REVIEWER = "d4" * 16
 TIMEOUT = 300
@@ -45,12 +49,18 @@ class Relay:
         self.upstream = upstream
         self.mode = "pass"
         self.dropped = 0
+        self.reply_cut = False
         self.listener = socket.create_server(("127.0.0.1", 0))
         self.port = self.listener.getsockname()[1]
         threading.Thread(target=self._accept, daemon=True).start()
 
     def arm(self, mode: str) -> None:
         self.mode, self.dropped = mode, 0
+        self.reply_cut = False
+
+    def close(self) -> None:
+        self.listener.shutdown(socket.SHUT_RDWR)
+        self.listener.close()
 
     def _accept(self) -> None:
         while True:
@@ -112,6 +122,7 @@ class Relay:
                     if drop_on_first:
                         # Cut the answer; canonical readback below independently
                         # establishes whether this request actually committed.
+                        self.reply_cut = True
                         break
                     sink.sendall(data)
             except OSError:
@@ -136,7 +147,7 @@ def run(args: list, env: dict[str, str]) -> subprocess.CompletedProcess:
 
 def checked(args: list, env: dict[str, str]) -> str:
     result = run(args, env)
-    require(result.returncode == 0, f"{args[:3]!r} failed: {result.stderr[-2000:]}")
+    require(result.returncode == 0, redact(f"{args[:3]!r} failed: {result.stderr[-2000:]}"))
     return result.stdout.strip()
 
 
@@ -147,63 +158,118 @@ def generation(fg: str, node: Path, env: dict[str, str]) -> int:
     return int(match.group(1))
 
 
-def exercise(fg: str, git: str, root: Path) -> dict:
+def exercise(fg: str, git: str, root: Path, object_format: str = "sha1",
+             restart_after_drop: bool = False, oracle_install: Path | None = None) -> dict:
     env = isolated_environment(root / "home")
+    git_command = [git]
+    if oracle_install is not None:
+        # The suite verifies this installation with oracle.sh. Expose only the
+        # disposable fixture and the read-only oracle to the stock Git process.
+        git_command = [
+            "bwrap", "--die-with-parent", "--new-session", "--unshare-all", "--share-net",
+            "--clearenv", "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin",
+            "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
+            "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+            "--bind", root, root, "--ro-bind", oracle_install, "/oracle", "--chdir", root,
+            "--setenv", "PATH", "/usr/bin:/bin",
+            "--setenv", "GIT_EXEC_PATH", "/oracle/libexec/git-core",
+            "--setenv", "GIT_ALLOW_PROTOCOL", "http", "--setenv", "GIT_ASKPASS", "/bin/false",
+        ]
+        for key in ("HOME", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_TERMINAL_PROMPT",
+                    "GIT_HTTP_USER_AGENT", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
+                    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE"):
+            git_command.extend(("--setenv", key, env[key]))
+        git_command.extend(("--", "/oracle/bin/git", "-c", "core.hooksPath=/dev/null",
+                            "-c", "credential.helper=", "-c", "http.proxy="))
     node = root / "node"
-    checked([fg, "init", node, TENANT, REPOSITORY, "sha1"], env)
+    checked([fg, "init", node, TENANT, REPOSITORY, object_format], env)
     checked([fg, "protection", "set", node, TENANT, REPOSITORY, "--trusted-local",
-             "--object-format", "sha1", "--principal", PRINCIPAL,
+             "--object-format", object_format, "--principal", PRINCIPAL,
              "--idempotency-key", "faults-protect", "--expected-version", "0",
              "--expected-epoch", "1", "--admin", PRINCIPAL,
              "--require-reviewer", f"refs/heads/protected:{REVIEWER}"], env)
     header = checked([fg, "serve-http", node, TENANT, REPOSITORY, "127.0.0.1:0",
                       "--trusted-local", "--print-credentials-header"], env)
     token = secrets.token_hex(32)
+    SECRETS.append(token)
     table = root / "credentials"
     private_file(table, f"{header}\n{hashlib.sha256(token.encode()).hexdigest()} {PRINCIPAL} "
                  "read,receive\n")
     source = root / "source"
-    checked([git, "init", "-q", "-b", "main", source], env)
+    checked([*git_command, "init", "-q", "--object-format", object_format, "-b", "main", source], env)
 
     def commit(name: str) -> str:
         (source / name).write_text(f"{name}\n")
-        checked([git, "-C", source, "add", name], env)
-        checked([git, "-C", source, "commit", "-qm", name], env)
-        return checked([git, "-C", source, "rev-parse", "HEAD"], env)
+        checked([*git_command, "-C", source, "add", name], env)
+        checked([*git_command, "-C", source, "commit", "-qm", name], env)
+        return checked([*git_command, "-C", source, "rev-parse", "HEAD"], env)
 
-    stop, out, err = root / "serve.stop", root / "serve.out", root / "serve.err"
-    process = subprocess.Popen(
-        [str(a) for a in [fg, "serve-http", node, TENANT, REPOSITORY, "127.0.0.1:0",
-                          "--trusted-local", "--credentials-file", table, "--allow-receive",
-                          "--continuous", "--stop-file", stop]],
-        env=env, stdout=out.open("w"), stderr=err.open("w"))
-    summary: dict = {"type": "stock_http_push_faults_summary",
-                     "git": checked([git, "--version"], env)}
-    try:
-        url = None
+    def start_server(label: str) -> tuple[subprocess.Popen, Path, int]:
+        stop, out, err = (root / f"{label}.{ext}" for ext in ("stop", "out", "err"))
+        with out.open("x") as stdout, err.open("x") as stderr:
+            process = subprocess.Popen(
+                [fg, "serve-http", node, TENANT, REPOSITORY, "127.0.0.1:0",
+                 "--trusted-local", "--credentials-file", table, "--allow-receive",
+                 "--continuous", "--stop-file", stop],
+                env=env, stdout=stdout, stderr=stderr)
         started = time.monotonic()
-        while url is None and time.monotonic() - started < 60:
-            require(process.poll() is None, "serve-http exited before readiness")
-            for line in out.read_text().splitlines():
-                if line.startswith("{") and "smart_http_listening" in line:
-                    url = json.loads(line)["url"]
-            time.sleep(0.05)
-        require(url is not None, "no readiness report")
-        upstream = int(url.split(":")[2].split("/")[0])
+        try:
+            while time.monotonic() - started < 60:
+                require(process.poll() is None, f"{label} exited before readiness")
+                for line in out.read_text().splitlines(keepends=True):
+                    if line.endswith("\n") and line.startswith("{") and "smart_http_listening" in line:
+                        url = urlsplit(json.loads(line)["url"])
+                        require(url.scheme == "http" and url.hostname == "127.0.0.1"
+                                and url.port is not None and url.path == f"/{REPOSITORY}.git",
+                                f"{label} did not open the expected loopback repository")
+                        return process, stop, url.port
+                time.sleep(0.05)
+            raise RuntimeError(f"{label} did not report readiness")
+        except BaseException:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=10)
+            raise
+
+    summary: dict = {"type": "stock_http_push_faults_summary", "object_format": object_format,
+                     "git": checked([*git_command, "--version"], env), "restarts": []}
+    process, stop, upstream = start_server("serve")
+    relay = None
+    try:
         relay = Relay(upstream)
-        remote = f"http://git:{token}@127.0.0.1:{relay.port}/{url.split('/', 3)[3]}"
+        remote = f"http://git:{token}@127.0.0.1:{relay.port}/{REPOSITORY}.git"
+        push_number = 0
+
+        def restart(label: str) -> None:
+            nonlocal process, stop
+            prior = process
+            require(prior.poll() is None, f"{label}: original server exited before SIGKILL")
+            prior.kill()
+            exit_code = prior.wait(timeout=10)
+            require(exit_code == -signal.SIGKILL, f"{label}: expected SIGKILL, got {exit_code}")
+            process, stop, relay.upstream = start_server(f"serve-{label}")
+            summary["restarts"].append({"after": label, "exit": exit_code,
+                                         "original_pid": prior.pid, "reopened_pid": process.pid})
 
         def push(refspec: str) -> subprocess.CompletedProcess:
-            return run([git, "-C", source, "push", remote, refspec], env)
+            nonlocal push_number
+            result = run([*git_command, "-C", source, "push", remote, refspec], env)
+            push_number += 1
+            (root / f"git-push-{push_number}.json").write_text(json.dumps({
+                "refspec": refspec, "exit": result.returncode,
+                "stdout": redact(result.stdout), "stderr": redact(result.stderr),
+            }) + "\n")
+            return result
 
         def tip(ref: str) -> str | None:
-            line = checked([git, "ls-remote", remote, ref], env)
+            line = checked([*git_command, "ls-remote", remote, ref], env)
             return line.split()[0] if line else None
 
         first = commit("base")
         summary["initial_push_exit"] = push("HEAD:refs/heads/main").returncode
         summary["initial_published"] = tip("refs/heads/main") == first
         g0 = generation(fg, node, env)
+        summary["initial_generation"] = g0
 
         # 1. The request is delivered and committed, but the reply is cut.
         second = commit("second")
@@ -211,12 +277,17 @@ def exercise(fg: str, git: str, root: Path) -> dict:
         dropped = push("HEAD:refs/heads/main")
         summary["drop_after_dropped_one_request"] = relay.dropped == 1
         summary["drop_after_client_failed"] = dropped.returncode != 0
+        summary["drop_after_reply_cut"] = relay.reply_cut
+        if restart_after_drop:
+            restart("reply-cut")
         g1 = generation(fg, node, env)
+        summary["drop_after_generation"] = g1
         summary["drop_after_committed_once"] = g1 == g0 + 1 and tip("refs/heads/main") == second
         retry = push("HEAD:refs/heads/main")
         summary["drop_after_retry_exit"] = retry.returncode
         summary["drop_after_retry_up_to_date"] = "Everything up-to-date" in retry.stderr
-        summary["drop_after_retry_not_duplicated"] = generation(fg, node, env) == g1
+        summary["drop_after_retry_generation"] = generation(fg, node, env)
+        summary["drop_after_retry_not_duplicated"] = summary["drop_after_retry_generation"] == g1
 
         # 2. Twin: the request never reaches the server, so nothing commits.
         third = commit("third")
@@ -224,12 +295,16 @@ def exercise(fg: str, git: str, root: Path) -> dict:
         dropped = push("HEAD:refs/heads/main")
         summary["drop_before_dropped_one_request"] = relay.dropped == 1
         summary["drop_before_client_failed"] = dropped.returncode != 0
+        if restart_after_drop:
+            restart("undelivered")
+        summary["drop_before_generation"] = generation(fg, node, env)
         summary["drop_before_nothing_committed"] = (
-            generation(fg, node, env) == g1 and tip("refs/heads/main") == second)
+            summary["drop_before_generation"] == g1 and tip("refs/heads/main") == second)
         retry = push("HEAD:refs/heads/main")
         summary["drop_before_retry_exit"] = retry.returncode
+        summary["drop_before_retry_generation"] = generation(fg, node, env)
         summary["drop_before_retry_committed_once"] = (
-            generation(fg, node, env) == g1 + 1 and tip("refs/heads/main") == third)
+            summary["drop_before_retry_generation"] == g1 + 1 and tip("refs/heads/main") == third)
 
         # 3. A protected branch refuses a direct push through report-status.
         refused = push("HEAD:refs/heads/protected")
@@ -241,21 +316,33 @@ def exercise(fg: str, git: str, root: Path) -> dict:
         process.wait(timeout=120)
         summary["server_drained_exit"] = process.returncode
     finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait(timeout=10)
+        try:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=10)
+        finally:
+            if relay is not None:
+                relay.close()
     return summary
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fg", required=True, type=Path)
-    parser.add_argument("--git", default="git")
+    client = parser.add_mutually_exclusive_group()
+    client.add_argument("--git", default="git")
+    client.add_argument("--git-oracle-install", type=Path)
     parser.add_argument("--summary", type=Path)
+    parser.add_argument("--object-format", choices=("sha1", "sha256"), default="sha1")
+    parser.add_argument("--restart-after-drop", action="store_true")
     options = parser.parse_args()
-    root = Path(tempfile.mkdtemp(prefix="fg-stock-push-faults-"))
+    if options.restart_after_drop and options.git_oracle_install is None:
+        parser.error("--restart-after-drop requires --git-oracle-install")
+    root = Path(tempfile.mkdtemp(prefix="fg-stock-push-faults-")).resolve()
     try:
-        summary = exercise(str(options.fg.resolve()), options.git, root)
+        summary = exercise(str(options.fg.resolve()), options.git, root,
+                           options.object_format, options.restart_after_drop,
+                           options.git_oracle_install)
     except BaseException:
         print(json.dumps({"type": "stock_http_push_faults_failed", "artifacts": str(root)}),
               flush=True)
