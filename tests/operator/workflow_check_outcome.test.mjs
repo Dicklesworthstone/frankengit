@@ -308,6 +308,18 @@ test('an expired deadline stops initial custody validation before reading a late
   assert.equal(server.calls.length, 0);
   await assert.rejects(status(f.config), /request changed/);
 });
+test('publication status shares its caller checkpoint during the custody scan', LINUX_WORKFLOW, async t => {
+  const f = await fixture(t);
+  const plan = structuredClone(f.plan);
+  plan.jobs[0].source_commit = 'f'.repeat(40);
+  await save(f.planPath, plan);
+  const before = (await readdir(f.config.state_directory)).sort();
+  const expired = new Error('shared publisher custody deadline');
+  let checkpoints = 0;
+  await assert.rejects(status(f.config, () => { if (++checkpoints > 1) throw expired; }), error => error === expired);
+  assert.deepEqual((await readdir(f.config.state_directory)).sort(), before);
+  await assert.rejects(status(f.config), /request changed/);
+});
 test('cancellation after a validated terminal saves it and stops before the next job', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', 2), server = await peer(t, f), controller = new AbortController();
   const result = await recover(f.config, server.address, token, { signal: controller.signal, onObservation() { controller.abort(); } });

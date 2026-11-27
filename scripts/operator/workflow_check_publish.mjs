@@ -257,11 +257,13 @@ function summary(groups) {
       pending: group.rows.filter(row => !row.terminal).length,
       unknown: group.rows.filter(row => row.started && !row.terminal).length })) };
 }
-export async function status(config) {
+export async function status(config, checkpoint) {
   config = configuration(config);
-  const groups = await inventory(config);
+  const groups = await inventory(config, false, checkpoint);
   const owner = await lstat(join(config.state_directory, 'owner.lock')).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
+  checkpoint?.();
   const recovering = await lstat(join(config.state_directory, 'recovery.lock')).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
+  checkpoint?.();
   return { ...summary(groups), read_only: true, owner_present: owner, recovery_owner_present: recovering };
 }
 async function owned(config, work) {
