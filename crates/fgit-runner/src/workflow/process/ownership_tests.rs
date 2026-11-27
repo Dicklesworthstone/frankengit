@@ -34,10 +34,10 @@ impl ProcRoot {
         })
     }
     fn scan(&self, checkpoint: &dyn Fn() -> Result<(), ScanError>) -> Result<Snapshot, ScanError> {
-        // Fixture PIDs do not name real host processes. Unknown kernel
-        // membership forces inspection of the fixture's actual stat record.
+        // Fixture PIDs do not name real host processes. Never consult the
+        // kernel PID probe for a missing or damaged fixture record.
         inspect_with_group_lookup(&self.0, 123, checkpoint, &|_| {
-            Err(rustix::io::Errno::ACCESS)
+            Err(rustix::io::Errno::ACCESS.into())
         })
     }
 }
@@ -63,6 +63,9 @@ fn scan_requires_leader_and_distinguishes_live_members_from_zombies() {
     root.record(42, 321, b'S');
     let unrelated = root.inspect().unwrap();
     assert!(!unrelated.other && !unrelated.live_other);
+    root.record(2, 0, b'S');
+    let kernel = root.inspect().unwrap();
+    assert!(!kernel.other && !kernel.live_other);
     root.record(123, 321, b'Z');
     assert!(root.inspect().is_err());
 }
@@ -142,9 +145,10 @@ impl FaultyStat {
 fn failed_stat_records_require_positive_nonmembership_or_a_vanished_pid() {
     for fault in FaultyStat::ALL {
         for (membership, may_skip) in [
-            (Ok(Pid::from_raw(321).unwrap()), true),
+            (Ok(321), true),
+            (Ok(0), true),
             (Err(rustix::io::Errno::SRCH), true),
-            (Ok(Pid::from_raw(123).unwrap()), false),
+            (Ok(123), false),
             (Err(rustix::io::Errno::ACCESS), false),
             (Err(rustix::io::Errno::IO), false),
         ] {
@@ -161,10 +165,8 @@ fn failed_stat_records_require_positive_nonmembership_or_a_vanished_pid() {
                     inspect_with_group_lookup(&root.0, 123, &|| Ok(()), &|pid| match pid {
                         42 => {
                             lookups.set(lookups.get() + 1);
-                            membership
+                            membership.map_err(Into::into)
                         }
-                        77 => Ok(Pid::from_raw(321).unwrap()),
-                        44 => Ok(Pid::from_raw(123).unwrap()),
                         _ => panic!("unexpected membership lookup for {pid}"),
                     });
                 if may_skip {
@@ -177,7 +179,7 @@ fn failed_stat_records_require_positive_nonmembership_or_a_vanished_pid() {
                     };
                     fault.assert_preserved(&error);
                 }
-                assert_eq!(lookups.get(), if may_skip { 1 } else { 2 });
+                assert_eq!(lookups.get(), 1);
             }
         }
     }
@@ -236,18 +238,18 @@ fn membership_fallback_preserves_cancellation_and_the_existing_deadline() {
                 inspect_with_group_lookup(&root.0, 123, &checkpoint, &|pid| {
                     assert_eq!(pid, 42);
                     lookups.set(lookups.get() + 1);
-                    Ok(Pid::from_raw(321).unwrap())
+                    Ok(321)
                 }),
                 Err(ScanError::Stopped(stopped)) if stopped == reason
             ));
             assert_eq!(lookups.get(), usize::from(stop_after_lookup));
-            assert_eq!(checkpoints.get(), if stop_after_lookup { 3 } else { 2 });
+            assert_eq!(checkpoints.get(), if stop_after_lookup { 4 } else { 2 });
         }
     }
 }
 
 #[test]
-fn vanished_member_between_lookup_and_stat_is_checked_again() {
+fn vanished_entry_can_be_skipped_only_after_missing_stat() {
     let root = ProcRoot::new();
     root.record(123, 123, b'Z');
     FaultyStat::Missing.install(&root, 42);
@@ -255,21 +257,40 @@ fn vanished_member_between_lookup_and_stat_is_checked_again() {
     let snapshot = inspect_with_group_lookup(&root.0, 123, &|| Ok(()), &|pid| {
         assert_eq!(pid, 42);
         calls.set(calls.get() + 1);
-        if calls.get() == 1 {
-            Ok(Pid::from_raw(123).unwrap())
-        } else {
-            Err(rustix::io::Errno::SRCH)
-        }
+        Err(rustix::io::Errno::SRCH.into())
     })
     .unwrap();
-    assert_eq!(calls.get(), 2);
+    assert_eq!(calls.get(), 1);
     assert!(!snapshot.other && !snapshot.live_other);
 }
 
 #[test]
-fn kernel_group_lookup_rejects_self_and_wrapping_pid_names() {
+fn proc_group_lookup_rejects_self_and_wrapping_pid_names() {
     for pid in [0, (i32::MAX as u32) + 1, u32::MAX] {
-        assert_eq!(kernel_group(pid), Err(rustix::io::Errno::INVAL));
+        assert_eq!(
+            proc_group(Path::new("/proc"), pid)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(rustix::io::Errno::INVAL.raw_os_error())
+        );
+    }
+}
+
+#[test]
+fn proc_status_group_uses_the_mount_namespace_and_rejects_ambiguous_identity() {
+    assert_eq!(status_group(b"Pid:\t42\nNSpgid:\t0\n", 42).unwrap(), 0);
+    assert_eq!(
+        status_group(b"Pid:\t42\nNSpgid:\t321\t1\n", 42).unwrap(),
+        321
+    );
+    for bytes in [
+        b"Pid:\t43\nNSpgid:\t0\n".as_slice(),
+        b"Pid:\t42\n",
+        b"Pid:\t42\nNSpgid:\t?\n",
+        b"Pid:\t42\nPid:\t42\nNSpgid:\t0\n",
+        b"Pid:\t42\nNSpgid:\t0\nNSpgid:\t123\n",
+    ] {
+        assert!(status_group(bytes, 42).is_err());
     }
 }
 
@@ -296,7 +317,11 @@ fn completion_scan_preserves_progress_through_descheduling_within_the_caller_bud
     };
     let live = root.scan(&checkpoint).unwrap();
     assert!(live.other && live.live_other);
-    assert_eq!(checkpoints.get(), 7, "one traversal, one nonleader lookup");
+    assert_eq!(
+        checkpoints.get(),
+        6,
+        "one traversal over two valid stat records"
+    );
     // The permitted twin: a zombie member is stopped, not live.
     root.record(42, 123, b'Z');
     let settled = root.scan(&checkpoint).unwrap();
@@ -394,12 +419,18 @@ fn real_kernel_nonmembership_isolates_a_bad_record_without_reaping_either_child(
     let root = ProcRoot::new();
     root.record(leader, leader, b'Z');
     FaultyStat::Malformed.install(&root, sibling_pid);
-    let snapshot = inspect(&root.0, leader, &|| Ok(())).unwrap();
+    let snapshot = inspect_with_group_lookup(&root.0, leader, &|| Ok(()), &|pid| {
+        proc_group(Path::new("/proc"), pid)
+    })
+    .unwrap();
     assert!(!snapshot.other && !snapshot.live_other);
     assert!(owned.exited().unwrap());
     assert!(sibling.exited().unwrap());
-    assert_eq!(kernel_group(leader).unwrap(), owned.pid);
-    assert_eq!(kernel_group(sibling_pid).unwrap(), sibling.pid);
+    assert_eq!(proc_group(Path::new("/proc"), leader).unwrap(), leader);
+    assert_eq!(
+        proc_group(Path::new("/proc"), sibling_pid).unwrap(),
+        sibling_pid
+    );
     // No signal was needed. These finite no-descendant shells remain waitable
     // until their owners explicitly perform the final reap.
     assert_eq!(owned.reap().unwrap().code(), Some(7));

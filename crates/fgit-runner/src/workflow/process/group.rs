@@ -3,7 +3,7 @@
 //! after reaping that child: its numeric identity may then name somebody else.
 //! This is trusted-host cleanup, not a sandbox for processes that escape groups.
 use rustix::process::{
-    Pid, Signal, WaitId, WaitIdOptions, getpgid, kill_process, kill_process_group, waitid,
+    Pid, Signal, WaitId, WaitIdOptions, kill_process, kill_process_group, test_kill_process, waitid,
 };
 use std::fs::{self, File};
 use std::io::{self, Read};
@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 const DRAIN: Duration = Duration::from_secs(3);
 const MAX_PROC_ENTRIES: usize = 16_384;
 const MAX_STAT_BYTES: usize = 4096;
+const MAX_STATUS_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum CompletionStop {
@@ -240,14 +241,14 @@ fn inspect(
     leader: u32,
     checkpoint: &dyn Fn() -> Result<(), ScanError>,
 ) -> Result<Snapshot, ScanError> {
-    inspect_with_group_lookup(root, leader, checkpoint, &kernel_group)
+    inspect_with_group_lookup(root, leader, checkpoint, &|pid| proc_group(root, pid))
 }
 
 fn inspect_with_group_lookup(
     root: &Path,
     leader: u32,
     checkpoint: &dyn Fn() -> Result<(), ScanError>,
-    group_of: &dyn Fn(u32) -> rustix::io::Result<Pid>,
+    group_of: &dyn Fn(u32) -> io::Result<u32>,
 ) -> Result<Snapshot, ScanError> {
     checkpoint()?;
     let mut snapshot = Snapshot::default();
@@ -267,17 +268,6 @@ fn inspect_with_group_lookup(
         };
         if pid == 0 {
             continue;
-        }
-        // Most PIDs on a shared runner have nothing to do with this job.
-        // The kernel can establish that in one syscall, without opening,
-        // reading and parsing a stat file. Only stat can establish that an
-        // actual member is stopped. Always check the pinned leader's record.
-        if pid != leader {
-            let membership = group_of(pid);
-            checkpoint()?;
-            if outside_group(membership, leader) {
-                continue;
-            }
         }
         let observed = read_stat(&entry.path().join("stat"), pid);
         checkpoint()?;
@@ -318,32 +308,79 @@ fn inspect_with_group_lookup(
     Ok(snapshot)
 }
 
-fn outside_group(membership: rustix::io::Result<Pid>, leader: u32) -> bool {
+fn outside_group(membership: io::Result<u32>, leader: u32) -> bool {
     match membership {
-        Ok(group) => group.as_raw_pid() as u32 != leader,
-        Err(error) => error == rustix::io::Errno::SRCH,
+        Ok(group) => group != leader,
+        Err(error) => error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()),
     }
 }
 
-fn kernel_group(pid: u32) -> rustix::io::Result<Pid> {
-    // Zero means the caller to getpgid; negative IDs are not process entries.
-    // Reject either interpretation instead of truncating an untrusted name.
-    let pid = i32::try_from(pid)
+fn proc_group(root: &Path, pid: u32) -> io::Result<u32> {
+    let process = i32::try_from(pid)
         .ok()
         .and_then(Pid::from_raw)
         .ok_or(rustix::io::Errno::INVAL)?;
-    getpgid(Some(pid))
+    // Kernel entries can have group zero. Procfs can represent that value;
+    // rustix's getpgid API returns a strictly positive Pid.
+    let mut bytes = [0; MAX_STATUS_BYTES + 1];
+    let path = root.join(pid.to_string()).join("status");
+    let group = read_proc_file(&path, &mut bytes, "process status limit exceeded")
+        .and_then(|len| status_group(&bytes[..len], pid));
+    match group {
+        Err(_) if test_kill_process(process) == Err(rustix::io::Errno::SRCH) => {
+            Err(rustix::io::Errno::SRCH.into())
+        }
+        _ => group,
+    }
+}
+
+fn status_group(bytes: &[u8], expected: u32) -> io::Result<u32> {
+    let bad = || io::Error::other("invalid process status group identity");
+    let number = |field: &[u8]| {
+        let first = field
+            .split(|b| b.is_ascii_whitespace())
+            .find(|s| !s.is_empty())?;
+        std::str::from_utf8(first).ok()?.parse::<u32>().ok()
+    };
+    let mut pid = None;
+    let mut group = None;
+    for line in bytes.split(|byte| *byte == b'\n') {
+        let (field, slot) = if let Some(field) = line.strip_prefix(b"Pid:") {
+            (field, &mut pid)
+        } else if let Some(field) = line.strip_prefix(b"NSpgid:") {
+            // The first value is relative to the procfs mount, just like stat.
+            (field, &mut group)
+        } else {
+            continue;
+        };
+        if slot.replace(number(field).ok_or_else(bad)?).is_some() {
+            return Err(bad());
+        }
+    }
+    if pid != Some(expected) {
+        return Err(bad());
+    }
+    group.ok_or_else(bad)
 }
 
 fn read_stat(path: &Path, pid: u32) -> io::Result<(u32, u8)> {
-    let mut bytes = Vec::new();
-    File::open(path)?
-        .take((MAX_STAT_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_STAT_BYTES {
-        return Err(io::Error::other("process stat limit exceeded"));
+    let mut bytes = [0; MAX_STAT_BYTES + 1];
+    let len = read_proc_file(path, &mut bytes, "process stat limit exceeded")?;
+    stat(&bytes[..len], pid)
+}
+
+fn read_proc_file(path: &Path, bytes: &mut [u8], limit: &'static str) -> io::Result<usize> {
+    let mut file = File::open(path)?;
+    let mut len = 0;
+    while len < bytes.len() {
+        match file.read(&mut bytes[len..]) {
+            Ok(0) => return Ok(len),
+            Ok(count) => len += count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
     }
-    stat(&bytes, pid)
+    Err(io::Error::other(limit))
 }
 
 fn stat(bytes: &[u8], expected: u32) -> io::Result<(u32, u8)> {
