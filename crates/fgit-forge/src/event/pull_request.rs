@@ -383,64 +383,52 @@ mod tests {
     }
     #[test]
     fn native_pr_hash_domain_cannot_change_during_any_lifecycle_transition() {
-        for (initial, replacement) in [
+        for (initial, other) in [
             (GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256),
             (GitHashAlgorithm::Sha256, GitHashAlgorithm::Sha1),
         ] {
             let mut command = command(initial);
             let opened = command.proposed_event(actor(), initial).unwrap();
-            let mut prior = opened.clone();
+            command.expected_version = ExpectedVersion::Exactly(opened.version);
+            command.action = PullRequestAction::Close;
+            let closed = command.proposed_event(actor(), initial).unwrap();
+            validate_transition(Some(&opened), &closed).unwrap();
+
             for action in [
                 PullRequestAction::Update,
                 PullRequestAction::Retarget,
                 PullRequestAction::Close,
                 PullRequestAction::Reopen,
             ] {
-                // A legitimate same-domain update is always possible from
-                // this open predecessor, except Reopen (which needs Close).
-                command.action = action;
-                command.expected_version = ExpectedVersion::Exactly(prior.version);
-                if action == PullRequestAction::Retarget {
-                    command.data.target_ref =
-                        RefName::try_new(b"refs/heads/other").unwrap();
-                }
-                let mut candidate = command.proposed_event(actor(), initial).unwrap();
-                if action == PullRequestAction::Reopen {
-                    // Reopen is permitted only after a close, not after an update.
-                    let close = {
-                        command.action = PullRequestAction::Close;
-                        command.data = match &prior.payload {
-                            ForgeEventPayload::PullRequestChangedNative(change) => change.data.clone(),
-                            _ => unreachable!(),
-                        };
-                        command.proposed_event(actor(), initial).unwrap()
-                    };
-                    validate_transition(Some(&prior), &close).unwrap();
-                    prior = close;
-                    command.action = PullRequestAction::Reopen;
-                    command.expected_version = ExpectedVersion::Exactly(prior.version);
-                    candidate = command.proposed_event(actor(), initial).unwrap();
+                let previous = if action == PullRequestAction::Reopen {
+                    &closed
                 } else {
-                    validate_transition(Some(&prior), &candidate).unwrap();
-                }
+                    &opened
+                };
+                command.action = action;
+                command.expected_version = ExpectedVersion::Exactly(previous.version);
+                command.data.target_ref = RefName::try_new(if action == PullRequestAction::Retarget {
+                    b"refs/heads/other"
+                } else {
+                    b"refs/heads/main"
+                }).unwrap();
+                let candidate = command.proposed_event(actor(), initial).unwrap();
+                validate_transition(Some(previous), &candidate).unwrap();
+
                 let mut changed = candidate.clone();
                 if let ForgeEventPayload::PullRequestChangedNative(change) = &mut changed.payload {
                     change.data.source_tip = GitOid::from_hex(
-                        replacement,
-                        &"a".repeat(replacement.digest_len() * 2),
+                        other, &"a".repeat(other.digest_len() * 2),
                     ).unwrap();
                     change.data.target_tip = GitOid::from_hex(
-                        replacement,
-                        &"b".repeat(replacement.digest_len() * 2),
+                        other, &"b".repeat(other.digest_len() * 2),
                     ).unwrap();
                 }
                 assert_eq!(
-                    validate_transition(Some(&prior), &changed),
+                    validate_transition(Some(previous), &changed),
                     Err(RefusalCode::ProtectedRefTransitionDenied),
-                    "{initial:?} to {replacement:?} during {action:?}",
+                    "{initial:?} to {other:?} during {action:?}",
                 );
-                prior = candidate;
-                // After retarget, keep the newly selected target for the next action.
             }
         }
     }
