@@ -58,6 +58,7 @@ for (const format of ['sha1', 'sha256']) {
     const files = await readdir(f.config.state_directory);
     assert.equal(files.filter(n => n.startsWith('intent-')).length, 1);
     assert.equal(files.filter(n => n.startsWith('started-')).length, 1);
+    assert.equal(files.filter(n => n.startsWith('reply-')).length, 1);
     assert.equal(files.filter(n => n.startsWith('result-')).length, 1);
     assert.equal(files.includes('owner.lock'), false);
     assert.equal((await once(f.config)).reason, 'commit_already_observed');
@@ -91,6 +92,46 @@ for (const format of ['sha1', 'sha256']) {
     assert.equal((await f.lines('calls.ndjson')).length, calls, 'reconcile performs no child execution');
     assert.equal((await once(f.config)).reason, 'commit_already_observed');
     assert.equal((await f.lines('effects.ndjson')).length, 1);
+  });
+  test(`${format}: contradictory native reports stay unresolved across restart`, LINUX_WORKFLOW, async t => {
+    const returned = { succeeded: false, stop_reason: 'request_stopped' };
+    const f = await fixture(t, format, { stdout_patch: returned, exit_code: 1 });
+    await assert.rejects(once(f.config), /Saved native report differs from the returned dispatch/);
+    const { records: [pending] } = await status(f.config);
+    assert.equal(pending.state, 'execution_unknown');
+    const savedPath = join(pending.native_directory, 'report.json');
+    const replyPath = join(f.config.state_directory, `reply-${pending.id}.json`);
+    const resultPath = join(f.config.state_directory, `result-${pending.id}.json`);
+    const savedBytes = await readFile(savedPath);
+    assert.equal(JSON.parse(savedBytes).succeeded, true);
+    const replyBytes = `${JSON.stringify({ ...JSON.parse(savedBytes), ...returned })}\n`;
+    const digest = createHash('sha256').update(replyBytes).digest('hex');
+    const reply = await readFile(replyPath);
+    assert.equal(JSON.parse(reply).report_sha256, digest);
+    await assert.rejects(lstat(resultPath), { code: 'ENOENT' });
+
+    const fresh = await child(['reconcile', '--config', f.configFile, '--trusted-local']).done;
+    assert.equal(fresh.code, 3);
+    assert.match(fresh.errors, /Saved native report differs from the returned dispatch/);
+    assert.deepEqual(await readFile(savedPath), savedBytes);
+    await assert.rejects(lstat(resultPath), { code: 'ENOENT' });
+    await assert.rejects(once(f.config), /unresolved/);
+    assert.equal((await f.lines('effects.ndjson')).length, 1);
+    assert.equal((await f.lines('calls.ndjson')).length, 2);
+
+    // Restore the exact reply from the controlled peer, keeping the original
+    // intent and execution identity.
+    await writeFile(savedPath, replyBytes);
+    const recovered = await reconcile(f.config);
+    assert.equal(recovered.records[0].state, 'observed_stopped');
+    assert.equal(JSON.parse(await readFile(resultPath)).report_sha256, digest);
+    assert.deepEqual(await readFile(replyPath), reply);
+    assert.equal((await once(f.config)).reason, 'commit_already_observed');
+    assert.equal((await f.lines('effects.ndjson')).length, 1);
+
+    await f.set({ commit: 'e'.repeat(f.control.commit.length), stdout_patch: null, exit_code: null });
+    assert.equal((await once(f.config)).outcome, 'observed_succeeded');
+    assert.equal((await f.lines('effects.ndjson')).length, 2);
   });
 }
 
@@ -333,7 +374,8 @@ test('queued pre-execution intent resumes at its original pins without another s
 test('corrupt local summary cannot gain check authority or alter complete-run accounting', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), result = await once(f.config), path = join(f.config.state_directory, `result-${result.id}.json`);
   const saved = JSON.parse(await readFile(path, 'utf8'));
-  for (const patch of [{ authoritative_check: true }, { executed_count: 0 }, { outcome: 'no_matching_workflows' }]) {
+  for (const patch of [{ authoritative_check: true }, { executed_count: 0 }, { outcome: 'no_matching_workflows' },
+    { report_sha256: '0'.repeat(64) }]) {
     await writeFile(path, JSON.stringify({ ...saved, ...patch }));
     await assert.rejects(once(f.config), /custody/);
   }

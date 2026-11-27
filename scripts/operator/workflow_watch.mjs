@@ -115,6 +115,7 @@ function validateIntent(config, value) {
 function paths(config, intent) {
   return { intent: join(config.state_directory, `intent-${intent.id}.json`),
     started: join(config.state_directory, `started-${intent.id}.json`),
+    reply: join(config.state_directory, `reply-${intent.id}.json`),
     result: join(config.state_directory, `result-${intent.id}.json`),
     batch: join(config.run_parent, `dispatch-${intent.run_id}`) };
 }
@@ -131,7 +132,7 @@ async function inventory(config, bind = false, checkpoint = () => {}) {
   const bindingPath = join(config.state_directory, 'binding.json');
   const saved = await readPrivate(bindingPath, 128 * 1024, true);
   if (saved && !saved.equals(encode(config))) fail('Watcher configuration changed; never reset an existing run namespace.');
-  const entries = await names(config.state_directory, 3 * config.max_runs + 2);
+  const entries = await names(config.state_directory, 4 * config.max_runs + 2);
   checkpoint();
   if (!saved) {
     if (entries.some(name => name !== 'owner.lock')) fail('Unbound watcher directory is not empty.');
@@ -142,7 +143,7 @@ async function inventory(config, bind = false, checkpoint = () => {}) {
   for (const name of entries) {
     checkpoint();
     if (['binding.json', 'owner.lock'].includes(name)) continue;
-    const match = /^(intent|started|result)-([0-9a-f]{64})\.json$/.exec(name);
+    const match = /^(intent|started|reply|result)-([0-9a-f]{64})\.json$/.exec(name);
     if (!match) fail('Unrecognized custody entry; interrupted writes must be inspected, never erased automatically.');
     const row = records.get(match[2]) ?? {};
     row[match[1]] = parseJson(await readPrivate(join(config.state_directory, name), 128 * 1024));
@@ -163,6 +164,13 @@ async function inventory(config, bind = false, checkpoint = () => {}) {
             : (record.result.outcome === 'no_matching_workflows') !== (record.result.matched_count === 0))) fail('Invalid completion custody counts or authority claim.');
     }
     if (record.started && (record.started.schema !== 'frankengit-workflow-watch-start-v1' || record.started.intent_sha256 !== intentHash)) fail('Execution-start custody changed.');
+    if (Object.hasOwn(record, 'reply')) {
+      keys(record.reply, ['schema', 'intent_sha256', 'report_sha256']);
+      if (!record.started || record.reply.schema !== 'frankengit-workflow-watch-reply-v1' ||
+          record.reply.intent_sha256 !== intentHash || typeof record.reply.report_sha256 !== 'string' ||
+          !/^[0-9a-f]{64}$/.test(record.reply.report_sha256) ||
+          (record.result && record.result.report_sha256 !== record.reply.report_sha256)) fail('Native reply custody changed.');
+    }
     if (record.result && (!record.started || record.result.intent_sha256 !== intentHash ||
         record.result.schema !== 'frankengit-workflow-watch-result-v1' ||
         !['observed_succeeded', 'observed_failed', 'observed_stopped', 'no_matching_workflows'].includes(record.result.outcome) ||
@@ -369,6 +377,9 @@ async function reconcileOne(config, record, checkpoint = () => {}) {
   checkpoint();
   if (!raw) return false;
   const result = dispatchReport(config, record.intent, parseJson(raw, 40 * 1024 * 1024));
+  if (record.reply && result.report_sha256 !== record.reply.report_sha256) {
+    fail('Saved native report differs from the returned dispatch. Execution remains unresolved.');
+  }
   checkpoint();
   await identicalOrNew(location.result, result); record.result = result;
   return true;
@@ -429,13 +440,18 @@ async function execute(config, intent, options) {
   // invented rollback. No caller-provided command or shell is accepted here.
   const native = await runNative(config.fg, args, { signal: options.signal, drain: true, timeoutMs: options.dispatchTimeoutMs ?? 660_000 });
   if (native.forced) throw nativeFailure(native, 'Native containment was not established');
-  const record = { intent, started: true };
   if (!native.signal && !native.spawn_error && [0, 1].includes(native.code)) {
     const envelope = parseJson(native.stdout, 40 * 1024 * 1024);
     if (envelope.type !== 'workflow_dispatch_result' || envelope.schema_version !== 1 || envelope.node_closed !== true || envelope.node_cleanup_error !== null) fail('Native node finalization was not established.');
     const reported = dispatchReport(config, intent, envelope.dispatch);
     if (native.code !== (envelope.dispatch.succeeded ? 0 : 1)) fail('Native exit and dispatch observation disagree.');
-    if (!await reconcileOne(config, record) || reported.report_sha256 !== record.result.report_sha256) fail('Saved native report differs from the returned dispatch.');
+    const reply = { schema: 'frankengit-workflow-watch-reply-v1',
+      intent_sha256: reported.intent_sha256, report_sha256: reported.report_sha256 };
+    // Retain the validated reply before settlement so restart recovery has
+    // the same commitment even if the saved report is missing or disagrees.
+    await identicalOrNew(location.reply, reply);
+    const record = { intent, started: true, reply };
+    if (!await reconcileOne(config, record)) fail('Native dispatch did not retain its completion report. Execution remains unresolved.');
     return { type: 'workflow_watch_result', schema_version: 1, id: intent.id, commit: intent.commit, ...record.result, native_directory: location.batch };
   }
   // A missing stdout reply can be recovered without a second executable run.

@@ -196,6 +196,15 @@ watcher also checks the nested native execution profile, job/step outcomes,
 retention flags, exit/success consistency and aggregate jobs/steps/output bounds.
 A top-level success bit cannot override a retained workspace or containment failure.
 
+When the native reply is available and passes validation, the watcher writes a
+private `reply-<id>.json` binding the original intent to the reply's report
+digest. The saved dispatch report must match that digest before the watcher
+records a local completion. Both the live watcher and a fresh `reconcile`
+process leave a disagreement unresolved. Existing custody without a reply
+record can still recover from its original valid saved dispatch report. Update
+the watcher, its publisher, and its supervisor together before opening
+directories that contain reply records.
+
 Known native stops (`request_stopped`, `output_budget_exhausted`,
 `workflow_refused`, `workflow_timed_out`, `workflow_output_limit`) with fully
 settled reported children are recorded as **observed_stopped**, not success. The
