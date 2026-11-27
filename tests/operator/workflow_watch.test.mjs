@@ -133,6 +133,63 @@ for (const format of ['sha1', 'sha256']) {
     assert.equal((await once(f.config)).outcome, 'observed_succeeded');
     assert.equal((await f.lines('effects.ndjson')).length, 2);
   });
+  test(`${format}: an explicit native shutdown failure cannot recover as success`, LINUX_WORKFLOW, async t => {
+    const cleanupError = 'fixture node shutdown failed after retaining the report';
+    const f = await fixture(t, format, { node_cleanup_error: cleanupError });
+    const initial = await child(['once', '--config', f.configFile, '--trusted-local']).done;
+    const { records: [pending] } = await status(f.config);
+    assert.equal(pending.state, 'execution_unknown');
+    const savedPath = join(pending.native_directory, 'report.json');
+    const saved = await readFile(savedPath);
+    assert.equal(JSON.parse(saved).succeeded, true);
+
+    const fresh = await child(['reconcile', '--config', f.configFile, '--trusted-local']).done;
+    assert.equal(fresh.code, 3, fresh.output || fresh.errors);
+    for (const run of [initial, fresh]) {
+      assert.equal(run.code, 3);
+      assert.match(run.errors, /native.*finalization/i);
+    }
+    const replyPath = join(f.config.state_directory, `reply-${pending.id}.json`);
+    const intent = await readFile(join(f.config.state_directory, `intent-${pending.id}.json`));
+    const reply = await readFile(replyPath);
+    assert.deepEqual(JSON.parse(reply), {
+      schema: 'frankengit-workflow-watch-reply-unclosed-v1',
+      intent_sha256: createHash('sha256').update(intent).digest('hex'),
+    });
+    assert.equal(reply.includes(cleanupError), false);
+    assert.deepEqual(await readFile(savedPath), saved);
+    await assert.rejects(lstat(join(f.config.state_directory, `result-${pending.id}.json`)), { code: 'ENOENT' });
+
+    await f.set({ commit: 'e'.repeat(f.control.commit.length), node_cleanup_error: null });
+    await assert.rejects(once(f.config), /unresolved/);
+    assert.equal((await f.lines('effects.ndjson')).length, 1);
+    assert.equal((await f.lines('calls.ndjson')).length, 2);
+    assert.deepEqual(await readFile(replyPath), reply);
+  });
+  test(`${format}: reconciliation cannot settle a report while the native reply is outstanding`, LINUX_WORKFLOW, async t => {
+    const f = await fixture(t, format, { hold_reply: true, drop_stdout: true });
+    const run = child(['once', '--config', f.configFile, '--trusted-local']);
+    const owner = join(f.config.state_directory, 'owner.lock');
+    try {
+      await waitFor(() => lstat(join(f.config.storage_root, 'reply-ready'))
+        .then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; }));
+      const { records: [pending] } = await status(f.config);
+      const identity = await lstat(owner);
+      const during = await child(['reconcile', '--config', f.configFile, '--trusted-local']).done;
+      assert.equal(during.code, 3, during.output || during.errors);
+      assert.equal(JSON.parse(during.output).records[0].state, 'execution_unknown');
+      assert.equal((await lstat(owner)).ino, identity.ino);
+      await assert.rejects(lstat(join(f.config.state_directory, `result-${pending.id}.json`)), { code: 'ENOENT' });
+    } finally {
+      await writeFile(join(f.config.storage_root, 'release-reply'), '', { mode: 0o600 });
+      await run.done;
+    }
+    assert.equal((await run.done).code, 3);
+    const after = await child(['reconcile', '--config', f.configFile, '--trusted-local']).done;
+    assert.equal(after.code, 0, after.errors);
+    assert.equal(JSON.parse(after.output).records[0].state, 'observed_succeeded');
+    assert.equal((await f.lines('effects.ndjson')).length, 1);
+  });
 }
 
 test('missing branch is idle, whereas read refusal cannot be fabricated into absence', LINUX_WORKFLOW, async t => {
@@ -419,8 +476,6 @@ for (const signal of [null, 'SIGINT', 'SIGTERM']) {
     const calls = await f.lines('calls.ndjson'), effects = await f.lines('effects.ndjson');
     const entries = await readdir(f.config.state_directory);
     const custody = await Promise.all(entries.map(async name => [name, await readFile(join(f.config.state_directory, name))]));
-    const owner = join(f.config.state_directory, 'owner.lock');
-    await mkdir(owner, { mode: 0o700 }); const identity = await lstat(owner);
     await unlink(f.config.fg); // Reconciliation must use saved reports, never an executable.
     const listeners = ['SIGINT', 'SIGTERM'].map(name => process.listenerCount(name));
     let output = '', diagnostic = '';
@@ -437,7 +492,7 @@ for (const signal of [null, 'SIGINT', 'SIGTERM']) {
       const error = JSON.parse(diagnostic);
       assert.equal(error.type, 'workflow_watch_error'); assert.match(error.message, /stop requested/i);
       assert.equal(error.execution_retried, false); assert.equal(error.absence_proves_non_execution, false);
-      assert.deepEqual((await readdir(f.config.state_directory)).sort(), [...entries, 'owner.lock'].sort());
+      assert.deepEqual((await readdir(f.config.state_directory)).sort(), entries.sort());
       assert.equal((await status(f.config)).records[0].state, 'execution_unknown');
       // The same original custody remains recoverable on a later uncancelled call.
       output = ''; diagnostic = '';
@@ -450,8 +505,7 @@ for (const signal of [null, 'SIGINT', 'SIGTERM']) {
     assert.deepEqual(await readFile(reportPath), report);
     assert.deepEqual(['SIGINT', 'SIGTERM'].map(name => process.listenerCount(name)), listeners);
     for (const [name, bytes] of custody) assert.deepEqual(await readFile(join(f.config.state_directory, name)), bytes);
-    const retainedOwner = await lstat(owner);
-    assert.equal(retainedOwner.dev, identity.dev); assert.equal(retainedOwner.ino, identity.ino);
+    await assert.rejects(lstat(join(f.config.state_directory, 'owner.lock')), { code: 'ENOENT' });
     assert.deepEqual(await f.lines('calls.ndjson'), calls); assert.deepEqual(await f.lines('effects.ndjson'), effects);
     stdout.destroy(); stderr.destroy();
   });

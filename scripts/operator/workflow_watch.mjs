@@ -11,6 +11,8 @@ import { verifyArtifactReceipts } from './workflow_artifact_report.mjs';
 const hex = bytes => Buffer.from(bytes).toString('hex');
 const encode = value => Buffer.from(`${JSON.stringify(value)}\n`);
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+const UNCLOSED_REPLY = 'frankengit-workflow-watch-reply-unclosed-v1';
+const UNCLOSED_MESSAGE = 'Native dispatch reported failed node finalization. Execution remains unresolved.';
 const object = value => { if (!value || typeof value !== 'object' || Array.isArray(value)) fail('Expected a JSON record.'); return value; };
 function keys(value, allowed) {
   object(value);
@@ -165,10 +167,13 @@ async function inventory(config, bind = false, checkpoint = () => {}) {
     }
     if (record.started && (record.started.schema !== 'frankengit-workflow-watch-start-v1' || record.started.intent_sha256 !== intentHash)) fail('Execution-start custody changed.');
     if (Object.hasOwn(record, 'reply')) {
-      keys(record.reply, ['schema', 'intent_sha256', 'report_sha256']);
-      if (!record.started || record.reply.schema !== 'frankengit-workflow-watch-reply-v1' ||
-          record.reply.intent_sha256 !== intentHash || typeof record.reply.report_sha256 !== 'string' ||
-          !/^[0-9a-f]{64}$/.test(record.reply.report_sha256) ||
+      const unclosed = record.reply?.schema === UNCLOSED_REPLY;
+      keys(record.reply, unclosed ? ['schema', 'intent_sha256'] : ['schema', 'intent_sha256', 'report_sha256']);
+      if (!record.started || record.reply.intent_sha256 !== intentHash) fail('Native reply custody changed.');
+      if (unclosed) {
+        if (Object.hasOwn(record, 'result')) fail(UNCLOSED_MESSAGE);
+      } else if (record.reply.schema !== 'frankengit-workflow-watch-reply-v1' ||
+          typeof record.reply.report_sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(record.reply.report_sha256) ||
           (record.result && record.result.report_sha256 !== record.reply.report_sha256)) fail('Native reply custody changed.');
     }
     if (record.result && (!record.started || record.result.intent_sha256 !== intentHash ||
@@ -372,6 +377,7 @@ async function reconcileOne(config, record, checkpoint = () => {}) {
   checkpoint();
   const location = paths(config, record.intent);
   if (!record.started) return false;
+  if (record.reply?.schema === UNCLOSED_REPLY) fail(UNCLOSED_MESSAGE);
   await directory(location.batch);
   const raw = await readPrivate(join(location.batch, 'report.json'), 40 * 1024 * 1024, true);
   checkpoint();
@@ -409,13 +415,26 @@ export async function reconcile(config, options = {}) {
   };
   checkpoint();
   await preflight(config, 'reconcile');
-  const records = await inventory(config, false, checkpoint);
-  if (records.filter(record => !record.result).length > 1) fail('Multiple unresolved execution records require inspection.');
-  for (const record of records) if (!record.result && record.started) {
-    // Missing native evidence is never permission to run a second time.
-    try { await reconcileOne(config, record, checkpoint); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+  let release;
+  try { release = await lock(join(config.state_directory, 'owner.lock')); }
+  catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    // The saved report can precede the native reply. Inspect custody without
+    // settling it while a live or crash-retained execution owner holds the lock.
+    return statusFrom(config, await inventory(config, false, checkpoint));
   }
-  checkpoint();
+  let records;
+  try {
+    records = await inventory(config, false, checkpoint);
+    if (records.filter(record => !record.result).length > 1) fail('Multiple unresolved execution records require inspection.');
+    for (const record of records) if (!record.result && record.started) {
+      // Missing native evidence is never permission to run a second time.
+      try { await reconcileOne(config, record, checkpoint); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+    }
+    checkpoint();
+  } finally {
+    await release();
+  }
   return statusFrom(config, records);
 }
 function checkpoint(signal) {
@@ -440,9 +459,17 @@ async function execute(config, intent, options) {
   // invented rollback. No caller-provided command or shell is accepted here.
   const native = await runNative(config.fg, args, { signal: options.signal, drain: true, timeoutMs: options.dispatchTimeoutMs ?? 660_000 });
   if (native.forced) throw nativeFailure(native, 'Native containment was not established');
-  if (!native.signal && !native.spawn_error && [0, 1].includes(native.code)) {
-    const envelope = parseJson(native.stdout, 40 * 1024 * 1024);
-    if (envelope.type !== 'workflow_dispatch_result' || envelope.schema_version !== 1 || envelope.node_closed !== true || envelope.node_cleanup_error !== null) fail('Native node finalization was not established.');
+  if (!native.signal && !native.spawn_error && [0, 1, 2].includes(native.code)) {
+    let envelope;
+    try { envelope = parseJson(native.stdout, 40 * 1024 * 1024); }
+    catch (error) { if (native.code !== 2) throw error; }
+    if (envelope?.type === 'workflow_dispatch_result' && envelope.schema_version === 1 &&
+        (envelope.node_closed === false || typeof envelope.node_cleanup_error === 'string')) {
+      await identicalOrNew(location.reply, { schema: UNCLOSED_REPLY, intent_sha256: digest(encode(intent)) });
+      fail(UNCLOSED_MESSAGE);
+    }
+    if (native.code === 2) throw nativeFailure(native, `Dispatch unresolved; inspect ${location.batch} and use reconcile`);
+    if (envelope?.type !== 'workflow_dispatch_result' || envelope.schema_version !== 1 || envelope.node_closed !== true || envelope.node_cleanup_error !== null) fail('Native node finalization was not established.');
     const reported = dispatchReport(config, intent, envelope.dispatch);
     if (native.code !== (envelope.dispatch.succeeded ? 0 : 1)) fail('Native exit and dispatch observation disagree.');
     const reply = { schema: 'frankengit-workflow-watch-reply-v1',
