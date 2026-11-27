@@ -159,8 +159,28 @@ def generation(fg: str, node: Path, env: dict[str, str]) -> int:
 
 
 def exercise(fg: str, git: str, root: Path, object_format: str = "sha1",
-             restart_after_drop: bool = False) -> dict:
+             restart_after_drop: bool = False, oracle_install: Path | None = None) -> dict:
     env = isolated_environment(root / "home")
+    git_command = [git]
+    if oracle_install is not None:
+        # The suite verifies this installation with oracle.sh. Expose only the
+        # disposable fixture and the read-only oracle to the stock Git process.
+        git_command = [
+            "bwrap", "--die-with-parent", "--new-session", "--unshare-all", "--share-net",
+            "--clearenv", "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin",
+            "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
+            "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+            "--bind", root, root, "--ro-bind", oracle_install, "/oracle", "--chdir", root,
+            "--setenv", "PATH", "/usr/bin:/bin",
+            "--setenv", "GIT_EXEC_PATH", "/oracle/libexec/git-core",
+            "--setenv", "GIT_ALLOW_PROTOCOL", "http", "--setenv", "GIT_ASKPASS", "/bin/false",
+        ]
+        for key in ("HOME", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_TERMINAL_PROMPT",
+                    "GIT_HTTP_USER_AGENT", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
+                    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE"):
+            git_command.extend(("--setenv", key, env[key]))
+        git_command.extend(("--", "/oracle/bin/git", "-c", "core.hooksPath=/dev/null",
+                            "-c", "credential.helper=", "-c", "http.proxy="))
     node = root / "node"
     checked([fg, "init", node, TENANT, REPOSITORY, object_format], env)
     checked([fg, "protection", "set", node, TENANT, REPOSITORY, "--trusted-local",
@@ -176,13 +196,13 @@ def exercise(fg: str, git: str, root: Path, object_format: str = "sha1",
     private_file(table, f"{header}\n{hashlib.sha256(token.encode()).hexdigest()} {PRINCIPAL} "
                  "read,receive\n")
     source = root / "source"
-    checked([git, "init", "-q", "--object-format", object_format, "-b", "main", source], env)
+    checked([*git_command, "init", "-q", "--object-format", object_format, "-b", "main", source], env)
 
     def commit(name: str) -> str:
         (source / name).write_text(f"{name}\n")
-        checked([git, "-C", source, "add", name], env)
-        checked([git, "-C", source, "commit", "-qm", name], env)
-        return checked([git, "-C", source, "rev-parse", "HEAD"], env)
+        checked([*git_command, "-C", source, "add", name], env)
+        checked([*git_command, "-C", source, "commit", "-qm", name], env)
+        return checked([*git_command, "-C", source, "rev-parse", "HEAD"], env)
 
     def start_server(label: str) -> tuple[subprocess.Popen, Path, int]:
         stop, out, err = (root / f"{label}.{ext}" for ext in ("stop", "out", "err"))
@@ -212,12 +232,13 @@ def exercise(fg: str, git: str, root: Path, object_format: str = "sha1",
             raise
 
     summary: dict = {"type": "stock_http_push_faults_summary", "object_format": object_format,
-                     "git": checked([git, "--version"], env), "restarts": []}
+                     "git": checked([*git_command, "--version"], env), "restarts": []}
     process, stop, upstream = start_server("serve")
     relay = None
     try:
         relay = Relay(upstream)
         remote = f"http://git:{token}@127.0.0.1:{relay.port}/{REPOSITORY}.git"
+        push_number = 0
 
         def restart(label: str) -> None:
             nonlocal process, stop
@@ -231,10 +252,17 @@ def exercise(fg: str, git: str, root: Path, object_format: str = "sha1",
                                          "original_pid": prior.pid, "reopened_pid": process.pid})
 
         def push(refspec: str) -> subprocess.CompletedProcess:
-            return run([git, "-C", source, "push", remote, refspec], env)
+            nonlocal push_number
+            result = run([*git_command, "-C", source, "push", remote, refspec], env)
+            push_number += 1
+            (root / f"git-push-{push_number}.json").write_text(json.dumps({
+                "refspec": refspec, "exit": result.returncode,
+                "stdout": redact(result.stdout), "stderr": redact(result.stderr),
+            }) + "\n")
+            return result
 
         def tip(ref: str) -> str | None:
-            line = checked([git, "ls-remote", remote, ref], env)
+            line = checked([*git_command, "ls-remote", remote, ref], env)
             return line.split()[0] if line else None
 
         first = commit("base")
@@ -301,15 +329,20 @@ def exercise(fg: str, git: str, root: Path, object_format: str = "sha1",
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fg", required=True, type=Path)
-    parser.add_argument("--git", default="git")
+    client = parser.add_mutually_exclusive_group()
+    client.add_argument("--git", default="git")
+    client.add_argument("--git-oracle-install", type=Path)
     parser.add_argument("--summary", type=Path)
     parser.add_argument("--object-format", choices=("sha1", "sha256"), default="sha1")
     parser.add_argument("--restart-after-drop", action="store_true")
     options = parser.parse_args()
-    root = Path(tempfile.mkdtemp(prefix="fg-stock-push-faults-"))
+    if options.restart_after_drop and options.git_oracle_install is None:
+        parser.error("--restart-after-drop requires --git-oracle-install")
+    root = Path(tempfile.mkdtemp(prefix="fg-stock-push-faults-")).resolve()
     try:
         summary = exercise(str(options.fg.resolve()), options.git, root,
-                           options.object_format, options.restart_after_drop)
+                           options.object_format, options.restart_after_drop,
+                           options.git_oracle_install)
     except BaseException:
         print(json.dumps({"type": "stock_http_push_faults_failed", "artifacts": str(root)}),
               flush=True)

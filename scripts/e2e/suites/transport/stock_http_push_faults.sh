@@ -18,6 +18,15 @@ FG_BIN="${FG_BIN:-}"
 fge_assert_cmd PUSH-FAULT-001 'FG_BIN names a prebuilt fg binary' test -n "$FG_BIN"
 [ -x "$FG_BIN" ] || fge_die 'FG_BIN must name a prebuilt executable'
 fge_context fg_digest "$(fge_digest_file "$FG_BIN")"
+fge_capture oracle-verify "$E2E_ROOT/oracle/oracle.sh" verify git-2.54.0 || true
+fge_assert_exit PUSH-FAULT-005 0 "$FGE_LAST_EXIT" 'pinned stock Git verifies inside Bubblewrap'
+[[ "$FGE_LAST_EXIT" == 0 ]] || fge_die 'the pinned Git oracle is required'
+oracle_root="${FGIT_ORACLE_ROOT:-$HOME/.cache/frankengit/git-oracle}"
+oracle_install="$(realpath "${oracle_root%/}/installs/git-2.54.0")"
+http_helper="$oracle_install/libexec/git-core/git-remote-http"
+fge_assert_cmd PUSH-FAULT-006 'the matching pinned HTTP helper is installed' test -x "$http_helper"
+[[ -x "$http_helper" ]] || fge_die 'the pinned Git oracle lacks its HTTP helper'
+fge_context git_http_helper_sha256 "$(fge_digest_file "$http_helper")"
 fge_run_timeout 30 relay-preflight python3 "$E2E_ROOT/selftests/test_stock_http_push_faults.py" || true
 fge_assert_exit PUSH-FAULT-003 0 "$FGE_LAST_EXIT" 'real socket relay regression tests pass'
 
@@ -36,13 +45,14 @@ run_case() {
   fge_context fault_profile "$label"
   fge_phase action
   fge_run_timeout 900 "$label" python3 "$E2E_ROOT/stock_http_push_faults.py" \
-    --fg "$FG_BIN" --git "${GIT_ORACLE_BIN:-git}" --summary "$summary" \
+    --fg "$FG_BIN" --git-oracle-install "$oracle_install" --summary "$summary" \
     --object-format "$format" "$@" || true
   fge_assert_exit "PUSH-FAULT-002$suffix" 0 "$FGE_LAST_EXIT" 'the campaign ran to completion'
   fge_context campaign_artifacts "$(field "$summary" artifacts)"
   fge_context git_version "$(field "$summary" git)"
   fge_phase assert
   fge_assert_eq "PUSH-FAULT-004$suffix" "$format" "$(field "$summary" object_format)" 'the selected object format ran'
+  fge_assert_eq "PUSH-FAULT-007$suffix" 'git version 2.54.0' "$(field "$summary" git)" 'the campaign ran the pinned stock Git'
   fge_assert_eq "PUSH-FAULT-010$suffix" 0 "$(field "$summary" initial_push_exit)" 'a stock push with only URL credentials succeeds'
   fge_assert_eq "PUSH-FAULT-011$suffix" True "$(field "$summary" initial_published)" 'the pushed commit is published'
   fge_assert_eq "PUSH-FAULT-020$suffix" True "$(field "$summary" drop_after_dropped_one_request)" 'the relay cut exactly one delivered receive request'
