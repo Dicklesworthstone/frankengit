@@ -233,6 +233,13 @@ pub fn validate_transition(
     {
         return Err(RefusalCode::ProtectedRefTransitionDenied);
     }
+    // A native PR's object format is fixed by its opening event. Even if a
+    // caller constructs a self-consistent candidate in another hash domain,
+    // no later lifecycle action may reinterpret the aggregate's Git identity.
+    // Admission also checks the repository format; replay must be safe alone.
+    if old.data.source_tip.algorithm() != change.data.source_tip.algorithm() {
+        return Err(RefusalCode::ProtectedRefTransitionDenied);
+    }
     if old.data.source_ref != change.data.source_ref
         || (old.data.target_ref != change.data.target_ref)
             != (change.action == PullRequestAction::Retarget)
@@ -374,6 +381,70 @@ mod tests {
             .is_err()
         );
     }
+    #[test]
+    fn native_pr_hash_domain_cannot_change_during_any_lifecycle_transition() {
+        for (initial, replacement) in [
+            (GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256),
+            (GitHashAlgorithm::Sha256, GitHashAlgorithm::Sha1),
+        ] {
+            let mut command = command(initial);
+            let opened = command.proposed_event(actor(), initial).unwrap();
+            let mut prior = opened.clone();
+            for action in [
+                PullRequestAction::Update,
+                PullRequestAction::Retarget,
+                PullRequestAction::Close,
+                PullRequestAction::Reopen,
+            ] {
+                // A legitimate same-domain update is always possible from
+                // this open predecessor, except Reopen (which needs Close).
+                command.action = action;
+                command.expected_version = ExpectedVersion::Exactly(prior.version);
+                if action == PullRequestAction::Retarget {
+                    command.data.target_ref =
+                        RefName::try_new(b"refs/heads/other").unwrap();
+                }
+                let mut candidate = command.proposed_event(actor(), initial).unwrap();
+                if action == PullRequestAction::Reopen {
+                    // Reopen is permitted only after a close, not after an update.
+                    let close = {
+                        command.action = PullRequestAction::Close;
+                        command.data = match &prior.payload {
+                            ForgeEventPayload::PullRequestChangedNative(change) => change.data.clone(),
+                            _ => unreachable!(),
+                        };
+                        command.proposed_event(actor(), initial).unwrap()
+                    };
+                    validate_transition(Some(&prior), &close).unwrap();
+                    prior = close;
+                    command.action = PullRequestAction::Reopen;
+                    command.expected_version = ExpectedVersion::Exactly(prior.version);
+                    candidate = command.proposed_event(actor(), initial).unwrap();
+                } else {
+                    validate_transition(Some(&prior), &candidate).unwrap();
+                }
+                let mut changed = candidate.clone();
+                if let ForgeEventPayload::PullRequestChangedNative(change) = &mut changed.payload {
+                    change.data.source_tip = GitOid::from_hex(
+                        replacement,
+                        &"a".repeat(replacement.digest_len() * 2),
+                    ).unwrap();
+                    change.data.target_tip = GitOid::from_hex(
+                        replacement,
+                        &"b".repeat(replacement.digest_len() * 2),
+                    ).unwrap();
+                }
+                assert_eq!(
+                    validate_transition(Some(&prior), &changed),
+                    Err(RefusalCode::ProtectedRefTransitionDenied),
+                    "{initial:?} to {replacement:?} during {action:?}",
+                );
+                prior = candidate;
+                // After retarget, keep the newly selected target for the next action.
+            }
+        }
+    }
+
     #[test]
     fn bounds_domains_and_command_shape_refuse_before_publication() {
         let valid = command(GitHashAlgorithm::Sha1);
