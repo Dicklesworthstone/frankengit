@@ -1,5 +1,10 @@
 # Native repository discussions
 
+For a remote terminal workflow, use the
+[discussion operator](REMOTE_DISCUSSION_OPERATOR.md). It provides the complete
+native lifecycle, snapshot-pinned list/history reads and durable original-key
+recovery through the authenticated HTTP API.
+
 Discussions provide a repository conversation independent of issues and pull
 requests. The native lifecycle supports opening, editing the title or body,
 authored comments, closing/reopening, and locking/unlocking comments. Every

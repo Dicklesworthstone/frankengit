@@ -2,6 +2,7 @@
 // No local node principal, database access, parallel mutation codec or authority.
 import { IssueClient, mutationRequest, MAX_RECEIPT_BYTES } from '../../crates/fgit-node/src/smart_http/server/browser/issues.mjs';
 import { MilestoneClient, milestoneMutationRequest } from '../../crates/fgit-node/src/smart_http/server/browser/milestones.mjs';
+import { DiscussionClient, discussionMutationRequest } from '../../crates/fgit-node/src/smart_http/server/browser/discussions.mjs';
 import { operatorError, operatorPath, privateRecordPath, absentRecord, readPrivateOperatorFile,
   readSynchronizedOperatorRecord, saveOperatorRecord, recordDigest } from './forge-operator-io.mjs';
 import { isCredentialToken, MAX_CREDENTIAL_TOKEN_BYTES } from '../operator/credential_token.mjs';
@@ -10,14 +11,16 @@ const exact = (v, keys) => v !== null && typeof v === 'object' && !Array.isArray
   Object.keys(v).length === keys.length && keys.every(k => Object.hasOwn(v, k));
 const fail = code => { throw operatorError(code); };
 // Shared connection validation; each entrypoint checks its own closed grammar.
-export function issueConnectionOptions(raw) {
+export function issueConnectionOptions(raw, entity = 'issue') {
+  if (!['issue', 'discussion'].includes(entity)) fail('issue_operator_profile');
   const o = { ...raw, timeoutMs: raw.timeoutMs ?? 30000, onProgress: raw.onProgress ?? (() => {}) };
   for (const key of ['tenant', 'repository']) if (typeof o[key] !== 'string' || !/^[0-9a-f]{32}$/.test(o[key])) fail('issue_operator_identity');
   if (typeof o.href !== 'string' || o.href.length > 4096 || /[\u0000-\u0020\u007f-\u009f\uD800-\uDFFF]/u.test(o.href)) fail('issue_operator_url');
   // The shipped client validates HTTPS/loopback, origin, path and no credentials.
   // Reject URL normalization too: the exact destination is selected by the user.
   if (new URL(o.href).href !== o.href) fail('issue_operator_url');
-  new IssueClient({ href: o.href, timeoutMs: o.timeoutMs });
+  const Client = entity === 'discussion' ? DiscussionClient : IssueClient;
+  new Client({ href: o.href, timeoutMs: o.timeoutMs });
   if ((o.signal !== undefined && !(o.signal instanceof AbortSignal)) || typeof o.onProgress !== 'function') fail('issue_operator_lifetime');
   o.tokenFile = operatorPath(o.tokenFile);
   return o;
@@ -37,29 +40,30 @@ export function issueOperatorFetch(url, init, signal) {
   return fetch(url, { ...init, headers, signal: AbortSignal.any([signal, init.signal]) });
 }
 // A closed repository-owned selection, never a route or callback from custody.
-// Both metadata families use the same private-file, cancellation and original
+// These metadata families use the same private-file, cancellation and original
 // outcome path; legacy issue records and key derivation remain unchanged.
 export function createMetadataOperator(entity) {
-if (!['issue', 'milestone'].includes(entity)) throw operatorError('issue_operator_profile');
-const milestone = entity === 'milestone';
-const Client = milestone ? MilestoneClient : IssueClient;
-const request = milestone ? milestoneMutationRequest : mutationRequest;
+if (!['issue', 'milestone', 'discussion'].includes(entity)) throw operatorError('issue_operator_profile');
+const milestone = entity === 'milestone', discussion = entity === 'discussion';
+const Client = discussion ? DiscussionClient : milestone ? MilestoneClient : IssueClient;
+const request = discussion ? discussionMutationRequest : milestone ? milestoneMutationRequest : mutationRequest;
 const schema = `frankengit-${entity}-operator-v1`;
 const ACTIONS = milestone ? ['open', 'edit', 'close', 'reopen']
+  : discussion ? ['open', 'edit', 'comment', 'append-comment', 'close', 'reopen', 'lock', 'unlock']
   : ['open', 'edit', 'comment', 'close', 'reopen', 'assign', 'unassign', 'add-assignees', 'add-labels', 'lock', 'unlock', 'set-milestone', 'clear-milestone'];
-const independent = action => ['add-assignees', 'add-labels'].includes(action);
-const fail = code => { throw operatorError(milestone ? code.replace(/^issue_operator_/, 'milestone_operator_') : code); };
+const independent = action => ['append-comment', 'add-assignees', 'add-labels'].includes(action);
+const fail = code => { throw operatorError(entity === 'issue' ? code : code.replace(/^issue_operator_/, `${entity}_operator_`)); };
 function options(raw) {
   const keys = ['operation', 'href', 'tenant', 'repository', 'tokenFile', 'record', 'number', 'expectedVersion', 'fields', 'timeoutMs', 'signal', 'onProgress'];
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some(k => !keys.includes(k))) fail('issue_operator_options');
-  const o = issueConnectionOptions(raw);
+  const o = issueConnectionOptions(raw, discussion ? 'discussion' : 'issue');
   if (![...ACTIONS, 'status', 'retry'].includes(o.operation)) fail('issue_operator_operation');
   o.tokenFile = operatorPath(o.tokenFile); o.record = operatorPath(o.record);
   if (o.tokenFile === o.record) fail('issue_operator_separate_record');
   if (ACTIONS.includes(o.operation)) {
     if (independent(o.operation)) {
       if (raw.expectedVersion !== undefined && raw.expectedVersion !== null) {
-        fail(o.operation === 'add-assignees' ? 'issue_operator_add_assignees_has_no_version' : 'issue_operator_add_labels_has_no_version');
+        fail(`issue_operator_${o.operation.replaceAll('-', '_')}_has_no_version`);
       }
       o.expectedVersion = null;
     }
