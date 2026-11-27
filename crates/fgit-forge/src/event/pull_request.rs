@@ -407,11 +407,12 @@ mod tests {
                 };
                 command.action = action;
                 command.expected_version = ExpectedVersion::Exactly(previous.version);
-                command.data.target_ref = RefName::try_new(if action == PullRequestAction::Retarget {
+                let target: &[u8] = if action == PullRequestAction::Retarget {
                     b"refs/heads/other"
                 } else {
                     b"refs/heads/main"
-                }).unwrap();
+                };
+                command.data.target_ref = RefName::try_new(target).unwrap();
                 let candidate = command.proposed_event(actor(), initial).unwrap();
                 validate_transition(Some(previous), &candidate).unwrap();
 
