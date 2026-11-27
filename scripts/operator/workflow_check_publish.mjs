@@ -8,7 +8,7 @@ import { encode, sha256, hex, record, keys, integer, text, digest, principal, oi
   conclusion, journalConclusion, historyPage, jobKey, validateJob, publication, validateTerminal } from './workflow_check_protocol.mjs';
 import { verifyPlannedConclusions } from './workflow_check_submission.mjs';
 import { markerMatches } from './workflow_attempt_report.mjs';
-import { lookupOutcome, outcomeEndpoint } from './transaction_outcome.mjs';
+import { lookupOutcome, outcomeEndpoint, OutcomeError } from './transaction_outcome.mjs';
 import { recoveryScope, recoveryRecord, validateRecoveryRecord, recoveredTerminal, matchPublication } from './workflow_check_outcome.mjs';
 
 const MAX_RUNS = 128, MAX_JOBS = 128, MANIFEST_BYTES = 1024 * 1024, STATE_BYTES = 64 * 1024 * 1024;
@@ -349,7 +349,10 @@ export async function recover(config, address, token, options = {}) {
   const ca = options.ca === undefined ? undefined : Buffer.isBuffer(options.ca) && options.ca.length && options.ca.length <= 128 * 1024
     ? Buffer.from(options.ca) : fail('Invalid recovery TLS CA.');
   const deadline = performance.now() + timeout;
-  const check = () => { signal?.throwIfAborted(); if (performance.now() >= deadline) fail('Workflow recovery deadline exceeded.'); };
+  const check = () => {
+    signal?.throwIfAborted();
+    if (performance.now() >= deadline) throw new OutcomeError('outcome_timeout');
+  };
   check(); await directory(config.state_directory);
   // Refuse accidental initialization: only existing, verified publisher plans
   // can select original keys. No original run files or executable are read.
