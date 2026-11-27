@@ -45,7 +45,8 @@ pub(super) fn dispatch(
         "custody_directory_hex",
         &hex(path.as_os_str().as_bytes()),
     )?;
-    let (trigger, candidate) = match text(event, "profile")? {
+    let profile = text(event, "profile")?;
+    let (trigger, candidate) = match profile {
         "latest-canonical-ref-update-v1" => ("push", false),
         "ordered-canonical-branch-update-v1" => {
             let tip = GitOid::from_hex(node.object_format(), text(event, "observed_ref_tip")?)
@@ -123,8 +124,8 @@ pub(super) fn dispatch(
     equal_text(plan, "source_commit", &sources.commit.to_string())?;
     equal_text(plan, "object_format", node.object_format().as_str())?;
     equal_text(plan, "workflow_directory_hex", &hex(workflow_directory))?;
-    let profile = text(event, "profile")?;
-    if profile == "latest-canonical-tag-update-v1" {
+    let tag = profile == "latest-canonical-tag-update-v1";
+    if tag {
         equal_text(plan, "source_tag_tip", text(event, "tag_tip")?)?;
         equal_text(plan, "source_head", text(event, "observed_head")?)?;
     } else if plan.contains_key("source_tag_tip") {
@@ -155,7 +156,7 @@ pub(super) fn dispatch(
     ) {
         (true, Some(refusal))
             if !candidate
-                && reference.as_bytes().starts_with(b"refs/heads/")
+                && (tag || reference.as_bytes().starts_with(b"refs/heads/"))
                 && definitions.is_empty() =>
         {
             let refusal = object(refusal)?;
@@ -165,7 +166,7 @@ pub(super) fn dispatch(
             let diagnostic = text(refusal, "diagnostic_hex")?;
             match refusal.get("code") {
                 // Original v2 branch plans predate typed compiler diagnostics.
-                None if trigger == "push" => {}
+                None if trigger == "push" && !tag => {}
                 Some(code)
                     if matches!(
                         code.text(),

@@ -124,6 +124,12 @@ raw tag tip across the event, dispatch, and attempt, as well as the original hea
 peeled commit, workflow graph, and journal bindings. Replacing a raw annotation
 OID with its peeled commit is a mismatch. Recovery never reruns a script.
 
+If a verified tag's workflow definition fails compilation, the watch records
+the exact refused file and diagnostic before any job starts. This settles the
+event as non-green with zero executed workflows. A restart can recover the
+missing acknowledgement from the original tag and dispatch plan. A later tag
+update to a corrected source can run under the same watch custody.
+
 ## Verification commands
 
 The schema regression suite includes `workflow_tags` and the existing workflow
