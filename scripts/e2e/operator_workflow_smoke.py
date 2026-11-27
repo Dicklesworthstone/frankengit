@@ -52,15 +52,21 @@ def verify_fixture(c, source, oracle_run, fmt, label, *arguments):
     require(checked.returncode == 0, "pinned sandboxed Git rejected workflow objects")
 
 
-def supervisor_case(c, home, repository, config, canonical, next_revision):
-    fmt = config["object_format"]
-    watch, publisher, state = Path(config["state_directory"]), home / "publisher", home / "supervisor"
+def supervisor_selection(home, config):
+    state = home / "supervisor"
     state.mkdir(mode=0o700)
     selected = dict(schema="frankengit-workflow-supervisor-v1", state_directory=str(state), lanes=[dict(
         name="selected", publisher=dict(schema="frankengit-workflow-check-publisher-v1", watch=config,
-                                       state_directory=str(publisher), principal_id=PRINCIPAL))])
+                                       state_directory=str(home / "publisher"), principal_id=PRINCIPAL))])
     selection = home / "supervisor.json"
     selection.write_text(json.dumps(selected))
+    return selection
+
+
+def supervisor_case(c, home, repository, config, canonical, next_revision):
+    fmt = config["object_format"]
+    watch, publisher, state = Path(config["state_directory"]), home / "publisher", home / "supervisor"
+    selection = supervisor_selection(home, config)
     script = ROOT / "scripts/fg_workflow_supervisor.mjs"
 
     def call(action, *extra, expected=0):
@@ -366,27 +372,59 @@ def run_case(c, oracle_run, fmt, nested, supervised=False):
             and canonical() == page and c.run("at", repository, TENANT, REPOSITORY, "latest") == authority,
             "publisher output failure changed original keys, terminal custody or canonical state")
     c.facts[f"{fmt}_publication_output_failure_retains_terminal"] = True
+    selection = supervisor_selection(home, config)
+    bound = node_rows(c, ROOT / "scripts/fg_workflow_supervisor.mjs",
+                      ["once", "--config", str(selection), "--trusted-local"], 1)[-1]
+    lane = bound["lanes"][0]
+    require("error" not in lane and lane["execution"]["type"] == "workflow_watch_idle"
+            and lane["before"]["committed"] == lane["after"]["committed"] == 3
+            and custody_bytes() == original_custody,
+            "supervisor binding changed the already-settled watcher or publisher")
+    supervisor_binding = home / "supervisor" / "binding.json"
+    binding_bytes = supervisor_binding.read_bytes()
     saved = home / "retained-terminals"
     saved.mkdir(mode=0o700)
     terminals = list(pub_state.glob("terminal-*.json"))
     require(len(terminals) == 3, "three terminal receipts required before recovery exercise")
     for terminal in terminals:
         terminal.rename(saved / terminal.name)
+    expected_outcomes = {job["job"]: json.loads(
+        (saved / f'terminal-{plan["watch_id"]}-{index:03d}.json').read_bytes())
+        for index, job in enumerate(plan["jobs"])}
+    detached_watch = home / "retained-watch.json"
+    config_path.rename(detached_watch)
     grants("pulls-read")
-    with issue_server(c, repository, credentials, "workflow-" + fmt) as server:
-        recovery = ["recover", *pub_args, "--endpoint", server.url, "--token-file", str(token)]
-        denied = node_rows(c, check_cli, recovery, 3, error_reply=True)[-1]
-        require(denied["type"] == "workflow_check_error" and denied["message"] == "outcome_http_refused"
-                and denied["publication_unknown"] is True and denied["retained_recovery"]["runs"][0]["pending"] == 3
-                and not list(pub_state.glob("observed-*.json")),
-                "outcomes denial invented a terminal observation")
-        grants("outcomes-read")
-        recovered = node_rows(c, check_cli, recovery)[-1]
-        require(recovered["remote_read_only"] is True and recovered["request_reexecuted"] is False
-                and recovered["lookups"] == 3 and recovered["runs"][0]["committed"] == 3,
-                "original-key outcome recovery lost terminal identity or resubmitted")
+    try:
+        with issue_server(c, repository, credentials, "workflow-" + fmt) as server:
+            remote = ["--endpoint", server.url, "--token-file", str(token)]
+            recovery = ["recover", "--supervisor-config", str(selection), "--lane", "selected", "--trusted-local", *remote]
+            denied = node_rows(c, check_cli, recovery, 3, error_reply=True)[-1]
+            require(denied["type"] == "workflow_check_error" and denied["message"] == "outcome_http_refused"
+                    and denied["publication_unknown"] is True and denied["retained_recovery"]["runs"][0]["pending"] == 3
+                    and not list(pub_state.glob("observed-*.json")),
+                    "outcomes denial invented a terminal observation")
+            grants("outcomes-read")
+            *observations, recovered = node_rows(c, check_cli, recovery)
+            require(recovered["remote_read_only"] is True and recovered["request_reexecuted"] is False
+                    and recovered["lookups"] == 3 and recovered["runs"][0]["committed"] == 3
+                    and len(observations) == 3 and {row["job"] for row in observations} == set(expected_outcomes),
+                    "original-key outcome recovery lost terminal identity or resubmitted")
+            for observation in observations:
+                expected = expected_outcomes[observation["job"]]
+                require(observation["type"] == "workflow_check_outcome_observed"
+                        and observation["tx_id"] == expected["tx_id"]
+                        and observation["decision"]["repository_commit_id"] == expected["repository_commit_id"],
+                        "recovery did not retain the exact original transaction and repository decision")
+            detached_watch.rename(config_path)
+            repeated = node_rows(c, check_cli, ["recover", *pub_args, *remote])[-1]
+            require(repeated["lookups"] == 0 and repeated["runs"][0]["committed"] == 3,
+                    "standalone recovery did not share the same terminal custody")
+    finally:
+        if detached_watch.exists():
+            detached_watch.rename(config_path)
     c.facts[f"{fmt}_outcome_grant_twins_and_service_drain"] = True
-    require(all((pub_state / name).read_bytes() == data for name, data in retained.items())
+    require(supervisor_binding.read_bytes() == binding_bytes
+            and all((pub_state / name).read_bytes() == data for name, data in retained.items())
             and marker.read_bytes() == b"sf" and canonical() == page
             and c.run("at", repository, TENANT, REPOSITORY, "latest") == authority,
             "recovery changed keys, reran execution or changed canonical state")

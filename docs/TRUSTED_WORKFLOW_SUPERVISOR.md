@@ -158,6 +158,12 @@ stale lock is deleted automatically. Inspect native custody and use the existing
 watcher reconciliation or publisher recovery tools explicitly; a check outcome
 receipt does not prove that a native process was reaped.
 
+For an unresolved check publication, use
+`fg_workflow_checks.mjs recover --supervisor-config /srv/ci/supervisor.json --lane main`
+with the explicit endpoint, credential and trust options in the
+[check-outcome recovery guide](WORKFLOW_CHECK_OUTCOME_RECOVERY.md). The recovery
+command selects the original publisher from the saved supervisor binding.
+
 Changing the lane set requires stopping the old supervisor and selecting a new,
 empty supervisor directory while retaining the original lane directories and
 configuration. Do not run a second watcher or publisher service for the same

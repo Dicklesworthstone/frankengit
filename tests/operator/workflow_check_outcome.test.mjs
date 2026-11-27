@@ -91,6 +91,17 @@ function argumentsFor(f, address, operation = 'recover', extras = []) {
   return [operation, '--watch-config', f.watchFile, '--state', f.config.state_directory, '--principal-id', f.config.principal_id,
     '--trusted-local', ...(operation === 'recover' ? ['--endpoint', address, '--token-file', f.tokenFile] : []), ...extras];
 }
+async function supervisorFixture(f, other) {
+  const state = join(f.root, 'supervisor'), path = join(f.root, 'supervisor.json');
+  await mkdir(state, { mode: 0o700 });
+  const config = { schema: 'frankengit-workflow-supervisor-v1', state_directory: state,
+    lanes: [{ name: 'other', publisher: other.config }, { name: 'selected', publisher: f.config }] };
+  await save(path, config);
+  const args = (address, lane = 'selected') => ['recover', '--supervisor-config', path, '--lane', lane,
+    '--trusted-local', '--endpoint', address, '--token-file', f.tokenFile];
+  const bindingPath = join(state, 'binding.json');
+  return { config, path, state, args, bindingPath, bind: () => save(bindingPath, config) };
+}
 function child(t, args) {
   const processChild = spawn(process.execPath, [cli, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '', stderr = ''; processChild.stdout.on('data', b => stdout += b); processChild.stderr.on('data', b => stderr += b);
@@ -323,6 +334,57 @@ test('CLI recovery uses a private token file and exits with the native terminal 
   assert.equal(result.code, 0, result.stderr); assert.equal(result.signal, null);
   const lines = result.stdout.trim().split('\n').map(JSON.parse); assert.equal(lines.at(-1).runs[0].committed, 1);
   assert.equal(result.stdout.includes(token), false); assert.equal(result.stderr.includes(token), false); assert.equal(result.stdout.includes(f.jobs[0].key), false);
+});
+test('CLI recovers only the selected bound supervisor lane without separate watch configuration or native files', LINUX_WORKFLOW, async t => {
+  const f = await fixture(t, 'sha256'), other = await fixture(t), server = await peer(t, f);
+  const supervisor = await supervisorFixture(f, other);
+  await supervisor.bind();
+  await mkdir(join(supervisor.state, 'owner.lock'), { mode: 0o700 });
+  const lock = await lstat(join(supervisor.state, 'owner.lock'));
+  const original = await readFile(supervisor.bindingPath), plan = await readFile(f.planPath);
+  const untouched = (await readdir(other.config.state_directory)).sort();
+  for (const path of [f.watchFile, f.config.watch.fg, f.config.watch.storage_root, f.config.watch.run_parent]) {
+    await rm(path, { recursive: true, force: true });
+  }
+  const result = await child(t, supervisor.args(server.address)).done;
+  assert.equal(result.code, 0, result.stderr);
+  const lines = result.stdout.trim().split('\n').map(JSON.parse);
+  assert.equal(lines.at(-1).type, 'workflow_check_recovery');
+  assert.equal(lines.at(-1).runs[0].committed, 1);
+  assert.equal((await status(f.config)).runs[0].committed, 1);
+  assert.equal((await status(other.config)).runs[0].unknown, 1);
+  assert.deepEqual((await readdir(other.config.state_directory)).sort(), untouched);
+  assert.deepEqual(await readFile(supervisor.bindingPath), original);
+  assert.deepEqual(await readFile(f.planPath), plan);
+  assert.equal((await lstat(join(supervisor.state, 'owner.lock'))).ino, lock.ino);
+  assert.deepEqual(server.calls.map(call => call.headers['idempotency-key']), [f.jobs[0].key]);
+  assert.equal((await child(t, supervisor.args(server.address)).done).code, 0);
+  assert.equal(server.calls.length, 1);
+});
+test('CLI refuses unbound, altered, unknown or ambiguous supervisor lane selection before HTTP', LINUX_WORKFLOW, async t => {
+  const f = await fixture(t), other = await fixture(t), server = await peer(t, f);
+  const supervisor = await supervisorFixture(f, other), args = supervisor.args(server.address);
+  const before = (await readdir(f.config.state_directory)).sort();
+  const refused = async (argv, message) => {
+    const result = await child(t, argv).done;
+    assert.equal(result.code, 2, result.stderr);
+    if (message) assert.match(JSON.parse(result.stderr).message, message);
+  };
+  await refused(args, /original saved supervisor binding/);
+  assert.deepEqual(await readdir(supervisor.state), []);
+  await supervisor.bind();
+  await refused(supervisor.args(server.address, 'foreign'), /Unknown supervisor lane/);
+  await refused([...args, '--principal-id', f.config.principal_id]);
+  await refused([...args, '--watch-config', f.watchFile]);
+  await refused([...args, '--state', f.config.state_directory]);
+  await refused(['status', '--supervisor-config', supervisor.path, '--lane', 'selected', '--trusted-local']);
+  await refused(args.filter(arg => arg !== '--lane' && arg !== 'selected'));
+  const changed = structuredClone(supervisor.config);
+  changed.lanes[1].publisher.principal_id = 'f'.repeat(32);
+  await save(supervisor.path, changed);
+  await refused(args, /Supervisor configuration changed/);
+  assert.equal(server.calls.length, 0);
+  assert.deepEqual((await readdir(f.config.state_directory)).sort(), before);
 });
 test('CLI rejects publication flags, missing scopes, unsafe token files and malformed credentials before HTTP', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), server = await peer(t, f);

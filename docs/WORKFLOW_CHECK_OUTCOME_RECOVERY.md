@@ -13,8 +13,8 @@ outcome API. Unavailable authority is not replaced by a local receipt or guess.
 
 ## Inputs and trust
 
-Retain the original private watcher configuration file and the publisher's
-private state directory, including `binding.json`, `plan-*.json`, and the
+Retain the original private watcher or supervisor configuration file and the
+publisher's private state directory, including `binding.json`, `plan-*.json`, and the
 corresponding `started-*.json` records. Configuration values and original paths
 remain part of request identity even when the files at those paths no longer
 exist. Do not edit the configuration to point at a new executable or source
@@ -52,6 +52,21 @@ node scripts/fg_workflow_checks.mjs recover \
   --token-file /srv/credentials/outcome.token \
   --max-lookups 128
 ```
+
+For a supervised lane, select its publisher directly from the original bound
+supervisor configuration:
+
+```bash
+node scripts/fg_workflow_checks.mjs recover \
+  --supervisor-config /srv/ci/supervisor.json --lane main --trusted-local \
+  --endpoint https://forge.example/team/repo.git \
+  --token-file /srv/credentials/outcome.token
+```
+
+This form replaces `--watch-config`, `--state` and `--principal-id`. The saved
+supervisor binding must match the complete configuration and contain the named
+lane. Recovery uses that lane's original publisher principal, paths, keys and
+receipts. It leaves the supervisor binding, owner locks and other lanes intact.
 
 HTTPS uses certificate verification. An optional `--ca-file` accepts a private
 PEM CA file of at most 128 KiB; it does not disable hostname or certificate
