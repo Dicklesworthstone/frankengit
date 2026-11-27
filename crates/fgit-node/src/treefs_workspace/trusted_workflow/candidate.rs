@@ -421,6 +421,7 @@ impl OneNode {
             started,
             artifact_session.as_ref(),
             None,
+            true,
         )
     }
 }

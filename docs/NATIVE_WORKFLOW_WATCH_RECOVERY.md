@@ -69,9 +69,11 @@ After native dispatch and source finalization, the watcher checks that its
 processes and workspaces have closed. It writes and syncs `check-sources`,
 retaining the original event, executed commit, child run IDs, journal identities
 and exact journal pins. It then writes and syncs `settled` before publishing the
-human-readable batch report. A late report write error still fails the current
-invocation. A new watcher can use the saved evidence to publish the original
-checks and process later commits.
+human-readable per-workflow and batch reports. A late write error on either
+report still fails the current invocation. A new watcher can use the saved
+evidence to publish the original checks and process later commits. Direct
+workflow runs and standalone dispatch persist their reports as part of the
+requested execution.
 
 A crash between those last two writes used to leave the entire watch scope
 blocked despite a completed execution. The watcher now verifies the completion

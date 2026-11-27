@@ -298,6 +298,17 @@ pub struct TrustedWorkflowRun {
     pub execution: WorkflowReport,
 }
 impl TrustedWorkflowRun {
+    fn persist_report(&self) -> Result<(), TrustedWorkflowFailure> {
+        File::open(&self.run_directory)
+            .and_then(|root| publish_report(&root, &self.run_directory, self.to_json().as_bytes()))
+            .map_err(|error| TrustedWorkflowFailure::Journal {
+                directory: self.run_directory.clone(),
+                detail: format!(
+                    "execution finished but report durability failed: {error}; do not replay this attempt"
+                ),
+            })
+    }
+
     #[must_use]
     pub fn succeeded(&self) -> bool {
         self.workspaces_closed
@@ -745,6 +756,7 @@ fn run_at<A: GitHashAlgorithm>(
         started,
         artifact_session.as_ref(),
         tag_tip,
+        true,
     )
 }
 
@@ -763,6 +775,7 @@ fn run_inputs<A: GitHashAlgorithm>(
     started: Instant,
     artifact_session: Option<&artifacts::Session<'_>>,
     tag_tip: Option<GitOid>,
+    persist_report_now: bool,
 ) -> Result<TrustedWorkflowRun, TrustedWorkflowFailure> {
     let live = || workspace_request_live(request) && started.elapsed() < limits.run_timeout;
     if !live() {
@@ -956,12 +969,9 @@ fn run_inputs<A: GitHashAlgorithm>(
     report.workspaces_closed = !worker.retained && worker.current.is_none();
     report.request_interrupted =
         !workspace_request_live(request) || started.elapsed() >= limits.run_timeout;
-    let json = report.to_json();
-    publish_report(&worker.parent, &report.run_directory, json.as_bytes()).map_err(|e| {
-        journal_error(format!(
-            "execution finished but report durability failed: {e}; do not replay this attempt"
-        ))
-    })?;
+    if persist_report_now {
+        report.persist_report()?;
+    }
     Ok(report)
 }
 

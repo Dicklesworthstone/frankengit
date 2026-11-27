@@ -161,10 +161,10 @@ def definition_refusal(fmt, ordered):
     assert f.count() == 'xx'
     case(fmt, f'{profile}-refusal-ack-recovery-and-successor', repaired=f.tip)
 
-def failed_batch_report(fmt):
-    # Block a real job until the fixture occupies the batch report's name.
-    # The job report, journal and completion files remain writable.
-    f = Fixture(fmt, 'batch-report-failure',
+def failed_report(fmt, level):
+    # Block a real job until the fixture occupies one report's name.
+    # The execution journal and handoff remain writable.
+    f = Fixture(fmt, f'{level}-report-failure',
                 tail="printf ready > '{pids}'; while [ ! -f '{pids}.release' ]; do sleep .02; done")
     release = f.pids.with_suffix('.release')
     watcher, out, err = f.started('report-collision', polls=1)
@@ -174,8 +174,10 @@ def failed_batch_report(fmt):
         assert watcher.poll() is None and f.count() == 'x'
         event, = f.parent.glob('watch-*/event-*')
         batch, = event.glob('dispatch-*')
+        child, = batch.glob('workflow-*')
         assert (batch / 'dispatch.json').exists()
-        with (batch / 'report.json').open('xb') as output:
+        blocked_report = (child if level == 'child' else batch) / 'report.json'
+        with blocked_report.open('xb') as output:
             output.write(occupied)
         release.touch()
         failure = complete(watcher, out, err, 2)[-1]
@@ -185,30 +187,33 @@ def failed_batch_report(fmt):
             watcher.terminate()
             watcher.wait(timeout=12)
     assert 'report durability failed' in failure['operation_error']
-    assert (batch / 'report.json').read_bytes() == occupied
-    child, = batch.glob('workflow-*')
-    execution = json.loads((child / 'report.json').read_bytes())
-    assert execution['workspaces_closed'] and execution['executed_commit'] == f.tip
+    assert blocked_report.read_bytes() == occupied
     handoff = event / 'check-sources'
     settled = event / 'settled'
     assert handoff.is_file() and settled.is_file(), 'closed run lost its original handoff'
-    case(fmt, 'late-batch-report-failure-preserves-closed-execution', commit=f.tip)
+    if level == 'child':
+        execution, = json.loads((batch / 'report.json').read_bytes())['runs']
+    else:
+        execution = json.loads((child / 'report.json').read_bytes())
+    assert execution['workspaces_closed'] and execution['executed_commit'] == f.tip
+    case(fmt, f'late-{level}-report-failure-preserves-closed-execution', commit=f.tip)
 
     metadata = json.loads((event / 'event.json').read_bytes())
     original = f.tip
     auto = f.args() + ['--publish-checks', '--principal-id', PRINCIPAL,
                        '--expected-incarnation', metadata['repository_incarnation']]
     settled.unlink()
-    captured = [json.loads(line) for line in invoke('recover-without-batch-report', auto).splitlines()]
+    captured = [json.loads(line) for line in invoke('recover-with-occupied-report', auto).splitlines()]
     decisions = [row for row in captured if row['type'] == 'workflow_check_set_decision']
     checks = [check for row in captured if row['type'] == 'workflow_check_set' for check in row['checks']]
     assert len(decisions) == len(checks) == 1
     assert decisions[0]['command_committed'] and checks[0]['source_commit'] == original
     assert checks[0]['conclusion'] == 'success' and settled.is_file()
-    assert f.count() == 'x' and (batch / 'report.json').read_bytes() == occupied
+    assert f.count() == 'x' and blocked_report.read_bytes() == occupied
     repeated = [json.loads(line) for line in invoke('repeat-after-report-failure', auto).splitlines()]
     assert repeated[-1]['committed_check_decisions'] == 0 and f.count() == 'x'
-    case(fmt, 'recover-original-check-without-replaying-jobs-or-writing-report', commit=original)
+    case(fmt, 'recover-original-check-without-replaying-jobs-or-writing-report',
+         blocked_report=level, commit=original)
 
     f.advance()
     successor = [json.loads(line) for line in invoke('run-after-report-failure', auto).splitlines()]
@@ -217,7 +222,7 @@ def failed_batch_report(fmt):
     assert successor[-1]['committed_check_decisions'] == 1 and f.count() == 'xx'
     directory = Path(os.fsdecode(bytes.fromhex(poll['dispatch']['plan']['run_directory_hex'])))
     assert json.loads((directory / 'report.json').read_bytes()) == poll['dispatch']
-    case(fmt, 'report-failure-does-not-block-next-commit', commit=f.tip)
+    case(fmt, 'report-failure-does-not-block-next-commit', blocked_report=level, commit=f.tip)
 
 for fmt in ('sha1','sha256'):
     f=Fixture(fmt,'ordinary')
@@ -266,5 +271,6 @@ for fmt in ('sha1','sha256'):
     old=f.count();invalid=f.args();invalid.extend(['--event','push']);invoke('reject-caller-event',invalid,2);assert f.count()==old;case(fmt,'caller-event-refused')
     definition_refusal(fmt, ordered=False)
     definition_refusal(fmt, ordered=True)
-    failed_batch_report(fmt)
+    failed_report(fmt, 'batch')
+    failed_report(fmt, 'child')
 (root/'results.json').write_text(json.dumps(results,indent=2))
