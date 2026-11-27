@@ -436,16 +436,16 @@ impl OneNode {
             (_, Some(Err(error))) => Err(error),
             (Ok(()) | Err(NodeWorkspaceRefusal::Cancelled { .. }), Some(Ok(report))) => Ok(report),
             (Err(error), Some(Ok(report))) => {
-                if expected.watch_owns_completion {
-                    // Preserve the report for inspection without handing a
-                    // failed source-finalization result to the watch.
-                    report.persist_watch_reports()?;
+                let mut detail = format!(
+                    "dispatch source finalization failed after execution: {error}; inspect saved reports, do not replay"
+                );
+                if expected.watch_owns_completion && let Err(error) = report.persist_watch_reports() {
+                    write!(detail, ". Report delivery also failed: {error}")
+                        .expect("writing to a String cannot fail");
                 }
                 Err(TrustedWorkflowFailure::Journal {
                     directory: report.run_directory,
-                    detail: format!(
-                        "dispatch source finalization failed after execution: {error}; inspect saved reports, do not replay"
-                    ),
+                    detail,
                 })
             }
             (Err(error), None) => Err(TrustedWorkflowFailure::Source(error)),
@@ -819,26 +819,28 @@ fn dispatch_at<A: GitHashAlgorithm>(
                 ..limits
             };
             let run = run_inputs(
-            node,
-            request,
-            inputs.shared(),
-            capability,
-            head,
-            reference,
-            &definition.path,
-            declared,
-            definition.run_id,
-            &batch_directory,
-            child_limits,
-            started,
-            artifact_session.as_ref(),
-            tag_tip,
-            !watch_owns_completion,
-        )
-        .map_err(|error| format!(
-            "dispatch child {} failed: {error}; retain the batch and inspect its child journals, do not replay",
-            hex(&definition.run_id),
-        ))?;
+                node,
+                request,
+                inputs.shared(),
+                capability,
+                head,
+                reference,
+                &definition.path,
+                declared,
+                definition.run_id,
+                &batch_directory,
+                child_limits,
+                started,
+                artifact_session.as_ref(),
+                tag_tip,
+                !watch_owns_completion,
+            )
+            .map_err(|error| {
+                format!(
+                    "dispatch child {} failed: {error}; retain the batch and inspect its child journals, do not replay",
+                    hex(&definition.run_id),
+                )
+            })?;
             let captured = run
                 .execution
                 .jobs
