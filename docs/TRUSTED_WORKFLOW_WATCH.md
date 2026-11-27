@@ -196,6 +196,17 @@ watcher also checks the nested native execution profile, job/step outcomes,
 retention flags, exit/success consistency and aggregate jobs/steps/output bounds.
 A top-level success bit cannot override a retained workspace or containment failure.
 
+When the native reply is available and passes validation, the watcher writes a
+private `reply-<id>.json` binding the original intent to the reply's report
+digest. The saved dispatch report must match that digest before the watcher
+records a local completion. Both the live watcher and a fresh `reconcile`
+process leave a disagreement unresolved. An explicit native shutdown failure
+binds the failure to the original intent in the same private reply slot and
+blocks completion even when the earlier dispatch report says the jobs passed.
+Existing custody without a reply record can still recover from its original
+valid saved dispatch report. Update the watcher, its publisher, and its
+supervisor together before opening directories with the new reply profile.
+
 Known native stops (`request_stopped`, `output_budget_exhausted`,
 `workflow_refused`, `workflow_timed_out`, `workflow_output_limit`) with fully
 settled reported children are recorded as **observed_stopped**, not success. The
@@ -212,9 +223,13 @@ they can still inspect preserved custody and reports while the native installati
 is unavailable. Loss of stdout can therefore be reconciled without replay. Missing or
 contradictory evidence stays pending.
 
-Reconciliation observes SIGTERM/SIGINT through its existing cancellation
-checkpoints. An in-flight filesystem read settles before the next checkpoint;
-stopping preserves original reports, execution responsibility and owner locks.
+Reconciliation takes the same exclusive owner lock as execution before it
+records completion. If a live or crash-retained owner already holds the lock,
+`reconcile` reports status and leaves any unresolved result untouched. This
+prevents recovery from reading a successful dispatch report while the native
+process is still trying to finalize. Reconciliation observes SIGTERM/SIGINT
+at its cancellation checkpoints. An in-flight filesystem read settles before
+the next checkpoint. Stopping preserves original reports and custody.
 
 SIGTERM/SIGINT stop new work and **drain** an active native dispatch. Killing the
 native owner immediately would undermine its own step cleanup. The native

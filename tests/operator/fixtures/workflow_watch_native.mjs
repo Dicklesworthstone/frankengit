@@ -125,8 +125,21 @@ if (!dispatch) {
   const report = { type: 'trusted_workflow_dispatch', plan: { ...plan, ...control.plan_patch }, matched_count: Number(selected), executed_count: Number(selected),
     succeeded: !selected || !control.job_failure, stop_reason: null, runs: selected ? [run] : [], ...control.report_patch };
   await json(join(batch, 'report.json'), report);
+  if (control.hold_reply) {
+    await writeFile(join(storage, 'reply-ready'), '', { mode: 0o600 });
+    let released = false;
+    for (let attempt = 0; attempt < 500 && !released; attempt++) {
+      released = await readFile(join(storage, 'release-reply')).then(() => true, error => {
+        if (error.code !== 'ENOENT') throw error;
+        return false;
+      });
+      if (!released) await sleep(10);
+    }
+    if (!released) throw new Error('fixture reply release did not arrive');
+  }
   if (control.drop_stdout) { console.error('fixture output lost after saved report'); process.exit(2); }
-  console.log(JSON.stringify({ type: 'workflow_dispatch_result', schema_version: 1, node_closed: true, node_cleanup_error: null,
+  console.log(JSON.stringify({ type: 'workflow_dispatch_result', schema_version: 1,
+    node_closed: !control.node_cleanup_error, node_cleanup_error: control.node_cleanup_error ?? null,
     dispatch: control.stdout_patch ? { ...report, ...control.stdout_patch } : report }));
-  process.exitCode = control.exit_code ?? (report.succeeded ? 0 : 1);
+  process.exitCode = control.exit_code ?? (control.node_cleanup_error ? 2 : report.succeeded ? 0 : 1);
 }
