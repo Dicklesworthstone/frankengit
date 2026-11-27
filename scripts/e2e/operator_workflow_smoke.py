@@ -392,6 +392,53 @@ def run_case(c, oracle_run, fmt, nested, supervised=False):
             "recovery changed keys, reran execution or changed canonical state")
     c.facts[f"{fmt}_recovery_no_execution_or_publication"] = True
 
+    # Run the real native binary with its direct dispatch stdout redirected.
+    # Other commands, including the pinned source read, use their normal pipes.
+    launcher = home / "native-stdout-loss"
+    launcher.write_text(
+        f"#!{Path(sys.executable).resolve()}\n"
+        "import os, sys\n"
+        "if sys.argv[1:3] == ['workflow', 'dispatch']:\n"
+        "    with open('/dev/full', 'wb') as sink:\n"
+        "        os.dup2(sink.fileno(), 1)\n"
+        f"os.execv({str(c.fg)!r}, [{str(c.fg)!r}, *sys.argv[1:]])\n"
+    )
+    launcher.chmod(0o700)
+    lost_state, lost_runs = home / "lost-native-watch", home / "lost-native-runs"
+    lost_state.mkdir(mode=0o700)
+    lost_runs.mkdir(mode=0o700)
+    lost_config = home / "lost-native.json"
+    lost_config.write_text(json.dumps(dict(config, fg=str(launcher), state_directory=str(lost_state),
+                                           run_parent=str(lost_runs))))
+    lost_args = ["--config", str(lost_config), "--trusted-local"]
+    lost = c.node_command(watch_cli, ["once", *lost_args], 3, error_reply=True)
+    require(b"dispatch receipt output incomplete" in bytes.fromhex(lost["native_stderr_hex"]),
+            "native stdout was not actually lost after completion")
+    pending, = c.node_command(watch_cli, ["status", *lost_args], 3)["records"]
+    require(pending["state"] == "execution_unknown"
+            and not (lost_state / f"reply-{pending['id']}.json").exists(),
+            "output loss unexpectedly retained a reply")
+    batch = Path(pending["native_directory"])
+    witness = batch / "finalization.json"
+    report = (batch / "report.json").read_bytes()
+    finalization = json.loads(witness.read_bytes())
+    require(finalization == dict(type="workflow_dispatch_finalization", schema_version=1, node_closed=True,
+                                 report_sha256=hashlib.sha256(report).hexdigest())
+            and witness.stat().st_mode & 0o777 == 0o600,
+            "native lost-output record did not bind the exact original report")
+    retained = home / "retained-finalization.json"
+    witness.rename(retained)
+    without, = c.node_command(watch_cli, ["reconcile", *lost_args], 3)["records"]
+    require(without == pending and not (lost_state / f"result-{pending['id']}.json").exists(),
+            "reconciliation accepted a report without evidence of native finalization")
+    retained.rename(witness)
+    repaired, = c.node_command(watch_cli, ["reconcile", *lost_args])["records"]
+    require(repaired["id"] == pending["id"] and repaired["state"] == "observed_failed"
+            and (batch / "report.json").read_bytes() == report and marker.read_bytes() == b"sfsf"
+            and canonical() == page and c.run("at", repository, TENANT, REPOSITORY, "latest") == authority,
+            "native finalization recovery reran execution, changed report bytes or published state")
+    c.facts[f"{fmt}_native_reply_loss_requires_finalization"] = True
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

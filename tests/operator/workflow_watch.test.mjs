@@ -88,10 +88,27 @@ for (const format of ['sha1', 'sha256']) {
     const calls = (await f.lines('calls.ndjson')).length;
     await assert.rejects(once(f.config), /unresolved/);
     assert.equal((await f.lines('calls.ndjson')).length, calls);
+    const savedPath = join((await status(f.config)).records[0].native_directory, 'report.json');
+    const saved = await readFile(savedPath);
+    await writeFile(savedPath, Buffer.concat([saved, Buffer.from(' ')]));
+    await assert.rejects(reconcile(f.config), /differs from its finalization record/);
+    await writeFile(savedPath, saved);
     const recovered = await reconcile(f.config); assert.equal(recovered.records[0].state, 'observed_succeeded');
     assert.equal((await f.lines('calls.ndjson')).length, calls, 'reconcile performs no child execution');
     assert.equal((await once(f.config)).reason, 'commit_already_observed');
     assert.equal((await f.lines('effects.ndjson')).length, 1);
+  });
+  test(`${format}: lost shutdown failure cannot turn an earlier report into a completion`, LINUX_WORKFLOW, async t => {
+    const f = await fixture(t, format, { drop_stdout: true, node_cleanup_error: 'fixture node shutdown failed' });
+    await assert.rejects(once(f.config), /Dispatch unresolved/);
+    const pending = (await status(f.config)).records[0];
+    assert.equal(JSON.parse(await readFile(join(pending.native_directory, 'report.json'))).succeeded, true);
+    const after = await reconcile(f.config);
+    assert.equal(after.records[0].state, 'execution_unknown');
+    await assert.rejects(lstat(join(f.config.state_directory, `result-${pending.id}.json`)), { code: 'ENOENT' });
+    await assert.rejects(once(f.config), /unresolved/);
+    assert.equal((await f.lines('effects.ndjson')).length, 1);
+    assert.equal((await f.lines('calls.ndjson')).length, 2);
   });
   test(`${format}: contradictory native reports stay unresolved across restart`, LINUX_WORKFLOW, async t => {
     const returned = { succeeded: false, stop_reason: 'request_stopped' };

@@ -203,9 +203,13 @@ records a local completion. Both the live watcher and a fresh `reconcile`
 process leave a disagreement unresolved. An explicit native shutdown failure
 binds the failure to the original intent in the same private reply slot and
 blocks completion even when the earlier dispatch report says the jobs passed.
-Existing custody without a reply record can still recover from its original
-valid saved dispatch report. Update the watcher, its publisher, and its
-supervisor together before opening directories with the new reply profile.
+When stdout is lost, `reconcile` requires the private, create-only
+`finalization.json` beside the original report. Native dispatch writes this
+record after its signal monitor and node close successfully and before it
+writes stdout. Recovery verifies the exact saved report bytes against the
+finalization digest. A batch with an earlier report and no positive reply or
+finalization record remains unresolved. Older batches with a verified
+retained positive reply can use that reply for recovery.
 
 Known native stops (`request_stopped`, `output_budget_exhausted`,
 `workflow_refused`, `workflow_timed_out`, `workflow_output_limit`) with fully

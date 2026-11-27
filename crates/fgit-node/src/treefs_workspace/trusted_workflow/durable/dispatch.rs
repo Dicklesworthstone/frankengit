@@ -11,8 +11,8 @@ use super::super::{
     PathBuf, PermissionsExt, RefName, RepositoryAuthorityHeadId, SOURCE_LIMITS, Sha1, Sha256,
     SparseEntryKind, SparseManifest, TreeCapability, TreePath, TrustedWorkflowArtifactConfig,
     TrustedWorkflowFailure, TrustedWorkflowRun, WorkflowInputs, WorkflowLimits, WorkflowPlan,
-    WorkspaceId, artifacts, candidate, fs, hex, publish_report, run_inputs, validate_inputs,
-    workspace_request_live, write_new,
+    WorkspaceId, artifacts, candidate, fs, hex, publish_report, publish_workflow_custody,
+    run_inputs, validate_inputs, workspace_request_live, write_new,
 };
 use fgit_crypto::sha256_digest;
 use fgit_forge::review::{ComparisonMode, SourcePathChanges};
@@ -89,6 +89,31 @@ impl TrustedWorkflowDispatch {
                     "dispatch finished but report durability failed: {error}; do not replay"
                 ),
             })
+    }
+
+    /// After the command's signal monitor and node both close successfully,
+    /// retain the exact report digest before returning any stdout bytes.
+    pub fn retain_finalized_reply(&self) -> Result<String, TrustedWorkflowFailure> {
+        let report = self.to_json();
+        let digest = hex(&sha256_digest(report.as_bytes()));
+        let finalized = format!(
+            "{{\"type\":\"workflow_dispatch_finalization\",\"schema_version\":1,\"node_closed\":true,\"report_sha256\":\"{digest}\"}}"
+        );
+        File::open(&self.run_directory)
+            .and_then(|root| {
+                publish_workflow_custody(
+                    &root,
+                    &self.run_directory,
+                    ".finalization.pending",
+                    "finalization.json",
+                    finalized.as_bytes(),
+                )
+            })
+            .map_err(|error| TrustedWorkflowFailure::Journal {
+                directory: self.run_directory.clone(),
+                detail: format!("dispatch finalization record failed: {error}; do not replay"),
+            })?;
+        Ok(report)
     }
 
     fn persist_child_reports(&self) -> Result<(), TrustedWorkflowFailure> {

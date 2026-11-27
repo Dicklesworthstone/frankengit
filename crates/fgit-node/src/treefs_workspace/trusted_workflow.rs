@@ -985,10 +985,19 @@ fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     file.sync_all()
 }
 fn publish_report(root: &File, directory: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let temporary = directory.join(".report.pending");
+    publish_workflow_custody(root, directory, ".report.pending", "report.json", bytes)
+}
+fn publish_workflow_custody(
+    root: &File,
+    directory: &Path,
+    pending: &str,
+    name: &str,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    let temporary = directory.join(pending);
     write_new(&temporary, bytes)?;
     // A completed result can never be replaced by a rerun or later failure.
-    fs::hard_link(&temporary, directory.join("report.json"))?;
+    fs::hard_link(&temporary, directory.join(name))?;
     root.sync_all()?;
     fs::remove_file(temporary)?;
     root.sync_all()

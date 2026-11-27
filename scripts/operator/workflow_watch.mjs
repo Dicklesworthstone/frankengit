@@ -382,6 +382,17 @@ async function reconcileOne(config, record, checkpoint = () => {}) {
   const raw = await readPrivate(join(location.batch, 'report.json'), 40 * 1024 * 1024, true);
   checkpoint();
   if (!raw) return false;
+  if (!record.reply) {
+    const bytes = await readPrivate(join(location.batch, 'finalization.json'), 512, true);
+    checkpoint();
+    if (!bytes) return false;
+    const finalization = parseJson(bytes, 512);
+    keys(finalization, ['type', 'schema_version', 'node_closed', 'report_sha256']);
+    if (finalization.type !== 'workflow_dispatch_finalization' || finalization.schema_version !== 1 ||
+        finalization.node_closed !== true || finalization.report_sha256 !== digest(raw)) {
+      fail('Saved native report differs from its finalization record. Execution remains unresolved.');
+    }
+  }
   const result = dispatchReport(config, record.intent, parseJson(raw, 40 * 1024 * 1024));
   if (record.reply && result.report_sha256 !== record.reply.report_sha256) {
     fail('Saved native report differs from the returned dispatch. Execution remains unresolved.');
