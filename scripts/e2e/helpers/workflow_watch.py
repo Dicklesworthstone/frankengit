@@ -1,10 +1,13 @@
 """Real native latest-ref workflow polling and cancellation, no execution stand-in."""
+from array import array
+import fcntl
 import json
 import os
 from pathlib import Path
 import signal
 import subprocess
 import sys
+import termios
 import time
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from workspace_tool_smoke import TENANT,REPOSITORY,PRINCIPAL,REF,write_object,tree,commit
@@ -85,6 +88,89 @@ def alive(pid):
     try:return Path(f'/proc/{pid}/stat').read_text().rsplit(') ',1)[1][0]not in 'ZX'
     except FileNotFoundError:return False
 
+def stop_during_settled_output(fmt):
+    # Keep the foreground CLI blocked while delivering the settled poll. The
+    # workflow itself has already closed before the signal reaches the watch.
+    f = Fixture(fmt, 'settled-output-stop', tail="printf '%08000d' 0")
+    base_ref = 'refs/heads/base'
+    base_tree = write_object(f.source, fmt, 'tree', b'')
+    base = write_object(f.source, fmt, 'commit', commit(base_tree, None, 2, b'base\n'))
+    (f.source / REF).unlink()
+    (f.source / base_ref).write_text(base + '\n')
+    (f.source / 'HEAD').write_text(f'ref: {base_ref}\n')
+    invoke('import-base', ['import', *f.scope, PRINCIPAL, 'settled-output-base', f.source])
+    credentials = invoke('read-incarnation', ['serve-http', *f.scope, '127.0.0.1:0', '--trusted-local',
+                                               '--print-credentials-header']).decode().split()
+    assert credentials[:3] == ['frankengit-http-credentials-v1', TENANT, REPOSITORY] and len(credentials) == 4
+    invoke('open-pr', ['pr', 'open', *f.scope, '7', '--trusted-local', '--principal', PRINCIPAL,
+                       '--idempotency-key', 'settled-output-pr', '--expected-version', '0', '--source-ref', REF,
+                       '--target-ref', base_ref, '--expected-source', f.tip, '--expected-target', base,
+                       '--title', 'Settled output stop', '--body', 'Check publication restart', '--object-format', fmt])
+
+    def checks(label):
+        result = invoke(label, ['pr', 'checks', *f.scope, '7', '--trusted-local', '--object-format', fmt])
+        return json.loads(result)['checks']
+
+    assert checks('before-settled-stop') == []
+    watch = [*f.args(), '--publish-checks', '--principal-id', PRINCIPAL, '--expected-incarnation', credentials[-1]]
+    out, err = f.home / 'settled-stop.out', f.home / 'settled-stop.err'
+    with err.open('wb') as stderr:
+        child = subprocess.Popen([fg, *map(str, watch)], stdout=subprocess.PIPE, stderr=stderr, pipesize=4096)
+    try:
+        def delivering_poll():
+            available = array('i', [0])
+            fcntl.ioctl(child.stdout.fileno(), termios.FIONREAD, available, True)
+            assert child.poll() is None, err.read_bytes()
+            return available[0] > 0 and any(f.parent.glob('watch-*/event-*/settled'))
+
+        wait_for(delivering_poll, seconds=15)
+        child.send_signal(signal.SIGTERM)
+        time.sleep(.2)  # Keep stdout full while the owned signal observer runs.
+        assert child.poll() is None
+        output, _ = child.communicate(timeout=15)
+        out.write_bytes(output)
+        assert child.returncode == 1, (child.returncode, err.read_bytes())
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+        child.stdout.close()
+    if diagnostic := err.read_bytes():
+        sys.stderr.buffer.write(diagnostic)
+        sys.stderr.buffer.flush()
+    observations = rows(out)
+    poll = next(row['poll'] for row in observations if row['type'] == 'workflow_watch_poll')
+    terminal = observations[-1]
+    assert poll['execution_settled'] and poll['dispatch']['succeeded'] and f.count() == 'x'
+    assert terminal['node_closed'] and terminal['request_stopped'] and not terminal['non_green']
+    assert not terminal['requires_reconciliation'], terminal
+    assert terminal['committed_check_decisions'] == 0 and checks('before-settled-restart') == []
+
+    restarted = [json.loads(line) for line in invoke('restart-settled-stop', watch).splitlines()]
+    assert restarted[-1]['dispatched'] == 0 and restarted[-1]['committed_check_decisions'] == 1
+    retained = checks('after-settled-restart')
+    assert len(retained) == 1 and retained[0]['conclusion'] == 'success' and f.count() == 'x'
+    repeated = json.loads(invoke('repeat-settled-stop', watch).splitlines()[-1])
+    assert repeated['dispatched'] == repeated['committed_check_decisions'] == 0
+    assert checks('after-settled-repeat') == retained and f.count() == 'x'
+    f.advance()
+    successor = [json.loads(line) for line in invoke('successor-after-settled-stop', watch).splitlines()]
+    assert successor[-1]['dispatched'] == successor[-1]['committed_check_decisions'] == 1
+    selected = next(row['poll'] for row in successor if row['type'] == 'workflow_watch_poll')
+    assert selected['dispatch']['runs'][0]['source_commit'] == f.tip and f.count() == 'xx'
+    case(fmt, 'settled-output-stop-recovers-one-check-and-resumes', event=poll['event']['event_id'],
+         check=retained[0]['id'], successor=f.tip)
+def advance_invalid_definition(f):
+    bad_path = b'ci/z-invalid.yml'
+    bad_yaml = b'name: invalid\non: push\njobs:\n  check:\n    runs-on: fgit-trusted-local\n    steps:\n      - uses: external/action@v1\n'
+    bad_blob = write_object(f.source, f.fmt, 'blob', bad_yaml)
+    bad_entries = tree([(b'100644', b'build.yml', f.workflow_blob),
+                        (b'100644', b'z-invalid.yml', bad_blob)])
+    bad_ci = write_object(f.source, f.fmt, 'tree', bad_entries)
+    f.tree = write_object(f.source, f.fmt, 'tree', tree([(b'40000', b'ci', bad_ci)]))
+    f.advance()
+    return bad_path, bad_blob
+
 def definition_refusal(fmt, ordered):
     profile = 'ordered' if ordered else 'latest'
     f = Fixture(fmt, f'{profile}-definition-refusal')
@@ -104,15 +190,7 @@ def definition_refusal(fmt, ordered):
     assert poll('publish-anchor')[-1]['committed_check_decisions'] == 1
     assert f.count() == 'x'
     good_tree = f.tree
-    source = f.source
-    bad_path = b'ci/z-invalid.yml'
-    bad_yaml = b'name: invalid\non: push\njobs:\n  check:\n    runs-on: fgit-trusted-local\n    steps:\n      - uses: external/action@v1\n'
-    bad_blob = write_object(source, fmt, 'blob', bad_yaml)
-    bad_entries = tree([(b'100644', b'build.yml', f.workflow_blob),
-                        (b'100644', b'z-invalid.yml', bad_blob)])
-    bad_ci = write_object(source, fmt, 'tree', bad_entries)
-    f.tree = write_object(source, fmt, 'tree', tree([(b'40000', b'ci', bad_ci)]))
-    f.advance()
+    bad_path, bad_blob = advance_invalid_definition(f)
     rejected = f.tip
     if ordered:
         f.tree = good_tree
@@ -160,6 +238,151 @@ def definition_refusal(fmt, ordered):
     assert poll('suppress-repaired-repeat')[-1]['committed_check_decisions'] == 0
     assert f.count() == 'xx'
     case(fmt, f'{profile}-refusal-ack-recovery-and-successor', repaired=f.tip)
+
+def oversized_preflight(fmt, ordered):
+    profile = 'ordered' if ordered else 'latest'
+    f = Fixture(fmt, f'{profile}-oversized-preflight')
+    watch = f.args() + (['--ordered-branch-updates'] if ordered else [])
+
+    def poll(label, code=0):
+        return [json.loads(line) for line in invoke(label, watch, code).splitlines()]
+
+    anchor = poll('preflight-anchor')[0]['poll']
+    watch.extend(['--publish-checks', '--principal-id', PRINCIPAL,
+                  '--expected-incarnation', anchor['event']['repository_incarnation']])
+    assert poll('publish-preflight-anchor')[-1]['committed_check_decisions'] == 1
+    custody = Path(os.fsdecode(bytes.fromhex(anchor['event']['custody_directory_hex']))).parent
+    before = set(custody.iterdir())
+
+    idle_yaml = (b'name: idle\non: workflow_dispatch\njobs:\n  idle:\n'
+                 b'    runs-on: fgit-trusted-local\n    steps:\n      - run: true\n')
+    idle_blob = write_object(f.source, fmt, 'blob', idle_yaml)
+    files = [(b'100644', b'build.yml', f.workflow_blob)]
+    files.extend((b'100644', f'idle-{index:02}.yml'.encode(), idle_blob) for index in range(32))
+
+    def workflow_tree(entries):
+        ci = write_object(f.source, fmt, 'tree', tree(entries))
+        return write_object(f.source, fmt, 'tree', tree([(b'40000', b'ci', ci)]))
+
+    f.tree = workflow_tree(files)
+    f.advance()
+    rejected = f.tip
+    refused = poll('oversized-workflow-directory', 2)[-1]
+    assert 'dispatch exceeds 32 workflow definitions' in refused['operation_error']
+    assert refused['committed_check_decisions'] == 0 and f.count() == 'x'
+    after_refusal = set(custody.iterdir())
+
+    f.tree = workflow_tree(files[:-1])
+    f.advance()
+    next_rows = poll('after-oversized-workflow-directory', 2 if ordered else 0)
+    if ordered:
+        assert 'dispatch exceeds 32 workflow definitions' in next_rows[-1]['operation_error']
+        assert not next_rows[-1]['requires_reconciliation']
+        assert next_rows[-1]['committed_check_decisions'] == 0 and f.count() == 'x'
+        assert set(custody.iterdir()) == before
+    else:
+        successor = next(row['poll'] for row in next_rows if row['type'] == 'workflow_watch_poll')
+        assert successor['event']['commit'] == f.tip and successor['execution_settled']
+        assert successor['dispatch']['matched_count'] == 1
+        assert len(successor['dispatch']['plan']['workflows']) == 32
+        assert next_rows[-1]['committed_check_decisions'] == 1 and f.count() == 'xx'
+        assert poll('suppress-oversized-successor-repeat')[-1]['committed_check_decisions'] == 0
+        assert f.count() == 'xx'
+    assert not refused['requires_reconciliation'] and after_refusal == before
+    case(fmt, f'{profile}-oversized-preflight-preserves-custody', rejected=rejected, successor=f.tip)
+
+def tag_definition_refusal(fmt):
+    f = Fixture(fmt, 'tag-definition-refusal')
+    ref = 'refs/tags/v1'
+    tag_options = ['--trusted-local', '--object-format', fmt, '--ref', ref]
+    read = ['tag', 'show', *f.scope, *tag_options]
+    mutation = [*f.scope, *tag_options, '--principal', PRINCIPAL]
+    watch = f.args()
+    watch[watch.index(REF)] = ref
+    message = f.home / 'annotation'
+    message.write_bytes(b'Release v1\n')
+
+    def annotate(label):
+        receipt = json.loads(invoke(label, [
+            'tag', 'annotate', *mutation, '--idempotency-key', label,
+            '--target', f.tip, '--target-kind', 'commit',
+            '--tagger', 'Release <release@example.invalid>', '--timestamp', str(f.revision),
+            '--message-file', message,
+        ]))
+        assert receipt['command_committed'] and receipt['node_closed'], receipt
+
+    def poll(label, code=0):
+        observations = [json.loads(line) for line in invoke(label, watch, code).splitlines()]
+        summary = observations[-1]
+        assert summary['node_closed'] and summary['committed_check_decisions'] == 0, summary
+        return next((row['poll'] for row in observations if row['type'] == 'workflow_watch_poll'),
+                    None), summary
+
+    good_tree = f.tree
+    bad_path, bad_blob = advance_invalid_definition(f)
+    annotate('annotate-invalid-release')
+    original_tag = invoke('read-invalid-release', read)
+    tag = json.loads(original_tag)
+    raw = tag['tip']
+    assert tag['peeled'] == f.tip and raw != f.tip, tag
+
+    refused, summary = poll('reject-invalid-tag-definition', 1)
+    assert refused['execution_settled'] and refused['event']['tag_tip'] == raw, refused
+    assert refused['event']['commit'] == f.tip and summary['non_green'], summary
+    assert not summary['requires_reconciliation'] and f.count() == ''
+    dispatch = refused['dispatch']
+    assert dispatch['stop_reason'] == 'definition_refused' and dispatch['executed_count'] == 0
+    plan = dispatch['plan']
+    assert plan['workflows'] == [] and plan['source_tag_tip'] == raw
+    refusal = plan['definition_refusal']
+    assert refusal['code'] == 'workflow_compile_refused', refusal
+    assert bytes.fromhex(refusal['path_hex']) == bad_path and refusal['blob'] == bad_blob
+    assert invoke('unchanged-invalid-tag', read) == original_tag
+    case(fmt, 'tag-definition-refuses-before-any-job', raw=raw, peeled=f.tip)
+
+    event = Path(os.fsdecode(bytes.fromhex(refused['event']['custody_directory_hex'])))
+    dispatch_dir = Path(os.fsdecode(bytes.fromhex(plan['run_directory_hex'])))
+    marker = event / 'settled'
+    ack = marker.read_bytes()
+    marker.unlink()
+    handoff = (event / 'check-sources').read_bytes()
+    for path, field in [(event / 'event.json', 'tag_tip'),
+                        (dispatch_dir / 'dispatch.json', 'source_tag_tip')]:
+        original = path.read_bytes()
+        old = f'"{field}":"{raw}"'.encode()
+        assert original.count(old) == 1
+        path.write_bytes(original.replace(old, f'"{field}":"{f.tip}"'.encode()))
+        poll('reject-peeled-in-place-of-tag-tip', 2)
+        assert not marker.exists() and f.count() == ''
+        path.write_bytes(original)
+    child = dispatch_dir / ('workflow-' + 'f' * 32)
+    child.mkdir(mode=0o700)
+    poll('reject-unrecorded-tag-child', 2)
+    assert not marker.exists() and f.count() == ''
+    child.rmdir()
+    recovered, summary = poll('recover-tag-refusal-acknowledgement')
+    assert recovered['state'] == 'previously_settled' and not summary['requires_reconciliation']
+    assert marker.read_bytes() == ack and (event / 'check-sources').read_bytes() == handoff
+    assert invoke('unchanged-after-tag-recovery', read) == original_tag and f.count() == ''
+    case(fmt, 'tag-refusal-acknowledgement-recovers-without-execution', raw=raw)
+
+    f.tree = good_tree
+    f.advance()
+    invoke('delete-invalid-tag', ['tag', 'delete', *mutation, '--idempotency-key',
+                                  'delete-invalid-tag', '--expected-tip', raw])
+    annotate('annotate-corrected-release')
+    corrected_tag = invoke('read-corrected-release', read)
+    tag = json.loads(corrected_tag)
+    assert tag['tip'] != raw and tag['peeled'] == f.tip
+    allowed, _ = poll('run-corrected-release')
+    assert allowed['execution_settled'] and allowed['event']['tag_tip'] == tag['tip']
+    run, = allowed['dispatch']['runs']
+    assert run['executed_commit'] == f.tip and run['source_tag_tip'] == tag['tip']
+    assert run['succeeded'] and run['workspaces_closed'] and f.count() == 'x'
+    repeated, _ = poll('suppress-corrected-tag-replay')
+    assert repeated['state'] == 'previously_settled' and f.count() == 'x'
+    assert invoke('unchanged-after-release', read) == corrected_tag
+    case(fmt, 'corrected-release-runs-once', raw=tag['tip'], peeled=f.tip)
 
 def failed_report(fmt, level):
     # Block a real job until the fixture occupies one report's name.
@@ -271,6 +494,10 @@ for fmt in ('sha1','sha256'):
     old=f.count();invalid=f.args();invalid.extend(['--event','push']);invoke('reject-caller-event',invalid,2);assert f.count()==old;case(fmt,'caller-event-refused')
     definition_refusal(fmt, ordered=False)
     definition_refusal(fmt, ordered=True)
+    oversized_preflight(fmt, ordered=False)
+    oversized_preflight(fmt, ordered=True)
+    tag_definition_refusal(fmt)
     failed_report(fmt, 'batch')
     failed_report(fmt, 'child')
+    stop_during_settled_output(fmt)
 (root/'results.json').write_text(json.dumps(results,indent=2))

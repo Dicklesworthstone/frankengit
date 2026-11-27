@@ -180,7 +180,7 @@ impl OneNode {
                             None,
                         )),
                         None,
-                        false,
+                        None::<fn() -> Result<(), TrustedWorkflowFailure>>,
                         false,
                     )
                     .and_then(|report| {

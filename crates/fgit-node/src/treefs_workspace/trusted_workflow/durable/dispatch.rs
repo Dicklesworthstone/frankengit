@@ -344,7 +344,12 @@ impl OneNode {
         path_basis: Option<PathBasis>,
         reserve: Option<impl FnOnce() -> Result<(), TrustedWorkflowFailure> + Send>,
     ) -> Result<TrustedWorkflowDispatch, TrustedWorkflowFailure> {
-        let retain_definition_refusal = expected.settle_definition_refusal && reserve.is_some();
+        let (reserve_before_discovery, reserve_after_preflight) =
+            if expected.settle_definition_refusal {
+                (None, reserve)
+            } else {
+                (reserve, None)
+            };
         let bytes = ByteCount::try_new("workflow source", FETCH_BYTES, FETCH_BYTES)
             .map_err(|_| TrustedWorkflowFailure::InvalidInput("source budget"))?;
         let declared = paths
@@ -380,10 +385,9 @@ impl OneNode {
                                 "dispatch stopped before discovery",
                             ));
                         }
-                        // Exact source pins are checked before this consumer.
-                        // Reserve watcher custody only once that snapshot exists,
-                        // and before any workflow discovery or execution effects.
-                        if let Some(reserve) = reserve {
+                        // A merge watch keeps its durable start fence before
+                        // discovery. An ordinary watch reserves after preflight.
+                        if let Some(reserve) = reserve_before_discovery {
                             reserve()?;
                         }
                         let manifest = Arc::new(
@@ -413,7 +417,7 @@ impl OneNode {
                             source,
                             path_basis,
                             tag_tip,
-                            retain_definition_refusal,
+                            reserve_after_preflight,
                             expected.watch_owns_completion,
                         )?;
                         if !expected.watch_owns_completion {
@@ -439,7 +443,9 @@ impl OneNode {
                 let mut detail = format!(
                     "dispatch source finalization failed after execution: {error}; inspect saved reports, do not replay"
                 );
-                if expected.watch_owns_completion && let Err(error) = report.persist_watch_reports() {
+                if expected.watch_owns_completion
+                    && let Err(error) = report.persist_watch_reports()
+                {
                     write!(detail, ". Report delivery also failed: {error}")
                         .expect("writing to a String cannot fail");
                 }
@@ -475,7 +481,7 @@ fn dispatch_at<A: GitHashAlgorithm>(
     source: &crate::treefs_workspace::NodeTreeSource<'_>,
     path_basis: Option<PathBasis>,
     tag_tip: Option<GitOid>,
-    retain_definition_refusal: bool,
+    reserve_after_preflight: Option<impl FnOnce() -> Result<(), TrustedWorkflowFailure>>,
     watch_owns_completion: bool,
 ) -> Result<TrustedWorkflowDispatch, TrustedWorkflowFailure> {
     let invalid = TrustedWorkflowFailure::InvalidInput;
@@ -515,7 +521,7 @@ fn dispatch_at<A: GitHashAlgorithm>(
             });
         let plan = match compiled {
             Ok(plan) => plan,
-            Err(error) if retain_definition_refusal => {
+            Err(error) if reserve_after_preflight.is_some() => {
                 // Compilation happens before any child or artifact session is
                 // opened. Preserve the rejected definition and discard the
                 // partially compiled plan so no earlier valid job can run.
@@ -762,6 +768,11 @@ fn dispatch_at<A: GitHashAlgorithm>(
     };
     if !live() {
         return Err(invalid("dispatch stopped before batch reservation"));
+    }
+    if let Some(reserve) = reserve_after_preflight {
+        // The pinned snapshot supplied read-only preflight. Acquire event
+        // custody before storing a dispatch plan or opening any child.
+        reserve()?;
     }
     let metadata = fs::symlink_metadata(parent).map_err(|source| TrustedWorkflowFailure::Io {
         operation: "inspect dispatch parent",

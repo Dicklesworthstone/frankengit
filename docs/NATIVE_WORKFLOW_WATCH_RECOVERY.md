@@ -113,9 +113,10 @@ anything. Ordinary completions continue to use `FGWCS001`.
 The next live owner can publish the exact retained **cancelled** checks through
 normal native admission, once, and then process later source events. It does not
 rerun the original scripts. Completed failed or successful jobs retain their
-own original conclusions; unstarted later workflow definitions receive no
-invented checks. A late stop after a completed durable handoff remains an
-interrupted service result without an unresolved-execution fence.
+own original conclusions. Unstarted later workflow definitions produce no
+checks. A service stop during report delivery preserves an already settled
+successful dispatch. Pending check publication remains visible in the drain
+receipt.
 
 A stop after the exact dispatch plan was persisted but before its first child
 may also settle, using the explicit v2 terminal record. Recovery requires the
@@ -126,15 +127,20 @@ Cancellation during earlier source discovery, an error without a returned
 terminal dispatch, an unfinished `Started` owner, abrupt termination and
 unproved descendant containment remain unresolved.
 
-An ordinary branch push or PR source-head event rejected during definition
+An ordinary watch can refuse read-only resource preflight before it reserves
+an event. A latest-state watch can then select a corrected successor. An
+ordered branch watch still observes the earliest pending reachable change.
+
+An ordinary branch push, tag update or PR source-head event rejected during definition
 compilation uses the v2 completion handoff with reason `definition_refused`,
 zero selected and executed children, and the committed dispatch-plan digest.
 The plan binds the refused definition's path and blob to the event's exact
-source. New plans include a refusal code and bounded diagnostic. Branch plans
+source. Tag plans also bind the raw tag tip and observed authority head. New
+plans include a refusal code and bounded diagnostic. Branch plans
 written before the code was added remain readable. Recovery rejects a changed
 plan or unexpected child and restores only the missing settlement
 acknowledgement, including for a PR that has since closed. The publisher has
-zero checks to submit for the refused event. Later corrected commits can run
+zero checks to submit for the refused event. Later corrected sources can run
 under the same watch custody.
 
 ## What is verified

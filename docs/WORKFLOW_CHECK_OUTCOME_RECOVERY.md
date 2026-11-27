@@ -143,6 +143,9 @@ allowance cannot increase new-work capacity or evict original receipts.
 Exit 0 means all saved jobs are settled as committed, or there are no pending
 jobs. Exit 1 means at least one saved canonical refusal and no pending jobs.
 Exit 3 means pending/unknown work, a lookup limit, or an unavailable outcome.
+An expired operation or request deadline reports `outcome_timeout` with exit 3.
+Earlier terminal observations remain in the saved state and are skipped on the
+next invocation.
 Exit 2 means input or local-state failure. Exit 4 distinguishes a known terminal
 from later local delivery/cleanup failure. Saved terminal observations are
 historical, not a claim that their HTTP lookup was repeated on every invocation.

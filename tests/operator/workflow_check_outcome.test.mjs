@@ -233,10 +233,30 @@ test('simultaneous recovery owners are excluded without touching the native send
   await assert.rejects(recover(f.config, server.address, token), error => error.code === 'EEXIST');
   release(); await first; assert.equal(server.calls.length, 1); assert.equal((await status(f.config)).owner_present, true);
 });
-test('whole-operation deadline applies across lookups, not once per job', LINUX_WORKFLOW, async t => {
-  const f = await fixture(t, 'sha1', 2), server = await peer(t, f, async call => { await new Promise(resolve => setTimeout(resolve, 100)); return outcome(f, call.job); });
-  await assert.rejects(recover(f.config, server.address, token, { timeoutMs: 30 }), /timeout/); assert.equal(server.calls.length, 1);
-  assert.equal((await status(f.config)).runs[0].unknown, 2);
+test('whole-operation timeout preserves the first terminal and leaves the second key pending', LINUX_WORKFLOW, async t => {
+  const f = await fixture(t, 'sha1', 2), server = await peer(t, f);
+  const timeout = 30_000, now = performance.now.bind(performance);
+  let elapsed = 0, errors = '';
+  t.mock.method(performance, 'now', () => now() + elapsed);
+  const stdout = new Writable({ write(chunk, _encoding, done) {
+    if (JSON.parse(chunk.toString()).type === 'workflow_check_outcome_observed') elapsed += timeout;
+    done();
+  } });
+  const stderr = new Writable({ write(chunk, _encoding, done) { errors += chunk; done(); } });
+  const exit = await main(argumentsFor(f, server.address, 'recover', ['--timeout-ms', String(timeout)]), { stdout, stderr });
+  assert.equal(exit, 3, errors);
+  const diagnostic = JSON.parse(errors);
+  assert.equal(diagnostic.message, 'outcome_timeout');
+  assert.equal(diagnostic.publication_unknown, true);
+  assert.equal(diagnostic.retained_recovery.runs[0].committed, 1);
+  assert.equal(diagnostic.retained_recovery.runs[0].unknown, 1);
+  assert.deepEqual(server.calls.map(call => call.headers['idempotency-key']), [f.jobs[0].key]);
+  const saved = await readFile(f.path('observed'));
+  const resumed = await recover(f.config, server.address, token);
+  assert.equal(resumed.lookups, 1);
+  assert.equal(resumed.runs[0].committed, 2);
+  assert.deepEqual(await readFile(f.path('observed')), saved);
+  assert.deepEqual(server.calls.map(call => call.headers['idempotency-key']), f.jobs.map(job => job.key));
 });
 test('cancellation after a validated terminal saves it and stops before the next job', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', 2), server = await peer(t, f), controller = new AbortController();

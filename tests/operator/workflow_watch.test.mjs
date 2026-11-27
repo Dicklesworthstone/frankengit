@@ -58,6 +58,7 @@ for (const format of ['sha1', 'sha256']) {
     const files = await readdir(f.config.state_directory);
     assert.equal(files.filter(n => n.startsWith('intent-')).length, 1);
     assert.equal(files.filter(n => n.startsWith('started-')).length, 1);
+    assert.equal(files.filter(n => n.startsWith('reply-')).length, 1);
     assert.equal(files.filter(n => n.startsWith('result-')).length, 1);
     assert.equal(files.includes('owner.lock'), false);
     assert.equal((await once(f.config)).reason, 'commit_already_observed');
@@ -90,6 +91,103 @@ for (const format of ['sha1', 'sha256']) {
     const recovered = await reconcile(f.config); assert.equal(recovered.records[0].state, 'observed_succeeded');
     assert.equal((await f.lines('calls.ndjson')).length, calls, 'reconcile performs no child execution');
     assert.equal((await once(f.config)).reason, 'commit_already_observed');
+    assert.equal((await f.lines('effects.ndjson')).length, 1);
+  });
+  test(`${format}: contradictory native reports stay unresolved across restart`, LINUX_WORKFLOW, async t => {
+    const returned = { succeeded: false, stop_reason: 'request_stopped' };
+    const f = await fixture(t, format, { stdout_patch: returned, exit_code: 1 });
+    await assert.rejects(once(f.config), /Saved native report differs from the returned dispatch/);
+    const { records: [pending] } = await status(f.config);
+    assert.equal(pending.state, 'execution_unknown');
+    const savedPath = join(pending.native_directory, 'report.json');
+    const replyPath = join(f.config.state_directory, `reply-${pending.id}.json`);
+    const resultPath = join(f.config.state_directory, `result-${pending.id}.json`);
+    const savedBytes = await readFile(savedPath);
+    assert.equal(JSON.parse(savedBytes).succeeded, true);
+    const replyBytes = `${JSON.stringify({ ...JSON.parse(savedBytes), ...returned })}\n`;
+    const digest = createHash('sha256').update(replyBytes).digest('hex');
+    const reply = await readFile(replyPath);
+    assert.equal(JSON.parse(reply).report_sha256, digest);
+    await assert.rejects(lstat(resultPath), { code: 'ENOENT' });
+
+    const fresh = await child(['reconcile', '--config', f.configFile, '--trusted-local']).done;
+    assert.equal(fresh.code, 3);
+    assert.match(fresh.errors, /Saved native report differs from the returned dispatch/);
+    assert.deepEqual(await readFile(savedPath), savedBytes);
+    await assert.rejects(lstat(resultPath), { code: 'ENOENT' });
+    await assert.rejects(once(f.config), /unresolved/);
+    assert.equal((await f.lines('effects.ndjson')).length, 1);
+    assert.equal((await f.lines('calls.ndjson')).length, 2);
+
+    // Restore the exact reply from the controlled peer, keeping the original
+    // intent and execution identity.
+    await writeFile(savedPath, replyBytes);
+    const recovered = await reconcile(f.config);
+    assert.equal(recovered.records[0].state, 'observed_stopped');
+    assert.equal(JSON.parse(await readFile(resultPath)).report_sha256, digest);
+    assert.deepEqual(await readFile(replyPath), reply);
+    assert.equal((await once(f.config)).reason, 'commit_already_observed');
+    assert.equal((await f.lines('effects.ndjson')).length, 1);
+
+    await f.set({ commit: 'e'.repeat(f.control.commit.length), stdout_patch: null, exit_code: null });
+    assert.equal((await once(f.config)).outcome, 'observed_succeeded');
+    assert.equal((await f.lines('effects.ndjson')).length, 2);
+  });
+  test(`${format}: an explicit native shutdown failure cannot recover as success`, LINUX_WORKFLOW, async t => {
+    const cleanupError = 'fixture node shutdown failed after retaining the report';
+    const f = await fixture(t, format, { node_cleanup_error: cleanupError });
+    const initial = await child(['once', '--config', f.configFile, '--trusted-local']).done;
+    const { records: [pending] } = await status(f.config);
+    assert.equal(pending.state, 'execution_unknown');
+    const savedPath = join(pending.native_directory, 'report.json');
+    const saved = await readFile(savedPath);
+    assert.equal(JSON.parse(saved).succeeded, true);
+
+    const fresh = await child(['reconcile', '--config', f.configFile, '--trusted-local']).done;
+    assert.equal(fresh.code, 3, fresh.output || fresh.errors);
+    for (const run of [initial, fresh]) {
+      assert.equal(run.code, 3);
+      assert.match(run.errors, /native.*finalization/i);
+    }
+    const replyPath = join(f.config.state_directory, `reply-${pending.id}.json`);
+    const intent = await readFile(join(f.config.state_directory, `intent-${pending.id}.json`));
+    const reply = await readFile(replyPath);
+    assert.deepEqual(JSON.parse(reply), {
+      schema: 'frankengit-workflow-watch-reply-unclosed-v1',
+      intent_sha256: createHash('sha256').update(intent).digest('hex'),
+    });
+    assert.equal(reply.includes(cleanupError), false);
+    assert.deepEqual(await readFile(savedPath), saved);
+    await assert.rejects(lstat(join(f.config.state_directory, `result-${pending.id}.json`)), { code: 'ENOENT' });
+
+    await f.set({ commit: 'e'.repeat(f.control.commit.length), node_cleanup_error: null });
+    await assert.rejects(once(f.config), /unresolved/);
+    assert.equal((await f.lines('effects.ndjson')).length, 1);
+    assert.equal((await f.lines('calls.ndjson')).length, 2);
+    assert.deepEqual(await readFile(replyPath), reply);
+  });
+  test(`${format}: reconciliation cannot settle a report while the native reply is outstanding`, LINUX_WORKFLOW, async t => {
+    const f = await fixture(t, format, { hold_reply: true, drop_stdout: true });
+    const run = child(['once', '--config', f.configFile, '--trusted-local']);
+    const owner = join(f.config.state_directory, 'owner.lock');
+    try {
+      await waitFor(() => lstat(join(f.config.storage_root, 'reply-ready'))
+        .then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; }));
+      const { records: [pending] } = await status(f.config);
+      const identity = await lstat(owner);
+      const during = await child(['reconcile', '--config', f.configFile, '--trusted-local']).done;
+      assert.equal(during.code, 3, during.output || during.errors);
+      assert.equal(JSON.parse(during.output).records[0].state, 'execution_unknown');
+      assert.equal((await lstat(owner)).ino, identity.ino);
+      await assert.rejects(lstat(join(f.config.state_directory, `result-${pending.id}.json`)), { code: 'ENOENT' });
+    } finally {
+      await writeFile(join(f.config.storage_root, 'release-reply'), '', { mode: 0o600 });
+      await run.done;
+    }
+    assert.equal((await run.done).code, 3);
+    const after = await child(['reconcile', '--config', f.configFile, '--trusted-local']).done;
+    assert.equal(after.code, 0, after.errors);
+    assert.equal(JSON.parse(after.output).records[0].state, 'observed_succeeded');
     assert.equal((await f.lines('effects.ndjson')).length, 1);
   });
 }
@@ -333,7 +431,8 @@ test('queued pre-execution intent resumes at its original pins without another s
 test('corrupt local summary cannot gain check authority or alter complete-run accounting', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), result = await once(f.config), path = join(f.config.state_directory, `result-${result.id}.json`);
   const saved = JSON.parse(await readFile(path, 'utf8'));
-  for (const patch of [{ authoritative_check: true }, { executed_count: 0 }, { outcome: 'no_matching_workflows' }]) {
+  for (const patch of [{ authoritative_check: true }, { executed_count: 0 }, { outcome: 'no_matching_workflows' },
+    { report_sha256: '0'.repeat(64) }]) {
     await writeFile(path, JSON.stringify({ ...saved, ...patch }));
     await assert.rejects(once(f.config), /custody/);
   }
@@ -377,8 +476,6 @@ for (const signal of [null, 'SIGINT', 'SIGTERM']) {
     const calls = await f.lines('calls.ndjson'), effects = await f.lines('effects.ndjson');
     const entries = await readdir(f.config.state_directory);
     const custody = await Promise.all(entries.map(async name => [name, await readFile(join(f.config.state_directory, name))]));
-    const owner = join(f.config.state_directory, 'owner.lock');
-    await mkdir(owner, { mode: 0o700 }); const identity = await lstat(owner);
     await unlink(f.config.fg); // Reconciliation must use saved reports, never an executable.
     const listeners = ['SIGINT', 'SIGTERM'].map(name => process.listenerCount(name));
     let output = '', diagnostic = '';
@@ -395,7 +492,7 @@ for (const signal of [null, 'SIGINT', 'SIGTERM']) {
       const error = JSON.parse(diagnostic);
       assert.equal(error.type, 'workflow_watch_error'); assert.match(error.message, /stop requested/i);
       assert.equal(error.execution_retried, false); assert.equal(error.absence_proves_non_execution, false);
-      assert.deepEqual((await readdir(f.config.state_directory)).sort(), [...entries, 'owner.lock'].sort());
+      assert.deepEqual((await readdir(f.config.state_directory)).sort(), entries.sort());
       assert.equal((await status(f.config)).records[0].state, 'execution_unknown');
       // The same original custody remains recoverable on a later uncancelled call.
       output = ''; diagnostic = '';
@@ -408,8 +505,7 @@ for (const signal of [null, 'SIGINT', 'SIGTERM']) {
     assert.deepEqual(await readFile(reportPath), report);
     assert.deepEqual(['SIGINT', 'SIGTERM'].map(name => process.listenerCount(name)), listeners);
     for (const [name, bytes] of custody) assert.deepEqual(await readFile(join(f.config.state_directory, name)), bytes);
-    const retainedOwner = await lstat(owner);
-    assert.equal(retainedOwner.dev, identity.dev); assert.equal(retainedOwner.ino, identity.ino);
+    await assert.rejects(lstat(join(f.config.state_directory, 'owner.lock')), { code: 'ENOENT' });
     assert.deepEqual(await f.lines('calls.ndjson'), calls); assert.deepEqual(await f.lines('effects.ndjson'), effects);
     stdout.destroy(); stderr.destroy();
   });
