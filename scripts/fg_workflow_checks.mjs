@@ -14,7 +14,7 @@ const USAGE = `usage: node scripts/fg_workflow_checks.mjs <once|serve|resume|sta
   [--poll-millis <100..60000> --max-polls <1..1000000>] (serve only)
   --endpoint <https-repository-url> --token-file <absolute-private-token> (recover)
   --supervisor-config <absolute-private-config> --lane <bound-name> --trusted-local
-    (recover only, replaces --watch-config, --state and --principal-id)
+    (once/recover only, replaces --watch-config, --state and --principal-id)
   [--ca-file <absolute-private-PEM>] (recover; TLS verification stays enabled)
   [--max-lookups <1..128> --timeout-ms <1..660000> --request-timeout-ms <1..300000>] (recover)
 
@@ -66,7 +66,7 @@ function options(args) {
   }
   if (!fields.has('--trusted-local')) throw new Error(USAGE);
   if (supervisorFlags.some(flag => fields.has(flag))) {
-    if (args[0] !== 'recover' || !supervisorFlags.every(flag => fields.has(flag)) ||
+    if (!['once', 'recover'].includes(args[0]) || !supervisorFlags.every(flag => fields.has(flag)) ||
         publisherFlags.some(flag => fields.has(flag))) throw new Error(USAGE);
   } else if (!publisherFlags.every(flag => fields.has(flag))) throw new Error(USAGE);
   if (args[0] !== 'serve' && (fields.has('--poll-millis') || fields.has('--max-polls')) || args[0] === 'status' && fields.has('--max-publications')) throw new Error(USAGE);
@@ -93,7 +93,7 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
     let config;
     if (fields.has('--supervisor-config')) {
       const supervisor = await nativeController();
-      config = await supervisor.loadRecoveryPublisher(fields.get('--supervisor-config'), fields.get('--lane'));
+      config = await supervisor.loadBoundPublisher(fields.get('--supervisor-config'), fields.get('--lane'));
     } else {
       config = configuration({ schema: 'frankengit-workflow-check-publisher-v1',
         watch: await loadConfiguration(fields.get('--watch-config')), state_directory: fields.get('--state'), principal_id: fields.get('--principal-id') });

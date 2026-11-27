@@ -172,6 +172,12 @@ limited to 30 seconds; native publication retains the shared remaining deadline.
 The Rust publisher independently limits each selected evidence body to 1 MiB;
 an oversized observation refuses rather than being reduced to a success flag.
 
+For a supervised lane, `once --supervisor-config /srv/ci/supervisor.json
+--lane main --trusted-local` selects the publisher from the original saved
+supervisor binding. It takes the normal publisher owner lock and processes
+completed watcher observations. See the
+[post-crash procedure](WORKFLOW_SUPERVISOR_RECONCILIATION.md#publish-a-recovered-run).
+
 A publication directory retains at most 128 watcher-run plans. Plans are bounded
 to 1 MiB each and all custody reads to 32 MiB. Admission of a new plan reserves
 room for its worst-case start and terminal records inside that same 32 MiB

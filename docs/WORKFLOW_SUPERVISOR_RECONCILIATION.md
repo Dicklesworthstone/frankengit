@@ -57,6 +57,24 @@ another error. A settled observation does not grant a protected merge. After
 independent process/owner reconciliation, the ordinary `once`/`serve` path can
 continue using its original execution and publication identities.
 
+## Publish a recovered run
+
+When reconciliation installs the completed watcher summary, make the original
+native executable and repository storage available again. Run a single
+publication pass for the selected lane:
+
+```sh
+node scripts/fg_workflow_checks.mjs once \
+  --supervisor-config /srv/ci/supervisor.json --lane main --trusted-local
+```
+
+The publisher uses its original repository, principal and evidence. The
+ordinary publisher lock serializes the pass. The supervisor and watcher locks
+can stay in place while the pass publishes completed observations. An
+unresolved watcher run remains pending, and an uncertain prior publication
+still requires explicit outcome recovery. Repeating a settled publication
+pass preserves the original decisions.
+
 ## Verification
 
 `tests/operator/workflow_supervisor_reconcile.test.mjs` uses explicit backend

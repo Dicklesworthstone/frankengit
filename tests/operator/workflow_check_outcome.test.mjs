@@ -388,6 +388,36 @@ test('CLI refuses unbound, altered, unknown or ambiguous supervisor lane selecti
   assert.equal(server.calls.length, 0);
   assert.deepEqual((await readdir(f.config.state_directory)).sort(), before);
 });
+test('bound publisher once respects its own lock and preserves held supervisor and watcher locks', LINUX_WORKFLOW, async t => {
+  const f = await fixture(t), other = await fixture(t);
+  const supervisor = await supervisorFixture(f, other);
+  await supervisor.bind();
+  await save(f.path('terminal'), nativeTerminal(f));
+  const supervisorLock = join(supervisor.state, 'owner.lock');
+  const watcherLock = join(f.config.watch.state_directory, 'owner.lock');
+  const publisherLock = join(f.config.state_directory, 'owner.lock');
+  for (const lock of [supervisorLock, watcherLock, publisherLock]) await mkdir(lock, { mode: 0o700 });
+  const supervisorInode = (await lstat(supervisorLock)).ino, watcherInode = (await lstat(watcherLock)).ino;
+  const args = ['once', '--supervisor-config', supervisor.path, '--lane', 'selected', '--trusted-local', '--max-publications', '1'];
+  const held = await child(t, args).done;
+  assert.equal(held.code, 2);
+  assert.match(JSON.parse(held.stderr).message, /EEXIST/);
+  await rm(publisherLock, { recursive: true });
+  const published = await child(t, args).done;
+  assert.equal(published.code, 0, published.stderr);
+  const result = JSON.parse(published.stdout);
+  assert.equal(result.publications, 0);
+  assert.equal(result.runs[0].committed, 1);
+  assert.equal((await status(other.config)).runs[0].unknown, 1);
+  assert.equal((await lstat(supervisorLock)).ino, supervisorInode);
+  assert.equal((await lstat(watcherLock)).ino, watcherInode);
+  assert.equal((await status(f.config)).owner_present, false);
+  for (const invalid of [['once', ...args.slice(1), '--state', f.config.state_directory],
+    ['once', ...args.slice(1), '--endpoint', 'http://127.0.0.1/repo.git'],
+    ...['resume', 'serve'].map(operation => [operation, ...args.slice(1)])]) {
+    assert.equal((await child(t, invalid).done).code, 2);
+  }
+});
 for (const [state, expected] of [['refused', 1], ['committed', 0]]) {
   test(`supervisor status reflects the recovered ${state} publication`, LINUX_WORKFLOW, async t => {
     const f = await fixture(t), server = await peer(t, f, ({ job }) => outcome(f, job, state));

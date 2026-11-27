@@ -297,14 +297,14 @@ export function createController(backend) {
   async function loadConfiguration(path) {
     return configuration(parseJson(await readPrivate(path, MAX_BYTES), MAX_BYTES));
   }
-  async function loadRecoveryPublisher(path, name) {
+  async function loadBoundPublisher(path, name) {
     const config = await loadConfiguration(path);
-    if (!await binding(config)) fail('Recovery requires the original saved supervisor binding.');
+    if (!await binding(config)) fail('This operation requires the original saved supervisor binding.');
     const lane = config.lanes.find(lane => lane.name === name);
     if (!lane) fail('Unknown supervisor lane.');
     return lane.publisher;
   }
-  return Object.freeze({ configuration, once, serve, status, reconcile, loadConfiguration, loadRecoveryPublisher });
+  return Object.freeze({ configuration, once, serve, status, reconcile, loadConfiguration, loadBoundPublisher });
 }
 
 export async function nativeController() {
