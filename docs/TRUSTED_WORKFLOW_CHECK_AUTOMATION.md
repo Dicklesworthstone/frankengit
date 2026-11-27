@@ -166,7 +166,10 @@ is provided. Independently reconcile the original process before operator repair
 Never delete old custody to cause a replay.
 
 Each sweep has one 660-second cooperative deadline, at most 128 publication
-calls and at most 128 jobs per plan. Each history-discovery pass is bounded to
+calls and at most 128 jobs per plan. The deadline covers the publisher and
+watcher custody scans. A stop after a saved terminal prevents another watcher
+scan. If the deadline expires while reporting that terminal, the error carries
+the saved decision. Each history-discovery pass is bounded to
 128 pages, 1024 batches and 16 MiB of aggregate JSON. Native recovery calls are
 limited to 30 seconds; native publication retains the shared remaining deadline.
 The Rust publisher independently limits each selected evidence body to 1 MiB;

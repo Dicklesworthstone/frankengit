@@ -280,11 +280,18 @@ async function owned(config, work) {
   }
 }
 async function sweep(config, options) {
-  const cx = context(options), groups = await inventory(config, true);
+  const cx = context(options), groups = await inventory(config, true, cx.check);
   if (!options.resume && groups.some(group => group.rows.some(row => row.started && !row.terminal))) fail('Original check publication unresolved; use explicit resume with the same principal and keys.');
   const observer = options.onObservation ?? (() => {});
   if (typeof observer !== 'function') fail('Invalid publication observer.');
-  let calls = 0;
+  let calls = 0, lastTerminal;
+  const checkpoint = () => {
+    try { cx.check(); }
+    catch (error) {
+      if (lastTerminal && !cx.signal?.aborted) error.retained_terminal = lastTerminal;
+      throw error;
+    }
+  };
   const processGroup = async group => {
     const pending = group.rows.filter(row => !row.terminal).map(row => row.job);
     if (!pending.length) return true;
@@ -302,17 +309,23 @@ async function sweep(config, options) {
         throw error;
       }
       calls++;
+      lastTerminal = terminal;
       const event = { type: 'workflow_check_observed', schema_version: 1, watch_id: group.plan.watch_id, job: row.job.job,
         conclusion: row.job.conclusion, ...terminal, authoritative_check: false, execution_retried: false };
       try { await observer(event); } catch (error) { error.retained_terminal = terminal; throw error; }
+      if (!cx.signal?.aborted) checkpoint();
     }
     return true;
   };
   const stopped = () => ({ ...summary(groups), publications: calls, limit_reached: calls === cx.maxPublications, stopped: cx.signal?.aborted === true });
   for (const group of groups) if (!await processGroup(group)) return stopped();
-  if (!options.resume) {
-    const watched = await watchStatus(config.watch);
-    for (const row of watched.records) {
+  if (!options.resume && !cx.signal?.aborted) {
+    let watched;
+    try { watched = await watchStatus(config.watch, checkpoint); }
+    catch (error) {
+      if (!cx.signal?.aborted || !Object.is(error, cx.signal.reason)) throw error;
+    }
+    for (const row of watched?.records ?? []) {
       if (['execution_unknown', 'queued'].includes(row.state) || groups.some(group => group.plan.watch_id === row.id)) continue;
       if (groups.length === MAX_RUNS) fail('Workflow publication run capacity reached; no history is evicted.');
       if (cx.signal?.aborted || calls === cx.maxPublications) return stopped();
@@ -320,6 +333,7 @@ async function sweep(config, options) {
       if (!await processGroup(group)) return stopped();
     }
   }
+  if (!cx.signal?.aborted) checkpoint();
   return { ...summary(groups), publications: calls, limit_reached: false, stopped: cx.signal?.aborted === true };
 }
 export async function once(config, options = {}) {
