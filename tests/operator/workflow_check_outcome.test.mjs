@@ -258,11 +258,64 @@ test('whole-operation timeout preserves the first terminal and leaves the second
   assert.deepEqual(await readFile(f.path('observed')), saved);
   assert.deepEqual(server.calls.map(call => call.headers['idempotency-key']), f.jobs.map(job => job.key));
 });
+test('whole-operation timeout after the last lookup reports and preserves the saved terminal', LINUX_WORKFLOW, async t => {
+  const f = await fixture(t), server = await peer(t, f);
+  const timeout = 30_000, now = performance.now.bind(performance);
+  let elapsed = 0, errors = '';
+  t.mock.method(performance, 'now', () => now() + elapsed);
+  const stdout = new Writable({ write(chunk, _encoding, done) {
+    if (JSON.parse(chunk.toString()).type === 'workflow_check_outcome_observed') elapsed += timeout;
+    done();
+  } });
+  const stderr = new Writable({ write(chunk, _encoding, done) { errors += chunk; done(); } });
+  const exit = await main(argumentsFor(f, server.address, 'recover', ['--timeout-ms', String(timeout)]), { stdout, stderr });
+  assert.equal(exit, 3, errors);
+  const diagnostic = JSON.parse(errors);
+  assert.equal(diagnostic.message, 'outcome_timeout');
+  assert.equal(diagnostic.retained_recovery.runs[0].committed, 1);
+  assert.equal(diagnostic.retained_recovery.runs[0].unknown, 0);
+  const saved = await readFile(f.path('observed'));
+  const local = await status(f.config);
+  assert.equal(local.runs[0].committed, 1);
+  assert.equal(local.recovery_owner_present, false);
+  assert.equal((await recover(f.config, server.address, token)).lookups, 0);
+  assert.deepEqual(await readFile(f.path('observed')), saved);
+  assert.deepEqual(server.calls.map(call => call.headers['idempotency-key']), [f.jobs[0].key]);
+});
+test('an expired deadline stops initial custody validation before reading a later plan', LINUX_WORKFLOW, async t => {
+  const f = await fixture(t), server = await peer(t, f);
+  const plan = structuredClone(f.plan);
+  plan.jobs[0].source_commit = 'f'.repeat(40);
+  await save(f.planPath, plan);
+  const before = (await readdir(f.config.state_directory)).sort();
+  let ticks = 0;
+  t.mock.method(performance, 'now', () => ++ticks < 3 ? 0 : 30_001);
+  await assert.rejects(recover(f.config, server.address, token, { timeoutMs: 30_000 }), error => error.code === 'outcome_timeout');
+  assert.deepEqual((await readdir(f.config.state_directory)).sort(), before);
+  assert.equal(server.calls.length, 0);
+  await assert.rejects(status(f.config), /request changed/);
+});
 test('cancellation after a validated terminal saves it and stops before the next job', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', 2), server = await peer(t, f), controller = new AbortController();
   const result = await recover(f.config, server.address, token, { signal: controller.signal, onObservation() { controller.abort(); } });
   assert.equal(result.stopped, true); assert.equal(result.runs[0].committed, 1); assert.equal(result.runs[0].unknown, 1);
   assert.equal(server.calls.length, 1);
+});
+test('cancellation after the last lookup skips reconciliation and leaves the saved terminal', LINUX_WORKFLOW, async t => {
+  const f = await fixture(t), server = await peer(t, f), controller = new AbortController();
+  const unrelated = join(f.config.state_directory, 'orphan-fixture');
+  const result = await recover(f.config, server.address, token, { signal: controller.signal, async onObservation() {
+    await writeFile(unrelated, '');
+    controller.abort();
+  } });
+  assert.equal(result.stopped, true);
+  assert.equal(result.runs[0].committed, 1);
+  assert.equal(server.calls.length, 1);
+  await assert.rejects(status(f.config), /Orphaned/);
+  await rm(unrelated);
+  const local = await status(f.config);
+  assert.equal(local.runs[0].committed, 1);
+  assert.equal(local.recovery_owner_present, false);
 });
 test('CLI recovery uses a private token file and exits with the native terminal state', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), server = await peer(t, f); await rm(f.config.watch.fg);

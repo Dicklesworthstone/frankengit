@@ -45,29 +45,35 @@ function manifest(value, config) {
 }
 // Reserve room for every start and terminal BEFORE admitting a new plan. The
 // reader's aggregate ceiling must not make an already-started job unrecoverable.
-function capacity(config, plans) {
+function capacity(config, plans, checkpoint) {
   // Keep the original plan/start/native-terminal admission ceiling unchanged.
   // Extra outcome records have a separate allowance; recovery must not narrow
   // which already-admitted plans remain readable or enlarge new-work capacity.
   let original = encode(config).length, recovery = 8192;
   for (const plan of plans) {
+    checkpoint?.();
     original += encode(plan).length + plan.jobs.length * 2 * 8192;
     recovery += plan.jobs.length * 2 * 8192;
     if (original > PLAN_RECEIPT_BYTES || original + recovery > STATE_BYTES) fail('Workflow publication receipt capacity reached; retain existing custody.');
   }
 }
-async function inventory(config, initialize = false) {
+async function inventory(config, initialize = false, checkpoint) {
+  checkpoint?.();
   await directory(config.state_directory);
-  const files = await names(config.state_directory, MAX_RUNS * (1 + 4 * MAX_JOBS) + 4);
+  const files = await names(config.state_directory, MAX_RUNS * (1 + 4 * MAX_JOBS) + 4, checkpoint);
   const fileSet = new Set(files);
+  checkpoint?.();
   const saved = await readPrivate(join(config.state_directory, 'binding.json'), 128 * 1024, true);
+  checkpoint?.();
   if (saved && !saved.equals(encode(config))) fail('Workflow publisher configuration changed; original principal and keys must be retained.');
   if (!saved) {
     if (files.some(file => file !== 'owner.lock')) fail('Unbound publication directory is not empty.');
     if (!initialize) return [];
     await writeNew(join(config.state_directory, 'binding.json'), encode(config));
   }
+  checkpoint?.();
   const remote = await readPrivate(join(config.state_directory, 'recovery-binding.json'), 8192, true);
+  checkpoint?.();
   if (remote) {
     const value = parseJson(remote, 8192);
     keys(value, ['schema', 'publisher_binding_sha256', 'endpoint']);
@@ -76,7 +82,10 @@ async function inventory(config, initialize = false) {
   }
   const groups = new Map(), selected = new Set(['binding.json', 'owner.lock', 'recovery.lock', 'recovery-binding.json']); let total = remote?.length ?? 0;
   const read = async (path, maximum) => {
-    const raw = await readPrivate(path, maximum); total += raw.length;
+    checkpoint?.();
+    const raw = await readPrivate(path, maximum);
+    checkpoint?.();
+    total += raw.length;
     if (total > STATE_BYTES) fail('Publication custody exceeds aggregate read budget.');
     return parseJson(raw, maximum);
   };
@@ -88,6 +97,7 @@ async function inventory(config, initialize = false) {
     if (plan.watch_id !== match[1]) fail('Publication plan filename changed.');
     const rows = [];
     for (let index = 0; index < plan.jobs.length; index++) {
+      checkpoint?.();
       const job = plan.jobs[index], row = { job, index, started: false, terminal: null, observed: null, recovered: null };
       for (const kind of ['started', 'terminal', 'observed', 'recovered']) {
         const name = `${kind}-${plan.watch_id}-${String(index).padStart(3, '0')}.json`;
@@ -112,9 +122,11 @@ async function inventory(config, initialize = false) {
     }
     selected.add(file); groups.set(plan.watch_id, { plan, rows });
   }
+  checkpoint?.();
   if (files.some(file => !selected.has(file))) fail('Orphaned or interrupted publication custody; no state is erased automatically.');
   const result = [...groups.values()];
-  capacity(config, result.map(group => group.plan));
+  capacity(config, result.map(group => group.plan), checkpoint);
+  checkpoint?.();
   return result;
 }
 function context(options = {}) {
@@ -353,11 +365,12 @@ export async function recover(config, address, token, options = {}) {
     signal?.throwIfAborted();
     if (performance.now() >= deadline) throw new OutcomeError('outcome_timeout');
   };
-  check(); await directory(config.state_directory);
   // Refuse accidental initialization: only existing, verified publisher plans
   // can select original keys. No original run files or executable are read.
-  await inventory(config);
+  await inventory(config, false, check);
+  check();
   if (!await readPrivate(join(config.state_directory, 'binding.json'), 128 * 1024, true)) fail('Retain the original publisher binding and plans before recovery.');
+  check();
   const release = await lock(join(config.state_directory, 'recovery.lock'));
   let result, failure, groups, lookups = 0, terminalCount = 0;
   const snapshot = () => ({ ...summary(groups), type: 'workflow_check_recovery', remote_read_only: true,
@@ -366,7 +379,7 @@ export async function recover(config, address, token, options = {}) {
     limit_reached: groups.some(group => group.rows.some(row => row.started && !row.terminal)) && lookups === maxLookups,
     stopped: signal?.aborted === true });
   try {
-    groups = await inventory(config);
+    groups = await inventory(config, false, check);
     const endpointPath = join(config.state_directory, 'recovery-binding.json');
     const expected = encode({ schema: 'frankengit-workflow-check-recovery-binding-v1', publisher_binding_sha256: binding(config), endpoint: address });
     const saved = await readPrivate(endpointPath, 8192, true);
@@ -374,8 +387,9 @@ export async function recover(config, address, token, options = {}) {
     check(); if (!saved) await writeNew(endpointPath, expected);
     for (const group of groups) for (const row of group.rows) {
       if (!row.started || row.terminal) continue;
-      if (signal?.aborted || lookups === maxLookups) { result = snapshot(); return result; }
+      if (signal?.aborted) { result = snapshot(); return result; }
       check();
+      if (lookups === maxLookups) { result = snapshot(); return result; }
       const reply = await lookupOutcome(address, token, { ...recoveryScope(config), key: row.job.key }, {
         signal, ca, timeoutMs: Math.max(1, Math.min(requestTimeout, Math.floor(deadline - performance.now()))), known: row.observed?.reply ?? null });
       lookups++;
@@ -409,8 +423,13 @@ export async function recover(config, address, token, options = {}) {
         throw error;
       }
     }
-    // Reconcile concurrent native receipts before reporting complete custody.
-    groups = await inventory(config); result = snapshot(); return result;
+    // Reconcile concurrent native receipts while time remains. If stopped,
+    // report the last verified inventory with any terminals already saved.
+    if (!signal?.aborted) {
+      try { groups = await inventory(config, false, check); }
+      catch (error) { if (!signal?.aborted || error !== signal.reason) throw error; }
+    }
+    result = snapshot(); return result;
   } catch (error) {
     failure = error;
     if (groups) error.retained_recovery = snapshot();

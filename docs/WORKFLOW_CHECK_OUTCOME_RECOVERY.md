@@ -130,8 +130,12 @@ with `--max-lookups 1..128`. `--request-timeout-ms` defaults to 30000 and permit
 1..300000 ms. `--timeout-ms` defaults to 660000 and permits 1..660000 ms for the
 whole operation. The remaining whole-operation time caps every network read.
 Native outcome bodies are limited to 16 KiB and selected headers to 16 KiB.
-Filesystem checks are cooperative between bounded operations; synchronous
-filesystem latency and arbitrary library observers do not have hard deadlines.
+The same deadline applies to the initial custody scans and the final
+reconciliation of concurrent native receipts. Checks are cooperative between
+bounded filesystem operations. A filesystem operation or library observer
+already in progress may finish after the deadline. A stop during final
+reconciliation reports the last verified inventory, including terminals
+already saved.
 The CLI owns its separate bounded stdout deadline.
 
 The original 32 MiB plan/start/native-terminal reservation and existing run/job

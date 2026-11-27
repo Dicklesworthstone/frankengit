@@ -75,14 +75,17 @@ export async function writeNew(path, bytes) {
   }
   if (failed) throw failure;
 }
-export async function names(path, maximum) {
+export async function names(path, maximum, checkpoint) {
+  checkpoint?.();
   const result = [], dir = await opendir(path);
   try {
     for await (const entry of dir) {
+      checkpoint?.();
       if (result.length >= maximum) fail('Watcher custody capacity exceeded; no history is evicted.');
       result.push(entry.name);
     }
   } finally { if (dir) await dir.close().catch(error => { if (error.code !== 'ERR_DIR_CLOSED') throw error; }); }
+  checkpoint?.();
   return result.sort();
 }
 export async function lock(path) {
