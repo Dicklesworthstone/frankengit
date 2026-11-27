@@ -128,8 +128,15 @@ terminal dispatch, an unfinished `Started` owner, abrupt termination and
 unproved descendant containment remain unresolved.
 
 An ordinary watch can refuse read-only resource preflight before it reserves
-an event. A latest-state watch can then select a corrected successor. An
-ordered branch watch still observes the earliest pending reachable change.
+an event. A latest-state watch can then select a corrected successor.
+
+An ordered branch watch settles a source with more than 32 definitions as a
+non-green `workflow_definition_limit`. Its v2 terminal handoff records zero
+selected children and pins the dispatch plan, including the observed count,
+limit and authenticated source. Recovery verifies the exact bound plan and
+the empty dispatch before restoring a missing acknowledgement. The verdict
+produces zero checks and lets the next poll select the next reachable commit.
+Other unresolved preflight errors stop catch-up.
 
 An ordinary branch push, tag update or PR source-head event rejected during definition
 compilation uses the v2 completion handoff with reason `definition_refused`,

@@ -267,28 +267,72 @@ def oversized_preflight(fmt, ordered):
     f.tree = workflow_tree(files)
     f.advance()
     rejected = f.tip
-    refused = poll('oversized-workflow-directory', 2)[-1]
-    assert 'dispatch exceeds 32 workflow definitions' in refused['operation_error']
-    assert refused['committed_check_decisions'] == 0 and f.count() == 'x'
-    after_refusal = set(custody.iterdir())
+    refs = ['refs', *f.scope, '--trusted-local', '--object-format', fmt]
+    if not ordered:
+        refused = poll('oversized-workflow-directory', 2)[-1]
+        assert 'dispatch exceeds 32 workflow definitions' in refused['operation_error']
+        assert not refused['requires_reconciliation'] and set(custody.iterdir()) == before
+        assert refused['committed_check_decisions'] == 0 and f.count() == 'x'
+        token = json.loads(invoke('oversized-explicit-basis', refs))['snapshot_token']
+        direct_before = set(f.parent.iterdir())
+        invoke('refuse-oversized-explicit-dispatch', [
+            'workflow', 'dispatch', *f.scope, REF, '--trusted-local', '--event', 'push',
+            '--workflow', 'ci', '--input', 'ci', '--run-parent', f.parent, '--run-id', '41' * 16,
+            '--expected-head', token, '--expected-commit', rejected, '--object-format', fmt,
+        ], 2)
+        assert set(f.parent.iterdir()) == direct_before and f.count() == 'x'
 
     f.tree = workflow_tree(files[:-1])
     f.advance()
-    next_rows = poll('after-oversized-workflow-directory', 2 if ordered else 0)
     if ordered:
-        assert 'dispatch exceeds 32 workflow definitions' in next_rows[-1]['operation_error']
-        assert not next_rows[-1]['requires_reconciliation']
-        assert next_rows[-1]['committed_check_decisions'] == 0 and f.count() == 'x'
-        assert set(custody.iterdir()) == before
-    else:
-        successor = next(row['poll'] for row in next_rows if row['type'] == 'workflow_watch_poll')
-        assert successor['event']['commit'] == f.tip and successor['execution_settled']
-        assert successor['dispatch']['matched_count'] == 1
-        assert len(successor['dispatch']['plan']['workflows']) == 32
-        assert next_rows[-1]['committed_check_decisions'] == 1 and f.count() == 'xx'
-        assert poll('suppress-oversized-successor-repeat')[-1]['committed_check_decisions'] == 0
-        assert f.count() == 'xx'
-    assert not refused['requires_reconciliation'] and after_refusal == before
+        basis = invoke('oversized-ordered-basis', refs)
+        observations = poll('settle-ordered-definition-limit', 1)
+        refused = next(row['poll'] for row in observations if row['type'] == 'workflow_watch_poll')
+        dispatch = refused['dispatch']
+        assert refused['event']['commit'] == rejected and refused['execution_settled']
+        assert refused['event']['profile'] == 'ordered-canonical-branch-update-v1'
+        assert dispatch['stop_reason'] == 'workflow_definition_limit'
+        assert dispatch['matched_count'] == dispatch['executed_count'] == 0
+        assert not dispatch['succeeded'] and dispatch['plan']['workflows'] == []
+        assert dispatch['plan']['dispatch_refusal'] == {
+            'code': 'workflow_definition_limit', 'observed': 33, 'maximum': 32,
+        }
+        assert observations[-1]['non_green'] and not observations[-1]['requires_reconciliation']
+        assert observations[-1]['committed_check_decisions'] == 0 and f.count() == 'x'
+        assert invoke('oversized-ordered-authority', refs) == basis
+
+        event_dir = Path(os.fsdecode(bytes.fromhex(refused['event']['custody_directory_hex'])))
+        assert set(custody.iterdir()) == before | {event_dir}
+        marker = event_dir / 'settled'
+        dispatch_dir = Path(os.fsdecode(bytes.fromhex(dispatch['plan']['run_directory_hex'])))
+        plan = dispatch_dir / 'dispatch.json'
+        original = plan.read_bytes()
+        changed = json.loads(original)
+        marker.unlink()
+        for observed in (32, 34):
+            changed['dispatch_refusal']['observed'] = observed
+            plan.write_text(json.dumps(changed))
+            refused_recovery = poll(f'refuse-edited-definition-count-{observed}', 2)[-1]
+            assert refused_recovery['requires_reconciliation'] and not marker.exists()
+            assert f.count() == 'x' and invoke('oversized-tamper-authority', refs) == basis
+        plan.write_bytes(original)
+        extra_child = dispatch_dir / f'workflow-{"a" * 32}'
+        extra_child.mkdir(mode=0o700)
+        unknown_execution = poll('refuse-unexpected-definition-limit-child', 2)[-1]
+        assert unknown_execution['requires_reconciliation'] and not marker.exists()
+        assert f.count() == 'x' and invoke('oversized-extra-child-authority', refs) == basis
+        extra_child.rmdir()
+
+    next_rows = poll('after-oversized-workflow-directory')
+    successor = next(row['poll'] for row in next_rows if row['type'] == 'workflow_watch_poll')
+    assert successor['event']['commit'] == f.tip and successor['execution_settled']
+    assert successor['dispatch']['matched_count'] == 1
+    assert len(successor['dispatch']['plan']['workflows']) == 32
+    assert next_rows[-1]['committed_check_decisions'] == 1 and f.count() == 'xx'
+    if ordered:
+        assert marker.read_text() == refused['event']['event_id'] and plan.read_bytes() == original
+    assert poll('suppress-oversized-successor-repeat')[-1]['committed_check_decisions'] == 0
+    assert f.count() == 'xx'
     case(fmt, f'{profile}-oversized-preflight-preserves-custody', rejected=rejected, successor=f.tip)
 
 def tag_definition_refusal(fmt):

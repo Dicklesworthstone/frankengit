@@ -648,6 +648,7 @@ impl OneNode {
                     // This is an ordinary source watch. Merge candidates have
                     // already returned through their separate start owner.
                     settle_definition_refusal: true,
+                    settle_definition_limit: ordered,
                     watch_owns_completion: true,
                 },
                 limits,

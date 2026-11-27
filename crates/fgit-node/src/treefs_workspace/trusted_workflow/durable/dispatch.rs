@@ -21,7 +21,8 @@ use fgit_forge::review::{ComparisonMode, SourcePathChanges};
 type PathBasis = (Option<GitOid>, ComparisonMode, Option<GitOid>);
 use fgit_runner::workflow::{JobOutcome, MAX_JOBS, MAX_STEPS, WorkflowError};
 
-const MAX_WORKFLOWS: usize = 32;
+pub(super) const MAX_WORKFLOWS: usize = 32;
+pub(super) const WORKFLOW_DEFINITION_LIMIT: &str = "workflow_definition_limit";
 const MAX_WORKFLOW_BYTES: usize = 1024 * 1024;
 
 pub(super) struct Snapshot {
@@ -29,6 +30,7 @@ pub(super) struct Snapshot {
     pub(super) commit: GitOid,
     pub(super) ancestor_of: Option<GitOid>,
     pub(super) settle_definition_refusal: bool,
+    pub(super) settle_definition_limit: bool,
     pub(super) watch_owns_completion: bool,
 }
 
@@ -39,6 +41,7 @@ impl From<(RepositoryAuthorityHeadId, GitOid)> for Snapshot {
             commit,
             ancestor_of: None,
             settle_definition_refusal: false,
+            settle_definition_limit: false,
             watch_owns_completion: false,
         }
     }
@@ -418,6 +421,7 @@ impl OneNode {
                             path_basis,
                             tag_tip,
                             reserve_after_preflight,
+                            expected.settle_definition_limit,
                             expected.watch_owns_completion,
                         )?;
                         if !expected.watch_owns_completion {
@@ -482,6 +486,7 @@ fn dispatch_at<A: GitHashAlgorithm>(
     path_basis: Option<PathBasis>,
     tag_tip: Option<GitOid>,
     reserve_after_preflight: Option<impl FnOnce() -> Result<(), TrustedWorkflowFailure>>,
+    settle_definition_limit: bool,
     watch_owns_completion: bool,
 ) -> Result<TrustedWorkflowDispatch, TrustedWorkflowFailure> {
     let invalid = TrustedWorkflowFailure::InvalidInput;
@@ -491,9 +496,16 @@ fn dispatch_at<A: GitHashAlgorithm>(
         .iter()
         .filter(|e| workflow_child(e.path().as_bytes(), directory))
         .collect::<Vec<_>>();
-    if entries.len() > MAX_WORKFLOWS {
-        return Err(invalid("dispatch exceeds 32 workflow definitions"));
-    }
+    let excess_definitions = match entries.len() {
+        count if count <= MAX_WORKFLOWS => None,
+        count if settle_definition_limit && reserve_after_preflight.is_some() => {
+            // The authenticated source count is fixed for this event. Settle
+            // it before compiling any prefix or preparing execution effects.
+            entries.clear();
+            Some(count)
+        }
+        _ => return Err(invalid("dispatch exceeds 32 workflow definitions")),
+    };
     entries.sort_by(|a, b| a.path().as_bytes().cmp(b.path().as_bytes()));
     let (source_rcr, source_commit, source_tree, candidate) =
         inputs.coordinates(node.object_format)?;
@@ -615,7 +627,8 @@ fn dispatch_at<A: GitHashAlgorithm>(
             selected,
         });
     }
-    if definition_refusal.is_none()
+    let preflight_admitted = definition_refusal.is_none() && excess_definitions.is_none();
+    if preflight_admitted
         && artifacts.is_some_and(|config| {
             config
                 .selected_workflows()
@@ -655,7 +668,7 @@ fn dispatch_at<A: GitHashAlgorithm>(
         }
     }
     let artifact_session = artifacts
-        .filter(|_| definition_refusal.is_none())
+        .filter(|_| preflight_admitted)
         .map(|config| artifacts::Session::open(node, config))
         .transpose()?;
     if let Some(session) = &artifact_session {
@@ -740,7 +753,7 @@ fn dispatch_at<A: GitHashAlgorithm>(
         write!(identity, ",\"artifact_contract\":{}", config.to_json())
             .expect("writing to a String cannot fail");
     }
-    let stop_reason = definition_refusal.map(|(entry, error)| {
+    let mut stop_reason = definition_refusal.map(|(entry, error)| {
         let code = match &error {
             TrustedWorkflowFailure::Workflow(WorkflowError::UnsupportedRunner(_)) => {
                 "unsupported_runner"
@@ -759,6 +772,14 @@ fn dispatch_at<A: GitHashAlgorithm>(
         .expect("writing to a String cannot fail");
         "definition_refused"
     });
+    if let Some(observed) = excess_definitions {
+        write!(
+            identity,
+            ",\"dispatch_refusal\":{{\"code\":\"{WORKFLOW_DEFINITION_LIMIT}\",\"observed\":{observed},\"maximum\":{MAX_WORKFLOWS}}}"
+        )
+        .expect("writing to a String cannot fail");
+        stop_reason = Some(WORKFLOW_DEFINITION_LIMIT);
+    }
     let mut report = TrustedWorkflowDispatch {
         run_directory,
         identity,

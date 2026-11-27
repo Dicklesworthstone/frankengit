@@ -256,6 +256,7 @@ pub(super) async fn execute(
                 commit: prepared.commit,
                 ancestor_of: None,
                 settle_definition_refusal: false,
+                settle_definition_limit: false,
                 watch_owns_completion: true,
             },
             limits,

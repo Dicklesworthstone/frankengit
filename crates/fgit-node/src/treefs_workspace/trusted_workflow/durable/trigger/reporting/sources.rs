@@ -3,6 +3,7 @@ use super::{
     File, Format, GitOid, MetadataExt, Path, Read, TrustedWorkflowDispatch, TrustedWorkflowFailure,
     fs, hex, invalid, io, sha256_digest, write_new,
 };
+use crate::treefs_workspace::trusted_workflow::durable::dispatch::WORKFLOW_DEFINITION_LIMIT;
 use std::collections::BTreeSet;
 const MAGIC: &[u8; 8] = b"FGWCS001";
 const TERMINAL_MAGIC: &[u8; 8] = b"FGWCS002";
@@ -22,6 +23,7 @@ pub(in super::super) struct TerminalDispatch {
 
 impl TerminalDispatch {
     const DEFINITION_REFUSED: u8 = 6;
+    const DEFINITION_LIMIT: u8 = 7;
 
     fn from_native(
         selected: usize,
@@ -35,6 +37,7 @@ impl TerminalDispatch {
             "workflow_timed_out" => 4,
             "workflow_output_limit" => 5,
             "definition_refused" if selected == 0 => Self::DEFINITION_REFUSED,
+            WORKFLOW_DEFINITION_LIMIT if selected == 0 => Self::DEFINITION_LIMIT,
             _ => return Err(invalid("watch terminal dispatch is not proved closed")),
         };
         if selected > 32 {
@@ -53,6 +56,10 @@ impl TerminalDispatch {
 
     pub(super) const fn is_definition_refusal(self) -> bool {
         self.reason == Self::DEFINITION_REFUSED
+    }
+
+    pub(super) const fn is_definition_limit(self) -> bool {
+        self.reason == Self::DEFINITION_LIMIT
     }
 }
 
@@ -225,7 +232,10 @@ impl Sources {
             ) as usize;
             let reason = bytes[start + 4];
             let valid_reason = (1..=5).contains(&reason)
-                || (reason == TerminalDispatch::DEFINITION_REFUSED && selected == 0);
+                || (matches!(
+                    reason,
+                    TerminalDispatch::DEFINITION_REFUSED | TerminalDispatch::DEFINITION_LIMIT
+                ) && selected == 0);
             if selected > 32 || !valid_reason {
                 return Err(invalid("invalid watch terminal selection or reason"));
             }
@@ -420,7 +430,7 @@ mod tests {
             assert!(decoded.terminal.is_none());
             assert!(decoded.verify_selection(2, [9; 32]).is_err());
             assert!(decoded.verify_selection(0, [9; 32]).is_ok());
-            for reason in [0, 2, 3, 4, 5, 6, 255] {
+            for reason in [0, 2, 3, 4, 5, 6, 7, 255] {
                 let changed = empty_frame(format, Some(TerminalDispatch { reason, ..terminal }));
                 assert!(
                     Sources::decode(&changed, &[1; 32], &key).is_err(),
@@ -445,12 +455,20 @@ mod tests {
         assert!(TerminalDispatch::from_native(1, "", [1; 32]).is_err());
         assert!(TerminalDispatch::from_native(33, "request_stopped", [1; 32]).is_err());
         assert!(TerminalDispatch::from_native(1, "definition_refused", [1; 32]).is_err());
+        assert!(TerminalDispatch::from_native(1, WORKFLOW_DEFINITION_LIMIT, [1; 32]).is_err());
         let refused = TerminalDispatch::from_native(0, "definition_refused", [1; 32]).unwrap();
+        let limit = TerminalDispatch::from_native(0, WORKFLOW_DEFINITION_LIMIT, [1; 32]).unwrap();
         for format in [Format::Sha1, Format::Sha256] {
             let frame = empty_frame(format, Some(refused));
             let decoded = Sources::decode(&frame, &[1; 32], &hex(&[2; 32])).unwrap();
             assert!(decoded.terminal.unwrap().is_definition_refusal());
             assert!(decoded.verify_selection(0, [1; 32]).is_ok());
+            assert!(decoded.runs.is_empty());
+            let frame = empty_frame(format, Some(limit));
+            let decoded = Sources::decode(&frame, &[1; 32], &hex(&[2; 32])).unwrap();
+            assert!(decoded.terminal.unwrap().is_definition_limit());
+            assert!(decoded.verify_selection(0, [1; 32]).is_ok());
+            assert!(decoded.verify_selection(0, [2; 32]).is_err());
             assert!(decoded.runs.is_empty());
         }
         for reason in [
