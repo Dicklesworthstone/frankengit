@@ -803,7 +803,7 @@ fn dispatch_at<A: GitHashAlgorithm>(
             "dispatch plan durability failed before execution: {e}"
         ))
     })?;
-    let execution = (|| {
+    let execution: Result<(), String> = (|| {
         let mut remaining = limits.total_output_bytes;
         for definition in report.definitions.iter().filter(|d| d.selected) {
             if !live() {
@@ -859,7 +859,7 @@ fn dispatch_at<A: GitHashAlgorithm>(
     })();
     if let Err(mut detail) = execution {
         if watch_owns_completion && let Err(error) = report.persist_child_reports() {
-            write!(detail, "; child report delivery also failed: {error}")
+            write!(detail, ". Child report delivery also failed: {error}")
                 .expect("writing to a String cannot fail");
         }
         return Err(failed(detail));
