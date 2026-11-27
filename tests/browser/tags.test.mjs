@@ -7,6 +7,42 @@ import { fixture, crypto, token, href, head, hex, source, existing, destination,
 async function connected(f, c = crypto) { const client = new TagClient({ href, fetchImpl: f.fetchImpl, cryptoImpl: c }); await client.connect(token); return client; }
 async function listed(f, c = crypto) { const client = await connected(f, c); await client.list({ objectFormat: f.algorithm }); return client; }
 async function staged(f, operation = 'annotated') { const c = await listed(f); await c.prepare(operation, operation === 'annotated' ? annotationInput() : operation === 'delete' ? { ref_hex: existing } : { ref_hex: destination, source_ref_hex: source }); return c; }
+function hexadecimalPages(f, change = () => {}) {
+  f.config.list = (page, call) => {
+    const query = Object.fromEntries(new URLSearchParams(call.body));
+    const rows = f.refs.filter(row => query.after === undefined || row.ref_hex > query.after);
+    page.cursor_encoding = 'hex'; page.after = query.after ?? null;
+    page.refs = structuredClone(rows.slice(0, Number(query.limit)));
+    page.next_after = rows.length > page.refs.length ? page.refs.at(-1).ref_hex : null;
+    change(page, call);
+  };
+}
+test('opt-in byte cursors cross non-UTF-8 intermediate names without changing the snapshot or encoding', async () => {
+  const f = fixture();
+  f.refs.splice(1, 0, { ref: null, ref_hex: hex('refs/tags/raw') + 'ff', object_id: f.commit });
+  hexadecimalPages(f);
+  const c = await connected(f);
+  await c.list({ limit: 1, cursorEncoding: 'hex' });
+  await c.list({ next: true, cursorEncoding: 'utf8' });
+  assert.equal(c.page.refs[0].ref, null);
+  const raw = c.page.next_after;
+  await c.list({ next: true });
+  assert.equal(c.refs.length, 3); assert.equal(c.page.next_after, null);
+  const query = Object.fromEntries(new URLSearchParams(f.calls.at(-1).body));
+  assert.equal(query.after, raw); assert.equal(query.cursor_encoding, 'hex'); assert.equal(query.expected_head, head);
+});
+for (const [name, change] of [
+  ['encoding', r => delete r.cursor_encoding], ['cursor', r => r.after = '726566732f746167732f78'],
+  ['uppercase hex', r => r.next_after = r.next_after.toUpperCase()], ['nonprogress', r => r.next_after = r.after],
+]) test(`hex tag continuation refuses changed ${name}`, async () => {
+  const f = fixture(); f.refs.push({ ref: 'refs/tags/z', ref_hex: hex('refs/tags/z'), object_id: f.commit });
+  hexadecimalPages(f); const c = await connected(f); await c.list({ limit: 1, cursorEncoding: 'hex' });
+  hexadecimalPages(f, change); await assert.rejects(c.list({ next: true })); assert.equal(c.refs.length, 1);
+});
+test('unknown tag cursor encodings are refused before transport', async () => {
+  const f = fixture(), c = await connected(f);
+  await assert.rejects(c.list({ cursorEncoding: 'base64' })); assert.equal(f.calls.length, 0);
+});
 for (const algorithm of ['sha1', 'sha256']) {
   test(`${algorithm}: preview constructs exact native bytes with raw names, empty and non-UTF8 messages`, async () => {
     const f = fixture(algorithm);

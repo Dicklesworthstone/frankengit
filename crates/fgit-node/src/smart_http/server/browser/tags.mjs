@@ -33,14 +33,16 @@ export class TagClient {
     if (this.#busy || !this.connected) fail('Connect first and finish the current operation.');
     this.#busy = true; try { return await work(); } finally { this.#busy = false; }
   }
-  async list({ objectFormat = 'sha1', limit = 50, next = false } = {}) {
+  async list({ objectFormat = 'sha1', limit = 50, cursorEncoding = 'utf8', next = false } = {}) {
     return this.#exclusive(async () => {
       this.#noPending(); let query;
       if (next) {
         if (!this.#page || this.#page.next_after === null) fail('No next reference page.');
         query = { ...this.#query, after: this.#page.next_after, expected_head: this.#page.snapshot_token };
       } else {
+        if (!['utf8', 'hex'].includes(cursorEncoding)) fail('Unsupported reference cursor encoding.');
         this.cancel(); query = { object_format: format(objectFormat), namespace: 'all', limit: integer(limit, 'page size', 1, 100) };
+        if (cursorEncoding === 'hex') query.cursor_encoding = 'hex';
       }
       if (this.#rows.size + query.limit > 2048) fail('Reference session limit reached.');
       const serial = this.#serial, epoch = this.#transport.epoch;

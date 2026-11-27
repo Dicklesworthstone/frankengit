@@ -57,11 +57,15 @@ export async function tagPlan(operation, input, crypto) {
 }
 export function tagRefPage(reply, query, scope) {
   const selected = pinned(reply, scope, query.expected_head ?? null);
+  const encoding = query.cursor_encoding ?? 'utf8';
+  if (!['utf8', 'hex'].includes(encoding) ||
+      (encoding === 'hex' ? reply.cursor_encoding !== 'hex' : reply.cursor_encoding !== undefined)) fail('Reference cursor encoding changed.');
   if (reply.type !== 'source_refs' || selected.binding.format !== query.object_format || reply.namespace !== 'all' ||
       reply.after !== (query.after ?? null) || reply.limit !== query.limit || reply.direct_refs_only !== true ||
       reply.read_only !== true || reply.transaction_created !== false || reply.published !== false ||
       !Array.isArray(reply.refs) || reply.refs.length > query.limit) fail('Invalid tag/source reference page.');
-  let previous = query.after === undefined ? '' : hex(utf8.encode(query.after));
+  let previous = query.after === undefined ? '' : encoding === 'hex' ? query.after : hex(utf8.encode(query.after));
+  if (previous) nativeRef(previous);
   for (const row of reply.refs) {
     record(row); const bytes = nativeRef(row.ref_hex); oid(row.object_id, query.object_format);
     let decoded = null; try { decoded = decode(bytes); } catch {}
@@ -69,8 +73,9 @@ export function tagRefPage(reply, query, scope) {
     previous = row.ref_hex;
   }
   if (reply.next_after !== null) {
-    text(reply.next_after, 4096, 'cursor'); nativeRef(hex(utf8.encode(reply.next_after)));
-    if (reply.refs.length !== query.limit || previous !== hex(utf8.encode(reply.next_after))) fail('Incomplete reference continuation.');
+    const cursor = encoding === 'hex' ? reply.next_after : hex(utf8.encode(text(reply.next_after, 4096, 'cursor')));
+    nativeRef(cursor);
+    if (reply.refs.length !== query.limit || previous !== cursor) fail('Incomplete reference continuation.');
   }
   return selected;
 }
