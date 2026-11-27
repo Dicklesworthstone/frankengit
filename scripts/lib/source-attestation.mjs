@@ -93,7 +93,8 @@ export function attestationPAE(payload) {
   const type = Buffer.from(ATTESTATION_TYPE);
   return Buffer.concat([Buffer.from(`DSSEv1 ${type.length} `), type, Buffer.from(` ${payload.length} `), payload]);
 }
-async function artifactHash(bytes, signal) {
+// Hash caller-owned bytes with cooperative cancellation between chunks.
+export async function artifactHash(bytes, signal) {
   const digest = createHash('sha256');
   for (let at = 0; at < bytes.length; at += 65536) {
     check(signal); digest.update(bytes.subarray(at, at + 65536));

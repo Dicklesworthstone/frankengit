@@ -10,7 +10,7 @@ const USAGE = `Usage:
     --tenant HEX --repository-id HEX --principal HEX --object-format sha1|sha256
     --recovery-directory /new/private/recovery-directory
     [--attestation DSSE --trust-key PEM --source-repository OWNER/REPO --minimum-sequence N]
-    [--expect-sha256 HEX] [--expect-ref REF=OID | --expect-ref-hex HEX=OID] [--exact-refs]
+    [--max-input-mib 1..128] [--expect-sha256 HEX] [--expect-ref REF=OID | --expect-ref-hex HEX=OID] [--exact-refs]
   node scripts/import_git_bundle_native.mjs status /recovery-directory --trusted-local
     --fg /absolute/path/to/fg [--intent-sha256 HEX]
   node scripts/import_git_bundle_native.mjs retry /recovery-directory --trusted-local
@@ -21,7 +21,7 @@ Import restores portable Git SOURCE into an already initialized node through
 native verification and one atomic absent-ref import. It never initializes,
 replaces, force-updates or restores forge/capsule state. The native executable
 is explicitly operator-trusted; no shell, upstream Git or decoder fallback.
-The input limit is 16 MiB with at most ${NATIVE_SOURCE_IMPORT_MAX_REFS} direct references.
+The buffered input limit defaults to 16 MiB and accepts 1..128 MiB with at most ${NATIVE_SOURCE_IMPORT_MAX_REFS} direct references.
 Independent 1 MiB argument and saved-intent limits also apply.
 
 Before submission, an exclusive owner-only recovery directory retains and syncs
@@ -35,7 +35,7 @@ Exit 0: committed; 3: canonical refusal; 4: unknown/nonterminal; 2: error.
 An error after submission can still mean the import committed. Use status.
 `;
 // Action/path plus every fixed import option, including the complete approval group.
-const MAX_ARGUMENTS = 30 + 2 * NATIVE_SOURCE_IMPORT_MAX_REFS;
+const MAX_ARGUMENTS = 32 + 2 * NATIVE_SOURCE_IMPORT_MAX_REFS;
 export function parseImportArguments(args) {
   if (args.length < 2 || args.length > MAX_ARGUMENTS || args.some(arg => arg.length > 8300 || arg.includes('\0'))
     || args.reduce((n, arg) => n + Buffer.byteLength(arg), 0) > 1024 * 1024) throw new Error('invalid_import_arguments');
@@ -44,7 +44,7 @@ export function parseImportArguments(args) {
   const options = {}, expected = {}, approval = {}, seen = new Set();
   const common = { '--fg': 'fg', '--timeout-secs': 'timeoutMs' };
   const initial = { '--storage': 'storage', '--tenant': 'tenant', '--repository-id': 'repository',
-    '--principal': 'principal', '--object-format': 'format', '--recovery-directory': 'recovery' };
+    '--principal': 'principal', '--object-format': 'format', '--recovery-directory': 'recovery', '--max-input-mib': 'maxInputMiB' };
   const signed = { '--attestation': 'envelope', '--trust-key': 'key', '--source-repository': 'repository', '--minimum-sequence': 'minimum_sequence' };
   for (let at = 2; at < args.length; at++) {
     const flag = args[at];
@@ -59,7 +59,10 @@ export function parseImportArguments(args) {
     const value = args[++at];
     if (!value || value.startsWith('--')) throw new Error('missing_import_option_value');
     if (Object.hasOwn(signed, flag)) approval[signed[flag]] = value;
-    else if (flag === '--timeout-secs') {
+    else if (flag === '--max-input-mib') {
+      if (!/^[1-9][0-9]{0,2}$/.test(value) || Number(value) > 128) throw new Error('native_input_limit');
+      options.maxInputMiB = Number(value);
+    } else if (flag === '--timeout-secs') {
       if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) > 3600) throw new Error('invalid_import_timeout');
       options.timeoutMs = Number(value) * 1000;
     } else if (flag === '--expect-sha256') expected.sha256 = value;

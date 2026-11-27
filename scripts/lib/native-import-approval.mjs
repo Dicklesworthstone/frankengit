@@ -1,7 +1,7 @@
 // Compose the existing DSSE/Ed25519 verifier with native import. This is not a
 // new signature format, Git verifier, policy engine or canonical authorization.
 import { createHash } from 'node:crypto';
-import { ATTESTATION_LIMITS, attestationPolicy, authenticateSourceBackup, verifySourceAttestation } from './source-attestation.mjs';
+import { ATTESTATION_LIMITS, artifactHash, attestationPolicy, verifySourceAttestation } from './source-attestation.mjs';
 import { importError } from './native-import-process.mjs';
 
 export const APPROVAL_FILES = Object.freeze(['approval.dsse.json', 'trusted-public-key.pem']);
@@ -25,35 +25,43 @@ export function validateApprovalBinding(value) {
   }
   attestationPolicy(value.policy);
 }
-async function authorization(encoded, key, policy, live) {
+async function authorization(encoded, key, policy, live, maximumBytes) {
   live.check();
-  await verifySourceAttestation(encoded, key, policy, { signal: live.signal }); live.check();
+  await verifySourceAttestation(encoded, key, policy, { signal: live.signal, maximumBytes }); live.check();
   return {
     binding: { profile: 'dsse-ed25519-source-v1', envelope_sha256: hash(encoded), public_key_sha256: hash(key), policy },
     files: [[APPROVAL_FILES[0], encoded], [APPROVAL_FILES[1], key]],
     async check(bytes) {
       live.check();
-      const matched = await authenticateSourceBackup(bytes, encoded, key, policy, { signal: live.signal });
-      live.check(); return matched.authentication;
+      // The importer owns these bytes. Match that exact custody to the signed
+      // statement, checking current signature policy after hashing too.
+      if (bytes.length > maximumBytes) throw importError('attestation_bundle_byte_limit');
+      const digest = await artifactHash(bytes, live.signal);
+      const matched = await verifySourceAttestation(encoded, key, policy, { signal: live.signal, maximumBytes });
+      live.check();
+      if (bytes.length !== matched.statement.artifact.bytes || digest !== matched.statement.artifact.sha256) {
+        throw importError('attestation_artifact_mismatch');
+      }
+      return matched;
     },
   };
 }
 /** Verify the caller's external key/repository/floor before opening the source. */
-export async function prepareImportApproval(config, read, live) {
+export async function prepareImportApproval(config, read, live, maximumBytes = ATTESTATION_LIMITS.bundleBytes) {
   if (config === null) return null;
   const encoded = await read(config.envelope, ATTESTATION_LIMITS.envelopeBytes);
   const key = await read(config.key, ATTESTATION_LIMITS.keyBytes);
-  return authorization(encoded, key, config.policy, live);
+  return authorization(encoded, key, config.policy, live, maximumBytes);
 }
 /** An unresolved signed retry cannot select fresh trust material or downgrade.
  * A caller resolving an already terminal outcome does not invoke this path.
  */
-export async function recoverImportApproval(binding, read, live) {
+export async function recoverImportApproval(binding, read, live, maximumBytes = ATTESTATION_LIMITS.bundleBytes) {
   validateApprovalBinding(binding);
   const encoded = await read(APPROVAL_FILES[0], ATTESTATION_LIMITS.envelopeBytes);
   const key = await read(APPROVAL_FILES[1], ATTESTATION_LIMITS.keyBytes);
   if (hash(encoded) !== binding.envelope_sha256 || hash(key) !== binding.public_key_sha256) {
     throw importError('native_import_approval_changed');
   }
-  return authorization(encoded, key, attestationPolicy(binding.policy), live);
+  return authorization(encoded, key, attestationPolicy(binding.policy), live, maximumBytes);
 }

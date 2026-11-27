@@ -12,7 +12,7 @@ import { spawnSync, spawn } from 'node:child_process';
 import { deflateSync } from 'node:zlib';
 import { importNativeSource, readNativeImportOutcome, retryNativeSourceImport } from '../../scripts/lib/native-source-import.mjs';
 import { parseImportArguments } from '../../scripts/import_git_bundle_native.mjs';
-import { signSourceBackup } from '../../scripts/lib/source-attestation.mjs';
+import { signSourceBackup, signSourceBackupFile } from '../../scripts/lib/source-attestation.mjs';
 import { pinnedNativeGitOracle } from './fixtures/pinned-native-git-oracle.mjs';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI = resolve(HERE, '../../scripts/import_git_bundle_native.mjs');
@@ -55,6 +55,66 @@ function importArguments(f, pins) {
       ? ['--expect-ref-hex', pin.ref_hex + '=' + pin.object_id]
       : ['--expect-ref', Buffer.from(pin.ref_hex, 'hex').toString() + '=' + pin.object_id])];
 }
+for (const signed of [false, true]) test('restore an oversized retained ' +
+  (signed ? 'signed' : 'unsigned') + ' bundle under the original input profile', async t => {
+  const f = await fixture(t, { import: 'fail-before' });
+  const bytes = Buffer.alloc(16 * 1024 * 1024 + 1, 0x73);
+  await writeFile(f.source, bytes);
+  await assert.rejects(importNativeSource(f.source, f.config), { code: 'native_import_file_size_or_type' });
+  const { options } = parseImportArguments(['import', f.source, '--max-input-mib', '17']);
+  const config = { ...f.config, ...options };
+  if (signed) {
+    const pair = generateKeyPairSync('ed25519');
+    const key = join(f.root, 'test.pem'), envelope = join(f.root, 'test.dsse');
+    const policy = { repository: 'owner/project', minimum_sequence: '42' };
+    const result = await signSourceBackupFile(f.source,
+      Buffer.from(pair.privateKey.export({ type: 'pkcs8', format: 'pem' })),
+      { repository: policy.repository, sequence: '42' }, { maximumBytes: bytes.length });
+    await writeFile(key, pair.publicKey.export({ type: 'spki', format: 'pem' }));
+    await writeFile(envelope, result.envelope);
+    config.approval = { envelope, key, policy };
+  }
+  await assert.rejects(importNativeSource(f.source, config), e => e.details?.submission_attempted === true);
+  const saved = await manifest(f);
+  assert.equal(saved.schema_version, 3);
+  assert.equal(saved.max_input_mib, 17);
+  assert.equal(saved.artifact.bytes, bytes.length);
+  assert.equal(saved.artifact.sha256, sha(bytes));
+  assert.equal(saved.approval !== null, signed);
+  await rm(f.source);
+  if (signed) { await rm(config.approval.envelope); await rm(config.approval.key); }
+  await f.setMode({ import: 'commit' });
+  const result = await retryNativeSourceImport(f.config.recovery, f.recovery);
+  assert.equal(result.outcome, 'committed');
+  assert.equal(result.source_approval?.checked_before_this_submission ?? false, signed);
+  const verifies = (await f.calls()).filter(args => args[1] === 'verify');
+  assert.equal(verifies.length, 2);
+  for (const args of verifies) assert.equal(args[args.indexOf('--max-input-mib') + 1], '17');
+  const attempts = (await readFile(join(f.root, 'attempts.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts.every(a => a.key === saved.idempotency_key), true);
+  const receipt = JSON.parse(await readFile(join(f.root, 'submissions.jsonl')));
+  assert.equal(receipt.digest, saved.artifact.sha256);
+});
+test('input profiles are bounded and cannot be replaced on retry', async t => {
+  const f = await fixture(t);
+  for (const value of ['0', '129', '017', '-1', '1.1']) {
+    assert.throws(() => parseImportArguments(['import', f.source, '--max-input-mib', value]));
+  }
+  assert.throws(() => parseImportArguments(['retry', f.config.recovery, '--max-input-mib', '17']));
+  for (const maxInputMiB of [0, 129, null, 1.5]) {
+    await assert.rejects(importNativeSource('/absent', { ...f.config, maxInputMiB }), { code: 'native_input_limit' });
+  }
+  f.config.maxInputMiB = 1;
+  await failedImport(f);
+  const saved = await manifest(f), calls = (await f.calls()).length;
+  for (const changes of [{ max_input_mib: 129 }, { max_input_mib: 0 }, { schema_version: 1 },
+    { artifact: { ...saved.artifact, bytes: 1024 * 1024 + 1 } }]) {
+    await writeFile(join(f.config.recovery, 'intent.json'), JSON.stringify({ ...saved, ...changes }) + '\n');
+    await assert.rejects(retryNativeSourceImport(f.config.recovery, f.recovery), { code: 'invalid_native_import_intent' });
+  }
+  assert.equal((await f.calls()).length, calls);
+});
 for (const format of ['sha1', 'sha256']) for (const count of [65, 1024, 4096]) {
   test('operator imports ' + count + ' direct refs with exact pins (' + format + ')', async t => {
     const f = await fixture(t, { format, referenceCount: count });

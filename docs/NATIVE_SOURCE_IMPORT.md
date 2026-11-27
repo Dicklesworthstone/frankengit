@@ -28,9 +28,13 @@ The executable is operator-trusted. These tools do not authenticate its build,
 sandbox it, grant a principal, or convert a local self-asserted principal into
 remote authentication. External artifact/reference pins are checked when supplied;
 an automatically computed snapshot hash is integrity, not provenance. A format
-alone is not an independent identity pin. The byte ceiling is 16 MiB, the direct
-reference ceiling is 4096, matching native direct-ref admission, and native
-expansion retains the existing bounded 128 MiB profile. Initial verification,
+alone is not an independent identity pin. Buffered input defaults to 16 MiB. Set `--max-input-mib N` (1–128) at import
+time to choose a different ceiling for a signed or unsigned source bundle.
+For example, `--max-input-mib 64` admits up to 64 MiB of input. The verifier
+and saved recovery intent use the selected ceiling. Status and retry recover
+it from that intent. Original version 1 and 2 intents keep the 16 MiB ceiling.
+The direct reference ceiling is 4096, matching native direct-ref admission,
+and expanded content retains its independent 128 MiB profile. Initial verification,
 saved-intent recovery and explicit retry use that same reference ceiling.
 The independent 1 MiB total CLI-argument and saved-intent limits remain in force;
 long ref names or extensive identity pins can reach a byte limit before the

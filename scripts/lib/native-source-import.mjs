@@ -12,7 +12,7 @@ import { APPROVAL_FILES, normalizeImportApproval, prepareImportApproval, recover
 
 // Match native direct-ref admission; independent byte and lifetime budgets still apply.
 export const NATIVE_SOURCE_IMPORT_MAX_REFS = NATIVE_BUNDLE_LIMITS.maxRefs;
-const INPUT_MAX = 16 * 1024 * 1024, INTENT_MAX = 1024 * 1024;
+const MIB = 1024 * 1024, DEFAULT_INPUT_MIB = 16, INTENT_MAX = MIB;
 const INTENT = 'intent.json', SNAPSHOT = 'source.bundle';
 const FIELDS = ['type', 'schema_version', 'storage', 'storage_identity', 'tenant_id', 'repository_id',
   'principal_id', 'object_format', 'idempotency_key', 'key_digest', 'artifact', 'expectations', 'content'];
@@ -88,7 +88,7 @@ async function syncDirectory(path) {
 }
 function options(value, recovery = false) {
   const allowed = recovery ? ['fg', 'timeoutMs', 'signal', 'intentSha256', 'trustedLocal']
-    : ['fg', 'timeoutMs', 'signal', 'trustedLocal', 'storage', 'tenant', 'repository', 'principal', 'format', 'recovery', 'expected', 'approval'];
+    : ['fg', 'timeoutMs', 'signal', 'trustedLocal', 'storage', 'tenant', 'repository', 'principal', 'format', 'recovery', 'expected', 'approval', 'maxInputMiB'];
   if (value === null || typeof value !== 'object' || Object.keys(value).some(key => !allowed.includes(key)) || value.trustedLocal !== true) {
     throw importError('explicit_trusted_local_required');
   }
@@ -106,11 +106,11 @@ function options(value, recovery = false) {
   const expected = value.expected ?? {};
   if (expected.object_format !== undefined && expected.object_format !== value.format) throw importError('native_import_format_mismatch');
   const native = normalizeNativeBundleOptions({ fg: value.fg, expected: { ...expected, object_format: value.format },
-    signal: value.signal, maxInputMiB: 16, maxRefs: NATIVE_SOURCE_IMPORT_MAX_REFS, timeoutMs });
+    signal: value.signal, maxInputMiB: value.maxInputMiB === undefined ? DEFAULT_INPUT_MIB : value.maxInputMiB, maxRefs: NATIVE_SOURCE_IMPORT_MAX_REFS, timeoutMs });
   return { ...value, native, timeoutMs, live, approval: normalizeImportApproval(value.approval) };
 }
 function nativeOptions(intent, config) {
-  return { fg: config.fg, signal: config.signal, timeoutMs: config.live.remaining(), maxInputMiB: 16, maxRefs: NATIVE_SOURCE_IMPORT_MAX_REFS,
+  return { fg: config.fg, signal: config.signal, timeoutMs: config.live.remaining(), maxInputMiB: intent.max_input_mib ?? DEFAULT_INPUT_MIB, maxRefs: NATIVE_SOURCE_IMPORT_MAX_REFS,
     expected: { ...intent.expectations, sha256: intent.artifact.sha256, object_format: intent.object_format } };
 }
 async function lookup(intent, config) {
@@ -131,28 +131,32 @@ function report(intent, recovery, intentHash, found, submitted) {
     outcome: found.outcome, terminal: found.terminal, submission_attempted: submitted,
     automatic_retry: false, absence_proves_non_commit: false, recovery_material_retained: true,
     scope: 'portable-git-source-only', forge_state_restored: false, capsule_restored: false,
-    ...(intent.schema_version === 2 ? { source_approval: { required: true, checked_before_this_submission: submitted,
+    ...(intent.approval != null ? { source_approval: { required: true, checked_before_this_submission: submitted,
       policy: intent.approval.policy, envelope_sha256: intent.approval.envelope_sha256,
       public_key_sha256: intent.approval.public_key_sha256, current_validity_claimed: false } } : {}) };
 }
 function validateIntent(intent) {
-  if (!exactKeys(intent, intent?.schema_version === 2 ? [...FIELDS, 'approval'] : FIELDS)
-    || intent.type !== 'native-source-import-intent' || ![1, 2].includes(intent.schema_version)
+  const fields = intent?.schema_version === 3 ? [...FIELDS, 'max_input_mib', 'approval']
+    : intent?.schema_version === 2 ? [...FIELDS, 'approval'] : FIELDS;
+  const maxInputMiB = intent?.schema_version === 3 ? intent.max_input_mib : DEFAULT_INPUT_MIB;
+  if (!exactKeys(intent, fields) || !Number.isSafeInteger(maxInputMiB)
+    || maxInputMiB < 1 || maxInputMiB > NATIVE_BUNDLE_LIMITS.maxInputMiB
+    || intent.type !== 'native-source-import-intent' || ![1, 2, 3].includes(intent.schema_version)
     || ![intent.tenant_id, intent.repository_id, intent.principal_id].every(id)
     || !['sha1', 'sha256'].includes(intent.object_format) || !nativeKeyDigest(intent.key_digest)
     || !/^fg-source-import-[0-9a-f]{64}$/.test(intent.idempotency_key)
     || !exactKeys(intent.storage_identity, ['dev', 'ino'])
     || !Object.values(intent.storage_identity).every(value => typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value))
     || !exactKeys(intent.artifact, ['bytes', 'sha256']) || !digest(intent.artifact.sha256)
-    || !Number.isSafeInteger(intent.artifact.bytes) || intent.artifact.bytes < 1 || intent.artifact.bytes > INPUT_MAX
+    || !Number.isSafeInteger(intent.artifact.bytes) || intent.artifact.bytes < 1 || intent.artifact.bytes > maxInputMiB * MIB
     || !exactKeys(intent.content, ['declared_refs', 'pack_bytes'])
     || !Number.isSafeInteger(intent.content.declared_refs) || intent.content.declared_refs < 1 || intent.content.declared_refs > NATIVE_SOURCE_IMPORT_MAX_REFS
     || !Number.isSafeInteger(intent.content.pack_bytes) || intent.content.pack_bytes < 1 || intent.content.pack_bytes > intent.artifact.bytes) {
     throw importError('invalid_native_import_intent');
   }
-  if (intent.schema_version === 2) validateApprovalBinding(intent.approval);
+  if (intent.schema_version === 2 || (intent.schema_version === 3 && intent.approval !== null)) validateApprovalBinding(intent.approval);
   pathValue(intent.storage, true);
-  const normalized = normalizeNativeBundleOptions({ fg: '/unused-native-fg', maxInputMiB: 16, maxRefs: NATIVE_SOURCE_IMPORT_MAX_REFS, expected: intent.expectations });
+  const normalized = normalizeNativeBundleOptions({ fg: '/unused-native-fg', maxInputMiB, maxRefs: NATIVE_SOURCE_IMPORT_MAX_REFS, expected: intent.expectations });
   if (normalized.expected.object_format !== intent.object_format || JSON.stringify(normalized.expected) !== JSON.stringify(intent.expectations)
     || (normalized.expected.sha256 !== undefined && normalized.expected.sha256 !== intent.artifact.sha256)) throw importError('invalid_native_import_intent');
   return intent;
@@ -183,13 +187,13 @@ async function submit(saved, config, bytes, snapshotStat) {
   await guardRecovery(saved, config, snapshotStat);
   // A retry may have recovered complete bytes from an interrupted preparation.
   // Re-establish persistence before acquiring publication responsibility.
-  for (const name of [SNAPSHOT, INTENT, ...(saved.intent.schema_version === 2 ? APPROVAL_FILES : [])]) {
+  for (const name of [SNAPSHOT, INTENT, ...(saved.intent.approval != null ? APPROVAL_FILES : [])]) {
     config.live.check();
     const handle = await open(join(saved.recovery, name), constants.O_RDONLY | constants.O_NOFOLLOW);
     try { await handle.sync(); } finally { await handle.close(); }
   }
   await syncDirectory(saved.recovery); await syncDirectory(dirname(saved.recovery));
-  if (saved.intent.schema_version === 2) {
+  if (saved.intent.approval != null) {
     const approval = await retainedApproval(saved, config);
     await approval.check(bytes);
   }
@@ -225,8 +229,8 @@ async function submit(saved, config, bytes, snapshotStat) {
 export async function importNativeSource(path, value) {
   const config = options(value); pathValue(path);
   const approval = await prepareImportApproval(config.approval,
-    async (path, maximum) => (await readFile(path, maximum, config.live)).bytes, config.live);
-  const input = await readFile(path, INPUT_MAX, config.live);
+    async (path, maximum) => (await readFile(path, maximum, config.live)).bytes, config.live, config.native.maxInputMiB * MIB);
+  const input = await readFile(path, config.native.maxInputMiB * MIB, config.live);
   if (approval !== null) await approval.check(input.bytes);
   const verified = await verifyNativeGitBundle(input.bytes, { ...config.native, timeoutMs: config.live.remaining() });
   if (approval !== null) await approval.check(input.bytes);
@@ -245,6 +249,11 @@ export async function importNativeSource(path, value) {
     artifact: { bytes: input.bytes.length, sha256: hash(input.bytes) }, expectations: config.native.expected,
     content: { declared_refs: verified.reference_count, pack_bytes: verified.pack_bytes } };
   if (approval !== null) { intent.schema_version = 2; intent.approval = approval.binding; }
+  if (config.native.maxInputMiB !== DEFAULT_INPUT_MIB) {
+    intent.schema_version = 3;
+    intent.max_input_mib = config.native.maxInputMiB;
+    intent.approval = approval?.binding ?? null;
+  }
   const original = await lookup(intent, config);
   if (original.outcome !== 'unknown_pending' || original.node_closed !== true) throw importError('native_import_identity_already_decided');
   intent.key_digest = original.key_digest; validateIntent(intent);
@@ -262,7 +271,7 @@ export async function importNativeSource(path, value) {
     await writeNew(join(recovery, INTENT), encoded, config.live);
     await syncDirectory(recovery); await syncDirectory(parent); config.live.check();
     const saved = await loadRecovery(recovery, { ...config, intentSha256: hash(encoded) });
-    const snapshot = await readFile(join(recovery, SNAPSHOT), INPUT_MAX, config.live, true);
+    const snapshot = await readFile(join(recovery, SNAPSHOT), (saved.intent.max_input_mib ?? DEFAULT_INPUT_MIB) * MIB, config.live, true);
     return await submit(saved, config, snapshot.bytes, snapshot.stat);
   } catch (error) {
     error.details ??= { recovery_directory: recovery, intent_sha256: hash(encoded), outcome: 'not_submitted',
@@ -293,9 +302,9 @@ export async function retryNativeSourceImport(path, value) {
     return report(saved.intent, saved.recovery, saved.intentHash, found, false);
   }
   if (found.node_closed !== true) throw importError('native_import_preflight_cleanup_failed');
-  const snapshot = await readFile(join(saved.recovery, SNAPSHOT), INPUT_MAX, config.live, true);
+  const snapshot = await readFile(join(saved.recovery, SNAPSHOT), (saved.intent.max_input_mib ?? DEFAULT_INPUT_MIB) * MIB, config.live, true);
   if (snapshot.bytes.length !== saved.intent.artifact.bytes || hash(snapshot.bytes) !== saved.intent.artifact.sha256) throw importError('native_import_snapshot_mismatch');
-  if (saved.intent.schema_version === 2) {
+  if (saved.intent.approval != null) {
     const approval = await retainedApproval(saved, config);
     await approval.check(snapshot.bytes);
   }
@@ -306,5 +315,6 @@ export async function retryNativeSourceImport(path, value) {
 
 async function retainedApproval(saved, config) {
   return recoverImportApproval(saved.intent.approval,
-    async (name, maximum) => (await readFile(join(saved.recovery, name), maximum, config.live, true)).bytes, config.live);
+    async (name, maximum) => (await readFile(join(saved.recovery, name), maximum, config.live, true)).bytes, config.live,
+    (saved.intent.max_input_mib ?? DEFAULT_INPUT_MIB) * MIB);
 }
