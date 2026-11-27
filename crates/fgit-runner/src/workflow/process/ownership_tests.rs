@@ -28,7 +28,17 @@ impl ProcRoot {
         .unwrap();
     }
     fn inspect(&self) -> io::Result<Snapshot> {
-        inspect_until(&self.0, 123, Instant::now() + Duration::from_secs(10))
+        self.scan(&|| Ok(())).map_err(|error| match error {
+            ScanError::Failed(error) => error,
+            ScanError::Stopped(reason) => panic!("unexpected stop {reason:?}"),
+        })
+    }
+    fn scan(&self, checkpoint: &dyn Fn() -> Result<(), ScanError>) -> Result<Snapshot, ScanError> {
+        // Fixture PIDs do not name real host processes. Unknown kernel
+        // membership forces inspection of the fixture's actual stat record.
+        inspect_with_group_lookup(&self.0, 123, checkpoint, &|_| {
+            Err(rustix::io::Errno::ACCESS)
+        })
     }
 }
 impl Drop for ProcRoot {
@@ -147,11 +157,16 @@ fn failed_stat_records_require_positive_nonmembership_or_a_vanished_pid() {
                 }
                 fault.install(&root, 42);
                 let lookups = Cell::new(0);
-                let result = inspect_with_group_lookup(&root.0, 123, &|| Ok(()), &|pid| {
-                    assert_eq!(pid, 42, "intact records need no kernel lookup");
-                    lookups.set(lookups.get() + 1);
-                    membership
-                });
+                let result =
+                    inspect_with_group_lookup(&root.0, 123, &|| Ok(()), &|pid| match pid {
+                        42 => {
+                            lookups.set(lookups.get() + 1);
+                            membership
+                        }
+                        77 => Ok(Pid::from_raw(321).unwrap()),
+                        44 => Ok(Pid::from_raw(123).unwrap()),
+                        _ => panic!("unexpected membership lookup for {pid}"),
+                    });
                 if may_skip {
                     let snapshot = result.unwrap();
                     assert_eq!(snapshot.other, has_live_member, "{fault:?}");
@@ -162,7 +177,7 @@ fn failed_stat_records_require_positive_nonmembership_or_a_vanished_pid() {
                     };
                     fault.assert_preserved(&error);
                 }
-                assert_eq!(lookups.get(), 1, "one lookup, no deadline-reset retries");
+                assert_eq!(lookups.get(), if may_skip { 1 } else { 2 });
             }
         }
     }
@@ -189,7 +204,8 @@ fn membership_fallback_preserves_cancellation_and_the_existing_deadline() {
     for reason in [CompletionStop::Cancelled, CompletionStop::TimedOut] {
         for stop_after_lookup in [false, true] {
             let root = ProcRoot::new();
-            // A single failed record makes both checkpoint locations exact.
+            // A single failed record makes the checkpoints before and after
+            // the nonmembership lookup exact.
             // No partial observation is allowed to substitute for the leader.
             FaultyStat::Malformed.install(&root, 42);
             let started = Instant::now();
@@ -201,7 +217,7 @@ fn membership_fallback_preserves_cancellation_and_the_existing_deadline() {
                 let stop = if stop_after_lookup {
                     lookups.get() != 0
                 } else {
-                    count == 3
+                    count == 2
                 };
                 completion_checkpoint(
                     started + Duration::from_secs(10),
@@ -225,9 +241,29 @@ fn membership_fallback_preserves_cancellation_and_the_existing_deadline() {
                 Err(ScanError::Stopped(stopped)) if stopped == reason
             ));
             assert_eq!(lookups.get(), usize::from(stop_after_lookup));
-            assert_eq!(checkpoints.get(), if stop_after_lookup { 4 } else { 3 });
+            assert_eq!(checkpoints.get(), if stop_after_lookup { 3 } else { 2 });
         }
     }
+}
+
+#[test]
+fn vanished_member_between_lookup_and_stat_is_checked_again() {
+    let root = ProcRoot::new();
+    root.record(123, 123, b'Z');
+    FaultyStat::Missing.install(&root, 42);
+    let calls = Cell::new(0);
+    let snapshot = inspect_with_group_lookup(&root.0, 123, &|| Ok(()), &|pid| {
+        assert_eq!(pid, 42);
+        calls.set(calls.get() + 1);
+        if calls.get() == 1 {
+            Ok(Pid::from_raw(123).unwrap())
+        } else {
+            Err(rustix::io::Errno::SRCH)
+        }
+    })
+    .unwrap();
+    assert_eq!(calls.get(), 2);
+    assert!(!snapshot.other && !snapshot.live_other);
 }
 
 #[test]
@@ -258,16 +294,16 @@ fn completion_scan_preserves_progress_through_descheduling_within_the_caller_bud
         }
         completion_checkpoint(started + Duration::from_secs(10), &|| true, &|| now.get())
     };
-    let live = inspect(&root.0, 123, &checkpoint).unwrap();
+    let live = root.scan(&checkpoint).unwrap();
     assert!(live.other && live.live_other);
-    assert_eq!(checkpoints.get(), 6, "one start, two per entry, one end");
+    assert_eq!(checkpoints.get(), 7, "one traversal, one nonleader lookup");
     // The permitted twin: a zombie member is stopped, not live.
     root.record(42, 123, b'Z');
-    let settled = inspect(&root.0, 123, &checkpoint).unwrap();
+    let settled = root.scan(&checkpoint).unwrap();
     assert!(settled.other && !settled.live_other);
     // A clean joined process has no other group member at all.
     root.record(42, 321, b'S');
-    let joined = inspect(&root.0, 123, &checkpoint).unwrap();
+    let joined = root.scan(&checkpoint).unwrap();
     assert!(!joined.other && !joined.live_other);
 }
 
@@ -296,7 +332,7 @@ fn interrupted_scans_never_establish_quiescence_or_restart_with_a_fresh_budget()
             )
         };
         assert!(matches!(
-            inspect(&root.0, 123, &checkpoint),
+            root.scan(&checkpoint),
             Err(ScanError::Stopped(reason)) if reason == stop
         ));
         assert_eq!(checkpoints.get(), 3, "interruption must remain latched");

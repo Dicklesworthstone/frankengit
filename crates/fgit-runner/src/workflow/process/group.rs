@@ -268,6 +268,17 @@ fn inspect_with_group_lookup(
         if pid == 0 {
             continue;
         }
+        // Most PIDs on a shared runner have nothing to do with this job.
+        // The kernel can establish that in one syscall, without opening,
+        // reading and parsing a stat file. Only stat can establish that an
+        // actual member is stopped. Always check the pinned leader's record.
+        if pid != leader {
+            let membership = group_of(pid);
+            checkpoint()?;
+            if outside_group(membership, leader) {
+                continue;
+            }
+        }
         let observed = read_stat(&entry.path().join("stat"), pid);
         checkpoint()?;
         let (group, state) = match observed {
@@ -284,11 +295,10 @@ fn inspect_with_group_lookup(
                 }
                 let group = group_of(pid);
                 checkpoint()?;
-                match group {
-                    Ok(group) if group.as_raw_pid() as u32 != leader => continue,
-                    Err(rustix::io::Errno::SRCH) => continue,
-                    _ => return Err(error.into()),
+                if outside_group(group, leader) {
+                    continue;
                 }
+                return Err(error.into());
             }
         };
         if pid == leader {
@@ -306,6 +316,13 @@ fn inspect_with_group_lookup(
     }
     checkpoint()?;
     Ok(snapshot)
+}
+
+fn outside_group(membership: rustix::io::Result<Pid>, leader: u32) -> bool {
+    match membership {
+        Ok(group) => group.as_raw_pid() as u32 != leader,
+        Err(error) => error == rustix::io::Errno::SRCH,
+    }
 }
 
 fn kernel_group(pid: u32) -> rustix::io::Result<Pid> {

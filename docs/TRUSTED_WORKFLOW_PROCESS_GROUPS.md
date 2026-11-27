@@ -50,10 +50,12 @@ Forced cleanup inspects under its original three-second drain deadline. Every
 scan admits at most 16,384 directory entries and at most 4,096 bytes per stat
 record. These work bounds apply to normal completion too. Names in `/proc/<pid>/stat` are
 opaque: spaces, parentheses and newlines are not interpreted as field separators
-inside the command name. If a nonleader's stat record cannot be read or parsed,
-the scanner asks the kernel for that PID's process group. It skips the failed
-record only when the kernel independently identifies another group or confirms
-that the PID vanished. A failed lookup or an actual member's failed record still
+inside the command name. The scanner reads the pinned leader's stat record. For
+other PIDs it first asks the kernel for the process group, skipping the stat
+file entirely when the PID belongs to another group or has vanished. Members
+and uncertain lookups require the bounded stat read. If it fails, a fresh
+kernel lookup handles a process that exited during the read. The scanner skips
+the failed record only on confirmed nonmembership or disappearance. A failed lookup or an actual member's failed record still
 refuses, and a pinned leader's failed record never uses this exception. This
 keeps unrelated host processes from invalidating an otherwise complete group
 observation without treating an unknown member as stopped. Missing-leader,
