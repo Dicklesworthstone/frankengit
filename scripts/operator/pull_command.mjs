@@ -16,10 +16,21 @@ const U64 = 18446744073709551615n, SCHEMA = 'frankengit-remote-pull-intent-v1';
 const COUNTERS = ['number', 'expected_version', 'pull_request_version', 'comment_version', 'decision_sequence', 'policy_epoch', 'review_expected_version',
   'byte_start', 'byte_end', 'line_start', 'line_count'];
 export class PullError extends Error {
-  constructor(code, { phase = 'validation', dispatched = false, publication = null, status = null } = {}) {
+  constructor(code, { phase = 'validation', dispatched = false, publication = null, outcome = null, status = null } = {}) {
     super(code); this.name = 'PullError'; this.code = code; this.phase = phase;
-    this.dispatched = dispatched; this.publication = publication; this.status = status; this.outcomeUnknown = true;
+    this.outcome = outcome; this.dispatched = dispatched; this.publication = publication; this.status = status; this.outcomeUnknown = true;
   }
+}
+// An outcome lookup can establish the seal before the publication reply arrives.
+export function pullEvidenceAgrees(outcome, publication) {
+  if (outcome === null || publication === null) return true;
+  if (outcome.transaction && outcome.transaction.tx_id !== publication.tx_id) return false;
+  if (!outcome.terminal) return true;
+  const d = outcome.decision;
+  return d.kind === publication.outcome && d.decision_sequence === publication.decision_sequence &&
+    (d.repository_commit_id ?? null) === publication.repository_commit_id &&
+    (d.refusal_record_id ?? null) === publication.refusal_record_id &&
+    (d.code ?? null) === publication.refusal_code && (d.code_point ?? null) === publication.refusal_code_point;
 }
 export const failPull = code => { throw new PullError(code); };
 function anchorResult(operation) {

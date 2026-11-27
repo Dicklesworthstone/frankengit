@@ -6,7 +6,7 @@ import { performance } from 'node:perf_hooks';
 import { lookupOutcome, validateOutcomeReply, OutcomeError } from './transaction_outcome.mjs';
 import { PULL_LIMITS, PullError, pullFields, failPull, pullOutcomeScope, pullTokenFingerprint,
   validatePullIntent, validatePullPublication, parsePullJson, isPullReview, validatePullBundle, pullEnvelope,
-  requireAgentMetadataOperation } from './pull_command.mjs';
+  requireAgentMetadataOperation, pullEvidenceAgrees } from './pull_command.mjs';
 export { preparePull, validatePullIntent, pullCanonical, parsePullJson, PullError } from './pull_command.mjs';
 
 function configuration(options, send) {
@@ -18,19 +18,12 @@ function configuration(options, send) {
     ? Buffer.from(options.ca) : failPull('invalid_pull_ca');
   return { ...options, timeoutMs, ca };
 }
-function matching(outcome, publication) {
-  if (publication === null) return outcome;
-  const d = outcome.decision;
-  if (!outcome.terminal || outcome.transaction?.tx_id !== publication.tx_id || d.kind !== publication.outcome ||
-      d.decision_sequence !== publication.decision_sequence ||
-      (d.repository_commit_id ?? null) !== publication.repository_commit_id ||
-      (d.refusal_record_id ?? null) !== publication.refusal_record_id || (d.code ?? null) !== publication.refusal_code ||
-      (d.code_point ?? null) !== publication.refusal_code_point) failPull('pull_outcome_publication_conflict');
-  return outcome;
+function checkEvidence(outcome, publication) {
+  if (!pullEvidenceAgrees(outcome, publication)) failPull('pull_outcome_publication_conflict');
 }
-function errorFor(error, phase, dispatched, publication) {
+function errorFor(error, phase, dispatched, publication, outcome) {
   return new PullError(error instanceof PullError || error instanceof OutcomeError ? error.code : 'pull_operation_unavailable',
-    { status: error instanceof PullError || error instanceof OutcomeError ? error.status : null, phase, dispatched, publication });
+    { status: error instanceof PullError || error instanceof OutcomeError ? error.status : null, phase, dispatched, publication, outcome });
 }
 function postPull(intent, token, options, envelope) {
   return new Promise((resolve, reject) => {
@@ -117,20 +110,32 @@ async function operate(input, token, options, send) {
     return { timeoutMs: duration, signal: config.signal, ca: config.ca };
   };
   const lookup = prior => lookupOutcome(intent.endpoint, token, { ...scope, key: intent.key }, { ...remaining(), known: prior });
-  let phase = 'preflight', dispatched = false;
+  checkEvidence(known, publication);
+  let outcome = known, phase = 'preflight', dispatched = false;
   try {
     const before = await lookup(known);
+    checkEvidence(before, publication);
+    outcome = before;
     if (!send || before.terminal || publication !== null) {
-      matching(before, publication);
+      if (publication !== null && !before.terminal) failPull('pull_outcome_publication_conflict');
       return { outcome: before, publication, dispatched: false };
     }
     phase = 'publication';
     const envelope = pullEnvelope(intent, bundle), transport = remaining(); dispatched = true;
-    publication = await postPull(intent, token, transport, envelope);
+    const receipt = await postPull(intent, token, transport, envelope);
+    checkEvidence(before, receipt);
+    publication = receipt;
     phase = 'confirmation';
-    const outcome = matching(await lookup(before), publication);
+    const confirmed = await lookup(before);
+    checkEvidence(confirmed, publication);
+    outcome = confirmed;
+    if (!outcome.terminal) failPull('pull_outcome_publication_conflict');
     return { outcome, publication, dispatched: true };
-  } catch (error) { throw errorFor(error, phase, dispatched, publication); }
+  } catch (error) {
+    // A preflight miss supplies no identity and says nothing about a subsequent write.
+    const retained = outcome?.state === 'key_not_observed' ? null : outcome;
+    throw errorFor(error, phase, dispatched, publication, retained);
+  }
 }
 export async function submitPull(intent, token, options = {}) { return operate(intent, token, options, true); }
 export async function recoverPull(intent, token, options = {}) { return operate(intent, token, options, false); }

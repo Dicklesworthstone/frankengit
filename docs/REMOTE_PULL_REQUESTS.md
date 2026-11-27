@@ -317,6 +317,11 @@ node scripts/remote_pull.mjs recover --request-dir /private/pr-37 \
 Omit `--known` when interruption produced no complete prior record. Recovery
 never sends a mutation. `--known` binds a retained observation to this exact
 request and refuses changed transactions, seals, terminal decisions or scope.
+When a later lookup fails or returns a conflicting observation, its error record
+retains the last verified seal or decision. Use that record as `--known` on the
+next attempt. If preflight had already observed the seal, a failed confirmation
+also retains a compatible publication reply. Recovery checks both before it
+accepts the decision. A preflight key miss carries no seal to retain.
 Both network commands require a **new** `--record` destination. Existing files
 are never overwritten. `--ca-file PRIVATE_PEM` provides an explicit CA, and
 `--timeout-ms` bounds the combined preflight/publication/confirmation network

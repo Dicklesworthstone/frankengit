@@ -76,6 +76,50 @@ test('SHA-256 fast-forward retains exact tips and version in saved intent and re
   assert.equal(record.publication.source_tip, `sha256:${p.intent.fields.source_tip}`);
   assert.equal(record.publication.pull_request_version, p.intent.fields.pull_request_version);
 });
+for (const terminal of ['committed', 'refused']) {
+  test(`failed PR recovery preserves a previously observed ${terminal} decision without a publication reply`, async t => {
+    let visible = true;
+    const p = await peer(t, { handle(request, response, state) {
+      if (visible && request.url.endsWith('/outcomes')) {
+        respond(response, outcome(state.intent, terminal)); return true;
+      }
+    } }), f = await prepared(t, p);
+    assert.equal((await cli(t, recoveryArgs(f))).code, terminal === 'committed' ? 0 : 1);
+    const original = await readPullRecord(f.record, p.intent);
+    visible = false;
+    const failed = join(f.root, 'failed.json'), again = join(f.root, 'again.json');
+    assert.equal((await cli(t, [...recoveryArgs(f, failed), '--known', f.record])).code, 3);
+    const record = await readPullRecord(failed, p.intent);
+    assert.deepEqual(record.outcome, original.outcome);
+    assert.equal(record.publication, null);
+    assert.equal((await cli(t, [...sendArgs(f, p.intent, again), '--known', failed])).code, 3);
+    assert.equal(p.requests.length, 3);
+    assert.ok(p.requests.every(request => request.url.endsWith('/outcomes')));
+  });
+}
+test('sealed preflight and publication both survive failed confirmation and reject a changed seal on recovery', async t => {
+  let mode = 'undecided';
+  const p = await peer(t, { handle(request, response, state) {
+    if (!request.url.endsWith('/outcomes')) return;
+    if (state.published && mode === 'undecided') { response.writeHead(503); response.end(); return true; }
+    const value = outcome(state.intent, mode === 'undecided' ? 'undecided' : 'committed');
+    if (mode === 'changed') value.transaction.seal_id = 'different-seal';
+    respond(response, value); return true;
+  } }), f = await prepared(t, p);
+  assert.equal((await cli(t, sendArgs(f, p.intent))).code, 3);
+  const record = await readPullRecord(f.record, p.intent);
+  assert.equal(record.outcome.transaction.seal_id, 'native-seal');
+  assert.equal(record.publication.tx_id, record.outcome.transaction.tx_id);
+  assert.throws(() => validatePullRecord({ ...record, error: null }, p.intent));
+  assert.throws(() => validatePullRecord({ ...record, publication: { ...record.publication, tx_id: 'other' } }, p.intent));
+  mode = 'changed';
+  const failed = join(f.root, 'conflicting.json');
+  assert.equal((await cli(t, [...sendArgs(f, p.intent, failed), '--known', f.record])).code, 3);
+  assert.deepEqual((await readPullRecord(failed, p.intent)).outcome, record.outcome);
+  mode = 'committed';
+  assert.equal((await cli(t, [...recoveryArgs(f, join(f.root, 'confirmed.json')), '--known', failed])).code, 0);
+  assert.equal(p.requests.filter(request => !request.url.endsWith('/outcomes')).length, 1);
+});
 for (const action of ['open', 'append-comment']) test(`${action}: a canonical refusal exits 1 and retains its exact evidence`, async t => {
   const p = await peer(t, { action, state: 'refused' }), f = await prepared(t, p);
   const result = await cli(t, sendArgs(f, p.intent)); assert.equal(result.code, 1, result.err);

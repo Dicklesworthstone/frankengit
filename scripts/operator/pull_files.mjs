@@ -4,7 +4,7 @@ import { constants } from 'node:fs';
 import { open, lstat, mkdir, realpath, link, unlink } from 'node:fs/promises';
 import { dirname, resolve, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { PULL_LIMITS, PullError, failPull, pullFields, pullHash, pullCanonical, parsePullJson,
+import { PULL_LIMITS, PullError, failPull, pullFields, pullEvidenceAgrees, pullHash, pullCanonical, parsePullJson,
   pullTokenFingerprint, validatePullIntent, validatePullPublication, pullOutcomeScope, validatePullBundle } from './pull_command.mjs';
 import { validateOutcomeReply } from './transaction_outcome.mjs';
 import { MAX_CREDENTIAL_TOKEN_BYTES } from './credential_token.mjs';
@@ -100,7 +100,7 @@ export async function loadPullBundle(path, value, { sync = false } = {}) {
 }
 export function pullRecord(intent, result, error = null) {
   const value = { schema: 'frankengit-remote-pull-record-v1', intent_sha256: pullHash(pullCanonical(validatePullIntent(intent))),
-    key: intent.key, outcome: result?.outcome ?? null, publication: result?.publication ?? error?.publication ?? null,
+    key: intent.key, outcome: result?.outcome ?? error?.outcome ?? null, publication: result?.publication ?? error?.publication ?? null,
     dispatched: result?.dispatched ?? error?.dispatched ?? false,
     error: error === null ? null : { code: error instanceof PullError ? error.code : 'pull_operation_unavailable',
       phase: error instanceof PullError ? error.phase : 'validation', status: error instanceof PullError ? error.status : null } };
@@ -114,13 +114,8 @@ export function validatePullRecord(value, input) {
   const scope = pullOutcomeScope(intent.scope), outcome = value.outcome === null ? null : validateOutcomeReply(value.outcome, scope);
   const publication = value.publication === null ? null : validatePullPublication(value.publication, intent,
     value.publication.outcome === 'committed' ? 200 : 409);
-  if (outcome !== null && publication !== null) {
-    const d = outcome.decision;
-    if (!outcome.terminal || outcome.transaction.tx_id !== publication.tx_id || d.kind !== publication.outcome ||
-        d.decision_sequence !== publication.decision_sequence || (d.repository_commit_id ?? null) !== publication.repository_commit_id ||
-        (d.refusal_record_id ?? null) !== publication.refusal_record_id || (d.code ?? null) !== publication.refusal_code ||
-        (d.code_point ?? null) !== publication.refusal_code_point) failPull('conflicting_pull_record');
-  }
+  if (!pullEvidenceAgrees(outcome, publication) ||
+      (value.error === null && publication !== null && !outcome?.terminal)) failPull('conflicting_pull_record');
   if (value.error === null) { if (outcome === null) failPull('empty_pull_record'); }
   else {
     pullFields(value.error, ['code', 'phase', 'status']);
