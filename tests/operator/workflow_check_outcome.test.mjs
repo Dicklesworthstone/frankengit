@@ -18,6 +18,7 @@ const LINUX_WORKFLOW = { skip: process.platform !== 'linux' && 'requires explici
 
 const token = 'a'.repeat(64), hex = text => Buffer.from(text).toString('hex');
 const cli = new URL('../../scripts/fg_workflow_checks.mjs', import.meta.url).pathname;
+const supervisorCli = new URL('../../scripts/fg_workflow_supervisor.mjs', import.meta.url).pathname;
 const save = (path, value) => writeFile(path, encode(value), { mode: 0o600 });
 const json = async path => JSON.parse(await readFile(path, 'utf8'));
 async function fixture(t, format = 'sha1', count = 1) {
@@ -94,16 +95,17 @@ function argumentsFor(f, address, operation = 'recover', extras = []) {
 async function supervisorFixture(f, other) {
   const state = join(f.root, 'supervisor'), path = join(f.root, 'supervisor.json');
   await mkdir(state, { mode: 0o700 });
-  const config = { schema: 'frankengit-workflow-supervisor-v1', state_directory: state,
-    lanes: [{ name: 'other', publisher: other.config }, { name: 'selected', publisher: f.config }] };
+  const lanes = [{ name: 'selected', publisher: f.config }];
+  if (other) lanes.unshift({ name: 'other', publisher: other.config });
+  const config = { schema: 'frankengit-workflow-supervisor-v1', state_directory: state, lanes };
   await save(path, config);
   const args = (address, lane = 'selected') => ['recover', '--supervisor-config', path, '--lane', lane,
     '--trusted-local', '--endpoint', address, '--token-file', f.tokenFile];
   const bindingPath = join(state, 'binding.json');
   return { config, path, state, args, bindingPath, bind: () => save(bindingPath, config) };
 }
-function child(t, args) {
-  const processChild = spawn(process.execPath, [cli, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+function child(t, args, script = cli) {
+  const processChild = spawn(process.execPath, [script, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '', stderr = ''; processChild.stdout.on('data', b => stdout += b); processChild.stderr.on('data', b => stderr += b);
   const done = new Promise((resolve, reject) => { processChild.once('error', reject); processChild.once('close', (code, signal) => resolve({ code, signal, stdout, stderr })); });
   t.after(async () => { if (processChild.exitCode === null && processChild.signalCode === null) processChild.kill('SIGKILL'); await done; });
@@ -386,6 +388,24 @@ test('CLI refuses unbound, altered, unknown or ambiguous supervisor lane selecti
   assert.equal(server.calls.length, 0);
   assert.deepEqual((await readdir(f.config.state_directory)).sort(), before);
 });
+for (const [state, expected] of [['refused', 1], ['committed', 0]]) {
+  test(`supervisor status reflects the recovered ${state} publication`, LINUX_WORKFLOW, async t => {
+    const f = await fixture(t), server = await peer(t, f, ({ job }) => outcome(f, job, state));
+    const supervisor = await supervisorFixture(f);
+    await supervisor.bind();
+    const statusArgs = ['status', '--config', supervisor.path];
+    assert.equal((await child(t, statusArgs, supervisorCli).done).code, 2);
+    const recovered = await child(t, supervisor.args(server.address)).done;
+    assert.equal(recovered.code, expected, recovered.stderr);
+    const local = await child(t, statusArgs, supervisorCli).done;
+    const observed = JSON.parse(local.stdout);
+    assert.equal(observed.read_only, true);
+    assert.equal(observed.lanes[0].publication[state], 1);
+    assert.equal(observed.lanes[0].publication.pending, 0);
+    assert.equal(local.code, expected, local.stderr);
+    assert.equal(server.calls.length, 1);
+  });
+}
 test('CLI rejects publication flags, missing scopes, unsafe token files and malformed credentials before HTTP', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), server = await peer(t, f);
   for (const args of [argumentsFor(f, server.address, 'recover', ['--max-publications', '1']),
