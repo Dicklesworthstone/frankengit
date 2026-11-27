@@ -45,8 +45,39 @@ export function mergeMethod(value) {
   return value;
 }
 export function mergeProfile(value) {
-  if (!['path-merge-v1', 'exact-renames-v1', 'builtin-attributes-v1'].includes(value)) fail('Choose a supported native merge profile.');
+  if (!['path-merge-v1', 'exact-renames-v1', 'builtin-attributes-v1', 'recursive-path-merge-v1'].includes(value)) fail('Choose a supported native merge profile.');
   return value;
+}
+// Preparation evidence, not publication authority. The native inspector checks
+// the candidate bytes, closure and parents; it does not replay this algorithm.
+// The real-base set cannot exceed the native bounded graph traversal.
+export function recursiveBase(metadata, algorithm) {
+  const required = metadata.profile === 'recursive-path-merge-v1' && ['clean', 'conflicted'].includes(metadata.state);
+  if (!required) {
+    if (Object.hasOwn(metadata, 'recursive_base')) fail('Unexpected recursive merge-base receipt.');
+    return null;
+  }
+  if (!Object.hasOwn(metadata, 'recursive_base')) fail('Missing recursive merge-base receipt.');
+  const receipt = metadata.recursive_base;
+  keys(receipt, ['bases', 'tree']);
+  if (!Array.isArray(receipt.bases) || !receipt.bases.length || receipt.bases.length > 4096) fail('Invalid bounded recursive merge-base set.');
+  let previous = '';
+  const bases = receipt.bases.map(value => {
+    const base = oid(value, algorithm);
+    if (base <= previous) fail('Unordered or duplicate recursive merge bases.');
+    previous = base; return base;
+  });
+  const witness = metadata.state === 'clean' ? metadata.candidate?.merge_base : metadata.merge_base;
+  if (bases[0] !== oid(witness, algorithm)) fail('Recursive merge-base witness changed.');
+  return { bases, tree: oid(receipt.tree, algorithm) };
+}
+export function recursivePreparationFailure(response, metadata, profile, family) {
+  if (profile !== 'recursive-path-merge-v1' || response.status !== 409 || metadata?.type !== family ||
+      metadata.schema_version !== 1 || metadata.code !== 'recursive_merge_base_conflict' || metadata.outcome_unknown !== false) return;
+  keys(metadata, ['type', 'schema_version', 'code', 'outcome_unknown']);
+  throw Object.assign(new Error('Recursive merge-base construction conflicted. Revise the source history before preparing again.'), {
+    code: 'recursive_merge_base_conflict', status: 409,
+  });
 }
 export function candidateMethod(artifact) {
   if (!artifact) return null;
@@ -130,6 +161,7 @@ export function preparationEnvelope(response) {
 export async function preparationReply(response, number, expected, scope, crypto, expectResolved = false, method = 'merge-commit', profile = 'path-merge-v1') {
   if (mergeMethod(method) === 'rebase') fail('Rebase requires a complete series preparation response.');
   const { metadata, bundle } = preparationEnvelope(response);
+  recursivePreparationFailure(response, metadata, profile, 'pull_request_error');
   const selected = pinned(metadata, scope); noEffects(metadata);
   if (metadata.type !== 'merge_preparation' || !Array.isArray(metadata.conflicts)) fail('Unsupported merge preparation.');
   if (metadata.profile !== mergeProfile(profile)) fail('Preparation profile changed.');
@@ -137,13 +169,15 @@ export async function preparationReply(response, number, expected, scope, crypto
   if (mergeMethod(metadata.method === undefined ? 'merge-commit' : metadata.method) !== mergeMethod(method)) fail('Preparation method changed.');
   matchSubject(metadata.subject, expected, number, selected.binding.format, 'pull_request');
   if ((metadata.state === 'resolved') !== expectResolved) fail('Preparation and explicit resolution cannot substitute for one another.');
+  const recursive = recursiveBase(metadata, scope.format);
   if (metadata.state === 'clean' || metadata.state === 'resolved') {
     if (!bundle || metadata.conflicts.length || response.status !== 200) fail('Clean preparation lacks its exact bundle.');
     record(metadata.candidate); record(metadata.bundle);
     const fields = { ...subject(expected), merge_base: oid(metadata.candidate.merge_base, scope.format), candidate_commit: oid(metadata.candidate.commit, scope.format) };
     oid(metadata.candidate.tree, scope.format); integer(metadata.candidate.new_object_count, 'candidate objects', 1);
     if (metadata.bundle.bytes !== bundle.length || metadata.bundle.sha256 !== await digest(bundle, crypto)) fail('Candidate bundle commitment mismatch.');
-    return { metadata, artifact: { number, scope: selected.binding, method, fields, bundle: bundle.slice(), sha256: metadata.bundle.sha256 } };
+    return { metadata, artifact: { number, scope: selected.binding, method, fields, bundle: bundle.slice(), sha256: metadata.bundle.sha256,
+      ...(recursive ? { preparation: structuredClone(metadata) } : {}) } };
   }
   if (bundle || metadata.candidate !== null || metadata.bundle !== null) fail('Noncandidate response contains candidate material.');
   if (metadata.state === 'already_up_to_date') {

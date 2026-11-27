@@ -1,7 +1,7 @@
 // Exact queue preparation, native full inspection and retained landing bytes.
 // Queue selection is a guard; only the native coupled decision grants landing.
 import { FORM_LIMIT, copy, fail, form, integer, keys, oid, pinned, record, text, unhex, utf8 } from './pulls-core.mjs';
-import { checkedBundle, checkedPath, digest, inspectionReply, mergeProfile, multipart, preparationEnvelope } from './pulls-candidate.mjs';
+import { checkedBundle, checkedPath, digest, inspectionReply, mergeProfile, multipart, preparationEnvelope, recursiveBase, recursivePreparationFailure } from './pulls-candidate.mjs';
 import { COMMAND_LIMIT, normalizeQueueFields, queueCommand, queueInteger, queueReference, queueScope } from './queues-protocol.mjs';
 
 function closed(value, names) {
@@ -60,17 +60,22 @@ export function queueLandingForm(commandForm, fields, scope) {
   return commandForm;
 }
 export async function queuePreparationReply(response, request, scope, crypto) {
-  const { metadata, bundle } = preparationEnvelope(response), selected = pinned(metadata, scope);
+  const { metadata, bundle } = preparationEnvelope(response);
+  recursivePreparationFailure(response, metadata, request.profile, 'merge_queue_error');
+  const selected = pinned(metadata, scope);
   noEffects(metadata); queueScope(selected.binding);
+  if (metadata.profile !== request.profile) fail('Preparation does not bind the selected queue head and native profile.');
   closed(metadata, ['type', 'schema_version', 'tenant_id', 'repository_id', 'repository_incarnation', 'object_format',
     'source_head', 'snapshot_token', 'profile', 'method', 'read_only', 'objects_staged', 'transaction_created', 'published', 'merge_authorized',
-    'subject', 'queue', 'landing', 'state', 'candidate', 'bundle', 'conflicts', ...(metadata.state === 'conflicted' ? ['merge_base'] : [])]);
+    'subject', 'queue', 'landing', 'state', 'candidate', 'bundle', 'conflicts', ...(metadata.state === 'conflicted' ? ['merge_base'] : []),
+    ...(request.profile === 'recursive-path-merge-v1' && ['clean', 'conflicted'].includes(metadata.state) ? ['recursive_base'] : [])]);
   closed(metadata.queue, ['number', 'expected_version']);
-  if (metadata.type !== 'queue_merge_preparation' || metadata.profile !== request.profile || metadata.method !== 'merge-commit' ||
+  if (metadata.type !== 'queue_merge_preparation' || metadata.method !== 'merge-commit' ||
       metadata.queue.number !== request.number || metadata.queue.expected_version !== request.fields.expected_version ||
       !Array.isArray(metadata.conflicts)) fail('Preparation does not bind the selected queue head and native profile.');
   const expected = subject(request.fields, scope.format);
   queueCandidateSubject(metadata.subject, expected, request.fields.pull_request, scope.format);
+  recursiveBase(metadata, scope.format);
   if (metadata.state === 'clean') {
     if (!bundle || response.status !== 200 || metadata.conflicts.length) fail('Clean queue preparation lacks its exact complete bundle.');
     closed(metadata.candidate, ['merge_base', 'commit', 'tree', 'new_object_count']); closed(metadata.bundle, ['bytes', 'sha256']);

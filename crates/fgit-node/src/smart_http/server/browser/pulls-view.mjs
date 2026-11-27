@@ -215,14 +215,21 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   function renderPreparation(result, resolved = false) {
     nodes.candidate.replaceChildren(); resolution.clear();
     const metadata = result.metadata, rebasing = metadata.method === 'rebase';
+    const renderRecursiveBase = () => {
+      if (!metadata.recursive_base) return;
+      item(doc, nodes.candidate, 'h4', 'Recursive merge preparation');
+      item(doc, nodes.candidate, 'pre', `Real best bases (${metadata.recursive_base.bases.length}):\n${metadata.recursive_base.bases.join('\n')}\nEffective base tree: ${metadata.recursive_base.tree}`);
+    };
     if (result.inspection) {
       const rendered = renderInspection(doc, nodes.candidate, result.inspection);
+      renderRecursiveBase();
       status((resolved ? 'Resolved candidate constructed and inspected. No vote or publication exists.'
         : 'Candidate prepared and inspected, without publication.') +
         (rendered.clipped ? ' Display clipped: download the full report before reviewing.' : ''));
       return;
     }
     item(doc, nodes.candidate, 'h3', 'Preparation: ' + metadata.state);
+    renderRecursiveBase();
     if (rebasing) item(doc, nodes.candidate, 'pre', 'Stopped at original commit ' + metadata.stopped_commit + '. No candidate bundle was produced.');
     for (const conflict of metadata.conflicts) item(doc, nodes.candidate, 'pre',
       displayBytes(conflict.path_hex) + ' · ' + conflict.kind + '\nPath bytes: ' + conflict.path_hex);
@@ -786,7 +793,8 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   on('candidate-download', 'click', () => run('export', async () => { downloadText('frankengit-candidate.json', client.exportCandidate()); status('Candidate receipt exported without credentials. Its bytes must be inspected before another reviewer can act.'); }));
   on('inspection-download', 'click', () => run('export', async () => {
     const candidate = client.candidate; if (!candidate) fail('No inspected candidate.');
-    downloadText('frankengit-candidate-inspection.json', JSON.stringify(candidate.inspection, null, 2)); status('Full inspection report exported. Binary object bodies remain excluded by the native report.');
+    const report = candidate.preparation ? { preparation: candidate.preparation, inspection: candidate.inspection } : candidate.inspection;
+    downloadText('frankengit-candidate-inspection.json', JSON.stringify(report, null, 2)); status('Full inspection report exported. Binary object bodies remain excluded by the native report.');
   }));
   on('candidate-import', 'submit', () => run('candidate', async guard => {
     client.invalidateCandidate(); nodes.candidate.replaceChildren(); resolution.clear(); const serialized = await fileText(nodes['candidate-import-file']); guard();

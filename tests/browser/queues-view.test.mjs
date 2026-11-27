@@ -396,6 +396,25 @@ test('editing candidate metadata clears inspected authority while retained landi
   h.app.disconnect(); assert.equal(h.app.client.pending.key, pending.key); assert.equal(h.nodes['candidate-message'].value, '');
 });
 
+test('queue recursive profile displays and exports real best bases while candidate staging remains explicit', async () => {
+  const f = queueFixture(); f.metadata.profile = 'recursive-path-merge-v1';
+  f.metadata.recursive_base = { bases: [f.landingFields.merge_base, 'f'.repeat(40)], tree: 'c'.repeat(40) };
+  const h = candidateHarness(f); await candidateDraft(h);
+  h.nodes['candidate-profile'].value = f.metadata.profile; h.nodes['candidate-profile'].fire('change');
+  h.nodes['candidate-prepare'].fire('click'); await settled();
+  assert.equal(h.app.client.candidateReady, true); assert.equal(h.app.client.pending, null);
+  const prepare = h.calls.find(call => call.url.endsWith('/prepare'));
+  assert.equal(new URLSearchParams(prepare.body).get('profile'), 'recursive-path-merge-v1');
+  assert.match(h.nodes['candidate-report'].textContent, /Recursive merge preparation/);
+  assert.match(h.nodes['candidate-report'].textContent, /Real best bases \(2\)/);
+  assert.ok(h.nodes['candidate-report'].textContent.includes(f.metadata.recursive_base.tree));
+  h.nodes['candidate-inspection-download'].fire('click'); await settled();
+  assert.deepEqual(JSON.parse(h.downloads[0].contents).preparation.recursive_base, f.metadata.recursive_base);
+  assert.equal(h.calls.some(call => call.url.endsWith('/land-candidate')), false);
+  h.nodes['candidate-profile'].value = 'path-merge-v1'; h.nodes['candidate-profile'].fire('change'); await settled();
+  assert.equal(h.app.client.candidateReady, false); assert.equal(h.nodes.prepare.disabled, true);
+});
+
 test('conflicts remain a read-only stop and a failed full inspection never exposes candidate staging', async () => {
   for (const kind of ['conflict', 'incomplete']) {
     const f = queueFixture(), h = candidateHarness(f, call => {

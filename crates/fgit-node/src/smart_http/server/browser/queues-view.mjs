@@ -286,6 +286,11 @@ export function mountQueues(doc, { href = doc.defaultView.location.href, fetchIm
   function drawCandidate(result) {
     const target = nodes['candidate-report']; target.replaceChildren(); nodes['candidate-section'].hidden = false;
     drawBinding(result);
+    if (result.metadata.recursive_base) {
+      const receipt = result.metadata.recursive_base;
+      target.append(text('h3', 'Recursive merge preparation'),
+        text('pre', `Real best bases (${receipt.bases.length}):\n${receipt.bases.join('\n')}\nEffective base tree: ${receipt.tree}`));
+    }
     if (!result.candidate) {
       target.append(text('h3', result.metadata.state === 'conflicted' ? 'Conflicts stop candidate preparation' : 'Already up to date — no candidate'));
       for (const conflict of result.metadata.conflicts) target.append(text('pre',

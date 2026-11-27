@@ -78,13 +78,17 @@ test('preparation requires the exact recorded first queue entry and preserves ex
   }
 });
 
-test('explicit built-in attributes and exact renames bind queue preparation through inspection', async () => {
-  for (const algorithm of ['sha1', 'sha256']) for (const profile of ['exact-renames-v1', 'builtin-attributes-v1']) {
+test('explicit merge profiles bind queue preparation through inspection', async () => {
+  for (const algorithm of ['sha1', 'sha256']) for (const profile of ['exact-renames-v1', 'builtin-attributes-v1', 'recursive-path-merge-v1']) {
     const f = queueFixture(algorithm, true);
     f.metadata.profile = profile; f.commitMetadata.profile = profile;
+    if (profile === 'recursive-path-merge-v1') f.metadata.recursive_base = {
+      bases: [f.landingFields.merge_base, 'f'.repeat(f.landingFields.merge_base.length)], tree: 'c'.repeat(f.landingFields.merge_base.length),
+    };
     const h = harness(f); await h.connect();
     const prepared = await h.prepare();
     assert.equal(prepared.metadata.profile, profile); assert.equal(h.client.candidateReady, true);
+    if (profile === 'recursive-path-merge-v1') assert.deepEqual(prepared.candidate.metadata.recursive_base, f.metadata.recursive_base);
     assert.equal(h.client.pending, null);
     const call = h.calls.find(value => value.path.endsWith('/prepare'));
     assert.equal(new URLSearchParams(call.body).get('profile'), profile);
@@ -92,11 +96,60 @@ test('explicit built-in attributes and exact renames bind queue preparation thro
     assert.ok(h.calls.every(value => value.headers['Idempotency-Key'] === undefined));
     const staged = await h.stage(); assert.equal(staged.body, f.commandForm);
     assert.equal(h.calls.some(value => value.path.endsWith('/land-candidate')), false);
-    for (const substituted of ['path-merge-v1', 'exact-renames-v1', 'builtin-attributes-v1'].filter(value => value !== profile)) {
+    for (const substituted of ['path-merge-v1', 'exact-renames-v1', 'builtin-attributes-v1', 'recursive-path-merge-v1'].filter(value => value !== profile)) {
       await assert.rejects(queuePreparationReply(response(f, { ...f.metadata, profile: substituted }), request(f), f.scope, webcrypto), /profile/);
     }
     h.client.disconnect();
   }
+});
+
+test('recursive queue preparation fails closed on missing, reordered or substituted base receipts', async () => {
+  for (const algorithm of ['sha1', 'sha256']) {
+    const f = queueFixture(algorithm), width = f.landingFields.merge_base.length;
+    f.metadata.profile = f.commitMetadata.profile = 'recursive-path-merge-v1';
+    f.metadata.recursive_base = { bases: [f.landingFields.merge_base], tree: 'c'.repeat(width) };
+    assert.equal((await queuePreparationReply(response(f), request(f), f.scope, webcrypto)).artifact.fields.merge_base, f.landingFields.merge_base);
+    f.metadata.recursive_base.bases.push('f'.repeat(width));
+    for (const mutate of [m => { delete m.recursive_base; }, m => { m.recursive_base.tree = 'invalid'; },
+      m => { m.recursive_base.bases.reverse(); }, m => { m.recursive_base.bases[0] = 'd'.repeat(width); },
+      m => { m.recursive_base.bases = [f.landingFields.merge_base, f.landingFields.merge_base]; },
+      m => { m.recursive_base.authorized = true; }]) {
+      const metadata = structuredClone(f.metadata); mutate(metadata);
+      const h = harness(f, call => call.path.endsWith('/prepare') ? f.prepared(metadata) : null);
+      await h.connect(); await assert.rejects(h.prepare());
+      assert.equal(h.client.candidateReady, false); assert.equal(h.client.pending, null);
+      assert.equal(h.calls.some(call => call.path.endsWith('/inspect')), false);
+      await assert.rejects(h.stage()); h.client.disconnect();
+    }
+    for (const state of ['conflicted', 'already_up_to_date']) {
+      const metadata = { ...f.metadata, state, candidate: null, bundle: null, landing: null,
+        conflicts: state === 'conflicted' ? [{ path_hex: '61', kind: 'content', base: null, ours: null, theirs: null }] : [] };
+      if (state === 'conflicted') metadata.merge_base = f.landingFields.merge_base; else delete metadata.recursive_base;
+      const status = state === 'conflicted' ? 409 : 200;
+      const h = harness(f, call => call.path.endsWith('/prepare') ? json(metadata, status) : null);
+      await h.connect(); const result = await h.prepare();
+      assert.equal(result.metadata.state, state); assert.equal(h.client.candidateReady, false);
+      assert.equal(h.calls.some(call => call.path.endsWith('/inspect')), false); await assert.rejects(h.stage());
+      const changed = structuredClone(metadata);
+      if (state === 'conflicted') delete changed.recursive_base; else changed.recursive_base = f.metadata.recursive_base;
+      await assert.rejects(queuePreparationReply({ status, type: 'application/json', value: new TextEncoder().encode(JSON.stringify(changed)) }, request(f), f.scope, webcrypto));
+      h.client.disconnect();
+    }
+    f.metadata.profile = f.commitMetadata.profile = 'path-merge-v1';
+    await assert.rejects(queuePreparationReply(response(f), request(f), f.scope, webcrypto), /inapplicable/);
+  }
+});
+
+test('native recursive-base conflicts stop queue preparation with a typed diagnostic and no landing material', async () => {
+  const f = queueFixture(); f.commitMetadata.profile = 'recursive-path-merge-v1';
+  const h = harness(f, call => call.path.endsWith('/prepare') ? json({
+    type: 'merge_queue_error', schema_version: 1, code: 'recursive_merge_base_conflict', outcome_unknown: false,
+  }, 409) : null);
+  await h.connect();
+  await assert.rejects(h.prepare(), { code: 'recursive_merge_base_conflict', status: 409 });
+  assert.equal(h.client.candidateReady, false); assert.equal(h.client.pending, null);
+  assert.equal(h.calls.some(call => call.path.endsWith('/inspect')), false);
+  await assert.rejects(h.stage()); h.client.disconnect();
 });
 
 test('conflicted and already-up-to-date native responses stop without inspection, staging or hidden fallback', async () => {

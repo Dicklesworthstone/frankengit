@@ -532,6 +532,14 @@ the original agent/sponsor evidence across rotation and restart. See
 [sponsored agent credentials](docs/SPONSORED_AGENT_CREDENTIALS.md) for private token
 files, trusted-local administration, scope limits and validation status.
 
+Native merge preparation accepts the explicit `recursive-path-merge-v1` profile
+for criss-cross histories with several best ancestors. It constructs a clean
+recursive comparison tree while preserving a real ancestry witness for
+publication, and supports merge, squash, queue preparation, HTTP/MCP, workflow
+watch, and browser review. Conflicting ancestor merges refuse without a
+candidate. See [native recursive merge preparation](docs/NATIVE_RECURSIVE_MERGE.md)
+for selection, evidence, bounds, and compatibility limits.
+
 ### Native merge queues
 
 `fg queue enqueue|dequeue|reorder|show|list` manages durable queue membership and

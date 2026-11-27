@@ -2,24 +2,25 @@
 // double here; the commit body and its Git object hash are computed independently.
 import { createHash } from 'node:crypto';
 import { ids, scope, subject, rawSubject, refFields, actor, head } from './pulls-fixtures.mjs';
-export function fixture(algorithm = 'sha1') {
+export function fixture(algorithm = 'sha1', method = 'merge-commit') {
   const length = algorithm === 'sha1' ? 40 : 64, sha = bytes => createHash('sha256').update(bytes).digest('hex');
   const selected = subject({ object_format: algorithm, source_tip: 'a'.repeat(length), target_tip: 'b'.repeat(length) });
-  const commitBody = Buffer.from(`tree ${'f'.repeat(length)}\nparent ${selected.target_tip}\nparent ${selected.source_tip}\nauthor Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\nExact candidate\n`);
+  const parents = method === 'squash' ? [selected.target_tip] : [selected.target_tip, selected.source_tip];
+  const commitBody = Buffer.from(`tree ${'f'.repeat(length)}\n${parents.map(parent => `parent ${parent}\n`).join('')}author Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\nExact candidate\n`);
   const commit = createHash(algorithm).update(`commit ${commitBody.length}\0`).update(commitBody).digest('hex');
   const bundle = new Uint8Array(Buffer.concat([Buffer.from(`# ${algorithm === 'sha1' ? 'v2' : 'v3'} git bundle\n${commit} refs/heads/candidate\n\nPACK`), Buffer.from([0, 255, 13, 10])]));
   const fields = { ...selected, merge_base: 'e'.repeat(length), candidate_commit: commit };
   const observedSubject = { ...rawSubject(), ...refFields, ...selected, pull_request: 1 }; delete observedSubject.number; delete observedSubject.object_format;
   const identity = { ...ids, object_format: algorithm, source_head: 'head-id', snapshot_token: head };
   const flags = { read_only: true, objects_staged: false, transaction_created: false, published: false, merge_authorized: false };
-  const metadata = { ...identity, ...flags, type: 'merge_preparation', profile: 'path-merge-v1', subject: observedSubject, state: 'clean',
+  const metadata = { ...identity, ...flags, type: 'merge_preparation', profile: 'path-merge-v1', ...(method === 'squash' ? { method } : {}), subject: observedSubject, state: 'clean',
     candidate: { merge_base: fields.merge_base, commit, tree: 'f'.repeat(length), new_object_count: 1 }, bundle: { bytes: bundle.length, sha256: sha(bundle) }, conflicts: [] };
   const inspection = { ...identity, ...flags, type: 'candidate_inspection', all_changed_paths: true, binary_bodies_included: false,
     comparison_profile: 'full-tree-direct-path-myers-v1', context_lines: 3, subject: observedSubject, merge_base: fields.merge_base, candidate_commit: commit,
-    parents: [selected.target_tip, selected.source_tip], prerequisites: [selected.target_tip], candidate_commit_body_hex: commitBody.toString('hex'),
+    parents, prerequisites: [selected.target_tip], candidate_commit_body_hex: commitBody.toString('hex'),
     bundle: { bytes: bundle.length, sha256: sha(bundle), pack_bytes: 6, pack_objects: 1, expanded_bytes: commitBody.length, closure_objects: 1, transport_only_objects: 0 },
     comparison: { mode: 'direct', before: selected.target_tip, after: commit, before_tree: 'd'.repeat(length), after_tree: 'f'.repeat(length), entry_count: 0, entries: [] } };
-  const artifact = { number: 1, scope: { ...scope, format: algorithm }, fields, bundle, sha256: sha(bundle) };
+  const artifact = { number: 1, scope: { ...scope, format: algorithm }, ...(method === 'squash' ? { method } : {}), fields, bundle, sha256: sha(bundle) };
   const boundary = `fg-prepare-${sha(bundle).slice(0, 48)}-0`;
   const mixed = (meta = metadata, bytes = bundle) => new Uint8Array(Buffer.concat([
     Buffer.from(`--${boundary}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Disposition: inline; name="metadata"\r\n\r\n${JSON.stringify(meta)}\r\n--${boundary}\r\nContent-Type: application/x-git-bundle\r\nContent-Disposition: attachment; name="bundle"; filename="candidate.bundle"\r\n\r\n`),

@@ -42,7 +42,10 @@ repository and create the artifact. It is not a remote authentication service
 or a hostile-filesystem sandbox. An explicit `--profile` is mandatory. Select
 `path-v1` for the legacy path merge, `exact-renames-v1` for unique content-identical
 moves, or [`builtin-attributes-v1`](NATIVE_BUILTIN_ATTRIBUTES_MERGE.md) for bounded
-path-specific attribute rules. None implies another engine's virtual-base rules.
+path-specific attribute rules. Select
+[`recursive-path-merge-v1`](NATIVE_RECURSIVE_MERGE.md) to combine multiple best
+ancestors when their recursive comparison merges are clean. These are separate
+profiles; none implies another engine's merge semantics.
 
 The target and source must be distinct fully qualified branch names. Missing
 and hidden refs share one refusal, and caller visibility can only narrow the
@@ -184,8 +187,9 @@ Wide ancestry regions can still exhaust the ceiling; exhaustion returns the
 typed limit, never a different base.
 Two incomparable best bases are proved incomparable by reading their shared
 history, so a
-criss-cross pair over a long history refuses at the ceiling; multiple bases
-refuse in any case.
+criss-cross pair over a long history refuses at the ceiling. Multiple bases
+refuse under the original profiles. The explicit recursive profile charges
+its initial and recursive graph queries against the same aggregate ceilings.
 Admission revalidates only what the candidate adds above the
 authority-selected closure, plus the already-selected objects it references
 directly (frankengit-lh8z). The 100,000-object, 400,000-edge and 128 MiB

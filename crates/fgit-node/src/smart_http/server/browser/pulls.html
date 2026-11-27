@@ -114,7 +114,7 @@
     <p>Uses the selected open PR’s exact version and tips. Git-read and PR-read grants are required on the same token. This operation does not stage objects, record a vote, or move a ref.</p>
     <form id="prepare">
       <label>Merge method <select id="candidate-method"><option value="merge-commit">Merge commit (two parents)</option><option value="squash">Squash (one target parent)</option><option value="rebase">Rebase and merge (inspect every commit)</option></select></label>
-      <label>Native merge profile <select id="candidate-profile"><option value="path-merge-v1">Direct path merge</option><option value="exact-renames-v1">Exact rename detection</option><option value="builtin-attributes-v1">Built-in attribute drivers</option></select></label>
+      <label>Native merge profile <select id="candidate-profile"><option value="path-merge-v1">Direct path merge</option><option value="exact-renames-v1">Exact rename detection</option><option value="builtin-attributes-v1">Built-in attribute drivers</option><option value="recursive-path-merge-v1">Recursive path merge (multiple merge bases)</option></select></label>
       <div id="rebase-fields" hidden>
         <label>Exact upstream commit <input id="rebase-upstream" spellcheck="false" placeholder="Common ancestor before the source commits to replay"></label>
         <label>If replay makes a commit empty <select id="rebase-empty"><option value="stop">Stop for an explicit decision</option><option value="drop">Drop newly empty commits</option><option value="keep">Keep newly empty commits</option></select></label>
