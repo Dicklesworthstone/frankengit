@@ -33,6 +33,10 @@ time to choose a different ceiling for a signed or unsigned source bundle.
 For example, `--max-input-mib 64` admits up to 64 MiB of input. The verifier
 and saved recovery intent use the selected ceiling. Status and retry recover
 it from that intent. Original version 1 and 2 intents keep the 16 MiB ceiling.
+When the verified pack exceeds 64 MiB, submission and retry pass the selected
+input limit to `fg bundle import --file-backed`. Smaller packs continue to use
+the buffered receive path. The operator still holds the source bytes
+in memory, and both profiles use the same pinned snapshot, key and authority decision.
 The direct reference ceiling is 4096, matching native direct-ref admission,
 and expanded content retains its independent 128 MiB profile. Initial verification,
 saved-intent recovery and explicit retry use that same reference ceiling.

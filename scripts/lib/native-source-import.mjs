@@ -203,9 +203,13 @@ async function submit(saved, config, bytes, snapshotStat) {
   // The immutable intent and snapshot were synced and read back before spawn.
   try {
     const intent = saved.intent;
+    // The buffered receive quarantine accepts at most 64 MiB of pack input.
+    // Select the native file-backed importer only for verified packs above it.
+    const profile = intent.content.pack_bytes > 64 * MIB
+      ? ['--file-backed', '--max-input-mib', String(intent.max_input_mib)] : [];
     const result = await runImportProcess(config.fg, ['bundle', 'import', intent.storage, intent.tenant_id,
       intent.repository_id, join(saved.recovery, SNAPSHOT), '--trusted-local', '--principal', intent.principal_id,
-      '--key-stdin', '--object-format', intent.object_format], config.live, intent.idempotency_key);
+      '--key-stdin', '--object-format', intent.object_format, ...profile], config.live, intent.idempotency_key);
     const found = readNativeImportReceipt(result, intent);
     if (!found.node_closed) return report(intent, saved.recovery, saved.intentHash, found, true);
     const confirmed = await lookup(intent, config);

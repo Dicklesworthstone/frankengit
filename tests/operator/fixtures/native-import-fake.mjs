@@ -48,7 +48,10 @@ if (args[0] === 'bundle' && args[1] === 'verify') {
   // Deliberately mirror the READ native CLI grammar, not the caller's adapter.
   // These positions/flags come from bundle.rs::USAGE and outcome.rs::USAGE.
   const fixed = ['--trusted-local', '--principal', '--key-stdin', '--object-format'];
-  if (importing ? args.length !== 12 || args[6] !== fixed[0] || args[7] !== fixed[1] || args[9] !== fixed[2] || args[10] !== fixed[3]
+  const fileProfile = importing && args.length === 15 && args[12] === '--file-backed'
+    && args[13] === '--max-input-mib' && /^[1-9][0-9]*$/.test(args[14])
+    && Number(args[14]) <= 16384;
+  if (importing ? (args.length !== 12 && !fileProfile) || args[6] !== fixed[0] || args[7] !== fixed[1] || args[9] !== fixed[2] || args[10] !== fixed[3]
     : args.length !== 10 || args[4] !== fixed[0] || args[5] !== fixed[1] || args[7] !== fixed[2] || args[8] !== fixed[3]) {
     throw new Error('fake_rejects_non_native_cli_grammar');
   }

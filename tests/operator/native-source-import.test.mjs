@@ -58,11 +58,13 @@ function importArguments(f, pins) {
 for (const signed of [false, true]) test('restore an oversized retained ' +
   (signed ? 'signed' : 'unsigned') + ' bundle under the original input profile', async t => {
   const f = await fixture(t, { import: 'fail-before' });
-  const bytes = Buffer.alloc(16 * 1024 * 1024 + 1, 0x73);
+  const maximumMiB = signed ? 128 : 65;
+  const bytes = Buffer.alloc(64 * 1024 * 1024 + 1, 0x73);
   await writeFile(f.source, bytes);
   await assert.rejects(importNativeSource(f.source, f.config), { code: 'native_import_file_size_or_type' });
-  const { options } = parseImportArguments(['import', f.source, '--max-input-mib', '17']);
-  const config = { ...f.config, ...options };
+  const { options } = parseImportArguments(['import', f.source, '--max-input-mib', String(maximumMiB)]);
+  const config = { ...f.config, ...options, timeoutMs: 60000 };
+  f.recovery.timeoutMs = 60000;
   if (signed) {
     const pair = generateKeyPairSync('ed25519');
     const key = join(f.root, 'test.pem'), envelope = join(f.root, 'test.dsse');
@@ -77,7 +79,7 @@ for (const signed of [false, true]) test('restore an oversized retained ' +
   await assert.rejects(importNativeSource(f.source, config), e => e.details?.submission_attempted === true);
   const saved = await manifest(f);
   assert.equal(saved.schema_version, 3);
-  assert.equal(saved.max_input_mib, 17);
+  assert.equal(saved.max_input_mib, maximumMiB);
   assert.equal(saved.artifact.bytes, bytes.length);
   assert.equal(saved.artifact.sha256, sha(bytes));
   assert.equal(saved.approval !== null, signed);
@@ -87,14 +89,28 @@ for (const signed of [false, true]) test('restore an oversized retained ' +
   const result = await retryNativeSourceImport(f.config.recovery, f.recovery);
   assert.equal(result.outcome, 'committed');
   assert.equal(result.source_approval?.checked_before_this_submission ?? false, signed);
-  const verifies = (await f.calls()).filter(args => args[1] === 'verify');
+  const calls = await f.calls();
+  const verifies = calls.filter(args => args[1] === 'verify');
   assert.equal(verifies.length, 2);
-  for (const args of verifies) assert.equal(args[args.indexOf('--max-input-mib') + 1], '17');
+  for (const args of verifies) assert.equal(args[args.indexOf('--max-input-mib') + 1], String(maximumMiB));
+  const imports = calls.filter(args => args[1] === 'import');
+  assert.equal(imports.length, 2);
+  for (const args of imports) {
+    assert.deepEqual(args.slice(-3), ['--file-backed', '--max-input-mib', String(maximumMiB)]);
+  }
   const attempts = (await readFile(join(f.root, 'attempts.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
   assert.equal(attempts.length, 2);
   assert.equal(attempts.every(a => a.key === saved.idempotency_key), true);
   const receipt = JSON.parse(await readFile(join(f.root, 'submissions.jsonl')));
   assert.equal(receipt.digest, saved.artifact.sha256);
+});
+test('a wider allowance retains the buffered native import path for small packs', async t => {
+  const f = await fixture(t);
+  const result = await importNativeSource(f.source, { ...f.config, maxInputMiB: 128 });
+  assert.equal(result.outcome, 'committed');
+  const imports = (await f.calls()).filter(args => args[1] === 'import');
+  assert.equal(imports.length, 1);
+  assert.equal(imports[0].includes('--file-backed'), false);
 });
 test('input profiles are bounded and cannot be replaced on retry', async t => {
   const f = await fixture(t);
