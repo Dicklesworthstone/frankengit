@@ -163,6 +163,8 @@ watchdog enforces the selected whole-operation deadline; forced termination
 retains the owner lock and makes no process-containment claim. SIGKILL can leave
 the native process alive. No PID-based lock stealing or automatic lock removal
 is provided. Independently reconcile the original process before operator repair.
+If the native publisher dies by signal, its original publication remains
+unknown and the publisher retains the owner lock.
 Never delete old custody to cause a replay.
 
 Each sweep has one 660-second cooperative deadline, at most 128 publication

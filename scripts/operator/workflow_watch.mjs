@@ -477,7 +477,11 @@ async function execute(config, intent, options) {
   // Abort after the synced start marker must leave an uncertain record, not an
   // invented rollback. No caller-provided command or shell is accepted here.
   const native = await runNative(config.fg, args, { signal: options.signal, drain: true, timeoutMs: options.dispatchTimeoutMs ?? 660_000 });
-  if (native.forced) throw nativeFailure(native, 'Native containment was not established');
+  if (native.forced || native.signal) {
+    const error = nativeFailure(native, 'Native containment was not established');
+    error.containment_unknown = true;
+    throw error;
+  }
   if (!native.signal && !native.spawn_error && [0, 1, 2].includes(native.code)) {
     let envelope;
     try { envelope = parseJson(native.stdout, 40 * 1024 * 1024); }

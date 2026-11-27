@@ -231,6 +231,39 @@ test('cancellation drains an active publisher and persists its terminal', LINUX_
   await running; assert.equal((await status(f.config)).runs[0].committed, 1); assert.equal((await status(f.config)).owner_present, false);
 });
 
+test('an externally signalled native publisher retains its unknown request and owner', LINUX_WORKFLOW, async t => {
+  const f = await fixture(t);
+  await f.run();
+  const native = await readFile(f.watch.fg, 'utf8');
+  const newline = native.indexOf('\n');
+  await writeFile(f.watch.fg, native.slice(0, newline + 1) +
+    "if (process.argv[2] === 'workflow' && process.argv[3] === 'publish') process.kill(process.pid, 'SIGKILL');\n" +
+    native.slice(newline + 1));
+  await assert.rejects(once(f.config), error =>
+    /signal=SIGKILL/.test(error.message) && error.containment_unknown && error.publication_unknown);
+  const observed = await status(f.config);
+  assert.equal(observed.owner_present, true);
+  assert.equal(observed.runs[0].unknown, 1);
+  assert.equal(observed.runs[0].committed, 0);
+  await assert.rejects(once(f.config), error => error.code === 'EEXIST');
+});
+
+test('an externally signalled read-only history command still permits a fresh publication', LINUX_WORKFLOW, async t => {
+  const f = await fixture(t);
+  await f.run();
+  const native = await readFile(f.watch.fg, 'utf8');
+  const newline = native.indexOf('\n');
+  await writeFile(f.watch.fg, native.slice(0, newline + 1) +
+    "if (process.argv[2] === 'workflow' && process.argv[3] === 'recover') process.kill(process.pid, 'SIGKILL');\n" +
+    native.slice(newline + 1));
+  await assert.rejects(once(f.config), error => /signal=SIGKILL/.test(error.message) && !error.containment_unknown);
+  const observed = await status(f.config);
+  assert.equal(observed.owner_present, false);
+  assert.deepEqual(observed.runs, []);
+  await writeFile(f.watch.fg, native);
+  assert.equal((await once(f.config)).runs[0].committed, 1);
+});
+
 test('an expired idle publication sweep refuses before initializing publisher custody', LINUX_WORKFLOW, async t => {
   const f = await fixture(t);
   let times = 0;

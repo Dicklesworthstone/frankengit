@@ -141,7 +141,8 @@ async function native(config, args, cx, reading) {
     timeoutMs: Math.min(cx.remaining(), reading ? 30_000 : 660_000), maximum: reading ? 8 * 1024 * 1024 : 128 * 1024 });
   if (value.forced || value.signal || value.spawn_error || (reading && value.code !== 0)) {
     const error = new Error(`Native workflow ${reading ? 'recovery' : 'publication'} unresolved; retain original custody and keys. Exit=${value.code}, signal=${value.signal}, reason=${value.reason ?? value.spawn_error ?? 'unavailable'}.`);
-    error.containment_unknown = value.forced; error.native_stderr_hex = hex(value.stderr); throw error;
+    error.containment_unknown = value.forced || (!reading && value.signal !== null);
+    error.native_stderr_hex = hex(value.stderr); throw error;
   }
   return value;
 }

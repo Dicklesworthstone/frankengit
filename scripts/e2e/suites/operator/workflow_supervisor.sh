@@ -46,7 +46,7 @@ print(str(result).lower())
 PY
 }
 for format in sha1 sha256; do
-  for property in failed_execution_still_publishes exact_native_job_identities status_restart_dedup permitted_revision_and_bounded_service offline_summary_reconciliation original_custody_and_owners native_authority_and_scope; do
+  for property in failed_execution_still_publishes exact_native_job_identities status_restart_dedup permitted_revision_and_bounded_service offline_summary_reconciliation original_custody_and_owners native_authority_and_scope native_signal_keeps_execution_fences; do
     fge_assert_eq "OPERATOR-SUPERVISOR-$format-$property" true "$(fact "${format}_$property")" "native supervisor $property"
   done
 done
