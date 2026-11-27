@@ -70,13 +70,18 @@ marker, per-job process ownership, artifact handoff, evidence journals and repor
 remain the execution implementation; no subprocess invocation of fg or Git and
 no JavaScript supervisor is involved.
 
-For ordinary branch and PR-head dispatch, the dispatcher verifies the exact
-observed authority head and source commit before creating permanent event
-custody. A source move at that boundary returns `source_moved` with no event or
-execution; a later bounded poll may select again. The same immutable snapshot
-then supplies discovery and execution. Merge candidates retain custody before
-their publication effect. Every failure after custody creation remains subject
-to the unresolved-event fence below; source movement never authorizes replay.
+For ordinary branch, tag and PR-head dispatch, the dispatcher verifies the
+observed authority head and source commit. A source move at that boundary
+returns `source_moved` without acquiring event custody or executing a script.
+The same immutable snapshot supplies discovery and execution. Read-only
+preflight checks source, definition and workspace bounds before the watch
+reserves its event. A resource refusal leaves the latest watch free to select
+a corrected successor. An ordered branch watch keeps selecting the oldest
+pending reachable update and refuses again if it still exceeds the bounds.
+The watch durably reserves an admitted dispatch, including a recorded
+definition refusal, before writing the dispatch batch or opening a child.
+Merge candidates retain custody before their publication effect. Every failure
+after custody creation remains subject to the unresolved-event fence.
 
 A settled marker is written only after the dispatch returned and all observed
 workspace/process ownership settled without interruption. It is not a passing
@@ -90,8 +95,8 @@ UTF-8 decoder settles as `definition_refused` with zero jobs and zero checks.
 The dispatch plan retains the exact source commit, workflow path and blob, and
 a bounded diagnostic in hex. This lets a corrected push advance the same watch.
 An ordered watch also retains a refused intermediate commit before moving on to
-its successor. An incomplete changed-path comparison or uncertain execution
-still blocks later events.
+its successor. An incomplete changed-path comparison refuses during read-only
+preflight. Uncertain execution after reservation still blocks later events.
 
 A missing final settlement can be recovered automatically when the original
 `check-sources` completion handoff and every original closed execution receipt

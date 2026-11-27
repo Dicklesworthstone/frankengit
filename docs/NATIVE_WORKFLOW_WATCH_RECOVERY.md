@@ -127,6 +127,10 @@ Cancellation during earlier source discovery, an error without a returned
 terminal dispatch, an unfinished `Started` owner, abrupt termination and
 unproved descendant containment remain unresolved.
 
+An ordinary watch can refuse read-only resource preflight before it reserves
+an event. A latest-state watch can then select a corrected successor. An
+ordered branch watch still observes the earliest pending reachable change.
+
 An ordinary branch push, tag update or PR source-head event rejected during definition
 compilation uses the v2 completion handoff with reason `definition_refused`,
 zero selected and executed children, and the committed dispatch-plan digest.

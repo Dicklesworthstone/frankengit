@@ -239,6 +239,58 @@ def definition_refusal(fmt, ordered):
     assert f.count() == 'xx'
     case(fmt, f'{profile}-refusal-ack-recovery-and-successor', repaired=f.tip)
 
+def oversized_preflight(fmt, ordered):
+    profile = 'ordered' if ordered else 'latest'
+    f = Fixture(fmt, f'{profile}-oversized-preflight')
+    watch = f.args() + (['--ordered-branch-updates'] if ordered else [])
+
+    def poll(label, code=0):
+        return [json.loads(line) for line in invoke(label, watch, code).splitlines()]
+
+    anchor = poll('preflight-anchor')[0]['poll']
+    watch.extend(['--publish-checks', '--principal-id', PRINCIPAL,
+                  '--expected-incarnation', anchor['event']['repository_incarnation']])
+    assert poll('publish-preflight-anchor')[-1]['committed_check_decisions'] == 1
+    custody = Path(os.fsdecode(bytes.fromhex(anchor['event']['custody_directory_hex']))).parent
+    before = set(custody.iterdir())
+
+    idle_yaml = (b'name: idle\non: workflow_dispatch\njobs:\n  idle:\n'
+                 b'    runs-on: fgit-trusted-local\n    steps:\n      - run: true\n')
+    idle_blob = write_object(f.source, fmt, 'blob', idle_yaml)
+    files = [(b'100644', b'build.yml', f.workflow_blob)]
+    files.extend((b'100644', f'idle-{index:02}.yml'.encode(), idle_blob) for index in range(32))
+
+    def workflow_tree(entries):
+        ci = write_object(f.source, fmt, 'tree', tree(entries))
+        return write_object(f.source, fmt, 'tree', tree([(b'40000', b'ci', ci)]))
+
+    f.tree = workflow_tree(files)
+    f.advance()
+    rejected = f.tip
+    refused = poll('oversized-workflow-directory', 2)[-1]
+    assert 'dispatch exceeds 32 workflow definitions' in refused['operation_error']
+    assert refused['committed_check_decisions'] == 0 and f.count() == 'x'
+    after_refusal = set(custody.iterdir())
+
+    f.tree = workflow_tree(files[:-1])
+    f.advance()
+    next_rows = poll('after-oversized-workflow-directory', 2 if ordered else 0)
+    if ordered:
+        assert 'dispatch exceeds 32 workflow definitions' in next_rows[-1]['operation_error']
+        assert not next_rows[-1]['requires_reconciliation']
+        assert next_rows[-1]['committed_check_decisions'] == 0 and f.count() == 'x'
+        assert set(custody.iterdir()) == before
+    else:
+        successor = next(row['poll'] for row in next_rows if row['type'] == 'workflow_watch_poll')
+        assert successor['event']['commit'] == f.tip and successor['execution_settled']
+        assert successor['dispatch']['matched_count'] == 1
+        assert len(successor['dispatch']['plan']['workflows']) == 32
+        assert next_rows[-1]['committed_check_decisions'] == 1 and f.count() == 'xx'
+        assert poll('suppress-oversized-successor-repeat')[-1]['committed_check_decisions'] == 0
+        assert f.count() == 'xx'
+    assert not refused['requires_reconciliation'] and after_refusal == before
+    case(fmt, f'{profile}-oversized-preflight-preserves-custody', rejected=rejected, successor=f.tip)
+
 def tag_definition_refusal(fmt):
     f = Fixture(fmt, 'tag-definition-refusal')
     ref = 'refs/tags/v1'
@@ -442,6 +494,8 @@ for fmt in ('sha1','sha256'):
     old=f.count();invalid=f.args();invalid.extend(['--event','push']);invoke('reject-caller-event',invalid,2);assert f.count()==old;case(fmt,'caller-event-refused')
     definition_refusal(fmt, ordered=False)
     definition_refusal(fmt, ordered=True)
+    oversized_preflight(fmt, ordered=False)
+    oversized_preflight(fmt, ordered=True)
     tag_definition_refusal(fmt)
     failed_report(fmt, 'batch')
     failed_report(fmt, 'child')
