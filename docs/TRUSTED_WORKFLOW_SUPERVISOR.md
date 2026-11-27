@@ -101,8 +101,13 @@ The original watcher still decides whether a selected commit is new or already
 observed. Polling an unchanged revision returns its native idle observation;
 the supervisor does not invent execution retries or new run identities.
 
-A lane that throws an execution/publication error, or reports an unknown
-publication, is quarantined for the remainder of that service invocation.
+A contained failure during the watcher's read-only source observation gets
+another poll on the next cycle. The service quarantines the lane after three
+consecutive observation failures and resets that count after a successful
+observation. Each failed cycle remains visible in the report.
+
+Other execution and publication errors and unknown publications quarantine the
+lane for the remainder of that service invocation.
 Healthy lanes continue; the affected lane is reported as `recovery_required`.
 When every lane is quarantined, the service exits rather than polling forever.
 Native custody survives process restart and remains the authority for explicit

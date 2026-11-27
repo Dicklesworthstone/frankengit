@@ -227,13 +227,13 @@ they can still inspect preserved custody and reports while the native installati
 is unavailable. Loss of stdout can therefore be reconciled without replay. Missing or
 contradictory evidence stays pending.
 
-Reconciliation takes the same exclusive owner lock as execution before it
-records completion. If a live or crash-retained owner already holds the lock,
-`reconcile` reports status and leaves any unresolved result untouched. This
-prevents recovery from reading a successful dispatch report while the native
-process is still trying to finalize. Reconciliation observes SIGTERM/SIGINT
-at its cancellation checkpoints. An in-flight filesystem read settles before
-the next checkpoint. Stopping preserves original reports and custody.
+Reconciliation takes the same exclusive owner lock as execution when available.
+With an existing owner, it records a completed local observation only when the
+original native finalization record verifies the saved report. The lock
+continues to fence execution and remains visible in status. The report alone
+leaves the observation pending. Reconciliation observes SIGTERM/SIGINT at its
+cancellation checkpoints. An in-flight filesystem read settles before the next
+checkpoint. Stopping preserves original reports and custody.
 
 SIGTERM/SIGINT stop new work and **drain** an active native dispatch. Killing the
 native owner immediately would undermine its own step cleanup. The native

@@ -373,20 +373,23 @@ export function dispatchReport(config, intent, report) {
     report_sha256: digest(encode(report)), outcome: stopped ? 'observed_stopped' : !selected.length ? 'no_matching_workflows' : report.succeeded ? 'observed_succeeded' : 'observed_failed',
     matched_count: selected.length, executed_count: report.runs.length, authoritative_check: false, ...(stopped ? { stop_reason: report.stop_reason } : {}) };
 }
-async function reconcileOne(config, record, checkpoint = () => {}) {
+async function reconcileOne(config, record, checkpoint = () => {}, requireFinalization = false) {
   checkpoint();
   const location = paths(config, record.intent);
   if (!record.started) return false;
   if (record.reply?.schema === UNCLOSED_REPLY) fail(UNCLOSED_MESSAGE);
   await directory(location.batch);
+  let finalizationBytes;
+  if (requireFinalization || !record.reply) {
+    finalizationBytes = await readPrivate(join(location.batch, 'finalization.json'), 512, true);
+    checkpoint();
+    if (!finalizationBytes) return false;
+  }
   const raw = await readPrivate(join(location.batch, 'report.json'), 40 * 1024 * 1024, true);
   checkpoint();
   if (!raw) return false;
-  if (!record.reply) {
-    const bytes = await readPrivate(join(location.batch, 'finalization.json'), 512, true);
-    checkpoint();
-    if (!bytes) return false;
-    const finalization = parseJson(bytes, 512);
+  if (finalizationBytes) {
+    const finalization = parseJson(finalizationBytes, 512);
     keys(finalization, ['type', 'schema_version', 'node_closed', 'report_sha256']);
     if (finalization.type !== 'workflow_dispatch_finalization' || finalization.schema_version !== 1 ||
         finalization.node_closed !== true || finalization.report_sha256 !== digest(raw)) {
@@ -430,9 +433,8 @@ export async function reconcile(config, options = {}) {
   try { release = await lock(join(config.state_directory, 'owner.lock')); }
   catch (error) {
     if (error.code !== 'EEXIST') throw error;
-    // The saved report can precede the native reply. Inspect custody without
-    // settling it while a live or crash-retained execution owner holds the lock.
-    return statusFrom(config, await inventory(config, false, checkpoint));
+    // A held owner still fences execution. Only the native owner's immutable
+    // close record can authorize recording the completed local observation.
   }
   let records;
   try {
@@ -440,11 +442,11 @@ export async function reconcile(config, options = {}) {
     if (records.filter(record => !record.result).length > 1) fail('Multiple unresolved execution records require inspection.');
     for (const record of records) if (!record.result && record.started) {
       // Missing native evidence is never permission to run a second time.
-      try { await reconcileOne(config, record, checkpoint); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+      try { await reconcileOne(config, record, checkpoint, !release); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }
     }
     checkpoint();
   } finally {
-    await release();
+    await release?.();
   }
   return statusFrom(config, records);
 }

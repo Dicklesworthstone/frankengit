@@ -6,6 +6,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { absolute, contains, directory, fail, lock, names, parseJson, readPrivate, writeNew } from './workflow_watch_io.mjs';
 
 const MAX_BYTES = 1024 * 1024;
+const MAX_OBSERVATION_FAILURES = 3;
 const encode = value => Buffer.from(`${JSON.stringify(value)}\n`);
 const overlap = (a, b) => contains(a, b) || contains(b, a);
 function keys(value, expected) {
@@ -197,7 +198,8 @@ export function createController(backend) {
     if (onCycle !== undefined && typeof onCycle !== 'function') fail('Invalid supervisor cycle reporter.');
     const config = configuration(value), selected = optionsFor(budgets);
     return owned(config, async retain => {
-      const quarantined = new Set(); let cycles = 0, failed = false;
+      const quarantined = new Set(), observationFailures = new Map();
+      let cycles = 0, failed = false;
       let last = aggregate(config.lanes.map(lane => ({ name: lane.name, skipped: 'stopped' })), selected.signal);
       while (!selected.signal?.aborted && (!maxCycles || cycles < maxCycles)) {
         last = await sweep(config, selected, cycles % config.lanes.length, quarantined);
@@ -206,7 +208,17 @@ export function createController(backend) {
         // never erase an owner's unresolved native containment fence.
         if (last.containment_unknown) retain();
         for (const row of last.lanes) {
-          if (row.error || row.before?.unknown > 0 || row.after?.unknown > 0) quarantined.add(row.name);
+          const { error } = row;
+          // The watcher assigns this phase only to the read before intent
+          // creation. Publication failures and uncertain custody cannot retry.
+          if (error?.stage === 'execution' && error.phase === 'observation' && !error.containment_unknown) {
+            const consecutive = (observationFailures.get(row.name) ?? 0) + 1;
+            observationFailures.set(row.name, consecutive);
+            if (consecutive < MAX_OBSERVATION_FAILURES) continue;
+          } else if (row.execution) {
+            observationFailures.delete(row.name);
+          }
+          if (error || row.before?.unknown > 0 || row.after?.unknown > 0) quarantined.add(row.name);
         }
         if (onCycle) await onCycle(structuredClone({ ...last, cycle: cycles }));
         if (last.containment_unknown || quarantined.size === config.lanes.length || selected.signal?.aborted ||

@@ -61,6 +61,10 @@ def wait_for(predicate, seconds=20):
         time.sleep(0.01)
     raise AssertionError('bounded native process condition did not arrive')
 
+def first_cycle(path):
+    line, separator, _ = path.read_bytes().partition(b'\n')
+    return json.loads(line) if separator else None
+
 def process_identity(pid):
     try:
         raw = pathlib.Path(f'/proc/{pid}/stat').read_bytes()
@@ -166,9 +170,49 @@ for fmt in ('sha1', 'sha256'):
     assert idle['lanes'][0]['execution']['reason'] == 'commit_already_observed'
     assert previous == (snapshot(base / 'watch'), snapshot(base / 'runs'), snapshot(base / 'publication'))
     import_revision(GOOD.replace('!= never-fails', '!= release'), 2)
-    failed = operator(expected=1)
+    # Withhold only the fixture's native state. The configured storage directory
+    # still passes preflight, so the real fg refs read fails before any intent.
+    withheld = base / 'node-withheld'
+    store.rename(withheld)
+    store.mkdir(mode=0o700)
+    retry_stdout, retry_stderr = base / 'observation-retry.out', base / 'observation-retry.err'
+    commands += 1
+    operator_commands += 1
+    process = None
+    try:
+        try:
+            with retry_stdout.open('wb') as output, retry_stderr.open('wb') as errors:
+                process = subprocess.Popen(['node', str(supervisor), 'serve', '--config', str(config_path),
+                    '--trusted-local', '--interval-ms', '1000', '--max-cycles', '2'], stdout=output, stderr=errors)
+            unavailable = wait_for(lambda: first_cycle(retry_stdout))
+            assert unavailable['type'] == 'workflow_supervisor_cycle' and unavailable['cycle'] == 1
+            lane = unavailable['lanes'][0]
+            assert lane['blocked'] and 'execution' not in lane and 'after' not in lane
+            assert lane['error']['stage'] == 'execution' and lane['error']['phase'] == 'observation'
+            assert not lane['error']['containment_unknown']
+            assert previous == (snapshot(base / 'watch'), snapshot(base / 'runs'), snapshot(base / 'publication'))
+        finally:
+            store.rename(base / 'node-observation-unavailable')
+            withheld.rename(store)
+        assert process.wait(timeout=90) == 1, (fmt, retry_stdout.read_text(), retry_stderr.read_text())
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=10)
+    observed = [json.loads(line) for line in retry_stdout.read_bytes().splitlines()]
+    assert [row['type'] for row in observed] == [
+        'workflow_supervisor_cycle', 'workflow_supervisor_cycle', 'workflow_supervisor_service'
+    ], (fmt, observed)
+    failed, service = observed[1:]
+    assert service['cycles'] == 2 and service['quarantined'] == [] and not service['pending']
+    assert service['failed'] and not service['execution_retried']
     assert failed['failed'] and not failed['pending']
     assert failed['lanes'][0]['execution']['outcome'] == 'observed_failed'
+    assert failed['lanes'][0]['execution']['commit'] == tip
     assert failed['lanes'][0]['after']['committed'] == 8
     import_revision(GOOD, 3)
     limited = operator(expected=2, extra=['--max-publications', '1'])
@@ -249,17 +293,28 @@ for fmt in ('sha1', 'sha256'):
     source.rename(base / 'source-offline')
     binary.rename(base / 'fg-offline')
     store.rename(base / 'node-offline')
+    finalization = directory / 'finalization.json'
+    finalization.rename(base / 'retained-finalization.json')
+    try:
+        still_pending = operator('reconcile', expected=2)
+        assert still_pending['lanes'][0]['watcher']['execution_unknown'] == 1
+        assert still_pending['lanes'][0]['watcher']['owner_present']
+        assert (base / 'watch/owner.lock').is_dir()
+    finally:
+        (base / 'retained-finalization.json').rename(finalization)
     recovered = operator('reconcile', expected=2)
     assert not recovered['failed'] and recovered['pending'] and recovered['owner_present']
     assert recovered['lanes'][0]['watcher']['execution_unknown'] == 0
     assert recovered['lanes'][0]['watcher']['observed_succeeded'] == 3
     assert not recovered['publication_submitted'] and not recovered['execution_retried'] and not recovered['locks_removed']
-    assert lock.stat().st_ino == original_lock
+    assert lock.stat().st_ino == original_lock and recovered['lanes'][0]['watcher']['owner_present']
     assert snapshot(base / 'runs') == retained and snapshot(base / 'publication') == publication_before
     watcher_after = snapshot(base / 'watch')
     assert operator('reconcile', expected=2) == recovered
     assert snapshot(base / 'watch') == watcher_after
     cases.append({'format': fmt, 'automatic_runs': 3, 'distinct_checks': len(checks), 'failed_matrix_published': True,
+                  'read_only_observation_recovered': True,
+                  'required_native_finalization_under_retained_owner': True,
                   'publication_backpressure': True, 'supervisor_sigkill_reconciled': True, 'source_and_binary_free': True,
                   'retained_owner_preserved': True, 'no_reexecution_or_republication_during_reconciliation': True})
 (root / 'results.json').write_text(json.dumps({'top_level_commands': commands, 'direct_native_commands': native_commands,

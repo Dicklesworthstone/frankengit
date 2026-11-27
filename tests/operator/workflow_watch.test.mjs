@@ -207,6 +207,34 @@ for (const format of ['sha1', 'sha256']) {
     assert.equal(JSON.parse(after.output).records[0].state, 'observed_succeeded');
     assert.equal((await f.lines('effects.ndjson')).length, 1);
   });
+  test(`${format}: locked reconciliation requires exact native finalization and preserves execution ownership`, LINUX_WORKFLOW, async t => {
+    const f = await fixture(t, format, { drop_stdout: true });
+    await assert.rejects(once(f.config), /Dispatch unresolved/);
+    const { records: [pending] } = await status(f.config);
+    const owner = join(f.config.state_directory, 'owner.lock');
+    await mkdir(owner, { mode: 0o700 });
+    const identity = await lstat(owner);
+    const finalization = join(pending.native_directory, 'finalization.json');
+    const result = join(f.config.state_directory, `result-${pending.id}.json`);
+    const original = await readFile(finalization);
+    await unlink(finalization);
+    assert.equal((await reconcile(f.config)).records[0].state, 'execution_unknown');
+    await assert.rejects(lstat(result), { code: 'ENOENT' });
+    await writeFile(finalization, JSON.stringify({ ...JSON.parse(original), report_sha256: '0'.repeat(64) }), { mode: 0o600 });
+    await assert.rejects(reconcile(f.config), /differs from its finalization record/);
+    await assert.rejects(lstat(result), { code: 'ENOENT' });
+    await writeFile(finalization, original);
+    const recovered = await reconcile(f.config);
+    assert.equal(recovered.owner_present, true);
+    assert.equal(recovered.records[0].state, 'observed_succeeded');
+    const terminal = await readFile(result);
+    assert.deepEqual(await reconcile(f.config), recovered);
+    assert.deepEqual(await readFile(result), terminal);
+    assert.equal((await lstat(owner)).ino, identity.ino);
+    await assert.rejects(once(f.config), { code: 'EEXIST' });
+    assert.equal((await f.lines('calls.ndjson')).length, 2);
+    assert.equal((await f.lines('effects.ndjson')).length, 1);
+  });
 }
 
 test('missing branch is idle, whereas read refusal cannot be fabricated into absence', LINUX_WORKFLOW, async t => {
