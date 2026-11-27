@@ -12,14 +12,14 @@ const exact = (v, keys) => v !== null && typeof v === 'object' && !Array.isArray
 const fail = code => { throw operatorError(code); };
 // Shared connection validation; each entrypoint checks its own closed grammar.
 export function issueConnectionOptions(raw, entity = 'issue') {
-  if (!['issue', 'discussion'].includes(entity)) fail('issue_operator_profile');
+  if (!['issue', 'milestone', 'discussion'].includes(entity)) fail('issue_operator_profile');
   const o = { ...raw, timeoutMs: raw.timeoutMs ?? 30000, onProgress: raw.onProgress ?? (() => {}) };
   for (const key of ['tenant', 'repository']) if (typeof o[key] !== 'string' || !/^[0-9a-f]{32}$/.test(o[key])) fail('issue_operator_identity');
   if (typeof o.href !== 'string' || o.href.length > 4096 || /[\u0000-\u0020\u007f-\u009f\uD800-\uDFFF]/u.test(o.href)) fail('issue_operator_url');
   // The shipped client validates HTTPS/loopback, origin, path and no credentials.
   // Reject URL normalization too: the exact destination is selected by the user.
   if (new URL(o.href).href !== o.href) fail('issue_operator_url');
-  const Client = entity === 'discussion' ? DiscussionClient : IssueClient;
+  const Client = entity === 'discussion' ? DiscussionClient : entity === 'milestone' ? MilestoneClient : IssueClient;
   new Client({ href: o.href, timeoutMs: o.timeoutMs });
   if ((o.signal !== undefined && !(o.signal instanceof AbortSignal)) || typeof o.onProgress !== 'function') fail('issue_operator_lifetime');
   o.tokenFile = operatorPath(o.tokenFile);
@@ -56,7 +56,7 @@ const fail = code => { throw operatorError(entity === 'issue' ? code : code.repl
 function options(raw) {
   const keys = ['operation', 'href', 'tenant', 'repository', 'tokenFile', 'record', 'number', 'expectedVersion', 'fields', 'timeoutMs', 'signal', 'onProgress'];
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some(k => !keys.includes(k))) fail('issue_operator_options');
-  const o = issueConnectionOptions(raw, discussion ? 'discussion' : 'issue');
+  const o = issueConnectionOptions(raw, entity);
   if (![...ACTIONS, 'status', 'retry'].includes(o.operation)) fail('issue_operator_operation');
   o.tokenFile = operatorPath(o.tokenFile); o.record = operatorPath(o.record);
   if (o.tokenFile === o.record) fail('issue_operator_separate_record');

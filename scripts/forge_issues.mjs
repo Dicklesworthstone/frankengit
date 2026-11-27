@@ -16,6 +16,8 @@ edit: --number N --expected-version N [--title TEXT] [--body TEXT | --body-file 
 comment: --number N --expected-version N (--body TEXT | --body-file PRIVATE_FILE)
 append-comment: --number N (--body TEXT | --body-file PRIVATE_FILE) (no --expected-version)
 close|reopen|lock|unlock: --number N --expected-version N
+set-milestone: --number N --expected-version N --milestone N --expected-milestone-version N
+clear-milestone: --number N --expected-version N
 assign|unassign: --number N --expected-version N --assignee PRINCIPAL_HEX [--assignee PRINCIPAL_HEX ...]
 add-assignees: --number N --assignee PRINCIPAL_HEX [--assignee PRINCIPAL_HEX ...] (no --expected-version)
 add-labels: --number N --label TEXT [--label TEXT ...] (no --expected-version)
@@ -23,7 +25,7 @@ status|retry: use only the connection options and the ORIGINAL --record.
 list|show|search: read only, no --record. show requires --number N.
   [--after N --expected-head TOKEN] [--limit 1..100 --max-pages 1..100]
   [--max-output-bytes 1..8388608]
-search filters: [--state open|closed|all] [--opened-by HEX] [--query TEXT]
+search filters: [--state open|closed|all] [--opened-by HEX] [--query TEXT] [--milestone N|none]
   [--case-sensitive] [--label TEXT ...] [--max-scan 1..1000]
 Reads default to one page; continuations pin the original snapshot and predicate.
 All commands accept --timeout-ms 1..300000 (whole operation, default 30000).
@@ -49,7 +51,7 @@ export function issueArguments(args) {
   const operation = args[0], map = new Map(), labels = [], assignees = []; let clear = false, caseSensitive = false;
   const allowed = ['--url', '--tenant-id', '--repository-id', '--token-file', '--record', '--number', '--expected-version',
     '--title', '--body', '--body-file', '--timeout-ms', '--after', '--expected-head', '--limit', '--max-pages',
-    '--max-output-bytes', '--state', '--opened-by', '--query', '--max-scan'];
+    '--max-output-bytes', '--state', '--opened-by', '--query', '--max-scan', '--milestone', '--expected-milestone-version'];
   for (let i = 1; i < args.length; i++) {
     const flag = args[i];
     if (flag === '--case-sensitive') { if (caseSensitive) throw operatorError('issue_operator_duplicate_option'); caseSensitive = true; continue; }
@@ -65,12 +67,13 @@ export function issueArguments(args) {
   if ((clear && labels.length) || (map.has('--body') && map.has('--body-file'))) throw operatorError('issue_operator_conflicting_fields');
   const reading = ['list', 'show', 'search'].includes(operation);
   if (reading) {
-    if (clear || assignees.length || ['--record', '--expected-version', '--title', '--body', '--body-file'].some(k => map.has(k))) throw operatorError('issue_read_mutation_option');
-    if (operation !== 'search' && (labels.length || caseSensitive || ['--state', '--opened-by', '--query', '--max-scan'].some(k => map.has(k)))) throw operatorError('issue_read_search_inapplicable');
+    if (clear || assignees.length || ['--record', '--expected-version', '--expected-milestone-version', '--title', '--body', '--body-file'].some(k => map.has(k))) throw operatorError('issue_read_mutation_option');
+    if (operation !== 'search' && (labels.length || caseSensitive || ['--state', '--opened-by', '--query', '--max-scan', '--milestone'].some(k => map.has(k)))) throw operatorError('issue_read_search_inapplicable');
     const query = {};
     if (map.has('--state') && map.get('--state') !== 'all') query.state = map.get('--state');
     if (map.has('--opened-by')) query.opened_by = map.get('--opened-by');
     if (map.has('--query')) query.text = map.get('--query');
+    if (map.has('--milestone')) query.milestone = map.get('--milestone') === 'none' ? 'none' : decimal(map.get('--milestone'), 'milestone filter', 1);
     if (caseSensitive) query.case_sensitive = true;
     if (labels.length) query.labels = labels;
     const raw = { operation, href: map.get('--url'), tenant: map.get('--tenant-id'), repository: map.get('--repository-id'),
@@ -90,6 +93,8 @@ export function issueArguments(args) {
   if (operation === 'open' && !Object.hasOwn(fields, 'body')) fields.body = '';
   if (labels.length || clear) fields.labels = labels;
   if (assignees.length) fields.assignees = assignees;
+  if (map.has('--milestone')) fields.milestone = decimal(map.get('--milestone'), 'milestone number', 1);
+  if (map.has('--expected-milestone-version')) fields.expected_milestone_version = decimal(map.get('--expected-milestone-version'), 'expected milestone version', 1);
   const raw = { operation, href: map.get('--url'), tenant: map.get('--tenant-id'), repository: map.get('--repository-id'),
     tokenFile: map.get('--token-file'), record: map.get('--record'),
     ...(map.has('--number') ? { number: decimal(map.get('--number'), 'issue number', 1) } : {}),
