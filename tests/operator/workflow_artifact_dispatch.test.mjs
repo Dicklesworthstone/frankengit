@@ -84,6 +84,10 @@ async function custody(t, mutate) {
   ];
   if (mutate) mutate(f);
   documents.push([join(f.batch, 'report.json'), f.report]);
+  documents.push([join(f.batch, 'finalization.json'), {
+    type: 'workflow_dispatch_finalization', schema_version: 1, node_closed: true,
+    report_sha256: hash(encode(f.report)),
+  }]);
   for (const [path, value] of documents) await writeNew(path, encode(value));
   return { ...f, documents: documents.map(([path, value]) => [path, encode(value)]) };
 }

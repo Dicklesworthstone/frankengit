@@ -178,18 +178,27 @@ fn execute(options: Options, event: &str) -> Result<u8, String> {
         node.shutdown().err().map(|e| e.to_string()),
     );
     match operation {
-        Ok(report) => finish(
-            &mut std::io::stdout().lock(),
-            &report.to_json(),
-            report.succeeded(),
-            cleanup.as_deref(),
-        )
-        .map_err(|e| {
-            format!(
-                "{e}; dispatch report remains at {}; do not replay the batch",
-                report.run_directory.join("report.json").display()
+        Ok(report) => {
+            let json = if cleanup.is_none() {
+                report
+                    .retain_finalized_reply()
+                    .map_err(|error| error.to_string())?
+            } else {
+                report.to_json()
+            };
+            finish(
+                &mut std::io::stdout().lock(),
+                &json,
+                report.succeeded(),
+                cleanup.as_deref(),
             )
-        }),
+            .map_err(|e| {
+                format!(
+                    "{e}; dispatch report remains at {}; do not replay the batch",
+                    report.run_directory.join("report.json").display()
+                )
+            })
+        }
         Err(error) => Err(format!(
             "{error}{}; inspect any existing dispatch/child journals before retrying; an error is not proof that no job ran",
             cleanup.map_or_else(String::new, |e| format!("; node shutdown also failed: {e}"))

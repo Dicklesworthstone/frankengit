@@ -11,8 +11,8 @@ use super::super::{
     PathBuf, PermissionsExt, RefName, RepositoryAuthorityHeadId, SOURCE_LIMITS, Sha1, Sha256,
     SparseEntryKind, SparseManifest, TreeCapability, TreePath, TrustedWorkflowArtifactConfig,
     TrustedWorkflowFailure, TrustedWorkflowRun, WorkflowInputs, WorkflowLimits, WorkflowPlan,
-    WorkspaceId, artifacts, candidate, fs, hex, publish_report, run_inputs, validate_inputs,
-    workspace_request_live, write_new,
+    WorkspaceId, artifacts, candidate, fs, hex, publish_report, publish_workflow_custody,
+    run_inputs, validate_inputs, workspace_request_live, write_new,
 };
 use fgit_crypto::sha256_digest;
 use fgit_forge::review::{ComparisonMode, SourcePathChanges};
@@ -21,7 +21,8 @@ use fgit_forge::review::{ComparisonMode, SourcePathChanges};
 type PathBasis = (Option<GitOid>, ComparisonMode, Option<GitOid>);
 use fgit_runner::workflow::{JobOutcome, MAX_JOBS, MAX_STEPS, WorkflowError};
 
-const MAX_WORKFLOWS: usize = 32;
+pub(super) const MAX_WORKFLOWS: usize = 32;
+pub(super) const WORKFLOW_DEFINITION_LIMIT: &str = "workflow_definition_limit";
 const MAX_WORKFLOW_BYTES: usize = 1024 * 1024;
 
 pub(super) struct Snapshot {
@@ -29,6 +30,7 @@ pub(super) struct Snapshot {
     pub(super) commit: GitOid,
     pub(super) ancestor_of: Option<GitOid>,
     pub(super) settle_definition_refusal: bool,
+    pub(super) settle_definition_limit: bool,
     pub(super) watch_owns_completion: bool,
 }
 
@@ -39,6 +41,7 @@ impl From<(RepositoryAuthorityHeadId, GitOid)> for Snapshot {
             commit,
             ancestor_of: None,
             settle_definition_refusal: false,
+            settle_definition_limit: false,
             watch_owns_completion: false,
         }
     }
@@ -86,6 +89,31 @@ impl TrustedWorkflowDispatch {
                     "dispatch finished but report durability failed: {error}; do not replay"
                 ),
             })
+    }
+
+    /// After the command's signal monitor and node both close successfully,
+    /// retain the exact report digest before returning any stdout bytes.
+    pub fn retain_finalized_reply(&self) -> Result<String, TrustedWorkflowFailure> {
+        let report = self.to_json();
+        let digest = hex(&sha256_digest(report.as_bytes()));
+        let finalized = format!(
+            "{{\"type\":\"workflow_dispatch_finalization\",\"schema_version\":1,\"node_closed\":true,\"report_sha256\":\"{digest}\"}}"
+        );
+        File::open(&self.run_directory)
+            .and_then(|root| {
+                publish_workflow_custody(
+                    &root,
+                    &self.run_directory,
+                    ".finalization.pending",
+                    "finalization.json",
+                    finalized.as_bytes(),
+                )
+            })
+            .map_err(|error| TrustedWorkflowFailure::Journal {
+                directory: self.run_directory.clone(),
+                detail: format!("dispatch finalization record failed: {error}; do not replay"),
+            })?;
+        Ok(report)
     }
 
     fn persist_child_reports(&self) -> Result<(), TrustedWorkflowFailure> {
@@ -418,6 +446,7 @@ impl OneNode {
                             path_basis,
                             tag_tip,
                             reserve_after_preflight,
+                            expected.settle_definition_limit,
                             expected.watch_owns_completion,
                         )?;
                         if !expected.watch_owns_completion {
@@ -482,6 +511,7 @@ fn dispatch_at<A: GitHashAlgorithm>(
     path_basis: Option<PathBasis>,
     tag_tip: Option<GitOid>,
     reserve_after_preflight: Option<impl FnOnce() -> Result<(), TrustedWorkflowFailure>>,
+    settle_definition_limit: bool,
     watch_owns_completion: bool,
 ) -> Result<TrustedWorkflowDispatch, TrustedWorkflowFailure> {
     let invalid = TrustedWorkflowFailure::InvalidInput;
@@ -491,9 +521,16 @@ fn dispatch_at<A: GitHashAlgorithm>(
         .iter()
         .filter(|e| workflow_child(e.path().as_bytes(), directory))
         .collect::<Vec<_>>();
-    if entries.len() > MAX_WORKFLOWS {
-        return Err(invalid("dispatch exceeds 32 workflow definitions"));
-    }
+    let excess_definitions = match entries.len() {
+        count if count <= MAX_WORKFLOWS => None,
+        count if settle_definition_limit && reserve_after_preflight.is_some() => {
+            // The authenticated source count is fixed for this event. Settle
+            // it before compiling any prefix or preparing execution effects.
+            entries.clear();
+            Some(count)
+        }
+        _ => return Err(invalid("dispatch exceeds 32 workflow definitions")),
+    };
     entries.sort_by(|a, b| a.path().as_bytes().cmp(b.path().as_bytes()));
     let (source_rcr, source_commit, source_tree, candidate) =
         inputs.coordinates(node.object_format)?;
@@ -615,7 +652,8 @@ fn dispatch_at<A: GitHashAlgorithm>(
             selected,
         });
     }
-    if definition_refusal.is_none()
+    let preflight_admitted = definition_refusal.is_none() && excess_definitions.is_none();
+    if preflight_admitted
         && artifacts.is_some_and(|config| {
             config
                 .selected_workflows()
@@ -655,7 +693,7 @@ fn dispatch_at<A: GitHashAlgorithm>(
         }
     }
     let artifact_session = artifacts
-        .filter(|_| definition_refusal.is_none())
+        .filter(|_| preflight_admitted)
         .map(|config| artifacts::Session::open(node, config))
         .transpose()?;
     if let Some(session) = &artifact_session {
@@ -740,7 +778,7 @@ fn dispatch_at<A: GitHashAlgorithm>(
         write!(identity, ",\"artifact_contract\":{}", config.to_json())
             .expect("writing to a String cannot fail");
     }
-    let stop_reason = definition_refusal.map(|(entry, error)| {
+    let mut stop_reason = definition_refusal.map(|(entry, error)| {
         let code = match &error {
             TrustedWorkflowFailure::Workflow(WorkflowError::UnsupportedRunner(_)) => {
                 "unsupported_runner"
@@ -759,6 +797,14 @@ fn dispatch_at<A: GitHashAlgorithm>(
         .expect("writing to a String cannot fail");
         "definition_refused"
     });
+    if let Some(observed) = excess_definitions {
+        write!(
+            identity,
+            ",\"dispatch_refusal\":{{\"code\":\"{WORKFLOW_DEFINITION_LIMIT}\",\"observed\":{observed},\"maximum\":{MAX_WORKFLOWS}}}"
+        )
+        .expect("writing to a String cannot fail");
+        stop_reason = Some(WORKFLOW_DEFINITION_LIMIT);
+    }
     let mut report = TrustedWorkflowDispatch {
         run_directory,
         identity,

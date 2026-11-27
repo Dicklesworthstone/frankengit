@@ -4,7 +4,10 @@ use super::{
     Budget, GitOid, OneNode, OsStrExt, Path, PrivateDirectory, RefName, Run, Sources,
     TrustedWorkflowFailure, checkpoint, hex, invalid, read_private,
 };
-use crate::treefs_workspace::trusted_workflow::durable::dispatch::{child_id, workflow_child};
+use crate::treefs_workspace::trusted_workflow::{
+    SOURCE_LIMITS,
+    durable::dispatch::{MAX_WORKFLOWS, WORKFLOW_DEFINITION_LIMIT, child_id, workflow_child},
+};
 use fgit_crypto::sha256_digest;
 use fgit_schema::json::{self, Object, Value};
 use std::collections::BTreeSet;
@@ -145,8 +148,41 @@ pub(super) fn dispatch(
         ));
     }
     let definitions = array(plan, "workflows")?;
-    if definitions.len() > 32 {
+    if definitions.len() > MAX_WORKFLOWS {
         return Err(invalid("watch dispatch workflow bound exceeded"));
+    }
+    match (
+        sources
+            .terminal
+            .is_some_and(|terminal| terminal.is_definition_limit()),
+        plan.get("dispatch_refusal"),
+    ) {
+        (true, Some(refusal))
+            if matches!(
+                profile,
+                "latest-canonical-ref-update-v1" | "ordered-canonical-branch-update-v1"
+            ) && reference.as_bytes().starts_with(b"refs/heads/")
+                && definitions.is_empty() =>
+        {
+            let refusal = object(refusal)?;
+            equal_text(refusal, "code", WORKFLOW_DEFINITION_LIMIT)?;
+            let maximum = refusal.get("maximum").and_then(Value::unsigned);
+            let observed = refusal.get("observed").and_then(Value::unsigned);
+            if maximum != Some(MAX_WORKFLOWS as u64)
+                || !observed.is_some_and(|count| {
+                    count > MAX_WORKFLOWS as u64 && count <= SOURCE_LIMITS.max_entries as u64
+                })
+            {
+                return Err(invalid("invalid watch definition limit refusal"));
+            }
+            equal_text(plan, "source_head", text(event, "observed_head")?)?;
+        }
+        (false, None) => {}
+        _ => {
+            return Err(invalid(
+                "watch dispatch refusal differs from its terminal record",
+            ));
+        }
     }
     match (
         sources

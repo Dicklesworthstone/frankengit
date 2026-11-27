@@ -38,10 +38,10 @@ unresolved, rather than permitting an execution replay.
 ## Locks and partial results
 
 Retained supervisor, watcher, publication and recovery owner locks are reported,
-never removed or stolen. A completed report does not establish that a killed
-supervisor's remaining processes have been independently reconciled. A retained
-owner therefore keeps the aggregate result pending even after its completed
-watcher summary is recovered. Normal execution still refuses that owner lock.
+never removed or stolen. Recovery under a retained watcher lock requires the
+original native finalization record and matching saved report. A retained owner
+keeps the aggregate result pending even after its completed watcher summary is
+recovered. Normal execution still refuses that owner lock.
 
 Each lane carries its recovered watcher status and retained publication status,
 or an explicit error. A corrupt lane does not hide a different valid lane.

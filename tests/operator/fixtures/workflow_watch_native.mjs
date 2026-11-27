@@ -137,6 +137,10 @@ if (!dispatch) {
     }
     if (!released) throw new Error('fixture reply release did not arrive');
   }
+  if (!control.node_cleanup_error) {
+    await json(join(batch, 'finalization.json'), { type: 'workflow_dispatch_finalization', schema_version: 1,
+      node_closed: true, report_sha256: hash(await readFile(join(batch, 'report.json'))) });
+  }
   if (control.drop_stdout) { console.error('fixture output lost after saved report'); process.exit(2); }
   console.log(JSON.stringify({ type: 'workflow_dispatch_result', schema_version: 1,
     node_closed: !control.node_cleanup_error, node_cleanup_error: control.node_cleanup_error ?? null,

@@ -88,10 +88,27 @@ for (const format of ['sha1', 'sha256']) {
     const calls = (await f.lines('calls.ndjson')).length;
     await assert.rejects(once(f.config), /unresolved/);
     assert.equal((await f.lines('calls.ndjson')).length, calls);
+    const savedPath = join((await status(f.config)).records[0].native_directory, 'report.json');
+    const saved = await readFile(savedPath);
+    await writeFile(savedPath, Buffer.concat([saved, Buffer.from(' ')]));
+    await assert.rejects(reconcile(f.config), /differs from its finalization record/);
+    await writeFile(savedPath, saved);
     const recovered = await reconcile(f.config); assert.equal(recovered.records[0].state, 'observed_succeeded');
     assert.equal((await f.lines('calls.ndjson')).length, calls, 'reconcile performs no child execution');
     assert.equal((await once(f.config)).reason, 'commit_already_observed');
     assert.equal((await f.lines('effects.ndjson')).length, 1);
+  });
+  test(`${format}: lost shutdown failure cannot turn an earlier report into a completion`, LINUX_WORKFLOW, async t => {
+    const f = await fixture(t, format, { drop_stdout: true, node_cleanup_error: 'fixture node shutdown failed' });
+    await assert.rejects(once(f.config), /Dispatch unresolved/);
+    const pending = (await status(f.config)).records[0];
+    assert.equal(JSON.parse(await readFile(join(pending.native_directory, 'report.json'))).succeeded, true);
+    const after = await reconcile(f.config);
+    assert.equal(after.records[0].state, 'execution_unknown');
+    await assert.rejects(lstat(join(f.config.state_directory, `result-${pending.id}.json`)), { code: 'ENOENT' });
+    await assert.rejects(once(f.config), /unresolved/);
+    assert.equal((await f.lines('effects.ndjson')).length, 1);
+    assert.equal((await f.lines('calls.ndjson')).length, 2);
   });
   test(`${format}: contradictory native reports stay unresolved across restart`, LINUX_WORKFLOW, async t => {
     const returned = { succeeded: false, stop_reason: 'request_stopped' };
@@ -188,6 +205,34 @@ for (const format of ['sha1', 'sha256']) {
     const after = await child(['reconcile', '--config', f.configFile, '--trusted-local']).done;
     assert.equal(after.code, 0, after.errors);
     assert.equal(JSON.parse(after.output).records[0].state, 'observed_succeeded');
+    assert.equal((await f.lines('effects.ndjson')).length, 1);
+  });
+  test(`${format}: locked reconciliation requires exact native finalization and preserves execution ownership`, LINUX_WORKFLOW, async t => {
+    const f = await fixture(t, format, { drop_stdout: true });
+    await assert.rejects(once(f.config), /Dispatch unresolved/);
+    const { records: [pending] } = await status(f.config);
+    const owner = join(f.config.state_directory, 'owner.lock');
+    await mkdir(owner, { mode: 0o700 });
+    const identity = await lstat(owner);
+    const finalization = join(pending.native_directory, 'finalization.json');
+    const result = join(f.config.state_directory, `result-${pending.id}.json`);
+    const original = await readFile(finalization);
+    await unlink(finalization);
+    assert.equal((await reconcile(f.config)).records[0].state, 'execution_unknown');
+    await assert.rejects(lstat(result), { code: 'ENOENT' });
+    await writeFile(finalization, JSON.stringify({ ...JSON.parse(original), report_sha256: '0'.repeat(64) }), { mode: 0o600 });
+    await assert.rejects(reconcile(f.config), /differs from its finalization record/);
+    await assert.rejects(lstat(result), { code: 'ENOENT' });
+    await writeFile(finalization, original);
+    const recovered = await reconcile(f.config);
+    assert.equal(recovered.owner_present, true);
+    assert.equal(recovered.records[0].state, 'observed_succeeded');
+    const terminal = await readFile(result);
+    assert.deepEqual(await reconcile(f.config), recovered);
+    assert.deepEqual(await readFile(result), terminal);
+    assert.equal((await lstat(owner)).ino, identity.ino);
+    await assert.rejects(once(f.config), { code: 'EEXIST' });
+    assert.equal((await f.lines('calls.ndjson')).length, 2);
     assert.equal((await f.lines('effects.ndjson')).length, 1);
   });
 }

@@ -154,6 +154,57 @@ test('lane exceptions are quarantined while healthy branches continue across cyc
   assert.equal(result.failed, true); assert.equal(exitCode(result), 1);
 });
 
+test('read-only observation failures retry and a successful observation resets their budget', async t => {
+  const f = await fixture(t, 1), cycles = [];
+  let observations = 0;
+  f.backend.execute = async () => {
+    if (++observations % 3 !== 0) throw Object.assign(new Error('source read unavailable'), { phase: 'observation' });
+    return idle();
+  };
+  const result = await f.controller.serve(f.config, {
+    maxCycles: 6, intervalMs: 1, onCycle: row => cycles.push(row.lanes[0]),
+  });
+  assert.deepEqual(cycles.map(row => row.error?.phase ?? row.execution.type), [
+    'observation', 'observation', 'workflow_watch_idle', 'observation', 'observation', 'workflow_watch_idle',
+  ]);
+  assert.equal(observations, 6);
+  assert.equal(f.calls.filter(call => call[0] === 'publish').length, 8);
+  assert.deepEqual(result.quarantined, []);
+  assert.equal(result.pending, false);
+  assert.equal(result.failed, true);
+  assert.equal(result.execution_retried, false);
+});
+
+test('persistent read-only observation failure exhausts the affected lane without starving another', async t => {
+  const f = await fixture(t, 2);
+  f.backend.execute = async watch => {
+    const name = f.name(watch);
+    f.calls.push(['execute', name]);
+    if (name === 'lane-0') throw Object.assign(new Error('source read unavailable'), { phase: 'observation' });
+    return idle();
+  };
+  const result = await f.controller.serve(f.config, { maxCycles: 4, intervalMs: 1 });
+  assert.equal(f.calls.filter(call => call[0] === 'execute' && call[1] === 'lane-0').length, 3);
+  assert.equal(f.calls.filter(call => call[0] === 'execute' && call[1] === 'lane-1').length, 4);
+  assert.deepEqual(result.quarantined, ['lane-0']);
+  assert.equal(result.lanes[0].skipped, 'recovery_required');
+  assert.equal(result.pending, true);
+});
+
+test('the observation phase cannot authorize replay after a publication failure', async t => {
+  const f = await fixture(t, 1);
+  let publications = 0;
+  f.backend.publish = async () => {
+    if (++publications === 2) throw Object.assign(new Error('unknown publication'), { phase: 'observation' });
+    return published();
+  };
+  const result = await f.controller.serve(f.config, { maxCycles: 3, intervalMs: 1 });
+  assert.equal(result.cycles, 1);
+  assert.equal(publications, 2);
+  assert.deepEqual(result.quarantined, ['lane-0']);
+  assert.equal(result.lanes[0].error.stage, 'publication_after_execution');
+});
+
 test('an unknown publication is not implicitly resumed during subsequent polling', async t => {
   const f = await fixture(t, 2); let attempts = 0;
   f.backend.publish = async publisher => {
@@ -198,11 +249,15 @@ test('service keeps ownership across reporting and waits before admitting anothe
 
 test('reporter mutations cannot forge containment or change service outcomes', async t => {
   const f = await fixture(t, 1);
-  f.backend.execute = async () => { throw Object.assign(new Error('forced'), { containment_unknown: true }); };
+  f.backend.execute = async () => {
+    throw Object.assign(new Error('forced source observation'), { phase: 'observation', containment_unknown: true });
+  };
   const result = await f.controller.serve(f.config, { maxCycles: 2, intervalMs: 1, onCycle: row => {
     row.containment_unknown = false; row.failed = false; row.lanes.length = 0;
   } });
   assert.equal(result.containment_unknown, true); assert.equal(result.failed, true); assert.equal(result.lanes.length, 1);
+  assert.equal(result.cycles, 1);
+  assert.deepEqual(result.quarantined, ['lane-0']);
   assert.deepEqual(await readdir(f.state), ['binding.json', 'owner.lock']);
 });
 

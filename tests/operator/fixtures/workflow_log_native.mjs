@@ -100,7 +100,12 @@ export async function runPeer(args) {
   await writeFile(join(childDirectory, 'attempt.json'), encode(attemptMarker(report.runs[0])), { mode: 0o600, flag: 'wx' });
   if (control.corrupt_log) report.runs[0].artifact_logs[0].logs[0].payload_sha256 = sha256('substituted');
   await appendFile(join(root, 'dispatches.ndjson'), encode({ id: intent.id }));
-  await writeFile(join(batch, 'report.json'), encode(report), { mode: 0o600, flag: 'wx' });
+  const savedReport = encode(report);
+  await writeFile(join(batch, 'report.json'), savedReport, { mode: 0o600, flag: 'wx' });
+  await writeFile(join(batch, 'finalization.json'), encode({
+    type: 'workflow_dispatch_finalization', schema_version: 1, node_closed: true,
+    report_sha256: sha256(savedReport),
+  }), { mode: 0o600, flag: 'wx' });
   if (control.drop_reply) { process.exitCode = 2; return; }
   process.stdout.write(encode({ type: 'workflow_dispatch_result', schema_version: 1, node_closed: true, node_cleanup_error: null, dispatch: report }));
   process.exitCode = report.succeeded ? 0 : 1;

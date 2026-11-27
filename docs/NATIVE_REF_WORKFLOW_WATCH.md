@@ -76,8 +76,11 @@ returns `source_moved` without acquiring event custody or executing a script.
 The same immutable snapshot supplies discovery and execution. Read-only
 preflight checks source, definition and workspace bounds before the watch
 reserves its event. A resource refusal leaves the latest watch free to select
-a corrected successor. An ordered branch watch keeps selecting the oldest
-pending reachable update and refuses again if it still exceeds the bounds.
+a corrected successor. An ordered branch watch processes the oldest pending
+reachable update. If that exact tree contains more than 32 workflow definitions,
+the ordered watch records a settled non-green `workflow_definition_limit` result
+with the observed count, zero children and zero checks, then can process the next
+commit. Other unresolved preflight errors stop catch-up.
 The watch durably reserves an admitted dispatch, including a recorded
 definition refusal, before writing the dispatch batch or opening a child.
 Merge candidates retain custody before their publication effect. Every failure
