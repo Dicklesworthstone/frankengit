@@ -43,20 +43,21 @@ async function fixture(t) {
       return respond(200, { type: 'issue_history', ...common(), snapshot_token: snapshot, after_version: after, limit,
         found: Boolean(f.row), issue: f.row, events, next_after_version: f.events.length > after + events.length ? after + events.length : null });
     }
-    const match = /^\/repo\/api\/v1\/issues\/1\/(open|edit|comment|close|reopen|assign|unassign|add-assignees|add-labels|lock|unlock)$/.exec(url.pathname);
+    const match = /^\/repo\/api\/v1\/issues\/1\/(open|edit|comment|append-comment|close|reopen|assign|unassign|add-assignees|add-labels|lock|unlock)$/.exec(url.pathname);
     if (!match || req.method !== 'POST') return respond(404, {});
-    if (f.onMutation) f.onMutation({ key, body });
+    if (f.onMutation) await f.onMutation({ key, body });
     const form = new URLSearchParams(body), action = match[1];
-    const independent = ['add-assignees', 'add-labels'].includes(action);
+    const independent = ['append-comment', 'add-assignees', 'add-labels'].includes(action);
+    if (independent === form.has('expected_version')) return respond(400, {});
     const expected = independent ? null : Number(form.get('expected_version'));
     let decision = f.decisions.get(key);
-    if (decision && decision.original_body !== body) return respond(409, { error: 'key reuse' });
+    if (decision && (decision.original_body !== body || decision.action !== action)) return respond(409, { error: 'key reuse' });
     if (!decision) {
-      const permitted = action === 'comment' ? !f.row?.locked : action === 'lock' ? f.row?.locked === false
+      const permitted = ['comment', 'append-comment'].includes(action) ? !f.row?.locked : action === 'lock' ? f.row?.locked === false
         : action === 'unlock' ? f.row?.locked === true : true;
       const committed = (independent ? Boolean(f.row) : expected === f.version) && f.mode !== 'refuse' && permitted;
       decision = { type: 'issue_publication', ...common(), number: 1, expected_version: expected, action,
-        ...(independent ? { command_profile: `issue.${action}.v1` } : {}),
+        ...(['add-assignees', 'add-labels'].includes(action) ? { command_profile: `issue.${action}.v1` } : {}),
         principal_id: actor, tx_id: 'tx-' + key, decision_sequence: f.decisions.size + 1,
         outcome: committed ? 'committed' : 'refused', repository_commit_id: committed ? 'rcr-1' : null,
         refusal_code: committed ? null : !permitted ? 'ProtectedRefTransitionDenied' : 'expected_version',
@@ -69,7 +70,7 @@ async function fixture(t) {
         f.row.version = f.version;
         if (action === 'close' || action === 'reopen') f.row.state = action === 'close' ? 'closed' : 'open';
         if (action === 'lock' || action === 'unlock') f.row.locked = action === 'lock';
-        if (action === 'comment') f.row.comments++;
+        if (['comment', 'append-comment'].includes(action)) f.row.comments++;
         if (action === 'edit') {
           for (const k of ['title', 'body']) if (form.has(k)) f.row[k] = form.get(k);
           if (form.has('label') || form.has('clear_labels')) f.row.labels = form.getAll('label');
@@ -77,7 +78,7 @@ async function fixture(t) {
         if (['assign', 'add-assignees'].includes(action)) f.row.assignees = [...new Set([...f.row.assignees, ...form.getAll('assignee')])].sort();
         if (action === 'unassign') f.row.assignees = f.row.assignees.filter(id => !form.getAll('assignee').includes(id));
         if (action === 'add-labels') f.row.labels = [...new Set([...f.row.labels, ...form.getAll('label')])].sort();
-        const eventAction = { name: action === 'add-assignees' ? 'assign' : action };
+        const eventAction = { name: action === 'add-assignees' ? 'assign' : action === 'append-comment' ? 'comment' : action };
         for (const k of ['title', 'body']) if (form.has(k)) eventAction[k] = form.get(k);
         if (form.has('label') || action === 'open') eventAction.labels = form.getAll('label');
         if (form.has('assignee')) eventAction.assignees = form.getAll('assignee');
@@ -97,7 +98,7 @@ async function fixture(t) {
   t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await rm(root, { recursive: true, force: true }); });
   return f;
 }
-const mutations = f => f.calls.filter(c => /issues\/1\/(open|edit|comment|close|reopen|assign|unassign|add-assignees|add-labels|lock|unlock)$/.test(c.path));
+const mutations = f => f.calls.filter(c => /issues\/1\/(open|edit|comment|append-comment|close|reopen|assign|unassign|add-assignees|add-labels|lock|unlock)$/.test(c.path));
 function command(args) {
   const child = spawn(process.execPath, [cli, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
   const out = [], err = []; child.stdout.on('data', b => out.push(b)); child.stderr.on('data', b => err.push(b));
@@ -106,6 +107,175 @@ function command(args) {
 function flags(f, operation, record = join(f.root, 'request.json')) {
   return [operation, '--url', f.href, '--tenant-id', tenant, '--repository-id', repository, '--token-file', f.tokenFile, '--record', record];
 }
+
+test('append-comment is explicit, has no predecessor, and preserves strict comment grammar', async t => {
+  const f = await fixture(t), args = [...flags(f, 'append-comment'), '--number', '1'];
+  const body = 'Literal 雪 <b> & reply\n';
+  const parsed = issueArguments([...args, '--body', body]);
+  assert.equal(parsed.options.expectedVersion, null);
+  assert.deepEqual(parsed.options.fields, { body });
+  for (const expectedVersion of [undefined, null]) {
+    assert.equal(issueOperatorOptions({ ...f.options('append-comment'), number: 1,
+      expectedVersion, fields: { body } }).expectedVersion, null);
+  }
+  for (const expectedVersion of [0, 1, '1', false]) {
+    assert.throws(() => issueOperatorOptions({ ...f.options('append-comment'), number: 1,
+      expectedVersion, fields: { body } }), error => error.code === 'issue_operator_append_comment_has_no_version');
+  }
+  for (const fields of [[], ['--body', ''], ['--body', ' \n'], ['--body', body, '--expected-version', '1'],
+    ['--body', body, '--title', 'Other intent'], ['--body', body, '--label', 'bug'],
+    ['--body', body, '--clear-labels'], ['--body', body, '--assignee', actor],
+    ['--body', body, '--body-file', f.tokenFile]]) {
+    assert.throws(() => issueArguments([...args, ...fields]));
+  }
+  assert.throws(() => issueArguments([...flags(f, 'comment'), '--number', '1', '--body', body]));
+  const strict = issueArguments([...flags(f, 'comment'), '--number', '1', '--expected-version', '1', '--body', body]);
+  assert.equal(strict.options.expectedVersion, 1);
+  assert.equal(f.calls.length, 0);
+  assert.deepEqual(await readdir(f.root), ['token']);
+});
+
+test('append-comment requires an existing issue before custody and keeps literal canonical text', async t => {
+  const f = await fixture(t), body = '\ufeffExact 雪 <script> & reply\r\n';
+  const o = { ...f.options('append-comment'), number: 1, fields: { body } };
+  await assert.rejects(runIssueOperation(o), error => error.code === 'issue_operator_version_moved' && error.operator_state === 'not_submitted');
+  assert.equal(mutations(f).length, 0); assert.deepEqual(await readdir(f.root), ['token']);
+  await runIssueOperation(f.options('open', join(f.root, 'open.json')));
+  assert.equal((await runIssueOperation(o)).result.outcome, 'committed');
+  const bytes = await readFile(o.record), record = JSON.parse(bytes), request = record.receipt.request;
+  assert.equal(record.schema, 'frankengit-issue-operator-v1');
+  assert.equal(record.receipt.schema, 'frankengit-issue-retry-v1');
+  assert.equal(request.action, 'append-comment'); assert.equal(request.expected_version, null);
+  assert.equal(request.body, new URLSearchParams({ body }).toString());
+  assert.deepEqual(request.fields, { body }); assert.ok(!bytes.includes(token));
+  assert.equal(mutations(f).at(-1).key, request.key);
+  assert.deepEqual(f.events.at(-1), { version: 2, actor, action: { name: 'comment', body } });
+  assert.equal(f.row.comments, 1); assert.equal(f.row.title, 'Real request'); assert.equal(f.row.body, 'private draft');
+});
+
+test('concurrent independent replies both commit while concurrent strict comments retain one predecessor', async t => {
+  const f = await fixture(t); await runIssueOperation(f.options('open', join(f.root, 'open.json')));
+  // Both real HTTP submissions must arrive before either simulated decision.
+  // That also keeps both client preflight reads at the same observed version.
+  const overlap = () => {
+    let arrivals = 0, release;
+    const gate = new Promise(resolve => { release = resolve; });
+    f.onMutation = () => { if (++arrivals === 2) release(); return gate; };
+  };
+  overlap();
+  const appends = await Promise.all(['a', 'b'].map(name => runIssueOperation({
+    ...f.options('append-comment', join(f.root, `append-${name}.json`)),
+    number: 1, fields: { body: 'Same text, separate intent' }, timeoutMs: 3000,
+  })));
+  assert.deepEqual(appends.map(result => result.result.outcome), ['committed', 'committed']);
+  assert.equal(f.version, 3); assert.equal(f.row.comments, 2);
+  assert.equal(new Set(mutations(f).slice(-2).map(call => call.key)).size, 2);
+  assert.deepEqual(f.events.slice(1).map(event => event.action), [
+    { name: 'comment', body: 'Same text, separate intent' }, { name: 'comment', body: 'Same text, separate intent' },
+  ]);
+  overlap();
+  const strict = await Promise.all(['a', 'b'].map(name => runIssueOperation({
+    ...f.options('comment', join(f.root, `strict-${name}.json`)),
+    number: 1, expectedVersion: 3, fields: { body: 'Strict reply' }, timeoutMs: 3000,
+  })));
+  f.onMutation = null;
+  assert.deepEqual(strict.map(result => result.result.outcome).sort(), ['committed', 'refused']);
+  assert.equal(f.version, 4); assert.equal(f.row.comments, 3);
+  for (const name of ['a', 'b']) {
+    const record = JSON.parse(await readFile(join(f.root, `strict-${name}.json`)));
+    assert.equal(record.schema, 'frankengit-issue-operator-v1');
+    assert.equal(record.receipt.schema, 'frankengit-issue-retry-v1');
+    assert.equal(record.receipt.request.action, 'comment');
+    assert.equal(record.receipt.request.expected_version, 3);
+    assert.equal(record.receipt.request.body, 'expected_version=3&body=Strict+reply');
+  }
+});
+
+test('interrupted append retries its original intent after intervening edits and close without changing them', async t => {
+  const f = await fixture(t); await runIssueOperation(f.options('open', join(f.root, 'open.json')));
+  const record = join(f.root, 'append.json'), body = 'Original reply';
+  await assert.rejects(runIssueOperation({ ...f.options('append-comment', record), number: 1, fields: { body },
+    onProgress: ({ phase }) => { if (phase === 'receipt_saved') throw Error('interrupted before send'); },
+  }), error => error.operator_state === 'recorded_unknown');
+  const original = await readFile(record), saved = JSON.parse(original).receipt.request;
+  const status = await runIssueOperation(f.options('status', record));
+  assert.equal(status.state, 'unresolved'); assert.equal(status.mutation_submitted, false);
+  assert.equal(status.absence_proves_non_commit, false); assert.equal(mutations(f).length, 1);
+  await runIssueOperation({ ...f.options('edit', join(f.root, 'edit.json')), number: 1, expectedVersion: 1,
+    fields: { title: 'Intervening title', body: 'Intervening body', labels: ['retained'] } });
+  await runIssueOperation({ ...f.options('close', join(f.root, 'close.json')), number: 1, expectedVersion: 2 });
+  const retry = await runIssueOperation(f.options('retry', record));
+  assert.equal(retry.result.outcome, 'committed'); assert.equal(retry.mutation_submitted, true);
+  assert.equal(mutations(f).at(-1).key, saved.key); assert.equal(mutations(f).at(-1).body, saved.body);
+  assert.equal(f.row.title, 'Intervening title'); assert.equal(f.row.body, 'Intervening body');
+  assert.deepEqual(f.row.labels, ['retained']); assert.equal(f.row.state, 'closed'); assert.equal(f.row.comments, 1);
+  assert.deepEqual(f.events.at(-1), { version: 4, actor, action: { name: 'comment', body } });
+  assert.equal((await runIssueOperation(f.options('retry', record))).mutation_submitted, false);
+  assert.equal(mutations(f).length, 4); assert.deepEqual(await readFile(record), original);
+});
+
+test('append CLI recovers a lost reply with its exact private body after later closing and locking', async t => {
+  const f = await fixture(t); await runIssueOperation(f.options('open', join(f.root, 'open.json')));
+  const record = join(f.root, 'append.json'), bodyFile = join(f.root, 'reply.txt');
+  const body = '\ufeffLiteral private 雪\r\n<script> &\u001b[31m\n';
+  await writeFile(bodyFile, body, { mode: 0o600 }); f.mode = 'lost-reply';
+  const lost = await command([...flags(f, 'append-comment', record), '--number', '1', '--body-file', bodyFile]).done;
+  assert.equal(lost.code, 2); assert.equal(f.row.comments, 1);
+  assert.equal(JSON.parse(lost.stderr).state, 'submitted_unknown'); assert.ok(!lost.stderr.includes(body));
+  const original = await readFile(record), saved = JSON.parse(original).receipt.request;
+  assert.equal(saved.fields.body, body); assert.equal(saved.expected_version, null);
+  f.mode = null;
+  await runIssueOperation({ ...f.options('close', join(f.root, 'close.json')), number: 1, expectedVersion: 2 });
+  await runIssueOperation({ ...f.options('lock', join(f.root, 'lock.json')), number: 1, expectedVersion: 3 });
+  for (const operation of ['status', 'retry']) {
+    const recovery = await command(flags(f, operation, record)).done;
+    assert.equal(recovery.code, 0, recovery.stderr);
+    assert.equal(JSON.parse(recovery.stdout).mutation_submitted, false);
+    assert.equal(mutations(f).length, 4); assert.equal(f.row.comments, 1);
+  }
+  assert.equal(f.row.locked, true); assert.equal(f.row.state, 'closed');
+  assert.deepEqual(f.events[1], { version: 2, actor, action: { name: 'comment', body } });
+  assert.deepEqual(await readFile(record), original);
+});
+
+test('locked append refusal stays terminal after unlocking; only a new record admits a new comment', async t => {
+  const f = await fixture(t); await runIssueOperation(f.options('open', join(f.root, 'open.json')));
+  await runIssueOperation({ ...f.options('lock', join(f.root, 'lock.json')), number: 1, expectedVersion: 1 });
+  const record = join(f.root, 'refused.json'), body = 'Explicit new reply';
+  const refused = await command([...flags(f, 'append-comment', record), '--number', '1', '--body', body]).done;
+  assert.equal(refused.code, 3, refused.stderr); assert.equal(f.version, 2); assert.equal(f.row.comments, 0);
+  const original = await readFile(record);
+  await runIssueOperation({ ...f.options('unlock', join(f.root, 'unlock.json')), number: 1, expectedVersion: 2 });
+  const recovery = await command(flags(f, 'retry', record)).done;
+  assert.equal(recovery.code, 3, recovery.stderr); assert.equal(JSON.parse(recovery.stdout).mutation_submitted, false);
+  assert.equal(mutations(f).length, 4); assert.equal(f.row.comments, 0);
+  const fresh = await command([...flags(f, 'append-comment', join(f.root, 'fresh.json')), '--number', '1', '--body', body]).done;
+  assert.equal(fresh.code, 0, fresh.stderr); assert.equal(f.row.comments, 1); assert.equal(f.version, 4);
+  assert.deepEqual(await readFile(record), original);
+});
+
+test('append recovery rejects a changed profile or body before HTTP and empty body files before custody', async t => {
+  const f = await fixture(t); await runIssueOperation(f.options('open', join(f.root, 'open.json')));
+  const record = join(f.root, 'append.json');
+  await runIssueOperation({ ...f.options('append-comment', record), number: 1, fields: { body: 'Original reply' } });
+  const original = await readFile(record), calls = f.calls.length;
+  for (const mutate of [request => { request.action = 'comment'; request.expected_version = 1;
+    request.body = 'expected_version=1&body=Original+reply'; },
+  request => { request.fields.body = 'Substituted reply'; request.body = 'body=Substituted+reply'; }]) {
+    const changed = JSON.parse(original); mutate(changed.receipt.request);
+    await writeFile(record, JSON.stringify(changed) + '\n');
+    await assert.rejects(runIssueOperation(f.options('retry', record)));
+    assert.equal(f.calls.length, calls);
+  }
+  await writeFile(record, original);
+  assert.equal((await runIssueOperation(f.options('status', record))).result.outcome, 'committed');
+  const bodyFile = join(f.root, 'empty.txt'), fresh = join(f.root, 'empty.json');
+  await writeFile(bodyFile, '', { mode: 0o600 }); const before = f.calls.length;
+  const empty = await command([...flags(f, 'append-comment', fresh), '--number', '1', '--body-file', bodyFile]).done;
+  assert.equal(empty.code, 2); assert.equal(f.calls.length, before);
+  await assert.rejects(readFile(fresh), error => error.code === 'ENOENT');
+  assert.equal(f.row.comments, 1); assert.deepEqual(await readFile(record), original);
+});
 
 test('fresh mutation syncs exact token-free receipt before HTTP and recovers without a write', async t => {
   const f = await fixture(t), o = f.options();

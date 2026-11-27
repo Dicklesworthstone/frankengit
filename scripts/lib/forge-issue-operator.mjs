@@ -50,7 +50,7 @@ const request = discussion ? discussionMutationRequest : milestone ? milestoneMu
 const schema = `frankengit-${entity}-operator-v1`;
 const ACTIONS = milestone ? ['open', 'edit', 'close', 'reopen']
   : discussion ? ['open', 'edit', 'comment', 'append-comment', 'close', 'reopen', 'lock', 'unlock']
-  : ['open', 'edit', 'comment', 'close', 'reopen', 'assign', 'unassign', 'add-assignees', 'add-labels', 'lock', 'unlock', 'set-milestone', 'clear-milestone'];
+  : ['open', 'edit', 'comment', 'append-comment', 'close', 'reopen', 'assign', 'unassign', 'add-assignees', 'add-labels', 'lock', 'unlock', 'set-milestone', 'clear-milestone'];
 const independent = action => ['append-comment', 'add-assignees', 'add-labels'].includes(action);
 const fail = code => { throw operatorError(entity === 'issue' ? code : code.replace(/^issue_operator_/, `${entity}_operator_`)); };
 function options(raw) {

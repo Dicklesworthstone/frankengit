@@ -7,7 +7,8 @@ The server authenticates the bearer token and enforces its configured scopes at
 each request. This supplies a network operator alternative; it does not change
 the trusted-local principal semantics of the native `fg` or MCP commands.
 
-The command supports issue opening, partial edits, independent label and assignee additions, comments,
+The command supports issue opening, partial edits, independent label and assignee additions,
+strict and predecessor-independent comments,
 closing, reopening, locking/unlocking discussion, assigning and unassigning
 principals, outcome lookup and explicit same-request retry. Mutation
 semantics and terminal-response validation are the same as the served issue UI.
@@ -43,6 +44,47 @@ chooses the issue number and expected version. Before staging, the command reads
 checks tenant/repository identity and refuses a moved version. The native server
 still enforces the exact expected version if state changes after this observation.
 No client read is an authorization grant and no race refreshes the request.
+
+## Concurrent replies
+
+Use `append-comment` when a reply should survive intervening edits or other
+comments without choosing a predecessor:
+
+```sh
+node scripts/forge_issues.mjs append-comment \
+  --url "$ISSUE_PAGE_URL" --tenant-id "$TENANT_HEX" \
+  --repository-id "$REPOSITORY_HEX" --token-file "$PRIVATE_DIR/token" \
+  --record "$PRIVATE_DIR/reply-1.json" \
+  --number 1 --body-file "$PRIVATE_DIR/reply.txt"
+```
+
+This explicit operation rejects `--expected-version` and unrelated title, label
+or assignee fields. Before staging, it verifies the expected repository and
+that the issue exists. Its saved request has `action: "append-comment"` and
+`expected_version: null`; the HTTP form contains only the exact original body.
+The existing native append profile selects the current publication position and
+records an ordinary authored Comment event. Intervening title, body, label,
+assignment and lifecycle changes are retained.
+
+Independent replies with distinct original keys can both commit after observing
+the same version. Two new records containing identical text represent two
+distinct comment intents. Recovery of one original record observes or resends
+that record's exact original key and body, so it cannot append a second comment.
+The same rule applies after a lost acknowledgment or an intervening close or lock.
+
+`comment --expected-version V` retains the strict contract: it refuses a moved
+predecessor and never becomes an append. Its saved record schema, form and key
+derivation are unchanged. Both modes allow replies on closed, unlocked issues
+and refuse new comments while locked. A refused append remains refused under
+its original key after unlocking; a new reply requires a new record.
+
+Bodies must be nonblank UTF-8 text of at most 65,536 bytes without NUL. A private
+body file preserves literal text and is useful for multiline replies. `--body`
+and `--body-file` cannot be combined. See
+[the native append contract](NORMATIVE_PROTOCOL_CONTRACTS.md#2021-native-issue-append-comment-intents)
+for the sealed intent, actor binding and shared admission semantics.
+
+## Labels, assignees and locks
 
 Add labels without choosing a predecessor using a fresh private record:
 
@@ -197,7 +239,11 @@ node --test tests/operator/forge-issues.test.mjs
 The tests execute the shipped issue client, real fetch/HTTP sockets,
 private filesystem operations and separate CLI processes, including SIGKILL
 after the simulated server receives a mutation. Their HTTP authority is explicitly
-simulated. Additional deterministic fault-injection tests require both file and
+simulated. Overlapping append submissions preserve both original replies, while
+overlapping strict comments retain their exact predecessor and terminal refusal.
+Append cases also exercise lost acknowledgments, intervening edits and locks,
+private body files, exact original-key recovery and refusal of profile/body
+substitution. Additional deterministic fault-injection tests require both file and
 parent synchronization before retry submission and pause a creator in `fsync`
 while a concurrent retry establishes its own barrier. They are not native
 Rust/node/authority integration or a power-loss campaign, and do not close the

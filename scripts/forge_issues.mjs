@@ -14,6 +14,7 @@ export const HELP = `Usage: node scripts/forge_issues.mjs OPERATION
 open: --number N --expected-version 0 --title TEXT [--body TEXT | --body-file PRIVATE_FILE] [--label TEXT ...]
 edit: --number N --expected-version N [--title TEXT] [--body TEXT | --body-file PRIVATE_FILE] [--label TEXT ... | --clear-labels]
 comment: --number N --expected-version N (--body TEXT | --body-file PRIVATE_FILE)
+append-comment: --number N (--body TEXT | --body-file PRIVATE_FILE) (no --expected-version)
 close|reopen|lock|unlock: --number N --expected-version N
 assign|unassign: --number N --expected-version N --assignee PRINCIPAL_HEX [--assignee PRINCIPAL_HEX ...]
 add-assignees: --number N --assignee PRINCIPAL_HEX [--assignee PRINCIPAL_HEX ...] (no --expected-version)
@@ -32,10 +33,13 @@ HTTPS is required except for explicit loopback HTTP. The token file contains a
 Token, body and record files must be owner-private, regular and single-link.
 The record parent must already exist and be owner-private. Unix profile only.
 The native server authenticates the principal; no --principal or local storage
-path is accepted. A fresh mutation first checks the exact repository/version,
+path is accepted. A fresh mutation first checks the repository and strict
+version (or existence for independent additions and append-comment),
 synchronizes its token-free recovery record, then sends once. Keep the record:
 status only observes; retry observes first and may resend the SAME request/key
 once. Missing outcome is NOT non-commit. No automatic retry or record overwrite.
+append-comment preserves the original body/key through concurrent edits and
+replies. Strict comment retains its exact predecessor; neither mode bypasses locks.
 Exit 0: committed terminal outcome or complete read; 3: terminal refusal;
 4: bounded read prefix with continuation; 2: unknown or error.
 `;
