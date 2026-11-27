@@ -851,17 +851,19 @@ fn attempt(
     }
     if let Some(dispatch) = poll.dispatch() {
         add(&mut receipt.dispatched, 1)?;
-        if poll.execution_settled() {
+        let settled = poll.execution_settled();
+        let succeeded = dispatch.succeeded();
+        if settled {
             receipt.pending_execution = receipt.pending_execution.saturating_sub(1);
         }
         receipt.publication_pending |= config.publisher.is_some();
-        receipt.non_green |= !dispatch.succeeded();
+        receipt.non_green |= !succeeded;
         receipt.interrupted |= dispatch.runs().iter().any(|run| run.request_interrupted);
-        if !request.checkpoint_is_live() {
-            // Interruption is still non-green, but a completed durable handoff
-            // already discharged this producer's execution responsibility.
+        // The stop observer can cancel the request while reports for an
+        // already settled success are being delivered.
+        if !(settled && succeeded) && !request.checkpoint_is_live() {
             receipt.interrupted = true;
-            receipt.requires_reconciliation |= !poll.execution_settled();
+            receipt.requires_reconciliation |= !settled;
             receipt.non_green = true;
         }
     }

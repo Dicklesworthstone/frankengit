@@ -342,9 +342,11 @@ An ordinary failed build can settle and the service can execute a later source
 event. A cooperatively cancelled build also settles when native owners prove
 process, workspace and shared-input closure: one bounded terminal handoff keeps
 its original cancelled checks for the next live publisher. Restart uses those
-same receipts and never reruns the original scripts. Unknown or unclosed
-execution, corrupt custody, incomplete publication or a worker failure stops
-the service. An idle clean stop exits 0. A requested
+same receipts and never reruns the original scripts. A stop while diagnostic
+reports drain preserves the completed status of an already settled successful
+dispatch. Pending check publication remains visible in the drain receipt.
+Unknown or unclosed execution, corrupt custody, incomplete publication or a
+worker failure stops the service. An idle clean stop exits 0. A requested
 shutdown that drains normally but reports non-green execution, interruption,
 unresolved custody or known pending publication exits 1. Startup, controller
 operation (including an exhausted attempt), output or cleanup failure exits 2.

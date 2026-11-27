@@ -199,8 +199,16 @@ def lifecycle(campaign, fmt):
         shutil.copyfile(transcript / "receipt.tsv", f.root / "pinned-push.tsv")
         assert refs(f) == {**initial, REF: tip}
         # The push must run CI while the PR still records its original tip.
-        server.wait(lambda _: f.effects_count() == 2 and len(event_directories(f)) == 2 and all(
-            (event / "settled").is_file() for event in event_directories(f)))
+        # Settlement precedes delivery of each workflow's diagnostic report.
+        def reports_delivered(_):
+            events = event_directories(f)
+            return f.effects_count() == 2 and len(events) == 2 and all(
+                (event / "settled").is_file()
+                and len(list(event.glob("dispatch-*/workflow-*/report.json"))) == 1
+                for event in events
+            )
+
+        server.wait(reports_delivered)
         reports = []
         for event in event_directories(f):
             report_path, = event.glob("dispatch-*/workflow-*/report.json")

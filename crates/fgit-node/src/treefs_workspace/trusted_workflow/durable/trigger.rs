@@ -899,7 +899,10 @@ fn finish_dispatch(
     const FINALIZATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
     let finalization_started = std::time::Instant::now();
     let finalizing = || finalization_started.elapsed() < FINALIZATION_TIMEOUT;
-    let execution_settled = if closed(&dispatch) {
+    let settlement = (|| {
+        if !closed(&dispatch) {
+            return Ok(false);
+        }
         reporting::capture(directory, scope, event_id, commit, &dispatch, &finalizing).map_err(
             |error| TrustedWorkflowFailure::Journal {
                 directory: directory.to_path_buf(),
@@ -921,13 +924,13 @@ fn finish_dispatch(
                 directory: directory.to_path_buf(),
                 detail: error.to_string(),
             })?;
-        true
-    } else {
-        false
-    };
-    // Once closure is proved, delivery of the optional report must not
-    // prevent a later owner from recovering the original check sources.
-    dispatch.persist_report()?;
+        Ok(true)
+    })();
+    // Reports are diagnostic outputs. Attempt them after custody, preserving
+    // both the original settlement error and the available run reports.
+    let reports = dispatch.persist_watch_reports();
+    let execution_settled = settlement?;
+    reports?;
     Ok(TrustedRefWorkflowPoll {
         state,
         event,

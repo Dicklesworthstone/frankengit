@@ -181,6 +181,7 @@ impl OneNode {
                         )),
                         None,
                         false,
+                        false,
                     )
                     .and_then(|report| {
                         report.persist_report()?;

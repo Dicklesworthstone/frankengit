@@ -88,6 +88,17 @@ impl TrustedWorkflowDispatch {
             })
     }
 
+    fn persist_child_reports(&self) -> Result<(), TrustedWorkflowFailure> {
+        self.runs
+            .iter()
+            .fold(Ok(()), |first, run| first.and(run.persist_report()))
+    }
+
+    pub(super) fn persist_watch_reports(&self) -> Result<(), TrustedWorkflowFailure> {
+        // Attempt every diagnostic report, keeping the original write error.
+        self.persist_child_reports().and(self.persist_report())
+    }
+
     /// Only the native dispatcher constructs this terminal description. A
     /// stopped empty prefix must retain the exact selected plan and reason;
     /// absence of child directories is never proof that execution terminated.
@@ -403,6 +414,7 @@ impl OneNode {
                             path_basis,
                             tag_tip,
                             retain_definition_refusal,
+                            expected.watch_owns_completion,
                         )?;
                         if !expected.watch_owns_completion {
                             report.persist_report()?;
@@ -424,16 +436,16 @@ impl OneNode {
             (_, Some(Err(error))) => Err(error),
             (Ok(()) | Err(NodeWorkspaceRefusal::Cancelled { .. }), Some(Ok(report))) => Ok(report),
             (Err(error), Some(Ok(report))) => {
-                if expected.watch_owns_completion {
-                    // Preserve the report for inspection without handing a
-                    // failed source-finalization result to the watch.
-                    report.persist_report()?;
+                let mut detail = format!(
+                    "dispatch source finalization failed after execution: {error}; inspect saved reports, do not replay"
+                );
+                if expected.watch_owns_completion && let Err(error) = report.persist_watch_reports() {
+                    write!(detail, ". Report delivery also failed: {error}")
+                        .expect("writing to a String cannot fail");
                 }
                 Err(TrustedWorkflowFailure::Journal {
                     directory: report.run_directory,
-                    detail: format!(
-                        "dispatch source finalization failed after execution: {error}; inspect saved reports, do not replay"
-                    ),
+                    detail,
                 })
             }
             (Err(error), None) => Err(TrustedWorkflowFailure::Source(error)),
@@ -464,6 +476,7 @@ fn dispatch_at<A: GitHashAlgorithm>(
     path_basis: Option<PathBasis>,
     tag_tip: Option<GitOid>,
     retain_definition_refusal: bool,
+    watch_owns_completion: bool,
 ) -> Result<TrustedWorkflowDispatch, TrustedWorkflowFailure> {
     let invalid = TrustedWorkflowFailure::InvalidInput;
     let live = || workspace_request_live(request) && started.elapsed() < limits.run_timeout;
@@ -790,38 +803,68 @@ fn dispatch_at<A: GitHashAlgorithm>(
             "dispatch plan durability failed before execution: {e}"
         ))
     })?;
-    let mut remaining = limits.total_output_bytes;
-    for definition in report.definitions.iter().filter(|d| d.selected) {
-        if !live() {
-            report.stop_reason = Some("request_stopped");
-            break;
+    let execution: Result<(), String> = (|| {
+        let mut remaining = limits.total_output_bytes;
+        for definition in report.definitions.iter().filter(|d| d.selected) {
+            if !live() {
+                report.stop_reason = Some("request_stopped");
+                break;
+            }
+            if remaining < 2 {
+                report.stop_reason = Some("output_budget_exhausted");
+                break;
+            }
+            let child_limits = WorkflowLimits {
+                total_output_bytes: remaining,
+                ..limits
+            };
+            let run = run_inputs(
+                node,
+                request,
+                inputs.shared(),
+                capability,
+                head,
+                reference,
+                &definition.path,
+                declared,
+                definition.run_id,
+                &batch_directory,
+                child_limits,
+                started,
+                artifact_session.as_ref(),
+                tag_tip,
+                !watch_owns_completion,
+            )
+            .map_err(|error| {
+                format!(
+                    "dispatch child {} failed: {error}; retain the batch and inspect its child journals, do not replay",
+                    hex(&definition.run_id),
+                )
+            })?;
+            let captured = run
+                .execution
+                .jobs
+                .iter()
+                .flat_map(|job| &job.steps)
+                .map(|step| step.observation.stdout.len() + step.observation.stderr.len())
+                .sum::<usize>();
+            report.stop_reason = stop_after(&run);
+            report.runs.push(run);
+            remaining = remaining.checked_sub(captured).ok_or_else(|| {
+                "dispatch output accounting exceeded its budget; retain all children".to_owned()
+            })?;
+            if report.stop_reason.is_some() {
+                break;
+            }
         }
-        if remaining < 2 {
-            report.stop_reason = Some("output_budget_exhausted");
-            break;
+        Ok(())
+    })();
+    if let Err(mut detail) = execution {
+        if watch_owns_completion && let Err(error) = report.persist_child_reports() {
+            write!(detail, ". Child report delivery also failed: {error}")
+                .expect("writing to a String cannot fail");
         }
-        let child_limits = WorkflowLimits {
-            total_output_bytes: remaining,
-            ..limits
-        };
-        let run = run_inputs(node, request, inputs.shared(), capability, head, reference,
-            &definition.path, declared, definition.run_id, &batch_directory, child_limits, started, artifact_session.as_ref(), tag_tip)
-            .map_err(|e| failed(format!("dispatch child {} failed: {e}; retain the batch and inspect its child journals, do not replay", hex(&definition.run_id))))?;
-        let captured = run
-            .execution
-            .jobs
-            .iter()
-            .flat_map(|job| &job.steps)
-            .map(|step| step.observation.stdout.len() + step.observation.stderr.len())
-            .sum::<usize>();
-        remaining = remaining.checked_sub(captured).ok_or_else(|| {
-            failed("dispatch output accounting exceeded its budget; retain all children".into())
-        })?;
-        report.stop_reason = stop_after(&run);
-        report.runs.push(run);
-        if report.stop_reason.is_some() {
-            break;
-        }
+        return Err(failed(detail));
     }
     Ok(report)
 }
