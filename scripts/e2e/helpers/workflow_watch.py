@@ -1,10 +1,13 @@
 """Real native latest-ref workflow polling and cancellation, no execution stand-in."""
+from array import array
+import fcntl
 import json
 import os
 from pathlib import Path
 import signal
 import subprocess
 import sys
+import termios
 import time
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from workspace_tool_smoke import TENANT,REPOSITORY,PRINCIPAL,REF,write_object,tree,commit
@@ -84,6 +87,79 @@ def complete(child,out,err,expected):
 def alive(pid):
     try:return Path(f'/proc/{pid}/stat').read_text().rsplit(') ',1)[1][0]not in 'ZX'
     except FileNotFoundError:return False
+
+def stop_during_settled_output(fmt):
+    # Keep the foreground CLI blocked while delivering the settled poll. The
+    # workflow itself has already closed before the signal reaches the watch.
+    f = Fixture(fmt, 'settled-output-stop', tail="printf '%08000d' 0")
+    base_ref = 'refs/heads/base'
+    base_tree = write_object(f.source, fmt, 'tree', b'')
+    base = write_object(f.source, fmt, 'commit', commit(base_tree, None, 2, b'base\n'))
+    (f.source / REF).unlink()
+    (f.source / base_ref).write_text(base + '\n')
+    (f.source / 'HEAD').write_text(f'ref: {base_ref}\n')
+    invoke('import-base', ['import', *f.scope, PRINCIPAL, 'settled-output-base', f.source])
+    credentials = invoke('read-incarnation', ['serve-http', *f.scope, '127.0.0.1:0', '--trusted-local',
+                                               '--print-credentials-header']).decode().split()
+    assert credentials[:3] == ['frankengit-http-credentials-v1', TENANT, REPOSITORY] and len(credentials) == 4
+    invoke('open-pr', ['pr', 'open', *f.scope, '7', '--trusted-local', '--principal', PRINCIPAL,
+                       '--idempotency-key', 'settled-output-pr', '--expected-version', '0', '--source-ref', REF,
+                       '--target-ref', base_ref, '--expected-source', f.tip, '--expected-target', base,
+                       '--title', 'Settled output stop', '--body', 'Check publication restart', '--object-format', fmt])
+
+    def checks(label):
+        result = invoke(label, ['pr', 'checks', *f.scope, '7', '--trusted-local', '--object-format', fmt])
+        return json.loads(result)['checks']
+
+    assert checks('before-settled-stop') == []
+    watch = [*f.args(), '--publish-checks', '--principal-id', PRINCIPAL, '--expected-incarnation', credentials[-1]]
+    out, err = f.home / 'settled-stop.out', f.home / 'settled-stop.err'
+    with err.open('wb') as stderr:
+        child = subprocess.Popen([fg, *map(str, watch)], stdout=subprocess.PIPE, stderr=stderr, pipesize=4096)
+    try:
+        def delivering_poll():
+            available = array('i', [0])
+            fcntl.ioctl(child.stdout.fileno(), termios.FIONREAD, available, True)
+            assert child.poll() is None, err.read_bytes()
+            return available[0] > 0 and any(f.parent.glob('watch-*/event-*/settled'))
+
+        wait_for(delivering_poll, seconds=15)
+        child.send_signal(signal.SIGTERM)
+        time.sleep(.2)  # Keep stdout full while the owned signal observer runs.
+        assert child.poll() is None
+        output, _ = child.communicate(timeout=15)
+        out.write_bytes(output)
+        assert child.returncode == 1, (child.returncode, err.read_bytes())
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+        child.stdout.close()
+    if diagnostic := err.read_bytes():
+        sys.stderr.buffer.write(diagnostic)
+        sys.stderr.buffer.flush()
+    observations = rows(out)
+    poll = next(row['poll'] for row in observations if row['type'] == 'workflow_watch_poll')
+    terminal = observations[-1]
+    assert poll['execution_settled'] and poll['dispatch']['succeeded'] and f.count() == 'x'
+    assert terminal['node_closed'] and terminal['request_stopped'] and not terminal['non_green']
+    assert not terminal['requires_reconciliation'], terminal
+    assert terminal['committed_check_decisions'] == 0 and checks('before-settled-restart') == []
+
+    restarted = [json.loads(line) for line in invoke('restart-settled-stop', watch).splitlines()]
+    assert restarted[-1]['dispatched'] == 0 and restarted[-1]['committed_check_decisions'] == 1
+    retained = checks('after-settled-restart')
+    assert len(retained) == 1 and retained[0]['conclusion'] == 'success' and f.count() == 'x'
+    repeated = json.loads(invoke('repeat-settled-stop', watch).splitlines()[-1])
+    assert repeated['dispatched'] == repeated['committed_check_decisions'] == 0
+    assert checks('after-settled-repeat') == retained and f.count() == 'x'
+    f.advance()
+    successor = [json.loads(line) for line in invoke('successor-after-settled-stop', watch).splitlines()]
+    assert successor[-1]['dispatched'] == successor[-1]['committed_check_decisions'] == 1
+    selected = next(row['poll'] for row in successor if row['type'] == 'workflow_watch_poll')
+    assert selected['dispatch']['runs'][0]['source_commit'] == f.tip and f.count() == 'xx'
+    case(fmt, 'settled-output-stop-recovers-one-check-and-resumes', event=poll['event']['event_id'],
+         check=retained[0]['id'], successor=f.tip)
 
 def definition_refusal(fmt, ordered):
     profile = 'ordered' if ordered else 'latest'
@@ -273,4 +349,5 @@ for fmt in ('sha1','sha256'):
     definition_refusal(fmt, ordered=True)
     failed_report(fmt, 'batch')
     failed_report(fmt, 'child')
+    stop_during_settled_output(fmt)
 (root/'results.json').write_text(json.dumps(results,indent=2))

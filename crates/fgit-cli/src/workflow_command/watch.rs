@@ -687,7 +687,6 @@ fn poll_once(
     .map_err(|e| format!("watch output failed; preserve original event custody: {e}"))?;
     if summary.stopped || !request.checkpoint_is_live() {
         summary.stopped = true;
-        summary.reconcile |= poll.dispatch().is_some();
         return Ok(());
     }
     if summary.reconcile {

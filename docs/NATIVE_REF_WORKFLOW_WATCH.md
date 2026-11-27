@@ -220,6 +220,10 @@ also responds without waiting out its poll interval. Every poll is flushed as
 one `workflow_watch_poll` JSON line; the final `workflow_watch_result` separately
 records node shutdown, non-green execution, interruption, reconciliation and
 operation/cleanup errors. No raw output is accumulated across polls.
+If a stop arrives while stdout is still delivering an already settled poll,
+the summary records the interruption and preserves the verified settlement.
+The next watch can publish the original check through normal admission without
+executing the workflow again.
 
 A verified source-head race detected BEFORE reservation returns `source_moved`
 without creating an event or executing a script. A later bounded poll can select
