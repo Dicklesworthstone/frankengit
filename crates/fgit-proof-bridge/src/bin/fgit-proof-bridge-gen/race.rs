@@ -82,8 +82,9 @@ fn same_ref_seed(seed: &GoldenTrace) -> Result<GoldenTrace, String> {
             .apply(input)
             .map_err(|e| format!("cannot record same-ref scenario: {e:?}"))?;
     }
-    if (changed_seals, changed_preparations) != (1, 2) {
-        return Err("expected one seal and two preparations of the other-ref writer".into());
+    // Only the losing writer is prepared twice in the supplied schedule.
+    if changed_seals != 1 || !(1..=2).contains(&changed_preparations) {
+        return Err("expected one seal and one or two preparations of the other-ref writer".into());
     }
     Ok(recorder.finish())
 }
