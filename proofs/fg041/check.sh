@@ -89,12 +89,12 @@ check_vectors
 printf 'FG-041 replayed the recorded reference histories with %s\n' "$toolchain"
 
 if (( $# )); then
-  "$bridge" dpor "$goldens/cas_loss_retry.fgtrace" >Vectors.lean
+  "$bridge" dpor --with-ref-conflict "$goldens/cas_loss_retry.fgtrace" >Vectors.lean
   if rg -n -w '(sorry|admit)' Vectors.lean; then
     echo 'fg041 proof lane refusal: scheduled vectors contain an admitted placeholder' >&2
     exit 2
   fi
   check_vectors
   "${lean[@]}" DporRace.lean
-  printf 'FG-041 replayed both competing head publications with %s\n' "$toolchain"
+  printf 'FG-041 replayed both winner orders for distinct and shared refs with %s\n' "$toolchain"
 fi

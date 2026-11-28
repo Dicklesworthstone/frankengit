@@ -23,7 +23,9 @@ const DEFAULT_OUT: &str = "proofs/fg041/generated";
 
 fn usage() -> ExitCode {
     eprintln!("usage: fgit-proof-bridge-gen <generate|check> [goldens-dir] [out-dir]");
-    eprintln!("       fgit-proof-bridge-gen dpor [competing-cas.fgtrace] > Vectors.lean");
+    eprintln!(
+        "       fgit-proof-bridge-gen dpor [--with-ref-conflict] [competing-cas.fgtrace] > Vectors.lean"
+    );
     eprintln!("  goldens-dir defaults to {DEFAULT_GOLDENS}");
     eprintln!("  out-dir     defaults to {DEFAULT_OUT}");
     eprintln!("exit 0 clean, 1 stale or missing, 2 usage");
@@ -31,11 +33,12 @@ fn usage() -> ExitCode {
 }
 
 fn main() -> ExitCode {
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1).peekable();
     let Some(command) = args.next() else {
         return usage();
     };
     if command == "dpor" {
+        let with_ref_conflict = args.next_if(|arg| arg == "--with-ref-conflict").is_some();
         let path = args
             .next()
             .map(PathBuf::from)
@@ -48,7 +51,13 @@ fn main() -> ExitCode {
             .and_then(|bytes| {
                 fgit_reference::trace::decode(&bytes).map_err(|e| format!("invalid trace: {e:?}"))
             })
-            .and_then(|seed| race::explore(&seed, race::BUDGET))
+            .and_then(|seed| {
+                if with_ref_conflict {
+                    race::explore_with_ref_conflict(&seed, race::BUDGET)
+                } else {
+                    race::explore(&seed, race::BUDGET)
+                }
+            })
             .and_then(|traces| {
                 let mut out = std::io::stdout().lock();
                 out.write_all(fgit_proof_bridge::emit::render_dpor(&traces).as_bytes())

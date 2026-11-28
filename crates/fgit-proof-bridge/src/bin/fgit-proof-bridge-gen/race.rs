@@ -2,8 +2,12 @@
 use fgit_lab::commute::ProtocolEvent;
 use fgit_lab::{Dpor, ExplorationBudget, ExplorationOutcome, Program, StepId};
 use fgit_proof_bridge::{ProjectedTrace, project};
+use fgit_reference::harness::IdentityMint;
+use fgit_reference::intent::{Intent, RefIntent};
 use fgit_reference::machine::ModelInput;
 use fgit_reference::trace::{GoldenTrace, ObservedOutcome, TraceRecorder, replay};
+use fgit_types::refs::RefName;
+use fgit_types::{DecisionOutcome, RefusalCode};
 
 #[path = "race_retry.rs"]
 mod retry;
@@ -20,6 +24,68 @@ pub(super) fn explore(
             project(&name, &history).map_err(|e| format!("cannot project {name}: {e:?}"))
         })
         .collect()
+}
+
+pub(super) fn explore_with_ref_conflict(
+    seed: &GoldenTrace,
+    budget: ExplorationBudget,
+) -> Result<Vec<ProjectedTrace>, String> {
+    // Validate and schedule the supplied history before deriving a counterpart.
+    let mut traces = explore(seed, budget)?;
+    let conflict = same_ref_seed(seed)?;
+    for (name, history) in histories(&conflict, budget)? {
+        let replayed = replay(&history).map_err(|e| format!("cannot replay {name}: {e:?}"))?;
+        if !replayed.is_faithful()
+            || !matches!(
+                replayed.state.decisions(),
+                [won, refused] if won.is_committed()
+                    && matches!(
+                        refused.outcome,
+                        DecisionOutcome::Refused { code: RefusalCode::ExpectedOldRefMismatch, .. }
+                    )
+            )
+            || replayed.state.roots().refs.len() != 1
+        {
+            return Err(format!(
+                "{name}: expected one ref and a losing expected-old refusal"
+            ));
+        }
+        let name = name.replacen("dpor_", "dpor_conflict_", 1);
+        traces.push(project(&name, &history).map_err(|e| format!("cannot project {name}: {e:?}"))?);
+    }
+    Ok(traces)
+}
+
+fn same_ref_seed(seed: &GoldenTrace) -> Result<GoldenTrace, String> {
+    let mut recorder = TraceRecorder::new(seed.genesis.clone());
+    let digest = IdentityMint::new(20261125).digest();
+    let main = RefName::try_new(b"refs/heads/main").map_err(|e| format!("invalid ref: {e:?}"))?;
+    let mut changed_seals = 0;
+    let mut changed_preparations = 0;
+    for step in &seed.steps {
+        let mut input = step.input.clone();
+        let request_and_count = match &mut input {
+            ModelInput::Seal(seal) => Some((&mut seal.request, &mut changed_seals)),
+            ModelInput::Prepare(prepare) => Some((&mut prepare.request, &mut changed_preparations)),
+            _ => None,
+        };
+        if let Some((request, count)) = request_and_count
+            && let [statement] = request.statements.as_mut_slice()
+            && let [Intent::Ref(RefIntent::Update { name, .. })] = statement.intents.as_mut_slice()
+            && name.as_bytes() == b"refs/heads/other"
+        {
+            *name = main.clone();
+            request.canonical_request_digest = digest;
+            *count += 1;
+        }
+        recorder
+            .apply(input)
+            .map_err(|e| format!("cannot record same-ref scenario: {e:?}"))?;
+    }
+    if (changed_seals, changed_preparations) != (1, 2) {
+        return Err("expected one seal and two preparations of the other-ref writer".into());
+    }
+    Ok(recorder.finish())
 }
 
 fn histories(

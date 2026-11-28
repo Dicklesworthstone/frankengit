@@ -344,7 +344,10 @@ else
   bash "$PRF_CHECK" --dpor >"$prf_dpor_log" 2>&1 || prf_dpor_exit=$?
   fge_field dpor_replay_exit "$prf_dpor_exit"
   fge_assert_eq fg041-dpor-refinement 0 "$prf_dpor_exit" \
-    'the kernel replays the reference model for both orders of the competing head updates'
+    'the kernel replays both winner orders for each ref scenario'
+  fge_assert_contains fg041-dpor-ref-scenarios "$(cat "$prf_dpor_log")" \
+    'FG-041 replayed both winner orders for distinct and shared refs' \
+    'the ordinary proof lane runs the distinct- and shared-ref schedules'
 
   prf_missing_exit=0
   FGIT_PROOF_BRIDGE_BIN="$FGE_ARTIFACT_DIR/missing-bridge" bash "$PRF_CHECK" --dpor \
