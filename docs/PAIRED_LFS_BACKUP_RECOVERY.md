@@ -120,8 +120,11 @@ remain false because packages, workflow outputs, other artifact classes,
 deployment credentials and service configuration are outside this profile.
 Restore does not activate HTTP serving or change routing. It is not complete
 Repository Capsule recovery, highest-checkpoint discovery or a measured site
-loss drill. Source-only job and HTTPS transfer commands retain their existing
-scope and do not automatically carry the companion.
+loss drill. The [local replica publisher](SIGNED_BACKUP_REPLICA_PUBLICATION.md#optional-verified-lfs-companion)
+can natively verify and copy both archives to another private directory, retaining
+the unchanged source approval and companion recovery pins. Source-only job and
+HTTPS transfer commands retain their existing scope and do not automatically
+carry the companion.
 
 ## Focused validation
 

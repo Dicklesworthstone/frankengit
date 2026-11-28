@@ -3,12 +3,14 @@
 // Destination names are content-addressed and every publication is create-only.
 import { constants } from 'node:fs';
 import { open, lstat, realpath, link, unlink } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { join, resolve, isAbsolute, sep } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { BACKUP_LIMITS, backupError, backupLifetime, backupPath, readBackupControl,
   publishBackupControl, exact } from './repository-backup-io.mjs';
-import { backupPolicy, verifyRepositoryBackupApproval } from './repository-backup-approval.mjs';
+import { backupDecimal, backupPolicy, verifyRepositoryBackupApproval } from './repository-backup-approval.mjs';
 import { repositoryBackupCandidates, selectRepositoryBackup } from './repository-backup-selection.mjs';
+import { runApprovedRepositoryBackup } from './repository-backup-native.mjs';
+import { backupLfsSha256, checkBackupLfsArtifact } from './repository-backup-lfs.mjs';
 
 const CHUNK = 65536;
 const fields = ['dev', 'ino', 'size', 'mode', 'uid', 'nlink', 'mtimeNs', 'ctimeNs'];
@@ -29,30 +31,47 @@ export function repositoryBackupReplicationCheckpoint(value) {
 
 export function repositoryBackupReplicationOptions(value) {
   const keys = ['candidates', 'trustKey', 'policy', 'destination', 'maximumBytes',
-    'maximumTotalBytes', 'timeoutMs', 'signal', 'onProgress', 'now', 'checkpoint'];
+    'maximumTotalBytes', 'timeoutMs', 'signal', 'onProgress', 'now', 'checkpoint',
+    'lfsArchive', 'expectedLfsSha256', 'fg', 'verificationInstance', 'trustedLocal'];
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || Object.keys(value).some(key => !keys.includes(key))) fail('backup_invalid_replication_options');
   const checkpoint = repositoryBackupReplicationCheckpoint(value.checkpoint);
   const candidates = repositoryBackupCandidates(value.candidates), policy = backupPolicy(value.policy);
   const trustKey = resolve(backupPath(value.trustKey)), destination = resolve(backupPath(value.destination));
   backupPath(trustKey); backupPath(destination);
+  if ((value.lfsArchive !== undefined) !== (value.expectedLfsSha256 !== undefined)) fail('backup_lfs_pair_required');
+  let companion;
+  if (value.lfsArchive !== undefined) {
+    if (value.trustedLocal !== true) fail('backup_explicit_local_operation_required');
+    const fg = backupPath(value.fg);
+    if (!isAbsolute(fg)) fail('backup_absolute_fg_required');
+    companion = { lfsArchive: resolve(backupPath(value.lfsArchive)),
+      expectedLfsSha256: backupLfsSha256(value.expectedLfsSha256), fg,
+      verificationInstance: backupDecimal(value.verificationInstance, 9223372036854775807n), trustedLocal: true };
+  } else if (['fg', 'verificationInstance', 'trustedLocal'].some(key => value[key] !== undefined)) {
+    fail('backup_replication_inapplicable_native_option');
+  }
   const live = backupLifetime({ maximumBytes: value.maximumBytes, timeoutMs: value.timeoutMs,
     signal: value.signal, onProgress: value.onProgress, now: value.now });
   // Separate the archive size ceiling from all selection/copy/readback payload
   // reads. Controls and one-byte EOF probes have their own fixed small bounds.
-  const maximumTotalBytes = value.maximumTotalBytes ?? live.maximumBytes * 4;
+  const multiplier = companion ? 8 : 4;
+  const maximumTotalBytes = value.maximumTotalBytes ?? live.maximumBytes * multiplier;
   if (!Number.isSafeInteger(maximumTotalBytes) || maximumTotalBytes < 1
-    || maximumTotalBytes > BACKUP_LIMITS.maximumArchiveBytes * 4) fail('backup_replication_read_limit');
+    || maximumTotalBytes > BACKUP_LIMITS.maximumArchiveBytes * multiplier) fail('backup_replication_read_limit');
   return Object.freeze({ candidates, policy, trustKey, destination, checkpoint,
     maximumBytes: live.maximumBytes, maximumTotalBytes, timeoutMs: value.timeoutMs,
-    signal: live.signal, onProgress: live.onProgress, now: value.now });
+    signal: live.signal, onProgress: live.onProgress, now: value.now, ...companion });
 }
 
 /** Publish a byte-for-byte replica in an EXISTING private local directory.
  * No signing key, native mutation, bucket listing, root replacement, or deletion
  * of previously published files is involved. The result is a new candidate for
- * the existing selector/approved native restore path, NOT native verification.
+ * the existing selector/approved native restore path. Source-only publication
+ * is NOT native verification.
  * The selected signed intent is pinned before the destination is touched.
+ * An explicit LFS pair additionally requires signed native verify before
+ * either body is published; its ordinary source approval remains unchanged.
  */
 export async function replicateRepositoryBackup(raw) {
   const options = repositoryBackupReplicationOptions(raw);
@@ -61,7 +80,10 @@ export async function replicateRepositoryBackup(raw) {
   const controlLive = () => ({ ...live, onProgress: () => {} });
   let totalBytes = 0, readCalls = 0, selectionOffset = 0;
   let selected, verified, directory, directoryIdentity, canonical, temporary, temporaryIdentity;
-  let source, staging, target, state = 'not_started', candidate, completed, failure;
+  let state = 'not_started', candidate, completed, failure;
+  const handles = new Set(), bodies = [];
+  let source, lfsSource, sourceIdentity, lfsIdentity, lfsPath, lfsReceipt, native;
+  let lfsDisposition = 'reused', lfsState = options.lfsArchive ? 'not_started' : null;
   let archiveDisposition = 'reused', approvalDisposition = 'reused', existingApproval = false;
   const gate = () => { live.check(); selected?.checkCurrent(); verified?.checkCurrent(); };
   const budget = bytes => {
@@ -69,11 +91,14 @@ export async function replicateRepositoryBackup(raw) {
   };
   const charge = bytes => { budget(bytes); totalBytes += bytes; readCalls++; };
   const accounting = () => Object.freeze({ total_payload_bytes_read: String(totalBytes), read_calls: readCalls,
-    maximum_read_bytes: CHUNK, total_payload_byte_budget: String(options.maximumTotalBytes) });
+    maximum_read_bytes: CHUNK, total_payload_byte_budget: String(options.maximumTotalBytes),
+    ...(options.lfsArchive ? { byte_budget_scope: 'selection_and_replica_publication',
+      native_preflight_metered: false, native_preflight_maximum_archive_bytes: String(live.maximumBytes) } : {}) });
   const progress = async (phase, details = {}) => {
     await options.onProgress(Object.freeze({ phase, ...details, publication_state: state,
       total_payload_bytes_read: String(totalBytes) }));
     gate();
+    await checkPairInputs();
   };
   function privateDirectory(stat) {
     if (!stat.isDirectory() || stat.uid !== BigInt(process.getuid()) || (stat.mode & 0o077n)) fail('backup_replica_private_directory_required');
@@ -95,6 +120,34 @@ export async function replicateRepositoryBackup(raw) {
   async function unchanged(handle, path, before) {
     const after = await handle.stat({ bigint: true }), named = await lstat(path, { bigint: true });
     if (!named.isFile() || !sameFile(before, after) || !sameFile(after, named)) fail('backup_replica_file_changed');
+  }
+  async function checkPairInputs() {
+    if (!lfsSource) return;
+    await unchanged(source, selected.report.selected.input, sourceIdentity);
+    await unchanged(lfsSource, options.lfsArchive, lfsIdentity);
+    gate();
+  }
+  async function checkPairSeparation() {
+    if (!options.lfsArchive) return;
+    // The companion cannot alias a source/control or any intended output,
+    // including through a parent symlink or a hard link. Pair inputs stay
+    // outside this writable directory; no output may be its own source.
+    const inputs = [selected.report.selected.input, options.lfsArchive,
+      selected.report.selected.approval, options.trustKey, options.fg];
+    const identities = [];
+    for (const path of inputs) {
+      gate(); const physical = await realpath(path), stat = await lstat(physical, { bigint: true });
+      if (physical === canonical || physical.startsWith(canonical + sep)) fail('backup_lfs_separate_path_required');
+      identities.push(stat);
+    }
+    if (identities.some((stat, index) => index !== 1 && sameInode(stat, identities[1]))) fail('backup_lfs_separate_path_required');
+    for (const path of [candidate.input, candidate.approval, lfsPath]) {
+      let stat;
+      try { stat = await lstat(path, { bigint: true }); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+      if (stat && identities.some(input => sameInode(input, stat))) fail('backup_lfs_separate_path_required');
+    }
+    gate();
   }
   function archiveStat(stat, expected) {
     if (!stat.isFile() || stat.size !== BigInt(expected.bytes)) fail('backup_replica_archive_size_or_type');
@@ -155,6 +208,56 @@ export async function replicateRepositoryBackup(raw) {
       return true;
     } finally { await file?.close(); }
   }
+  async function publishBody(kind, path, artifact, input, pinned = null) {
+    const mark = value => {
+      if (kind === 'lfs') lfsState = value;
+      if (!existingApproval) state = value;
+    };
+    let target = await absentOrFile(path), stableTarget, disposition = 'reused';
+    if (target) {
+      handles.add(target);
+      stableTarget = await scan(target, path, artifact, `verify_existing_${kind}`);
+    } else {
+      budget(Number(artifact.bytes) * 2);
+      const inputFile = pinned ?? await open(input, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      handles.add(inputFile);
+      archiveStat(await inputFile.stat({ bigint: true }), artifact); gate(); await checkDirectory();
+      temporary = join(canonical, `.fg-backup-replica-${randomBytes(16).toString('hex')}.tmp`);
+      const staging = await open(temporary, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+      handles.add(staging);
+      mark(kind === 'archive' ? 'staging' : 'lfs_staging');
+      temporaryIdentity = await staging.stat({ bigint: true });
+      await scan(inputFile, input, artifact, `copy_${kind}`, staging);
+      await staging.sync(); gate();
+      const stagedIdentity = await staging.stat({ bigint: true });
+      await progress(`${kind}_staged`); await checkDirectory();
+      await unchanged(staging, temporary, stagedIdentity); gate();
+      mark(`${kind}_publication_unknown`);
+      try {
+        await link(temporary, path); disposition = 'created';
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+        mark(`${kind}_visible`);
+        target = await absentOrFile(path);
+        if (!target) fail('backup_replica_archive_disappeared');
+        handles.add(target);
+        stableTarget = await scan(target, path, artifact, `verify_concurrent_${kind}`);
+      }
+      mark(`${kind}_visible`);
+      await directory.sync(); await removeTemporary();
+      if (!target) {
+        target = staging;
+        stableTarget = await scan(target, path, artifact, `verify_published_${kind}`);
+      }
+    }
+    privateReplica(stableTarget);
+    await target.sync(); await directory.sync(); await checkDirectory();
+    await unchanged(target, path, stableTarget); gate();
+    mark(`${kind}_durable`);
+    bodies.push({ handle: target, path, identity: stableTarget });
+    await progress(`${kind}_durable`);
+    return disposition;
+  }
   try {
     if (constants.O_NOFOLLOW === undefined || constants.O_NONBLOCK === undefined
       || constants.O_DIRECTORY === undefined || typeof process.getuid !== 'function') fail('backup_unsupported_filesystem');
@@ -194,58 +297,44 @@ export async function replicateRepositoryBackup(raw) {
     directoryIdentity = await directory.stat({ bigint: true }); await checkDirectory(); gate();
     candidate = Object.freeze({ input: join(canonical, `archive-sha256-${artifact.sha256}.fgbackup`),
       approval: join(canonical, `checkpoint-sha256-${digest(envelope)}.approval.json`) });
+    if (options.lfsArchive) {
+      lfsPath = join(canonical, `lfs-sha256-${options.expectedLfsSha256}.fglf`);
+      await checkPairSeparation();
+      source = await open(selected.report.selected.input, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      handles.add(source); sourceIdentity = await source.stat({ bigint: true }); archiveStat(sourceIdentity, artifact);
+      lfsSource = await open(options.lfsArchive, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      handles.add(lfsSource); lfsIdentity = await lfsSource.stat({ bigint: true });
+      if (!lfsIdentity.isFile() || lfsIdentity.size < 1n || lfsIdentity.size > BigInt(live.maximumBytes)) fail('backup_lfs_archive_size_or_type');
+      await checkPairInputs();
+      // Reserve both fresh-copy/readback passes before a verifier or stage.
+      // The native adapter's archive/object/deadline bounds remain independent:
+      // its internal reads are not observable in this JavaScript byte ledger.
+      budget(2 * (Number(artifact.bytes) + Number(lfsIdentity.size)));
+      state = 'native_verification';
+      const preflight = await runApprovedRepositoryBackup({ operation: 'verify', fg: options.fg,
+        input: selected.report.selected.input, approval: selected.report.selected.approval,
+        trustKey: options.trustKey, policy: options.policy, verificationInstance: options.verificationInstance,
+        trustedLocal: true, lfsArchive: options.lfsArchive, expectedLfsSha256: options.expectedLfsSha256,
+        checkpoint: selected.report.checkpoint, maximumBytes: live.maximumBytes,
+        timeoutMs: live.remaining(), signal: live.signal,
+        async onProgress(event) { await progress('native_preflight', { event }); } });
+      native = preflight.native; lfsReceipt = native.lfs_companion;
+      checkBackupLfsArtifact({ sha256: options.expectedLfsSha256, bytes: String(lfsIdentity.size) }, lfsReceipt);
+      await checkPairInputs(); await checkPairSeparation(); await checkDirectory(); gate();
+      state = 'native_verified';
+      await progress('native_verified');
+    }
     existingApproval = await checkExistingApproval(envelope);
     if (existingApproval) state = 'approval_visible';
     await progress('destination_checked');
     await checkDirectory(); gate();
-    target = await absentOrFile(candidate.input);
-    let stableTarget;
-    if (target) {
-      stableTarget = await scan(target, candidate.input, artifact, 'verify_existing_archive');
-    } else {
-      // Reserve copy AND readback work before staging anything. A refused work
-      // budget cannot leave a partially-created archive as its ordinary result.
-      budget(Number(artifact.bytes) * 2);
-      source = await open(selected.report.selected.input, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-      archiveStat(await source.stat({ bigint: true }), artifact); gate(); await checkDirectory();
-      temporary = join(canonical, `.fg-backup-replica-${randomBytes(16).toString('hex')}.tmp`);
-      staging = await open(temporary, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-      if (!existingApproval) state = 'staging';
-      temporaryIdentity = await staging.stat({ bigint: true });
-      await scan(source, selected.report.selected.input, artifact, 'copy_archive', staging);
-      await staging.sync(); gate();
-      const stagedIdentity = await staging.stat({ bigint: true });
-      await progress('archive_staged'); await checkDirectory();
-      await unchanged(staging, temporary, stagedIdentity); gate();
-      if (!existingApproval) state = 'archive_publication_unknown';
-      try {
-        await link(temporary, candidate.input); archiveDisposition = 'created';
-      } catch (error) {
-        if (error.code !== 'EEXIST') throw error;
-        // A concurrent winner must have the exact same committed bytes. Never
-        // rename over a winner, including a corrupt file or a symbolic link.
-        if (!existingApproval) state = 'archive_visible';
-        target = await absentOrFile(candidate.input);
-        if (!target) fail('backup_replica_archive_disappeared');
-        stableTarget = await scan(target, candidate.input, artifact, 'verify_concurrent_archive');
-      }
-      if (!existingApproval) state = 'archive_visible';
-      await directory.sync(); await removeTemporary();
-      if (!target) {
-        target = staging; staging = null;
-        stableTarget = await scan(target, candidate.input, artifact, 'verify_published_archive');
-      }
-    }
-    // Even an identical retry synchronizes the exact existing file and its
-    // directory. It cannot call object existence a completed durability epoch.
-    privateReplica(stableTarget);
-    await target.sync(); await directory.sync(); await checkDirectory();
-    await unchanged(target, candidate.input, stableTarget); gate();
-    if (!existingApproval) state = 'archive_durable';
-    await progress('archive_durable');
+    archiveDisposition = await publishBody('archive', candidate.input, artifact, selected.report.selected.input, source);
+    if (lfsReceipt) lfsDisposition = await publishBody('lfs', lfsPath, lfsReceipt, options.lfsArchive, lfsSource);
     // Recheck after the observer/any await and immediately before root-last
     // publication. A caller cancellation here leaves only an unadvertised body.
-    await checkDirectory(); await unchanged(target, candidate.input, stableTarget); gate();
+    await checkDirectory();
+    for (const body of bodies) await unchanged(body.handle, body.path, body.identity);
+    await checkPairInputs(); await checkPairSeparation(); gate();
     if (existingApproval) {
       // An existing root is not a permanently valid receipt: validate it again
       // after copy/readback and every observer before acknowledging a retry.
@@ -268,20 +357,25 @@ export async function replicateRepositoryBackup(raw) {
     completed = Object.freeze({ type: 'repository_backup_replication', schema_version: 1, state,
       candidate, checkpoint: selected.report.checkpoint, authentication: verified.authentication,
       source: selected.report.selected, artifact,
-      disposition: Object.freeze({ archive: archiveDisposition, approval: approvalDisposition }),
+      disposition: Object.freeze({ archive: archiveDisposition, approval: approvalDisposition,
+        ...(lfsReceipt ? { lfs: lfsDisposition } : {}) }),
       archive_readback_verified: true, body_before_approval: true, files_and_directory_synced: true,
-      native_content_verified: false, newest_checkpoint_verified: false, complete_capsule_verified: false,
+      native_content_verified: Boolean(native), newest_checkpoint_verified: false, complete_capsule_verified: false,
+      ...(lfsReceipt ? { lfs_archive: lfsPath, lfs_companion: lfsReceipt, lfs_companion_signed: false,
+        lfs_payloads_verified: true, lfs_readback_verified: true,
+        lfs_before_approval: approvalDisposition === 'created', lfs_durable_before_acknowledgement: true, native } : {}),
       streaming: accounting() });
     return completed;
   } catch (caught) {
     failure = caught instanceof Error ? caught : backupError('backup_replication_observer_failed');
     failure.publication_state = state; failure.replica = candidate ?? null;
+    if (options.lfsArchive) { failure.lfs_archive = lfsPath ?? null; failure.lfs_publication_state = lfsState; }
     failure.selection = selected?.report ?? null; failure.streaming = accounting();
     throw failure;
   } finally {
     let cleanup;
     try { await removeTemporary(); } catch (error) { cleanup = error; }
-    for (const handle of new Set([source, staging, target, directory])) {
+    for (const handle of new Set([...handles, directory])) {
       try { await handle?.close(); } catch (error) { cleanup ??= error; }
     }
     if (cleanup) {
@@ -289,6 +383,7 @@ export async function replicateRepositoryBackup(raw) {
         failure.cleanup_error = 'backup_replication_cleanup_failed'; failure.retained_temporary = temporaryIdentity ? temporary : null;
       } else {
         cleanup.publication_state = state; cleanup.replica = candidate ?? null;
+        if (options.lfsArchive) { cleanup.lfs_archive = lfsPath ?? null; cleanup.lfs_publication_state = lfsState; }
         cleanup.completed_result = completed; cleanup.streaming = accounting(); throw cleanup;
       }
     }

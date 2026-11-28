@@ -8,6 +8,111 @@ mandatory complete native preflight before publication and retains one original
 source descriptor, approval, deadline, and actual-byte ledger in the Rust process.
 The JavaScript adapter described below remains a separate operator surface.
 
+## Optional verified LFS companion
+
+The local JavaScript publisher also accepts an explicit paired operation. Supply
+the companion checksum independently and select the trusted native `fg` executable
+and a fresh verification instance:
+
+```sh
+node scripts/replicate_repository_backup_native.mjs \
+  --candidate /source/repository.fgbackup /source/repository.approval.json \
+  --trust-key /independent/operator-ed25519.pub \
+  --tenant-id "$TENANT_ID" --repository-id "$REPOSITORY_ID" \
+  --incarnation-id "$INCARNATION_ID" --object-format sha256 \
+  --minimum-head-generation "$MINIMUM_GENERATION" \
+  --replica-directory /private/replicas \
+  --lfs-archive /source/repository.fglf --expected-lfs-sha256 "$LFS_SHA256" \
+  --fg /absolute/path/to/fg --trusted-local --verification-instance 992
+```
+
+The library options are `lfsArchive`, `expectedLfsSha256`, `fg`,
+`trustedLocal: true`, and `verificationInstance`. The companion path and digest
+must be supplied together; verifier-only options without a companion refuse.
+Source-only calls retain their previous options, result fields and approval bytes.
+
+Selection still authenticates every explicit approval and chooses the highest
+uniquely signed source checkpoint first. The signed native adapter then verifies
+that exact source archive and independently pinned FGLF companion together. It
+checks the original source pointer inventory, exact snapshot and payload
+commitments. A missing, wrong, corrupt or substituted companion refuses; it
+cannot trigger selection of an older source or source-only completion. No FGLF
+decoder or second repository authority is introduced in JavaScript.
+
+The original DSSE v1 approval continues to sign only the source archive. It is
+neither extended nor re-signed. Native source-pointer verification authenticates
+the companion's contents; its independently retained checksum also pins the
+exact transport bytes. The publisher retains open source and companion handles
+across preflight and checks their identity and metadata before publication. Pair
+inputs must be physically separate from the destination and from one another;
+observed parent aliases, hard-link aliases and output collisions refuse.
+
+Both bodies use the existing bounded private-stage, create-only publication,
+exact readback, file-sync and directory-sync protocol. The companion name is
+`lfs-sha256-<companion-digest>.fglf`. A fresh approval is published only after
+**both** bodies are durable. A reused approval must be revalidated and both
+bodies verified before acknowledging the pair. As with source-only retry, an
+identical existing approval does not prevent recreating a missing body from the
+exact original verified input; no existing body or approval is overwritten.
+The paired `lfs_before_approval` field is true only when this invocation created
+the approval after verifying both durable bodies. It is false when the approval
+was reused, including an exact retry or adding a companion to a preexisting
+source-only replica; that invocation cannot attest to the approval's creation
+chronology. `lfs_durable_before_acknowledgement` is true for every successful
+paired result. The legacy source-only `body_before_approval` field is unchanged.
+
+The unchanged `candidate: {input, approval}` remains usable by existing source
+selectors. Paired results additionally contain `lfs_archive`, the normalized
+`lfs_companion` receipt, the native verification receipt, and separate creation
+or reuse disposition. `lfs_companion_signed` remains false. Supply
+`candidate.input`, `candidate.approval`, `lfs_archive` and
+`lfs_companion.sha256` to `restore_repository_backup_native.mjs` using its
+`--lfs-archive` and `--expected-lfs-sha256` options. Restore must perform its own
+signed native checks; a replication receipt is not permission to publish a
+repository head.
+
+### Paired budgets, interruption and scope
+
+The per-archive `--max-archive-bytes` ceiling applies independently to each body.
+The JavaScript `--max-total-read-bytes` ledger covers source selection plus source
+and companion publication scans. For a healthy N-byte source and L-byte
+companion, fresh publication charges **3N + 2L**; an exact existing-body retry
+reads **2N + L**. The operation conservatively reserves the fresh copy/readback
+allowance for both bodies before native preflight, including on retry. Failed
+source aliases remain charged. Paired mode defaults to eight times the
+per-archive ceiling, with an 8 TiB aggregate ceiling; source-only defaults and
+ceilings remain unchanged.
+
+**This JavaScript ledger does not meter the signed native preflight**, including
+the adapter's authentication and post-verification hash scans. That work has its
+own finite native archive, object, metadata and operation limits. The receipt
+reports `byte_budget_scope: "selection_and_replica_publication"` and
+`native_preflight_metered: false`; it makes no whole-process byte-count claim.
+One original monotonic deadline and cancellation signal still span selection,
+preflight, both publications and cleanup. There is no renewed operation lifetime
+after native verification.
+
+Cancellation or failure after publishing one body retains it for an exact retry,
+with the approval absent until both bodies are durable. Errors retain the strongest
+observed publication state, companion path/state and any unknown native scratch.
+The publisher never recursively removes native verification state or another
+invocation's temporary files. Existing conflicting or corrupted outputs require
+explicit operator handling; retry does not overwrite them.
+
+This extension is limited to the direct local replica publisher. HTTPS
+upload/download, replenishment, scrub and sealed jobs still use their source-only
+contracts; passing them a source candidate does not carry or validate its LFS
+companion. Complete capsule recovery, other external artifacts and global
+checkpoint currentness remain outside this operation.
+
+The dedicated `scripts/tests/repository-backup-replication-lfs.test.mjs` suite
+uses real Ed25519 signatures, files and subprocesses, with an explicitly labelled
+native protocol peer. It covers both Git hash labels, highest-checkpoint refusal,
+exact copied bytes, source loss, unchanged-inode retries, byte limits, aliases,
+substitution, cancellation, unknown native scratch and CLI handoff. The peer is
+not a Rust archive decoder or a native restore drill; those claims require an
+independently qualified real `fg` run.
+
 `scripts/lib/repository-backup-replication.mjs` publishes another exact copy of
 an independently approved native backup. It selects the highest uniquely signed
 checkpoint from an explicit candidate set using the existing selector. A missing
