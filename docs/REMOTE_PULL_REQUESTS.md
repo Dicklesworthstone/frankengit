@@ -14,6 +14,12 @@ commands retain their existing intent bytes, keys and requirements. The explicit
 `append-comment` action adds version-independent discussion through the same
 durable request and original-key recovery workflow.
 
+For remote PR selection and failure diagnosis, use
+[`scripts/forge_checks.mjs`](REMOTE_PULL_CHECKS.md). Its `list`, `show`, `checks`,
+`evidence` and `log` commands retain exact snapshots and check identities, with
+explicit credentials for evidence disclosure. It can supply metadata coordinates
+for these mutation commands and export exact retained stdout/stderr bytes.
+
 ## Supported commands
 
 `preparePull` in `scripts/operator/remote_pull.mjs` accepts an explicit endpoint,

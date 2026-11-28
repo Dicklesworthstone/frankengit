@@ -36,7 +36,9 @@ tips, merge base and candidate commit, plus reviewer-stream expected_version/rea
 For rebase reviews, including withdrawal, explicitly add method:"rebase".
 Ordinary merge/squash reviews omit method. merge requires that exact candidate,
 explicit required_reviewers and method merge-commit, squash or rebase.
-Read current coordinates through the native PR API/browser; they are never guessed.
+Read PR metadata with scripts/forge_checks.mjs show; it also reads canonical checks
+and retained failure logs. Candidate coordinates remain available through the
+native PR API/browser. Coordinates are always explicit and never guessed.
 
 prepare and inspect are offline. send requires the original token/key and
 --fast-forward-only for a fast-forward intent. Candidate actions also require

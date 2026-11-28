@@ -476,12 +476,16 @@ function recoverySelection(value) {
 // Abort an old view without cancelling a submitted mutation; disconnect cancels
 // both but never erases the pending request's responsibility.
 export class Transport {
-  #fetch; #crypto; #token = ''; #fingerprint = ''; #recovery = null; #epoch = 0; #all = new Set(); #reads = new Set(); #timeout; #source; #initial; #branches; #defaultBranch; #search; #transfers; #tags; #replay; #rebase; #checkEvidence; #queues; #artifacts;
+  #fetch; #crypto; #token = ''; #fingerprint = ''; #recovery = null; #epoch = 0; #all = new Set(); #reads = new Set(); #timeout; #source; #initial; #branches; #defaultBranch; #search; #transfers; #tags; #replay; #rebase; #checkEvidence; #queues; #artifacts; #pullReadOnly; #sponsoredRead;
   // WebIDL fetch refuses any receiver but the global (Chrome: "Illegal invocation"),
   // so the stored fetch is always invoked as a plain call, never as a method of this client.
-  constructor({ href, fetchImpl = globalThis.fetch, cryptoImpl = globalThis.crypto, timeoutMs = 30_000, pageSuffix = '/ui/pulls/', checkEvidenceOnly = false }) {
+  constructor({ href, fetchImpl = globalThis.fetch, cryptoImpl = globalThis.crypto, timeoutMs = 30_000, pageSuffix = '/ui/pulls/', checkEvidenceOnly = false, pullReadOnly = false, sponsoredRead = false }) {
     if (typeof checkEvidenceOnly !== 'boolean' || (checkEvidenceOnly && pageSuffix !== '/ui/pulls/')) fail('Invalid workflow evidence browser profile.');
+    if (typeof pullReadOnly !== 'boolean' || typeof sponsoredRead !== 'boolean' ||
+        (pullReadOnly && (pageSuffix !== '/ui/pulls/' || checkEvidenceOnly)) ||
+        (sponsoredRead && !pullReadOnly && !checkEvidenceOnly)) fail('Sponsored PR reads require a closed read-only profile.');
     this.#checkEvidence = checkEvidenceOnly;
+    this.#pullReadOnly = pullReadOnly; this.#sponsoredRead = sponsoredRead;
     this.#queues = pageSuffix === '/ui/queues/';
     this.#artifacts = pageSuffix === '/ui/artifacts/';
     this.#defaultBranch = pageSuffix === '/ui/default-branch/';
@@ -496,12 +500,13 @@ export class Transport {
   async connect(token, requiredFingerprint = null, recovery = null) {
     this.disconnect(); const epoch = this.#epoch;
     const selected = recovery === null ? null : recoverySelection(recovery);
-    if (selected && (this.#search || this.#checkEvidence || this.#artifacts)) fail('This read-only connection has no outcome recovery profile.');
-    // Sponsored credentials enter only the existing closed source-read profile.
-    // Mutation, recovery and workflow-evidence profiles retain ordinary tokens.
+    if (selected && (this.#search || this.#checkEvidence || this.#artifacts || this.#pullReadOnly)) fail('This read-only connection has no outcome recovery profile.');
+    // Existing profiles keep their credential grammar. Sponsored PR disclosure
+    // is an explicit opt-in inside independently closed read-only route sets.
     if (typeof token !== 'string' || !(/^[0-9a-f]{64}$/.test(token) ||
-        (this.#search && /^fgagent_[0-9a-f]{64}$/.test(token)))) fail(this.#search
-      ? 'A canonical source-read credential is required.' : 'A 64-character lowercase hexadecimal token is required.');
+        ((this.#search || this.#sponsoredRead) && /^fgagent_[0-9a-f]{64}$/.test(token)))) fail(this.#search
+      ? 'A canonical source-read credential is required.' : this.#sponsoredRead
+        ? 'A canonical read credential is required.' : 'A 64-character lowercase hexadecimal token is required.');
     const fingerprint = hex(new Uint8Array(await this.#crypto.subtle.digest('SHA-256', utf8.encode(token))));
     if (epoch !== this.#epoch) fail('Connection superseded.');
     if (!selected && requiredFingerprint !== null && fingerprint !== requiredFingerprint) fail('Unresolved request belongs to another credential.');
@@ -512,7 +517,7 @@ export class Transport {
   disconnect() { this.#epoch += 1; for (const c of this.#all) c.abort(); this.#token = ''; this.#fingerprint = ''; this.#recovery = null; }
   restrictToRecovery(selection) {
     const selected = recoverySelection(selection);
-    if (!this.connected || this.#search || this.#checkEvidence || this.#artifacts || this.#all.size) fail('Recovery-only selection requires an idle connected mutation profile.');
+    if (!this.connected || this.#search || this.#checkEvidence || this.#artifacts || this.#pullReadOnly || this.#all.size) fail('Recovery-only selection requires an idle connected mutation profile.');
     if (this.#recovery && (selected.key !== this.#recovery.key || selected.principal !== this.#recovery.principal)) fail('Reconnect explicitly before selecting another recovery identity.');
     // Receipt restoration invokes this only after verifying its original key.
     this.#recovery = selected;
@@ -534,6 +539,28 @@ export class Transport {
     if (!Array.isArray(headerNames) || headerNames.length > 16 || headerNames.some(name => typeof name !== 'string' || !/^[a-z0-9-]{1,64}$/i.test(name))) fail('Invalid response header selection.');
     const capturedHeaders = [...headerNames];
     const url = new URL(path, this.root.api);
+    if (this.#pullReadOnly) {
+      const list = /^pulls(?:\?[^#]*)?$/.test(path), checks = /^pulls\/[1-9][0-9]*\/checks(?:\?[^#]*)?$/.test(path);
+      const detail = /^pulls\/[1-9][0-9]*(?:\?[^#]*)?$/.test(path);
+      if (!(list || checks || detail) || method !== 'GET' || body !== undefined || key !== undefined || !read ||
+          binary || headerNames.length || contentType !== 'application/x-www-form-urlencoded' ||
+          !Array.isArray(statuses) || statuses.length !== (list ? 1 : 2) || statuses[0] !== 200 ||
+          (!list && statuses[1] !== 404)) fail('PR metadata and checks are a closed bodyless read-only profile.');
+      const seen = new Set();
+      for (const [name, value] of url.searchParams) {
+        if (seen.has(name) || !(name === 'expected_head' || (!detail && ['after', 'limit'].includes(name)))) fail('Invalid PR read query.');
+        seen.add(name);
+        if (name === 'expected_head') snapshot(value);
+        else if (name === 'after' && checks) {
+          if (!/^check\/[0-9a-v]{51}[0g]$/.test(value)) fail('Invalid workflow check cursor.');
+        } else {
+          const n = decimal(value, name, name === 'limit' ? 1 : 0);
+          if (name === 'limit' && n > 100) fail('Invalid PR page size.');
+        }
+      }
+      if ((checks || Number(url.searchParams.get('after') ?? 0) > 0) && !seen.has('expected_head')) fail('PR checks and continuations require their original snapshot.');
+      integer(maximum, 'PR read response limit', 1, REPLY_LIMIT);
+    }
     if (this.#defaultBranch) {
       const observation = /^default-branch(?:\?[^#]+)?$/.test(path) && method === 'GET';
       const listing = path === 'source/refs';
@@ -701,6 +728,8 @@ export class Transport {
       ? /^(?:queues(?:\/[1-9][0-9]*(?:\/(?:enqueue|dequeue|reorder|land|prepare|land-candidate))?)?(?:\?[^#]*)?|pulls\/[1-9][0-9]*(?:\/inspect)?(?:\?[^#]*)?|outcomes)$/.test(path)
       : this.#checkEvidence
       ? /^pulls\/[1-9][0-9]*\/checks\/evidence\?[^#]+$/.test(path)
+      : this.#pullReadOnly
+      ? /^pulls(?:\/[1-9][0-9]*(?:\/checks)?)?(?:\?[^#]*)?$/.test(path)
       : this.#rebase
       ? /^(?:source\/(?:tree|rebase\/(?:prepare|resolve|inspect|apply))|outcomes)$/.test(path)
       : this.#replay
