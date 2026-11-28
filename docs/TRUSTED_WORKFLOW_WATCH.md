@@ -217,6 +217,8 @@ settled reported children are recorded as **observed_stopped**, not success. The
 number of selected but unstarted workflows remains visible; none is implicitly
 resumed. A later commit may then run. Unknown stop reasons, missing reports,
 contradictory success and any containment warning remain pending and block work.
+If the active native dispatch dies by signal, containment is unknown and the
+watcher and supervisor retain their owner locks.
 
 An unknown execution prevents any later dispatch. `reconcile` reads the original
 native batch's `report.json`, validates its retained scope, source, child IDs and

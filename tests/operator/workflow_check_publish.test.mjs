@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
 import { Writable } from 'node:stream';
-import { once as execute, configuration as watchConfiguration } from '../../scripts/operator/workflow_watch.mjs';
+import { once as execute, configuration as watchConfiguration, status as watchStatus } from '../../scripts/operator/workflow_watch.mjs';
 import { configuration, once, status, serve } from '../../scripts/operator/workflow_check_publish.mjs';
 import { sha256, encode, conclusion, journalConclusion, jobKey } from '../../scripts/operator/workflow_check_protocol.mjs';
 import { main } from '../../scripts/fg_workflow_checks.mjs';
@@ -229,6 +229,91 @@ test('cancellation drains an active publisher and persists its terminal', LINUX_
   const f = await fixture(t, 'sha1', { publish_delay: 150 }); await f.run(); const stop = new AbortController();
   const running = once(f.config, { signal: stop.signal }); await waitFor(async () => (await f.lines('published.ndjson')).length === 1); stop.abort();
   await running; assert.equal((await status(f.config)).runs[0].committed, 1); assert.equal((await status(f.config)).owner_present, false);
+});
+
+test('an externally signalled native publisher retains its unknown request and owner', LINUX_WORKFLOW, async t => {
+  const f = await fixture(t);
+  await f.run();
+  const native = await readFile(f.watch.fg, 'utf8');
+  const newline = native.indexOf('\n');
+  await writeFile(f.watch.fg, native.slice(0, newline + 1) +
+    "if (process.argv[2] === 'workflow' && process.argv[3] === 'publish') process.kill(process.pid, 'SIGKILL');\n" +
+    native.slice(newline + 1));
+  await assert.rejects(once(f.config), error =>
+    /signal=SIGKILL/.test(error.message) && error.containment_unknown && error.publication_unknown);
+  const observed = await status(f.config);
+  assert.equal(observed.owner_present, true);
+  assert.equal(observed.runs[0].unknown, 1);
+  assert.equal(observed.runs[0].committed, 0);
+  await assert.rejects(once(f.config), error => error.code === 'EEXIST');
+});
+
+test('an externally signalled read-only history command still permits a fresh publication', LINUX_WORKFLOW, async t => {
+  const f = await fixture(t);
+  await f.run();
+  const native = await readFile(f.watch.fg, 'utf8');
+  const newline = native.indexOf('\n');
+  await writeFile(f.watch.fg, native.slice(0, newline + 1) +
+    "if (process.argv[2] === 'workflow' && process.argv[3] === 'recover') process.kill(process.pid, 'SIGKILL');\n" +
+    native.slice(newline + 1));
+  await assert.rejects(once(f.config), error => /signal=SIGKILL/.test(error.message) && !error.containment_unknown);
+  const observed = await status(f.config);
+  assert.equal(observed.owner_present, false);
+  assert.deepEqual(observed.runs, []);
+  await writeFile(f.watch.fg, native);
+  assert.equal((await once(f.config)).runs[0].committed, 1);
+});
+
+test('an expired idle publication sweep refuses before initializing publisher custody', LINUX_WORKFLOW, async t => {
+  const f = await fixture(t);
+  let times = 0;
+  const clock = t.mock.method(performance, 'now', () => times++ === 0 ? 0 : 1001);
+  await assert.rejects(once(f.config, { timeoutMs: 1000 }), /publication operation deadline exceeded/);
+  assert.deepEqual(await readdir(f.config.state_directory), []);
+  assert.deepEqual(await f.lines('published.ndjson'), []);
+  clock.mock.restore();
+  assert.equal((await once(f.config)).publications, 0);
+  assert.deepEqual(await readdir(f.config.state_directory), ['binding.json']);
+});
+
+test('watcher status honors the caller checkpoint across custody reads', LINUX_WORKFLOW, async t => {
+  const f = await fixture(t);
+  const deadline = new Error('caller deadline crossed');
+  let checks = 0;
+  await assert.rejects(watchStatus(f.watch, () => { if (++checks > 1) throw deadline; }), error => error === deadline);
+  assert.deepEqual((await watchStatus(f.watch)).records, []);
+  assert.deepEqual(await readdir(f.watch.state_directory), []);
+});
+
+test('an expired sweep after the last publication reports its saved terminal', LINUX_WORKFLOW, async t => {
+  const f = await fixture(t);
+  await f.run();
+  const now = performance.now.bind(performance), timeout = 30_000;
+  let elapsed = 0;
+  t.mock.method(performance, 'now', () => now() + elapsed);
+  await assert.rejects(once(f.config, { timeoutMs: timeout, onObservation() { elapsed += timeout; } }),
+    error => /publication operation deadline exceeded/.test(error.message) && error.retained_terminal?.outcome === 'committed');
+  const retained = await status(f.config);
+  assert.equal(retained.runs[0].committed, 1);
+  assert.equal(retained.runs[0].unknown, 0);
+  assert.equal(retained.owner_present, false);
+  assert.equal((await once(f.config)).publications, 0);
+  assert.equal((await f.lines('published.ndjson')).length, 1);
+});
+
+test('cancellation after the last publication skips another watcher scan', LINUX_WORKFLOW, async t => {
+  const f = await fixture(t, 'sha1', multiple), stop = new AbortController();
+  await f.run();
+  assert.equal((await once(f.config, { maxPublications: 1 })).runs[0].pending, 1);
+  const stopped = await once(f.config, { signal: stop.signal, async onObservation() {
+    await writeFile(join(f.watch.state_directory, 'orphan-fixture'), '');
+    stop.abort();
+  } });
+  assert.equal(stopped.stopped, true);
+  assert.equal(stopped.runs[0].committed, 2);
+  assert.equal((await status(f.config)).owner_present, false);
+  assert.equal((await f.lines('published.ndjson')).length, 2);
+  await assert.rejects(watchStatus(f.watch), /Unrecognized custody/);
 });
 
 test('status works without the native executable or source store, even with a retained owner lock', LINUX_WORKFLOW, async t => {

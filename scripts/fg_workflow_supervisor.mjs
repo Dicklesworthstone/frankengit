@@ -33,7 +33,7 @@ export function argumentsFor(argv) {
 }
 export function exitCode(result) {
   if (result.type === 'workflow_supervisor_status') {
-    if (result.lanes.some(row => row.error)) return 1;
+    if (result.lanes.some(row => row.error || row.publication?.refused > 0)) return 1;
     return result.owner_present || result.lanes.some(row => row.publication_owner_present || row.recovery_owner_present ||
       row.publication.pending > 0 || row.watcher.owner_present || row.watcher.queued > 0 || row.watcher.execution_unknown > 0) ? 2 : 0;
   }

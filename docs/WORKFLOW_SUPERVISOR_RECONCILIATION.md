@@ -13,7 +13,8 @@ node scripts/fg_workflow_supervisor.mjs reconcile \
 The original supervisor binding must already exist and match exactly. The command
 accepts no execution, publication, concurrency, polling or retry options. One
 cooperative read deadline covers every lane; it is not restarted per report or
-per lane. Cancellation is checked before filesystem work and between bounded
+per lane. The same deadline reaches supervisor binding reads and the publisher's
+custody scan. Cancellation is checked before filesystem work and between bounded
 custody records, report validation and immutable summary publication. Filesystem
 system calls themselves are not preempted. The default and maximum shared
 supervisor reconciliation budget are 30 seconds.
@@ -45,8 +46,10 @@ recovered. Normal execution still refuses that owner lock.
 
 Each lane carries its recovered watcher status and retained publication status,
 or an explicit error. A corrupt lane does not hide a different valid lane.
-Cancellation or an exhausted deadline prevents starting more reads. Results
-already installed before a late error remain recoverable; an error is not proof
+Cancellation or an exhausted deadline prevents starting more reads. During lane
+processing a cancelled read marks the lane `stopped` and keeps any completed
+watcher summary. A genuine custody error remains a failure if cancellation also
+arrives. Results already installed before a late error remain recoverable, and an error is not proof
 that no local summary was written. There is no all-lanes atomic transaction.
 
 The CLI emits `workflow_supervisor_reconciliation` with `execution_retried`,
@@ -56,6 +59,24 @@ publication refusal, and 2 means pending ownership/work or cancellation without
 another error. A settled observation does not grant a protected merge. After
 independent process/owner reconciliation, the ordinary `once`/`serve` path can
 continue using its original execution and publication identities.
+
+## Publish a recovered run
+
+When reconciliation installs the completed watcher summary, make the original
+native executable and repository storage available again. Run a single
+publication pass for the selected lane:
+
+```sh
+node scripts/fg_workflow_checks.mjs once \
+  --supervisor-config /srv/ci/supervisor.json --lane main --trusted-local
+```
+
+The publisher uses its original repository, principal and evidence. The
+ordinary publisher lock serializes the pass. The supervisor and watcher locks
+can stay in place while the pass publishes completed observations. An
+unresolved watcher run remains pending, and an uncertain prior publication
+still requires explicit outcome recovery. Repeating a settled publication
+pass preserves the original decisions.
 
 ## Verification
 

@@ -133,8 +133,9 @@ async function inventory(config, bind = false, checkpoint = () => {}) {
   checkpoint();
   const bindingPath = join(config.state_directory, 'binding.json');
   const saved = await readPrivate(bindingPath, 128 * 1024, true);
+  checkpoint();
   if (saved && !saved.equals(encode(config))) fail('Watcher configuration changed; never reset an existing run namespace.');
-  const entries = await names(config.state_directory, 4 * config.max_runs + 2);
+  const entries = await names(config.state_directory, 4 * config.max_runs + 2, checkpoint);
   checkpoint();
   if (!saved) {
     if (entries.some(name => name !== 'owner.lock')) fail('Unbound watcher directory is not empty.');
@@ -148,7 +149,9 @@ async function inventory(config, bind = false, checkpoint = () => {}) {
     const match = /^(intent|started|reply|result)-([0-9a-f]{64})\.json$/.exec(name);
     if (!match) fail('Unrecognized custody entry; interrupted writes must be inspected, never erased automatically.');
     const row = records.get(match[2]) ?? {};
-    row[match[1]] = parseJson(await readPrivate(join(config.state_directory, name), 128 * 1024));
+    const raw = await readPrivate(join(config.state_directory, name), 128 * 1024);
+    checkpoint();
+    row[match[1]] = parseJson(raw);
     records.set(match[2], row);
   }
   if (records.size > config.max_runs) fail('Watcher run capacity reached.');
@@ -404,14 +407,17 @@ async function reconcileOne(config, record, checkpoint = () => {}, requireFinali
   await identicalOrNew(location.result, result); record.result = result;
   return true;
 }
-export async function status(config) {
+export async function status(config, checkpoint) {
   config = configuration(config);
+  checkpoint?.();
   await preflight(config, 'status');
-  const records = await inventory(config);
-  return statusFrom(config, records);
+  const records = await inventory(config, false, checkpoint);
+  return statusFrom(config, records, checkpoint);
 }
-async function statusFrom(config, records) {
+async function statusFrom(config, records, checkpoint) {
+  checkpoint?.();
   const owner = await lstat(join(config.state_directory, 'owner.lock')).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
+  checkpoint?.();
   return { type: 'workflow_watch_status', schema_version: 1, owner_present: owner, read_only: true,
     records: records.map(record => ({ id: record.intent.id, commit: record.intent.commit, run_id: record.intent.run_id,
       state: record.result?.outcome ?? (record.started ? 'execution_unknown' : 'queued'),
@@ -471,7 +477,11 @@ async function execute(config, intent, options) {
   // Abort after the synced start marker must leave an uncertain record, not an
   // invented rollback. No caller-provided command or shell is accepted here.
   const native = await runNative(config.fg, args, { signal: options.signal, drain: true, timeoutMs: options.dispatchTimeoutMs ?? 660_000 });
-  if (native.forced) throw nativeFailure(native, 'Native containment was not established');
+  if (native.forced || native.signal) {
+    const error = nativeFailure(native, 'Native containment was not established');
+    error.containment_unknown = true;
+    throw error;
+  }
   if (!native.signal && !native.spawn_error && [0, 1, 2].includes(native.code)) {
     let envelope;
     try { envelope = parseJson(native.stdout, 40 * 1024 * 1024); }

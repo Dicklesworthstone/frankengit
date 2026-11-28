@@ -18,6 +18,7 @@ const LINUX_WORKFLOW = { skip: process.platform !== 'linux' && 'requires explici
 
 const token = 'a'.repeat(64), hex = text => Buffer.from(text).toString('hex');
 const cli = new URL('../../scripts/fg_workflow_checks.mjs', import.meta.url).pathname;
+const supervisorCli = new URL('../../scripts/fg_workflow_supervisor.mjs', import.meta.url).pathname;
 const save = (path, value) => writeFile(path, encode(value), { mode: 0o600 });
 const json = async path => JSON.parse(await readFile(path, 'utf8'));
 async function fixture(t, format = 'sha1', count = 1) {
@@ -91,8 +92,20 @@ function argumentsFor(f, address, operation = 'recover', extras = []) {
   return [operation, '--watch-config', f.watchFile, '--state', f.config.state_directory, '--principal-id', f.config.principal_id,
     '--trusted-local', ...(operation === 'recover' ? ['--endpoint', address, '--token-file', f.tokenFile] : []), ...extras];
 }
-function child(t, args) {
-  const processChild = spawn(process.execPath, [cli, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+async function supervisorFixture(f, other) {
+  const state = join(f.root, 'supervisor'), path = join(f.root, 'supervisor.json');
+  await mkdir(state, { mode: 0o700 });
+  const lanes = [{ name: 'selected', publisher: f.config }];
+  if (other) lanes.unshift({ name: 'other', publisher: other.config });
+  const config = { schema: 'frankengit-workflow-supervisor-v1', state_directory: state, lanes };
+  await save(path, config);
+  const args = (address, lane = 'selected') => ['recover', '--supervisor-config', path, '--lane', lane,
+    '--trusted-local', '--endpoint', address, '--token-file', f.tokenFile];
+  const bindingPath = join(state, 'binding.json');
+  return { config, path, state, args, bindingPath, bind: () => save(bindingPath, config) };
+}
+function child(t, args, script = cli) {
+  const processChild = spawn(process.execPath, [script, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '', stderr = ''; processChild.stdout.on('data', b => stdout += b); processChild.stderr.on('data', b => stderr += b);
   const done = new Promise((resolve, reject) => { processChild.once('error', reject); processChild.once('close', (code, signal) => resolve({ code, signal, stdout, stderr })); });
   t.after(async () => { if (processChild.exitCode === null && processChild.signalCode === null) processChild.kill('SIGKILL'); await done; });
@@ -295,6 +308,18 @@ test('an expired deadline stops initial custody validation before reading a late
   assert.equal(server.calls.length, 0);
   await assert.rejects(status(f.config), /request changed/);
 });
+test('publication status shares its caller checkpoint during the custody scan', LINUX_WORKFLOW, async t => {
+  const f = await fixture(t);
+  const plan = structuredClone(f.plan);
+  plan.jobs[0].source_commit = 'f'.repeat(40);
+  await save(f.planPath, plan);
+  const before = (await readdir(f.config.state_directory)).sort();
+  const expired = new Error('shared publisher custody deadline');
+  let checkpoints = 0;
+  await assert.rejects(status(f.config, () => { if (++checkpoints > 1) throw expired; }), error => error === expired);
+  assert.deepEqual((await readdir(f.config.state_directory)).sort(), before);
+  await assert.rejects(status(f.config), /request changed/);
+});
 test('cancellation after a validated terminal saves it and stops before the next job', LINUX_WORKFLOW, async t => {
   const f = await fixture(t, 'sha1', 2), server = await peer(t, f), controller = new AbortController();
   const result = await recover(f.config, server.address, token, { signal: controller.signal, onObservation() { controller.abort(); } });
@@ -324,6 +349,105 @@ test('CLI recovery uses a private token file and exits with the native terminal 
   const lines = result.stdout.trim().split('\n').map(JSON.parse); assert.equal(lines.at(-1).runs[0].committed, 1);
   assert.equal(result.stdout.includes(token), false); assert.equal(result.stderr.includes(token), false); assert.equal(result.stdout.includes(f.jobs[0].key), false);
 });
+test('CLI recovers only the selected bound supervisor lane without separate watch configuration or native files', LINUX_WORKFLOW, async t => {
+  const f = await fixture(t, 'sha256'), other = await fixture(t), server = await peer(t, f);
+  const supervisor = await supervisorFixture(f, other);
+  await supervisor.bind();
+  await mkdir(join(supervisor.state, 'owner.lock'), { mode: 0o700 });
+  const lock = await lstat(join(supervisor.state, 'owner.lock'));
+  const original = await readFile(supervisor.bindingPath), plan = await readFile(f.planPath);
+  const untouched = (await readdir(other.config.state_directory)).sort();
+  for (const path of [f.watchFile, f.config.watch.fg, f.config.watch.storage_root, f.config.watch.run_parent]) {
+    await rm(path, { recursive: true, force: true });
+  }
+  const result = await child(t, supervisor.args(server.address)).done;
+  assert.equal(result.code, 0, result.stderr);
+  const lines = result.stdout.trim().split('\n').map(JSON.parse);
+  assert.equal(lines.at(-1).type, 'workflow_check_recovery');
+  assert.equal(lines.at(-1).runs[0].committed, 1);
+  assert.equal((await status(f.config)).runs[0].committed, 1);
+  assert.equal((await status(other.config)).runs[0].unknown, 1);
+  assert.deepEqual((await readdir(other.config.state_directory)).sort(), untouched);
+  assert.deepEqual(await readFile(supervisor.bindingPath), original);
+  assert.deepEqual(await readFile(f.planPath), plan);
+  assert.equal((await lstat(join(supervisor.state, 'owner.lock'))).ino, lock.ino);
+  assert.deepEqual(server.calls.map(call => call.headers['idempotency-key']), [f.jobs[0].key]);
+  assert.equal((await child(t, supervisor.args(server.address)).done).code, 0);
+  assert.equal(server.calls.length, 1);
+});
+test('CLI refuses unbound, altered, unknown or ambiguous supervisor lane selection before HTTP', LINUX_WORKFLOW, async t => {
+  const f = await fixture(t), other = await fixture(t), server = await peer(t, f);
+  const supervisor = await supervisorFixture(f, other), args = supervisor.args(server.address);
+  const before = (await readdir(f.config.state_directory)).sort();
+  const refused = async (argv, message) => {
+    const result = await child(t, argv).done;
+    assert.equal(result.code, 2, result.stderr);
+    if (message) assert.match(JSON.parse(result.stderr).message, message);
+  };
+  await refused(args, /original saved supervisor binding/);
+  assert.deepEqual(await readdir(supervisor.state), []);
+  await supervisor.bind();
+  await refused(supervisor.args(server.address, 'foreign'), /Unknown supervisor lane/);
+  await refused([...args, '--principal-id', f.config.principal_id]);
+  await refused([...args, '--watch-config', f.watchFile]);
+  await refused([...args, '--state', f.config.state_directory]);
+  await refused(['status', '--supervisor-config', supervisor.path, '--lane', 'selected', '--trusted-local']);
+  await refused(args.filter(arg => arg !== '--lane' && arg !== 'selected'));
+  const changed = structuredClone(supervisor.config);
+  changed.lanes[1].publisher.principal_id = 'f'.repeat(32);
+  await save(supervisor.path, changed);
+  await refused(args, /Supervisor configuration changed/);
+  assert.equal(server.calls.length, 0);
+  assert.deepEqual((await readdir(f.config.state_directory)).sort(), before);
+});
+test('bound publisher once respects its own lock and preserves held supervisor and watcher locks', LINUX_WORKFLOW, async t => {
+  const f = await fixture(t), other = await fixture(t);
+  const supervisor = await supervisorFixture(f, other);
+  await supervisor.bind();
+  await save(f.path('terminal'), nativeTerminal(f));
+  const supervisorLock = join(supervisor.state, 'owner.lock');
+  const watcherLock = join(f.config.watch.state_directory, 'owner.lock');
+  const publisherLock = join(f.config.state_directory, 'owner.lock');
+  for (const lock of [supervisorLock, watcherLock, publisherLock]) await mkdir(lock, { mode: 0o700 });
+  const supervisorInode = (await lstat(supervisorLock)).ino, watcherInode = (await lstat(watcherLock)).ino;
+  const args = ['once', '--supervisor-config', supervisor.path, '--lane', 'selected', '--trusted-local', '--max-publications', '1'];
+  const held = await child(t, args).done;
+  assert.equal(held.code, 2);
+  assert.match(JSON.parse(held.stderr).message, /EEXIST/);
+  await rm(publisherLock, { recursive: true });
+  const published = await child(t, args).done;
+  assert.equal(published.code, 0, published.stderr);
+  const result = JSON.parse(published.stdout);
+  assert.equal(result.publications, 0);
+  assert.equal(result.runs[0].committed, 1);
+  assert.equal((await status(other.config)).runs[0].unknown, 1);
+  assert.equal((await lstat(supervisorLock)).ino, supervisorInode);
+  assert.equal((await lstat(watcherLock)).ino, watcherInode);
+  assert.equal((await status(f.config)).owner_present, false);
+  for (const invalid of [['once', ...args.slice(1), '--state', f.config.state_directory],
+    ['once', ...args.slice(1), '--endpoint', 'http://127.0.0.1/repo.git'],
+    ...['resume', 'serve'].map(operation => [operation, ...args.slice(1)])]) {
+    assert.equal((await child(t, invalid).done).code, 2);
+  }
+});
+for (const [state, expected] of [['refused', 1], ['committed', 0]]) {
+  test(`supervisor status reflects the recovered ${state} publication`, LINUX_WORKFLOW, async t => {
+    const f = await fixture(t), server = await peer(t, f, ({ job }) => outcome(f, job, state));
+    const supervisor = await supervisorFixture(f);
+    await supervisor.bind();
+    const statusArgs = ['status', '--config', supervisor.path];
+    assert.equal((await child(t, statusArgs, supervisorCli).done).code, 2);
+    const recovered = await child(t, supervisor.args(server.address)).done;
+    assert.equal(recovered.code, expected, recovered.stderr);
+    const local = await child(t, statusArgs, supervisorCli).done;
+    const observed = JSON.parse(local.stdout);
+    assert.equal(observed.read_only, true);
+    assert.equal(observed.lanes[0].publication[state], 1);
+    assert.equal(observed.lanes[0].publication.pending, 0);
+    assert.equal(local.code, expected, local.stderr);
+    assert.equal(server.calls.length, 1);
+  });
+}
 test('CLI rejects publication flags, missing scopes, unsafe token files and malformed credentials before HTTP', LINUX_WORKFLOW, async t => {
   const f = await fixture(t), server = await peer(t, f);
   for (const args of [argumentsFor(f, server.address, 'recover', ['--max-publications', '1']),

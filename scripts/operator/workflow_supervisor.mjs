@@ -114,11 +114,13 @@ export function createController(backend) {
     if (encode(config).length > MAX_BYTES) fail('Supervisor configuration exceeds its byte budget.');
     return Object.freeze(config);
   }
-  async function binding(config, initialize = false) {
+  async function binding(config, initialize = false, checkpoint) {
+    checkpoint?.();
     await directory(config.state_directory);
-    const entries = await names(config.state_directory, 3);
+    const entries = await names(config.state_directory, 3, checkpoint);
     if (entries.some(name => !['binding.json', 'owner.lock'].includes(name))) fail('Unrecognized supervisor custody; nothing is erased automatically.');
     const saved = await readPrivate(join(config.state_directory, 'binding.json'), MAX_BYTES, true);
+    checkpoint?.();
     if (saved && !saved.equals(encode(config))) fail('Supervisor configuration changed; retain the original branch, principal and custody bindings.');
     if (!saved && initialize) await writeNew(join(config.state_directory, 'binding.json'), encode(config));
     return saved !== null;
@@ -266,8 +268,7 @@ export function createController(backend) {
       if (milliseconds < 1) fail('Supervisor reconciliation deadline exceeded; original custody retained.');
       return milliseconds;
     };
-    remaining();
-    if (!await binding(config)) fail('Reconciliation requires the original saved supervisor binding.');
+    if (!await binding(config, false, remaining)) fail('Reconciliation requires the original saved supervisor binding.');
     const owner = await lstat(join(config.state_directory, 'owner.lock')).then(() => true, error => {
       if (error.code === 'ENOENT') return false; throw error;
     });
@@ -279,23 +280,36 @@ export function createController(backend) {
         row.watcher = watcherStatus(await backend.reconcile(lane.publisher.watch, {
           signal: selected.signal, timeoutMs: remaining() }));
         remaining();
-        const observed = await backend.publicationStatus(lane.publisher);
+        const observed = await backend.publicationStatus(lane.publisher, remaining);
         remaining();
         row.publication = publication(observed);
         row.publication_owner_present = observed.owner_present === true;
         row.recovery_owner_present = observed.recovery_owner_present === true;
-      } catch (error) { row.error = errorObservation(error, 'reconciliation'); }
+      } catch (error) {
+        if (selected.signal?.aborted && error === selected.signal.reason) row.stopped = true;
+        else row.error = errorObservation(error, 'reconciliation');
+      }
       lanes.push(row);
     }
+    const stopped = selected.signal?.aborted === true;
     return { type: 'workflow_supervisor_reconciliation', schema_version: 1, lanes,
       owner_present: owner, failed: lanes.some(row => row.error || row.publication?.refused > 0),
-      pending: owner || lanes.some(row => row.error || row.watcher?.owner_present || row.watcher?.queued > 0 ||
+      pending: stopped || owner || lanes.some(row => row.error || row.watcher?.owner_present || row.watcher?.queued > 0 ||
         row.watcher?.execution_unknown > 0 || row.publication?.pending > 0 || row.publication_owner_present || row.recovery_owner_present),
-      stopped: selected.signal?.aborted === true, authoritative_check: false,
+      stopped, authoritative_check: false,
       execution_retried: false, publication_submitted: false, locks_removed: false };
   }
-  return Object.freeze({ configuration, once, serve, status, reconcile,
-    async loadConfiguration(path) { return configuration(parseJson(await readPrivate(path, MAX_BYTES), MAX_BYTES)); } });
+  async function loadConfiguration(path) {
+    return configuration(parseJson(await readPrivate(path, MAX_BYTES), MAX_BYTES));
+  }
+  async function loadBoundPublisher(path, name) {
+    const config = await loadConfiguration(path);
+    if (!await binding(config)) fail('This operation requires the original saved supervisor binding.');
+    const lane = config.lanes.find(lane => lane.name === name);
+    if (!lane) fail('Unknown supervisor lane.');
+    return lane.publisher;
+  }
+  return Object.freeze({ configuration, once, serve, status, reconcile, loadConfiguration, loadBoundPublisher });
 }
 
 export async function nativeController() {

@@ -3,6 +3,7 @@ import hashlib, json, os, pathlib, shutil, signal, subprocess, sys, time, zlib
 fg, root = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
 repo_root = pathlib.Path(__file__).resolve().parents[3]
 supervisor = repo_root / 'scripts/fg_workflow_supervisor.mjs'
+publisher_cli = repo_root / 'scripts/fg_workflow_checks.mjs'
 tenant, repository, principal = '1' * 32, '2' * 32, '3' * 32
 commands, native_commands, operator_commands = 0, 0, 0
 cases = []
@@ -115,12 +116,12 @@ jobs:
       - run: printf PACKAGE
 '''
 
+binary = root / 'fg'
+shutil.copyfile(fg, binary)
+binary.chmod(0o700)
 for fmt in ('sha1', 'sha256'):
     base = root / fmt
     base.mkdir(mode=0o700)
-    binary = base / 'fg'
-    shutil.copyfile(fg, binary)
-    binary.chmod(0o700)
     source, store = base / 'source', base / 'node'
     for name in ['watch', 'publication', 'runs', 'supervisor']:
         (base / name).mkdir(mode=0o700)
@@ -256,7 +257,28 @@ for fmt in ('sha1', 'sha256'):
     assert len(checks) == 12
     # Kill only the supervisor we own after Rust has durably recorded a workflow
     # start. Its already admitted finite native workflow completes independently.
+    prior_tip = tip
     import_revision(GOOD.replace("printf '%s'", "sleep 1; printf '%s'"), 4)
+    opened = json.loads(call(fmt + '-open-recovered-run-pr', [
+        binary, 'pr', 'open', store, tenant, repository, '7', '--trusted-local', '--principal', principal,
+        '--idempotency-key', f'{fmt}-post-crash-pr', '--expected-version', '0', '--source-ref', 'refs/heads/main',
+        '--target-ref', 'refs/heads/revision-3', '--expected-source', tip, '--expected-target', prior_tip,
+        '--title', 'Recovered workflow run', '--body', 'Post-crash canonical check fixture', '--object-format', fmt
+    ], native=True))
+    assert opened['command_committed'] and opened['node_closed']
+    def canonical_checks(label):
+        page = json.loads(call(fmt + '-' + label, [
+            binary, 'pr', 'checks', store, tenant, repository, '7', '--trusted-local', '--object-format', fmt
+        ], native=True))
+        assert page['found'] and page['complete'] and page['source_current'] and page['source_tip'] == tip
+        assert page['repository_incarnation'] == incarnation
+        return page
+    def publish_recovered(label):
+        return [json.loads(line) for line in call(fmt + '-' + label, [
+            'node', publisher_cli, 'once', '--supervisor-config', config_path, '--lane', 'main', '--trusted-local'
+        ]).splitlines()]
+    before_crash = canonical_checks('before-supervisor-crash')
+    assert before_crash['checks'] == []
     commands += 1
     operator_commands += 1
     process = subprocess.Popen(['node', str(supervisor), 'once', '--config', str(config_path), '--trusted-local'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -286,36 +308,99 @@ for fmt in ('sha1', 'sha256'):
             process.communicate(timeout=10)
     unknown = operator('status', expected=2)
     assert unknown['owner_present'] and unknown['lanes'][0]['watcher']['execution_unknown'] == 1
-    lock = base / 'supervisor/owner.lock'
-    original_lock = lock.stat().st_ino
+    supervisor_lock, watcher_lock = base / 'supervisor/owner.lock', base / 'watch/owner.lock'
+    original_locks = (supervisor_lock.stat().st_ino, watcher_lock.stat().st_ino)
     retained = snapshot(base / 'runs')
     publication_before = snapshot(base / 'publication')
-    source.rename(base / 'source-offline')
-    binary.rename(base / 'fg-offline')
-    store.rename(base / 'node-offline')
+    pending_publication, = publish_recovered('publication-before-reconciliation')
+    assert pending_publication['publications'] == 0 and snapshot(base / 'publication') == publication_before
+    assert canonical_checks('unreconciled-run-has-no-checks') == before_crash
+    offline = [(source, base / 'source-offline'), (binary, base / 'fg-offline'), (store, base / 'node-offline')]
+    for path, hidden in offline:
+        path.rename(hidden)
     finalization = directory / 'finalization.json'
-    finalization.rename(base / 'retained-finalization.json')
     try:
-        still_pending = operator('reconcile', expected=2)
-        assert still_pending['lanes'][0]['watcher']['execution_unknown'] == 1
-        assert still_pending['lanes'][0]['watcher']['owner_present']
-        assert (base / 'watch/owner.lock').is_dir()
+        finalization.rename(base / 'retained-finalization.json')
+        try:
+            still_pending = operator('reconcile', expected=2)
+            assert still_pending['lanes'][0]['watcher']['execution_unknown'] == 1
+            assert still_pending['lanes'][0]['watcher']['owner_present']
+        finally:
+            (base / 'retained-finalization.json').rename(finalization)
+        recovered = operator('reconcile', expected=2)
+        assert not recovered['failed'] and recovered['pending'] and recovered['owner_present']
+        assert recovered['lanes'][0]['watcher']['execution_unknown'] == 0
+        assert recovered['lanes'][0]['watcher']['observed_succeeded'] == 3
+        assert not recovered['publication_submitted'] and not recovered['execution_retried'] and not recovered['locks_removed']
+        assert recovered['lanes'][0]['watcher']['owner_present']
+        assert snapshot(base / 'runs') == retained and snapshot(base / 'publication') == publication_before
+        watcher_after = snapshot(base / 'watch')
+        assert operator('reconcile', expected=2) == recovered
+        assert snapshot(base / 'watch') == watcher_after
     finally:
-        (base / 'retained-finalization.json').rename(finalization)
-    recovered = operator('reconcile', expected=2)
-    assert not recovered['failed'] and recovered['pending'] and recovered['owner_present']
-    assert recovered['lanes'][0]['watcher']['execution_unknown'] == 0
-    assert recovered['lanes'][0]['watcher']['observed_succeeded'] == 3
-    assert not recovered['publication_submitted'] and not recovered['execution_retried'] and not recovered['locks_removed']
-    assert lock.stat().st_ino == original_lock and recovered['lanes'][0]['watcher']['owner_present']
-    assert snapshot(base / 'runs') == retained and snapshot(base / 'publication') == publication_before
-    watcher_after = snapshot(base / 'watch')
-    assert operator('reconcile', expected=2) == recovered
-    assert snapshot(base / 'watch') == watcher_after
+        for path, hidden in reversed(offline):
+            hidden.rename(path)
+    assert canonical_checks('reconciled-run-still-has-no-checks') == before_crash
+
+    *observations, published = publish_recovered('publish-reconciled-run')
+    assert published['publications'] == len(observations) == 4
+    assert sum(run['committed'] for run in published['runs']) == 16
+    assert not published['execution_retried'] and all(row['outcome'] == 'committed' for row in observations)
+    original_plan, = [path for path in (base / 'publication').glob('plan-*.json') if path.name not in publication_before]
+    plan = json.loads(original_plan.read_bytes())
+    assert directory.name == 'dispatch-' + plan['watch_id'][:32]
+    original_report = json.loads((directory / 'report.json').read_bytes())
+    original_run, = original_report['runs']
+    job_outcomes = {job['id']: job['outcome'] for job in original_run['execution']['jobs']}
+    run_directory = pathlib.Path(os.fsdecode(bytes.fromhex(original_run['run_directory_hex'])))
+    assert run_directory == directory / ('workflow-' + original_run['run_id'])
+    journal_id = hashlib.sha256((run_directory / 'attempt.json').read_bytes()).hexdigest()
+    history = json.loads(call(fmt + '-recovered-native-journal', [
+        binary, 'workflow', 'recover', run_directory, tenant, repository, '--journal-id', journal_id,
+        '--limit', '128', '--page-bytes', '1048576', '--timeout-ms', '30000'
+    ], native=True))
+    assert history['next_after'] is None
+    original_facts = {fact['job']: (batch, index, fact)
+                      for batch in history['entries'] for index, fact in enumerate(batch['facts'])
+                      if fact['status'] == 'completed'}
+    page = canonical_checks('canonical-recovered-checks')
+    by_job = {row['job']: row for row in page['checks']}
+    assert len(page['checks']) == len(by_job) == len(job_outcomes) == 4
+    assert set(by_job) == set(job_outcomes) == set(original_facts)
+    original_check_ids = set()
+    for index, job in enumerate(plan['jobs']):
+        saved_terminal = json.loads((base / 'publication' / f'terminal-{plan["watch_id"]}-{index:03d}.json').read_bytes())
+        row = by_job[job['job']]
+        batch, fact_index, fact = original_facts[job['job']]
+        assert job['directory'] == str(run_directory) and job['journal_id'] == journal_id and job['source_commit'] == tip
+        assert job['batch_sha256'] == batch['batch_sha256'] and job['fact_index'] == fact_index
+        assert job['run_id'] == batch['run_sha256'] and job['attempt_id'] == batch['attempt_sha256']
+        assert job['evidence_sha256'] == fact['evidence_sha256'] and job['graph_root'] == batch['workflow_graph_sha256']
+        assert row['id'] == saved_terminal['check_id'] and row['publisher'] == principal
+        assert all(row[field] == job[field] for field in ['run_id', 'attempt_id', 'graph_root', 'evidence_sha256'])
+        assert row['conclusion'] == {'succeeded': 'success', 'skipped': 'action_required', 'failed': 'failure'}[job_outcomes[row['job']]]
+        original_check_ids.add(row['id'])
+    assert len(original_check_ids) == 4 and original_check_ids.isdisjoint(checks)
+    authority = call(fmt + '-post-crash-authority', [binary, 'at', store, tenant, repository, 'latest'], native=True)
+    after_publication = snapshot(base / 'publication')
+    repeated, = publish_recovered('repeat-recovered-publication')
+    assert repeated['publications'] == 0
+    assert sorted(repeated['runs'], key=lambda run: run['id']) == sorted(published['runs'], key=lambda run: run['id'])
+    assert canonical_checks('repeat-preserves-canonical-checks') == page
+    assert call(fmt + '-repeat-authority', [binary, 'at', store, tenant, repository, 'latest'], native=True) == authority
+    assert snapshot(base / 'watch') == watcher_after and snapshot(base / 'runs') == retained
+    assert snapshot(base / 'publication') == after_publication
+    assert (supervisor_lock.stat().st_ino, watcher_lock.stat().st_ino) == original_locks
+    assert not (base / 'publication/owner.lock').exists()
+    blocked = call(fmt + '-retained-supervisor-fence', [
+        'node', supervisor, 'once', '--config', config_path, '--trusted-local'
+    ], expected=1)
+    assert not blocked and snapshot(base / 'runs') == retained
     cases.append({'format': fmt, 'automatic_runs': 3, 'distinct_checks': len(checks), 'failed_matrix_published': True,
                   'read_only_observation_recovered': True,
                   'required_native_finalization_under_retained_owner': True,
                   'publication_backpressure': True, 'supervisor_sigkill_reconciled': True, 'source_and_binary_free': True,
-                  'retained_owner_preserved': True, 'no_reexecution_or_republication_during_reconciliation': True})
+                  'retained_owner_preserved': True, 'no_reexecution_or_republication_during_reconciliation': True,
+                  'reconciled_checks_published_once': len(original_check_ids), 'repeat_publications': repeated['publications']})
 (root / 'results.json').write_text(json.dumps({'top_level_commands': commands, 'direct_native_commands': native_commands,
     'operator_commands': operator_commands, 'cases': cases, 'native_peers_are_fixtures': False}, indent=2) + '\n')

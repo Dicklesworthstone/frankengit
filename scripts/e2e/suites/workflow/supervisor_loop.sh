@@ -17,4 +17,4 @@ fge_run_timeout 600 SUPERVISOR-LOOP-001 python3 "$E2E_ROOT/helpers/workflow_supe
 fge_assert_exit SUPERVISOR-LOOP-002 0 "$FGE_LAST_EXIT"
 fge_phase assert
 fge_artifact "$WORK/results.json" supervisor_loop
-fge_note SUPERVISOR-LOOP-003 'Both hash domains execute matrices, automatically publish, enforce backpressure and reconcile SIGKILL-retained native reports without source/binary access or execution replay.'
+fge_note SUPERVISOR-LOOP-003 'Both hash domains execute matrices, enforce backpressure, reconcile SIGKILL-retained native reports offline, and publish and read back the original canonical checks exactly once.'

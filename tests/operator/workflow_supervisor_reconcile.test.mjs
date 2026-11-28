@@ -86,6 +86,27 @@ test('deadline is shared across lanes and is not refreshed after an awaited read
   assert.ok(result.lanes.every(r => /deadline/.test(r.error.message))); assert.equal(result.pending, true);
 });
 
+test('publication custody scan receives the remaining reconciliation deadline', async t => {
+  let time = 1000, publications = 0, remaining;
+  const f = await fixture(t, {
+    reconcile: async () => { time += 25; return watched(); },
+    publicationStatus: async (_publisher, checkpoint) => {
+      publications++;
+      remaining = checkpoint();
+      time += 15;
+      checkpoint();
+      return published();
+    },
+  });
+  t.mock.method(performance, 'now', () => time);
+  const result = await f.controller.reconcile(f.config, { readTimeoutMs: 40 });
+  assert.equal(remaining, 15);
+  assert.equal(publications, 1);
+  assert.equal(result.lanes[0].watcher.observed_succeeded, 1);
+  assert.ok(result.lanes.every(row => /reconciliation deadline/.test(row.error.message)));
+  assert.equal(exitCode(result), 1);
+});
+
 test('pre-abort and changed or missing bindings never enter a backend', async t => {
   const f = await fixture(t), stop = new AbortController(); stop.abort(new Error('stop now'));
   await assert.rejects(f.controller.reconcile(f.config, { signal: stop.signal }), /stop now/);
@@ -101,6 +122,20 @@ test('mid-operation cancellation stops new reads but preserves already completed
   const result = await f.controller.reconcile(f.config, { signal: stop.signal });
   assert.equal(reads, 1); assert.equal(result.lanes[0].watcher.observed_succeeded, 1);
   assert.equal(result.stopped, true); assert.equal(result.pending, true);
+  assert.equal(result.failed, false); assert.equal(exitCode(result), 2);
+  assert.ok(result.lanes.every(row => row.stopped && !row.error));
+});
+
+test('a genuine custody error wins over a concurrent stop', async t => {
+  const stop = new AbortController();
+  const f = await fixture(t, { reconcile: async () => {
+    stop.abort(new Error('requested stop'));
+    throw new Error('original report corrupt');
+  } });
+  const result = await f.controller.reconcile(f.config, { signal: stop.signal });
+  assert.match(result.lanes[0].error.message, /original report corrupt/);
+  assert.equal(result.lanes[1].stopped, true);
+  assert.equal(result.stopped, true); assert.equal(result.failed, true); assert.equal(exitCode(result), 1);
 });
 
 test('CLI reconciliation requires consent and accepts only its applicable shared read budget', async () => {

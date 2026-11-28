@@ -16,6 +16,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import time
 
 from operator_issue_smoke import OperatorCampaign, issue_server, TOKEN
 from operator_artifact_smoke import artifact_case
@@ -52,15 +53,41 @@ def verify_fixture(c, source, oracle_run, fmt, label, *arguments):
     require(checked.returncode == 0, "pinned sandboxed Git rejected workflow objects")
 
 
-def supervisor_case(c, home, repository, config, canonical, next_revision):
-    fmt = config["object_format"]
-    watch, publisher, state = Path(config["state_directory"]), home / "publisher", home / "supervisor"
+def supervisor_selection(home, config):
+    state = home / "supervisor"
     state.mkdir(mode=0o700)
     selected = dict(schema="frankengit-workflow-supervisor-v1", state_directory=str(state), lanes=[dict(
         name="selected", publisher=dict(schema="frankengit-workflow-check-publisher-v1", watch=config,
-                                       state_directory=str(publisher), principal_id=PRINCIPAL))])
+                                       state_directory=str(home / "publisher"), principal_id=PRINCIPAL))])
     selection = home / "supervisor.json"
     selection.write_text(json.dumps(selected))
+    return selection
+
+
+def kill_active_dispatch(owner, fg, repository):
+    children = Path(f"/proc/{owner.pid}/task/{owner.pid}/children")
+    expected = [os.fsencode(fg), b"workflow", b"dispatch", os.fsencode(repository)]
+    for pid in map(int, children.read_text().split()):
+        try:
+            fd = os.pidfd_open(pid)
+        except ProcessLookupError:
+            continue
+        try:
+            command = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+            if command[:4] == expected and str(pid) in children.read_text().split():
+                signal.pidfd_send_signal(fd, signal.SIGKILL)
+                return pid
+        except FileNotFoundError:
+            continue
+        finally:
+            os.close(fd)
+    raise AssertionError("supervisor has no original active native dispatch child")
+
+
+def supervisor_case(c, home, repository, config, canonical, next_revision):
+    fmt = config["object_format"]
+    watch, publisher, state = Path(config["state_directory"]), home / "publisher", home / "supervisor"
+    selection = supervisor_selection(home, config)
     script = ROOT / "scripts/fg_workflow_supervisor.mjs"
 
     def call(action, *extra, expected=0):
@@ -170,6 +197,63 @@ def supervisor_case(c, home, repository, config, canonical, next_revision):
             and repaired["authoritative_check"] is False and current["merge_permission"] is None,
             "local workflow observation became merge authority")
     c.facts[fmt + "_native_authority_and_scope"] = True
+    blocked_tip = next_revision(tip, 9)
+    pending_page = canonical(9, blocked_tip)
+    pending_head = c.run("at", repository, TENANT, REPOSITORY, "latest")
+    require(pending_page["checks"] == [], "new interrupted run inherited checks")
+    active = home / "dispatch-active"
+    release = home / "dispatch-release"
+    output, errors = home / "native-kill.out", home / "native-kill.err"
+    args = [str(c.node), str(script), "once", "--config", str(selection), "--trusted-local"]
+    try:
+        with output.open("wb") as out, errors.open("wb") as err:
+            with subprocess.Popen(args, stdout=out, stderr=err) as owner:
+                deadline = time.monotonic() + 20
+                while not active.exists() and owner.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                try:
+                    require(active.exists() and owner.poll() is None, "native step did not start before the test deadline")
+                    pid = kill_active_dispatch(owner, c.fg, repository)
+                    exit_code = owner.wait(timeout=10)
+                finally:
+                    release.touch()
+                    if owner.poll() is None:
+                        owner.kill()
+                        owner.wait(timeout=10)
+        c.record(kind="native_dispatch_owner_killed", pid=pid, supervisor_exit=exit_code)
+        require(exit_code == 1, "surviving supervisor did not report native process loss")
+        lost = json.loads(output.read_bytes())
+        lane = lost["lanes"][0]
+        require(lane["error"]["stage"] == "execution" and "signal=SIGKILL" in lane["error"]["message"],
+                "real native signal loss was not observed")
+        require(lost["containment_unknown"] and lane["error"]["containment_unknown"],
+                "native signal death released containment responsibility")
+        locks = [state / "owner.lock", watch / "owner.lock"]
+        identities = [lock.stat().st_ino for lock in locks]
+        retained = call("status", expected=2)[-1]
+        require(retained["owner_present"] and retained["lanes"][0]["watcher"]["owner_present"]
+                and retained["lanes"][0]["watcher"]["execution_unknown"] == 1,
+                "native loss did not retain original execution custody")
+        original, = [intent for path in watch.glob("intent-*.json") if
+                     (intent := json.loads(path.read_bytes()))["commit"] == blocked_tip]
+        batch = Path(config["run_parent"]) / ("dispatch-" + original["run_id"])
+        require(bool(list(batch.glob("workflow-*/attempt.json"))) and not (batch / "finalization.json").exists(),
+                "native process loss missed the pre-finalization execution boundary")
+        pending = call("reconcile", expected=2)[-1]
+        require(pending["lanes"][0]["watcher"]["execution_unknown"] == 1
+                and not pending["execution_retried"] and not pending["publication_submitted"],
+                "reconciliation treated the terminated native child as completed")
+        refused = c.node_command(script, ["once", "--config", str(selection), "--trusted-local"], 1,
+                                 error_reply=True, text_reply=True)
+        require([lock.stat().st_ino for lock in locks] == identities
+                and "EEXIST" in refused
+                and marker.read_bytes() == b"sfsfxs"
+                and canonical(9, blocked_tip) == pending_page
+                and c.run("at", repository, TENANT, REPOSITORY, "latest") == pending_head,
+                "native signal recovery changed locks, repeated work or advanced canonical state")
+        c.facts[fmt + "_native_signal_keeps_execution_fences"] = True
+    finally:
+        release.touch()
     print(f"OPERATOR_SUPERVISOR {fmt}: actual execution/publication, bounded service, dedup and offline reconciliation", flush=True)
 
 
@@ -271,21 +355,32 @@ def run_case(c, oracle_run, fmt, nested, supervised=False):
         return page
 
     if supervised:
-        def next_revision():
+        def next_revision(parent=tip, number=8):
             # A distinct permitted fixture revision; the original failing input,
             # execution and receipts remain retained and keep their conclusions.
-            permitted = {**files, (workflow_dir + "/workflow.yml").encode(): (b"100644", workflow.replace(b"exit 7", b"exit 0"))}
+            permitted_workflow = workflow.replace(b"exit 7", b"exit 0")
+            if number == 9:
+                active = shlex.quote(str(home / "dispatch-active"))
+                release = shlex.quote(str(home / "dispatch-release"))
+                barrier = (f"printf active > {active}; n=0; "
+                           f"until test -e {release} || test \"$n\" -ge 150; do sleep 0.1; n=$((n+1)); done; ")
+                permitted_workflow = permitted_workflow.replace(b"printf workflow-ok", barrier.encode() + b"printf workflow-ok", 1)
+            permitted = {**files, (workflow_dir + "/workflow.yml").encode(): (b"100644", permitted_workflow)}
             next_tree, _ = file_tree(fmt, permitted, lambda kind, body: loose(source, fmt, kind, body))
-            body = (f"tree {next_tree}\nparent {tip}\nauthor Workflow Fixture <workflow@example.invalid> 2 +0000\n"
-                    "committer Workflow Fixture <workflow@example.invalid> 2 +0000\n\nPermitted workflow twin\n").encode()
+            timestamp = number - 6
+            body = (f"tree {next_tree}\nparent {parent}\nauthor Workflow Fixture <workflow@example.invalid> {timestamp} +0000\n"
+                    f"committer Workflow Fixture <workflow@example.invalid> {timestamp} +0000\n\nPermitted workflow twin\n").encode()
             next_tip = loose(source, fmt, "commit", body)
             (source / SOURCE).write_text(next_tip + "\n")
-            verify_fixture(c, source, oracle_run, fmt, "permitted")
-            verify_fixture(c, source, oracle_run, fmt, "permitted-bundle", "bundle", "create", "../permitted.bundle", SOURCE)
-            c.run("bundle", "sync-import", repository, TENANT, REPOSITORY, home / "permitted.bundle",
+            suffix = "" if number == 8 else "-native-signal"
+            bundle = f"permitted{suffix}.bundle"
+            verify_fixture(c, source, oracle_run, fmt, "permitted" + suffix)
+            verify_fixture(c, source, oracle_run, fmt, "permitted-bundle" + suffix, "bundle", "create", "../" + bundle, SOURCE)
+            c.run("bundle", "sync-import", repository, TENANT, REPOSITORY, home / bundle,
                   "--trusted-local", "--object-format", fmt, "--principal", PRINCIPAL, "--key-stdin",
-                  "--allow-ref-updates", "--expect", SOURCE + "=" + tip, input_bytes=b"operator-supervisor-permitted-fixture")
-            open_pull(8, next_tip)
+                  "--allow-ref-updates", "--expect", SOURCE + "=" + parent,
+                  input_bytes=("operator-supervisor-permitted-fixture" + suffix).encode())
+            open_pull(number, next_tip)
             return next_tip
         open_pull(7, tip)
         supervisor_case(c, home, repository, config, canonical, next_revision)
@@ -366,27 +461,59 @@ def run_case(c, oracle_run, fmt, nested, supervised=False):
             and canonical() == page and c.run("at", repository, TENANT, REPOSITORY, "latest") == authority,
             "publisher output failure changed original keys, terminal custody or canonical state")
     c.facts[f"{fmt}_publication_output_failure_retains_terminal"] = True
+    selection = supervisor_selection(home, config)
+    bound = node_rows(c, ROOT / "scripts/fg_workflow_supervisor.mjs",
+                      ["once", "--config", str(selection), "--trusted-local"], 1)[-1]
+    lane = bound["lanes"][0]
+    require("error" not in lane and lane["execution"]["type"] == "workflow_watch_idle"
+            and lane["before"]["committed"] == lane["after"]["committed"] == 3
+            and custody_bytes() == original_custody,
+            "supervisor binding changed the already-settled watcher or publisher")
+    supervisor_binding = home / "supervisor" / "binding.json"
+    binding_bytes = supervisor_binding.read_bytes()
     saved = home / "retained-terminals"
     saved.mkdir(mode=0o700)
     terminals = list(pub_state.glob("terminal-*.json"))
     require(len(terminals) == 3, "three terminal receipts required before recovery exercise")
     for terminal in terminals:
         terminal.rename(saved / terminal.name)
+    expected_outcomes = {job["job"]: json.loads(
+        (saved / f'terminal-{plan["watch_id"]}-{index:03d}.json').read_bytes())
+        for index, job in enumerate(plan["jobs"])}
+    detached_watch = home / "retained-watch.json"
+    config_path.rename(detached_watch)
     grants("pulls-read")
-    with issue_server(c, repository, credentials, "workflow-" + fmt) as server:
-        recovery = ["recover", *pub_args, "--endpoint", server.url, "--token-file", str(token)]
-        denied = node_rows(c, check_cli, recovery, 3, error_reply=True)[-1]
-        require(denied["type"] == "workflow_check_error" and denied["message"] == "outcome_http_refused"
-                and denied["publication_unknown"] is True and denied["retained_recovery"]["runs"][0]["pending"] == 3
-                and not list(pub_state.glob("observed-*.json")),
-                "outcomes denial invented a terminal observation")
-        grants("outcomes-read")
-        recovered = node_rows(c, check_cli, recovery)[-1]
-        require(recovered["remote_read_only"] is True and recovered["request_reexecuted"] is False
-                and recovered["lookups"] == 3 and recovered["runs"][0]["committed"] == 3,
-                "original-key outcome recovery lost terminal identity or resubmitted")
+    try:
+        with issue_server(c, repository, credentials, "workflow-" + fmt) as server:
+            remote = ["--endpoint", server.url, "--token-file", str(token)]
+            recovery = ["recover", "--supervisor-config", str(selection), "--lane", "selected", "--trusted-local", *remote]
+            denied = node_rows(c, check_cli, recovery, 3, error_reply=True)[-1]
+            require(denied["type"] == "workflow_check_error" and denied["message"] == "outcome_http_refused"
+                    and denied["publication_unknown"] is True and denied["retained_recovery"]["runs"][0]["pending"] == 3
+                    and not list(pub_state.glob("observed-*.json")),
+                    "outcomes denial invented a terminal observation")
+            grants("outcomes-read")
+            *observations, recovered = node_rows(c, check_cli, recovery)
+            require(recovered["remote_read_only"] is True and recovered["request_reexecuted"] is False
+                    and recovered["lookups"] == 3 and recovered["runs"][0]["committed"] == 3
+                    and len(observations) == 3 and {row["job"] for row in observations} == set(expected_outcomes),
+                    "original-key outcome recovery lost terminal identity or resubmitted")
+            for observation in observations:
+                expected = expected_outcomes[observation["job"]]
+                require(observation["type"] == "workflow_check_outcome_observed"
+                        and observation["tx_id"] == expected["tx_id"]
+                        and observation["decision"]["repository_commit_id"] == expected["repository_commit_id"],
+                        "recovery did not retain the exact original transaction and repository decision")
+            detached_watch.rename(config_path)
+            repeated = node_rows(c, check_cli, ["recover", *pub_args, *remote])[-1]
+            require(repeated["lookups"] == 0 and repeated["runs"][0]["committed"] == 3,
+                    "standalone recovery did not share the same terminal custody")
+    finally:
+        if detached_watch.exists():
+            detached_watch.rename(config_path)
     c.facts[f"{fmt}_outcome_grant_twins_and_service_drain"] = True
-    require(all((pub_state / name).read_bytes() == data for name, data in retained.items())
+    require(supervisor_binding.read_bytes() == binding_bytes
+            and all((pub_state / name).read_bytes() == data for name, data in retained.items())
             and marker.read_bytes() == b"sf" and canonical() == page
             and c.run("at", repository, TENANT, REPOSITORY, "latest") == authority,
             "recovery changed keys, reran execution or changed canonical state")

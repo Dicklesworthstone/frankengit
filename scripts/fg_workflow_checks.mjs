@@ -5,6 +5,7 @@ import { loadConfiguration } from './operator/workflow_watch.mjs';
 import { dirname } from 'node:path';
 import { absolute, directory, readPrivate } from './operator/workflow_watch_io.mjs';
 import { configuration, once, serve, status, recover } from './operator/workflow_check_publish.mjs';
+import { nativeController } from './operator/workflow_supervisor.mjs';
 
 const USAGE = `usage: node scripts/fg_workflow_checks.mjs <once|serve|resume|status|recover>
   --watch-config <absolute-private-watcher-config> --state <absolute-private-empty-directory>
@@ -12,6 +13,8 @@ const USAGE = `usage: node scripts/fg_workflow_checks.mjs <once|serve|resume|sta
   [--max-publications <1..128>] (once/resume/serve)
   [--poll-millis <100..60000> --max-polls <1..1000000>] (serve only)
   --endpoint <https-repository-url> --token-file <absolute-private-token> (recover)
+  --supervisor-config <absolute-private-config> --lane <bound-name> --trusted-local
+    (once/recover only, replaces --watch-config, --state and --principal-id)
   [--ca-file <absolute-private-PEM>] (recover; TLS verification stays enabled)
   [--max-lookups <1..128> --timeout-ms <1..660000> --request-timeout-ms <1..300000>] (recover)
 
@@ -52,14 +55,20 @@ function options(args) {
   if (!['once', 'serve', 'resume', 'status', 'recover'].includes(args[0]) || args.length > 24 ||
       args.some(arg => typeof arg !== 'string' || arg.length > 8192 || arg.includes('\0')) || args.reduce((n, arg) => n + arg.length, 0) > 65536) throw new Error(USAGE);
   const fields = new Map();
+  const publisherFlags = ['--watch-config', '--state', '--principal-id'];
+  const supervisorFlags = ['--supervisor-config', '--lane'];
   for (let index = 1; index < args.length;) {
     const flag = args[index++];
-    if (!['--watch-config', '--state', '--principal-id', '--trusted-local', '--max-publications', '--poll-millis', '--max-polls', '--endpoint', '--token-file', '--ca-file', '--max-lookups', '--timeout-ms', '--request-timeout-ms'].includes(flag) || fields.has(flag)) throw new Error(USAGE);
+    if (![...publisherFlags, ...supervisorFlags, '--trusted-local', '--max-publications', '--poll-millis', '--max-polls', '--endpoint', '--token-file', '--ca-file', '--max-lookups', '--timeout-ms', '--request-timeout-ms'].includes(flag) || fields.has(flag)) throw new Error(USAGE);
     const value = flag === '--trusted-local' ? true : args[index++];
     if (value === undefined || value === '' || (typeof value === 'string' && value.startsWith('--'))) throw new Error(USAGE);
     fields.set(flag, value);
   }
-  for (const flag of ['--watch-config', '--state', '--principal-id', '--trusted-local']) if (!fields.has(flag)) throw new Error(USAGE);
+  if (!fields.has('--trusted-local')) throw new Error(USAGE);
+  if (supervisorFlags.some(flag => fields.has(flag))) {
+    if (!['once', 'recover'].includes(args[0]) || !supervisorFlags.every(flag => fields.has(flag)) ||
+        publisherFlags.some(flag => fields.has(flag))) throw new Error(USAGE);
+  } else if (!publisherFlags.every(flag => fields.has(flag))) throw new Error(USAGE);
   if (args[0] !== 'serve' && (fields.has('--poll-millis') || fields.has('--max-polls')) || args[0] === 'status' && fields.has('--max-publications')) throw new Error(USAGE);
   const recoveryFlags = ['--endpoint', '--token-file', '--ca-file', '--max-lookups', '--timeout-ms', '--request-timeout-ms'];
   if (args[0] === 'recover' ? !fields.has('--endpoint') || !fields.has('--token-file') || fields.has('--max-publications')
@@ -81,8 +90,14 @@ export async function main(args, { stdout = process.stdout, stderr = process.std
   try {
     if (args.length === 1 && args[0] === '--help') { await write(stdout, { usage: USAGE }); return 0; }
     const { operation, fields, loop } = options(args);
-    const config = configuration({ schema: 'frankengit-workflow-check-publisher-v1',
-      watch: await loadConfiguration(fields.get('--watch-config')), state_directory: fields.get('--state'), principal_id: fields.get('--principal-id') });
+    let config;
+    if (fields.has('--supervisor-config')) {
+      const supervisor = await nativeController();
+      config = await supervisor.loadBoundPublisher(fields.get('--supervisor-config'), fields.get('--lane'));
+    } else {
+      config = configuration({ schema: 'frankengit-workflow-check-publisher-v1',
+        watch: await loadConfiguration(fields.get('--watch-config')), state_directory: fields.get('--state'), principal_id: fields.get('--principal-id') });
+    }
     const request = { ...loop, signal: stop.signal, onObservation: value => write(stdout, value) };
     let token, ca;
     if (operation === 'recover') {

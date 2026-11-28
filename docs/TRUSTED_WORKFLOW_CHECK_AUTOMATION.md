@@ -163,14 +163,25 @@ watchdog enforces the selected whole-operation deadline; forced termination
 retains the owner lock and makes no process-containment claim. SIGKILL can leave
 the native process alive. No PID-based lock stealing or automatic lock removal
 is provided. Independently reconcile the original process before operator repair.
+If the native publisher dies by signal, its original publication remains
+unknown and the publisher retains the owner lock.
 Never delete old custody to cause a replay.
 
 Each sweep has one 660-second cooperative deadline, at most 128 publication
-calls and at most 128 jobs per plan. Each history-discovery pass is bounded to
+calls and at most 128 jobs per plan. The deadline covers the publisher and
+watcher custody scans. A stop after a saved terminal prevents another watcher
+scan. If the deadline expires while reporting that terminal, the error carries
+the saved decision. Each history-discovery pass is bounded to
 128 pages, 1024 batches and 16 MiB of aggregate JSON. Native recovery calls are
 limited to 30 seconds; native publication retains the shared remaining deadline.
 The Rust publisher independently limits each selected evidence body to 1 MiB;
 an oversized observation refuses rather than being reduced to a success flag.
+
+For a supervised lane, `once --supervisor-config /srv/ci/supervisor.json
+--lane main --trusted-local` selects the publisher from the original saved
+supervisor binding. It takes the normal publisher owner lock and processes
+completed watcher observations. See the
+[post-crash procedure](WORKFLOW_SUPERVISOR_RECONCILIATION.md#publish-a-recovered-run).
 
 A publication directory retains at most 128 watcher-run plans. Plans are bounded
 to 1 MiB each and all custody reads to 32 MiB. Admission of a new plan reserves
