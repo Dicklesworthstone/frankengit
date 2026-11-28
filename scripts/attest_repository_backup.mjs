@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { approveVerifiedRepositoryBackup } from './lib/repository-backup-verified-sign.mjs';
 import { BACKUP_LIMITS, backupError, backupLifetime, backupPath, readBackupControl, publishBackupControl } from './lib/repository-backup-io.mjs';
 import { backupDecimal, backupPolicy, repositoryBackupDeclarations, signRepositoryBackupFile, authenticateRepositoryBackupFile } from './lib/repository-backup-approval.mjs';
+import { backupLfsSha256 } from './lib/repository-backup-lfs.mjs';
 
 export const BACKUP_APPROVAL_HELP = `Usage:
   node scripts/attest_repository_backup.mjs sign ARCHIVE NEW_APPROVAL --private-key PEM
@@ -24,6 +25,12 @@ export const BACKUP_APPROVAL_HELP = `Usage:
 
 All operations accept --max-archive-bytes N (default 1 GiB, at most 1 TiB)
 and --timeout-secs N (default 300, at most 3600). Use -- before literal paths.
+Export-sign may add --lfs-root EXISTING_CUSTODY --lfs-output NEW_COMPANION.
+Verify-sign may add --lfs-archive COMPANION --expected-lfs-sha256 SHA256.
+Each pair is required together. The byte limit applies to each archive separately;
+all phases share the original deadline. Native fg verifies the complete companion
+against the exact source pointer set. Keep the returned companion digest: the
+unchanged DSSE approval signs only the source archive, not the companion file.
 Offline sign binds actual streamed bytes to OPERATOR-SUPPLIED identity declarations;
 it does not parse or verify the native archive. Check authenticates the supplied
 Ed25519 key, exact namespace/incarnation/format and external generation floor,
@@ -34,9 +41,9 @@ The verified digest, namespace, incarnation, format and generation must match th
 final signing pass before any approval is published. The native verification
 receipt is not embedded in the signature: restore still verifies independently.
 Export-sign first runs native fg backup export, then verifies and signs the exact
-exported digest and object/graph counts. Both outputs must be outside SOURCE.
-Archive and approval publish separately; an interruption can leave an unsigned
-archive. It is retained, never deleted, overwritten, or automatically retried.
+exported digest and object/graph counts. Outputs must be outside both input roots.
+Archives and approval publish separately; an interruption can leave unsigned
+archives. They are retained, never deleted, overwritten, or automatically retried.
 Use verify-sign explicitly to verify and approve retained bytes after inspection.
 Unknown verification scratch is retained and reported, never recursively deleted.
 The detached approval has its own DSSE type; Git-bundle approvals are refused.
@@ -51,7 +58,9 @@ export function approvalArguments(args) {
   const isNative = ['verify-sign', 'export-sign'].includes(op);
   const allowed = new Set(['--tenant-id', '--repository-id', '--incarnation-id', '--object-format',
     '--max-archive-bytes', '--timeout-secs', ...(op !== 'check' ? ['--private-key', '--head-generation', '--expires-at'] : ['--trust-key', '--minimum-head-generation']),
-    ...(isNative ? ['--fg', '--verification-instance', '--trusted-local'] : [])]);
+    ...(isNative ? ['--fg', '--verification-instance', '--trusted-local'] : []),
+    ...(op === 'export-sign' ? ['--lfs-root', '--lfs-output'] : []),
+    ...(op === 'verify-sign' ? ['--lfs-archive', '--expected-lfs-sha256'] : [])]);
   for (let at = 1; at < args.length; at++) {
     const arg = args[at];
     if (!literal && arg === '--') { literal = true; continue; }
@@ -75,7 +84,16 @@ export function approvalArguments(args) {
   const native = isNative ? { fg: backupPath(required('--fg')),
     verificationInstance: backupDecimal(required('--verification-instance'), 9223372036854775807n),
     trustedLocal: required('--trusted-local') === true } : {};
-  return { op, paths, keyPath, policy, declarations, maximumBytes, timeoutMs, ...native };
+  let lfs = {};
+  if (flags.has('--lfs-root') || flags.has('--lfs-output')) {
+    if (!flags.has('--lfs-root') || !flags.has('--lfs-output')) throw backupError('backup_lfs_pair_required');
+    lfs = { lfsRoot: backupPath(flags.get('--lfs-root')), lfsOutput: backupPath(flags.get('--lfs-output')) };
+  }
+  if (flags.has('--lfs-archive') || flags.has('--expected-lfs-sha256')) {
+    if (!flags.has('--lfs-archive') || !flags.has('--expected-lfs-sha256')) throw backupError('backup_lfs_pair_required');
+    lfs = { lfsArchive: backupPath(flags.get('--lfs-archive')), expectedLfsSha256: backupLfsSha256(flags.get('--expected-lfs-sha256')) };
+  }
+  return { op, paths, keyPath, policy, declarations, maximumBytes, timeoutMs, ...native, ...lfs };
 }
 export async function runApprovalCommand(args, signal) {
   if (args.length === 1 && args[0] === '--help') return BACKUP_APPROVAL_HELP;
@@ -84,11 +102,13 @@ export async function runApprovalCommand(args, signal) {
     fg: options.fg, source: options.paths[0], archive: options.paths[1], output: options.paths[2], privateKey: options.keyPath,
     declarations: options.declarations, verificationInstance: options.verificationInstance, trustedLocal: options.trustedLocal,
     maximumBytes: live.maximumBytes, timeoutMs: live.remaining(), signal,
+    lfsRoot: options.lfsRoot, lfsOutput: options.lfsOutput,
   })) + '\n';
   if (options.op === 'verify-sign') return JSON.stringify(await approveVerifiedRepositoryBackup({
     fg: options.fg, input: options.paths[0], output: options.paths[1], privateKey: options.keyPath,
     declarations: options.declarations, verificationInstance: options.verificationInstance, trustedLocal: options.trustedLocal,
     maximumBytes: live.maximumBytes, timeoutMs: live.remaining(), signal,
+    lfsArchive: options.lfsArchive, expectedLfsSha256: options.expectedLfsSha256,
   })) + '\n';
   const key = await readBackupControl(options.keyPath, BACKUP_LIMITS.keyBytes, live, options.op === 'sign');
   try {
@@ -124,6 +144,7 @@ async function main() {
     process.stderr.write(JSON.stringify({ type: 'repository_backup_approval_error', code: error.code ?? 'backup_failed',
       operation_completed: completed, publication_state: error.publication_state ?? null, cleanup_error: error.cleanup_error ?? null,
       ...(error.verification_scratch !== undefined ? { verification_scratch: error.verification_scratch } : {}),
+      ...(error.lfs_archive_path !== undefined ? { lfs_archive_path: error.lfs_archive_path, lfs_archive_state: error.lfs_archive_state } : {}),
       ...(error.archive_state !== undefined ? { archive_state: error.archive_state, archive_path: error.archive_path, approval_path: error.approval_path } : {}) }) + '\n');
     process.exitCode = 1;
   } finally { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); }

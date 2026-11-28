@@ -3,6 +3,7 @@
 import { importJson } from './native-import-process.mjs';
 import { BACKUP_LIMITS, backupError, exact } from './repository-backup-io.mjs';
 import { BACKUP_CHECKPOINT_FIELDS, validBackupCheckpoint } from './repository-backup-native.mjs';
+import { validateBackupLfsReceipt } from './repository-backup-lfs.mjs';
 
 const IDENTITY = ['tenant_id', 'repository_id', 'incarnation_id', 'object_format'];
 const COUNTS = { objects: 100000n, references: 100000n, payload_bytes: BigInt(BACKUP_LIMITS.maximumArchiveBytes),
@@ -13,13 +14,15 @@ const FIELDS = ['type', 'schema_version', 'sha256', 'bytes', ...IDENTITY, 'head_
 const integer = (v, minimum, maximum) => (typeof v === 'bigint' || Number.isSafeInteger(v)) && BigInt(v) >= minimum && BigInt(v) <= maximum;
 function fail(code) { throw backupError(code); }
 
-export function repositoryBackupExportReceipt(result, declarations, maximumBytes) {
+export function repositoryBackupExportReceipt(result, declarations, maximumBytes, includeLfs = false) {
   if (result.code !== 0) {
     const error = backupError('backup_native_export_refused'); error.native_exit_code = result.code;
     throw error;
   }
   const v = importJson(result.stdout);
-  if (!exact(v, FIELDS) || v.type !== 'repository_source_backup_export' || v.schema_version !== 1
+  if (!exact(v, [...FIELDS, ...(includeLfs ? ['lfs_companion', 'lfs_payloads_included'] : [])])
+    || (includeLfs && v.lfs_payloads_included !== true)
+    || v.type !== 'repository_source_backup_export' || v.schema_version !== 1
     || typeof v.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(v.sha256)
     || IDENTITY.some(k => v[k] !== declarations[k])
     || !integer(v.head_generation, 1n, 18446744073709551615n) || String(v.head_generation) !== declarations.head_generation
@@ -29,7 +32,9 @@ export function repositoryBackupExportReceipt(result, declarations, maximumBytes
     || !validBackupCheckpoint(v, BigInt(v.bytes))
     || TRUE.some(k => v[k] !== true) || FALSE.some(k => v[k] !== false)
     || v.scope !== 'authority_and_selected_git_objects') fail('backup_native_export_receipt_mismatch');
-  return Object.freeze(Object.fromEntries(Object.entries(v).map(([k, value]) => [k, typeof value === 'bigint' ? String(value) : value])));
+  const lfs = includeLfs ? validateBackupLfsReceipt(v.lfs_companion, maximumBytes) : null;
+  return Object.freeze({ ...Object.fromEntries(Object.entries(v).map(([k, value]) => [k, typeof value === 'bigint' ? String(value) : value])),
+    ...(lfs ? { lfs_companion: lfs } : {}) });
 }
 
 // Every value is snapshotted before the first await. A caller pin may only

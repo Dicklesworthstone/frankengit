@@ -119,6 +119,13 @@ interoperable with the unchanged binary catalog format.
 
 ## JavaScript creation and independent checking
 
+The operator `export-sign` and `verify-sign` commands can additionally verify an
+explicit LFS companion before approving the source. The corresponding signed
+verify/restore adapter carries its independently retained digest through native
+preflight and resumable restore. See [paired LFS backup recovery](PAIRED_LFS_BACKUP_RECOVERY.md)
+for commands, exact trust boundaries, restart binding and partial publication.
+The DSSE v1 statement remains source-only.
+
 Export with the native `fg backup export` command. Independently review its
 namespace, incarnation, hash format and head-generation receipt. Then:
 

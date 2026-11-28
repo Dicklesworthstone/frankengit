@@ -14,6 +14,8 @@ Restore also requires:
 Resume requires those same identity/approval parameters and adds --resume.
 Optional: --max-archive-bytes N (default 1 GiB, at most 1 TiB),
           --timeout-secs N (default 300, at most 3600), -- before a literal path.
+Optional exact LFS snapshot requires BOTH:
+  --lfs-archive COMPANION --expected-lfs-sha256 64_LOWERCASE_HEX
 
 Authenticate the independent Ed25519 approval and actual archive bytes, then run
 native fg backup verify. Check every signed identity against the native receipt
@@ -21,6 +23,9 @@ BEFORE starting fg backup restore. All phases share one bounded deadline.
 Restore retains a synchronized approval record outside the destination. Resume
 must reauthenticate and match its version-2 record, including exact original
 approval bytes, native signed-mode binding, trusted key and generation floor.
+Paired LFS restores use a version-3 record which also binds companion digest and
+byte count. Resume cannot add, drop or change this companion; an identical copy
+at a different read-only input path is permitted. Source-only v2 stays unchanged.
 Legacy version-1 records are refused without automatic upgrade or unsigned retry.
 The destination and record parents must already be owner-private directories.
 Native restore alone owns quarantine, original commitments, graph checks,
@@ -32,8 +37,13 @@ Both native phases receive private copies of the authenticated approval and
 public key with all seven trust-policy flags. Native signed mode checks expiry
 again immediately before authority publication and binds resumable ownership.
 This is not an external key-revocation lease. Keep original approvals unchanged.
-This restores the native authority-and-selected-Git profile, not external artifacts,
-routing, or a complete Repository Capsule. The explicitly chosen fg must be trusted.
+With the optional pair, verify and restore both receive the same independently
+pinned companion. Native verification requires its exact source pointer snapshot
+and validates every payload before authority publication. The existing approval
+signs the source archive only, not the companion file. The archive-byte ceiling
+applies independently to each file; both share the original deadline. Generic
+external artifacts, routing and a complete Repository Capsule remain outside this
+profile. The explicitly chosen fg must be trusted.
 `;
 export function nativeBackupArguments(args) {
   if (!Array.isArray(args) || args.length > 64 || args.some(a => typeof a !== 'string' || a.length > 8192 || a.includes('\0'))
@@ -41,7 +51,7 @@ export function nativeBackupArguments(args) {
   const operation = args[0], map = new Map(), paths = []; let literal = false;
   const allowed = ['--fg', '--approval', '--trust-key', '--tenant-id', '--repository-id', '--incarnation-id', '--object-format',
     '--minimum-head-generation', '--verification-instance', '--destination', '--destination-instance', '--approval-record',
-    '--max-archive-bytes', '--timeout-secs', '--trusted-local', '--resume'];
+    '--max-archive-bytes', '--timeout-secs', '--trusted-local', '--resume', '--lfs-archive', '--expected-lfs-sha256'];
   for (let at = 1; at < args.length; at++) {
     const arg = args[at];
     if (!literal && arg === '--') { literal = true; continue; }
@@ -58,6 +68,7 @@ export function nativeBackupArguments(args) {
   return repositoryBackupOptions({ operation, input: paths[0], fg: get('--fg'), approval: get('--approval'), trustKey: get('--trust-key'), policy,
     trustedLocal: get('--trusted-local'), verificationInstance: get('--verification-instance'), resume: get('--resume') ?? false,
     destination: get('--destination'), destinationInstance: get('--destination-instance'), approvalRecord: get('--approval-record'),
+    lfsArchive: get('--lfs-archive'), expectedLfsSha256: get('--expected-lfs-sha256'),
     maximumBytes: Number(backupDecimal(get('--max-archive-bytes') ?? String(BACKUP_LIMITS.maximumBytes), BigInt(BACKUP_LIMITS.maximumArchiveBytes))),
     timeoutMs: 1000 * Number(backupDecimal(get('--timeout-secs') ?? '300', 3600n)) });
 }

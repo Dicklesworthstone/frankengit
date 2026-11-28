@@ -6,9 +6,10 @@ import { constants } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, resolve, dirname, basename, join, sep } from 'node:path';
 import { runImportProcess, importJson } from './native-import-process.mjs';
-import { BACKUP_LIMITS, backupError, backupPath, backupLifetime, exact, readBackupControl, publishBackupControl } from './repository-backup-io.mjs';
+import { BACKUP_LIMITS, backupError, backupPath, backupLifetime, exact, hashRepositoryBackup, readBackupControl, publishBackupControl } from './repository-backup-io.mjs';
 import { backupDecimal, backupPolicy, authenticateRepositoryBackupFile } from './repository-backup-approval.mjs';
 import { stageNativeBackupApproval, assertNativeBackupApproval, nativeBackupApprovalBinding } from './repository-backup-native-approval.mjs';
+import { backupLfsSha256, validateBackupLfsReceipt } from './repository-backup-lfs.mjs';
 
 const IDENTITY = ['tenant_id', 'repository_id', 'incarnation_id', 'object_format'];
 export const BACKUP_CHECKPOINT_FIELDS = Object.freeze(['transport_version', 'retained_outcome_checkpoint_verified',
@@ -36,10 +37,12 @@ export function validBackupCheckpoint(value, archiveBytes) {
     && /^2:[0-9a-f]{64}$/.test(value.retained_outcome_checkpoint_root)
     && BigInt(objects) > 0n && BigInt(bytes) > 0n;
 }
-export function repositoryBackupReceipt(process, operation, statement, instance, resume = false, approval) {
+export function repositoryBackupReceipt(process, operation, statement, instance, resume = false, approval, lfs) {
   if (process.code !== 0) { const e = backupError('backup_native_refused'); e.native_exit_code = process.code; e.native_diagnostic = process.stderr?.subarray(0, 4096).toString('utf8') ?? ''; throw e; }
   const v = importJson(process.stdout);
-  if (!exact(v, [...COMMON, ...(operation === 'verify' ? VERIFY : RESTORE), ...(approval ? ['approval'] : [])])
+  const lfsFlag = operation === 'verify' ? 'lfs_payloads_verified' : 'lfs_payloads_restored';
+  if (!exact(v, [...COMMON, ...(operation === 'verify' ? VERIFY : RESTORE), ...(approval ? ['approval'] : []),
+    ...(lfs ? ['lfs_companion', lfsFlag] : [])])
     || v.type !== `repository_source_backup_${operation}` || v.schema_version !== 1
     || IDENTITY.some(k => v[k] !== statement[k]) || v.sha256 !== statement.artifact.sha256
     || !nativeInteger(v.head_generation, 1n, 18446744073709551615n) || String(v.head_generation) !== statement.head_generation
@@ -59,12 +62,19 @@ export function repositoryBackupReceipt(process, operation, statement, instance,
   } else if (v.source_tokens_preserved !== false || v.external_artifacts_restored !== false || v.reopened_and_verified !== true
     || v.streaming !== true || v.resume_requested !== resume || typeof v.already_published !== 'boolean'
     || (!resume && v.already_published)) fail('backup_native_receipt_mismatch');
+  let companion;
+  if (lfs) {
+    if (v[lfsFlag] !== true) fail('backup_native_receipt_mismatch');
+    companion = validateBackupLfsReceipt(v.lfs_companion, BACKUP_LIMITS.maximumArchiveBytes, lfs);
+  }
   // Stable lossless operator JSON without pretending these counters are JS-safe.
-  return Object.freeze(Object.fromEntries(Object.entries(v).map(([k, value]) => [k, typeof value === 'bigint' ? String(value) : value])));
+  return Object.freeze(Object.fromEntries(Object.entries(v).map(([k, value]) =>
+    [k, k === 'lfs_companion' ? companion : typeof value === 'bigint' ? String(value) : value])));
 }
 export function repositoryBackupOptions(value) {
   const keys = ['operation', 'fg', 'input', 'approval', 'trustKey', 'policy', 'verificationInstance', 'destination',
-    'destinationInstance', 'approvalRecord', 'resume', 'trustedLocal', 'maximumBytes', 'timeoutMs', 'signal', 'onProgress', 'checkpoint'];
+    'destinationInstance', 'approvalRecord', 'resume', 'trustedLocal', 'maximumBytes', 'timeoutMs', 'signal', 'onProgress', 'checkpoint',
+    'lfsArchive', 'expectedLfsSha256'];
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(k => !keys.includes(k))
     || !['verify', 'restore'].includes(value.operation) || value.trustedLocal !== true) fail('backup_explicit_local_operation_required');
   const result = { ...value, policy: backupPolicy(value.policy), resume: value.resume ?? false, onProgress: value.onProgress ?? (() => {}) };
@@ -81,19 +91,28 @@ export function repositoryBackupOptions(value) {
   for (const k of ['fg', 'input', 'approval', 'trustKey']) result[k] = backupPath(result[k]);
   if (!isAbsolute(result.fg)) fail('backup_absolute_fg_required');
   result.input = resolve(result.input); result.approval = resolve(result.approval); result.trustKey = resolve(result.trustKey);
+  if ((result.lfsArchive !== undefined) !== (result.expectedLfsSha256 !== undefined)) fail('backup_lfs_pair_required');
+  if (result.lfsArchive !== undefined) {
+    result.lfsArchive = resolve(backupPath(result.lfsArchive));
+    result.expectedLfsSha256 = backupLfsSha256(result.expectedLfsSha256);
+    if ([result.fg, result.input, result.approval, result.trustKey].includes(result.lfsArchive)) fail('backup_lfs_separate_path_required');
+  }
   result.verificationInstance = backupDecimal(result.verificationInstance, 9223372036854775807n);
   if (result.operation === 'restore') {
     result.destination = resolve(backupPath(result.destination)); result.approvalRecord = resolve(backupPath(result.approvalRecord));
     result.destinationInstance = backupDecimal(result.destinationInstance, 9223372036854775807n);
     if (dirname(result.destination) === result.destination || result.approvalRecord === result.destination
       || result.approvalRecord.startsWith(result.destination + sep)
-      || [result.fg, result.input, result.approval, result.trustKey].includes(result.approvalRecord)) fail('backup_record_must_be_separate');
+      || [result.fg, result.input, result.approval, result.trustKey, result.lfsArchive].includes(result.approvalRecord)) fail('backup_record_must_be_separate');
+    if (result.lfsArchive && (overlaps(result.lfsArchive, result.destination)
+      || overlaps(result.lfsArchive, result.approvalRecord))) fail('backup_lfs_separate_path_required');
   } else if (result.resume || ['destination', 'destinationInstance', 'approvalRecord'].some(k => value[k] !== undefined)) fail('backup_inapplicable_restore_option');
   // Validate every lifetime field before any file, process or temporary directory.
   backupLifetime({ maximumBytes: result.maximumBytes, timeoutMs: result.timeoutMs, signal: result.signal });
   return result;
 }
 const same = (a, b) => a.dev === b.dev && a.ino === b.ino;
+const overlaps = (a, b) => a === b || a.startsWith(b + sep) || b.startsWith(a + sep);
 async function absent(path) {
   try { await lstat(path); fail('backup_existing_path'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
 }
@@ -102,11 +121,35 @@ async function privateCanonicalPath(path) {
   if (!stat.isDirectory() || typeof process.getuid !== 'function' || stat.uid !== BigInt(process.getuid()) || (stat.mode & 0o077n)) fail('backup_private_parent_required');
   return join(parent, basename(path));
 }
-function nativeArgs(operation, input, output, statement, instance, live, approval, resume = false) {
+// A companion is read-only input. Resolve physical parents and hard-link aliases
+// before reserving output paths; lexical separation alone does not protect it.
+async function requireLfsSeparation(options, live) {
+  if (!options.lfsArchive) return;
+  const companion = join(await realpath(dirname(options.lfsArchive)), basename(options.lfsArchive));
+  const identity = await lstat(companion, { bigint: true });
+  for (const path of [options.fg, options.input, options.approval, options.trustKey,
+    options.destination, options.approvalRecord].filter(Boolean)) {
+    live.check();
+    const physical = join(await realpath(dirname(path)), basename(path));
+    if (overlaps(companion, physical)) fail('backup_lfs_separate_path_required');
+    let stat;
+    try { stat = await lstat(physical, { bigint: true }); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (stat && same(identity, stat)) fail('backup_lfs_separate_path_required');
+  }
+  live.check();
+}
+async function checkLfsArtifact(options, lfs, live) {
+  if (!lfs) return;
+  const artifact = await hashRepositoryBackup(options.lfsArchive, live);
+  if (artifact.sha256 !== lfs.sha256 || artifact.bytes !== lfs.bytes) fail('backup_lfs_changed_after_verification');
+}
+function nativeArgs(operation, input, output, statement, instance, live, approval, resume = false, lfsArchive, lfs) {
   const args = ['backup', operation, input, output, '--trusted-local', '--expected-sha256', statement.artifact.sha256,
     operation === 'verify' ? '--verification-instance' : '--destination-instance', instance,
     '--max-archive-bytes', String(live.maximumBytes), '--timeout-secs', String(Math.ceil(live.remaining() / 1000))];
   args.push(...approval.args);
+  if (lfs) args.push('--lfs-archive', lfsArchive, '--expected-lfs-sha256', lfs.sha256);
   if (resume) args.push('--resume');
   return args;
 }
@@ -127,22 +170,32 @@ export async function runApprovedRepositoryBackup(raw) {
       { maximumBytes: live.maximumBytes, timeoutMs: live.remaining(), signal: live.signal });
     const authentication = verified.authentication, statement = authentication.statement;
     if (options.checkpoint && authentication.trusted_key_id !== options.checkpoint.trusted_key_id) fail('backup_selected_signer_changed');
+    let lfs;
+    if (options.lfsArchive) {
+      const artifact = await hashRepositoryBackup(options.lfsArchive, live);
+      if (artifact.sha256 !== options.expectedLfsSha256) fail('backup_lfs_digest_mismatch');
+      lfs = Object.freeze({ sha256: artifact.sha256, bytes: artifact.bytes });
+      verified.checkCurrent();
+    }
     await progress('authenticated'); verified.checkCurrent();
     // Resolve the actual trusted parent names before binding a destination.
     if (options.operation === 'restore') {
       options.destination = await privateCanonicalPath(options.destination);
       options.approvalRecord = await privateCanonicalPath(options.approvalRecord);
       if (options.approvalRecord === options.destination || options.approvalRecord.startsWith(options.destination + sep)) fail('backup_record_must_be_separate');
+      await requireLfsSeparation(options, live);
       // Version 2 explicitly binds native signed mode and the exact original
       // envelope/key/policy preimage. Never reinterpret a legacy unsigned run.
       const pins = nativeBackupApprovalBinding(encoded, key, authentication.policy);
-      record = Buffer.from(JSON.stringify({ type: 'repository_backup_restore_approval_v2', destination: options.destination,
+      // A paired record also binds the exact independently pinned companion.
+      // Source-only v2 bytes remain unchanged, including their property order.
+      record = Buffer.from(JSON.stringify({ type: lfs ? 'repository_backup_restore_approval_v3' : 'repository_backup_restore_approval_v2', destination: options.destination,
         native_signed_mode: true, approval_binding_sha256: pins.binding_sha256,
         destination_instance: options.destinationInstance, trusted_key_id: authentication.trusted_key_id,
-        policy: authentication.policy, statement }) + '\n');
+        policy: authentication.policy, statement, ...(lfs ? { lfs_companion: lfs } : {}) }) + '\n');
       if (options.resume) await checkRecord(options.approvalRecord, record, live);
       else { await absent(options.destination); await absent(options.approvalRecord); }
-    }
+    } else await requireLfsSeparation(options, live);
     nativeApproval = await stageNativeBackupApproval(encoded, key, authentication, live);
     // The native verifier needs a fresh scratch root. The adapter owns only its
     // private parent; unknown native children are NEVER recursively removed.
@@ -154,14 +207,16 @@ export async function runApprovedRepositoryBackup(raw) {
       if (!identity.isDirectory() || (identity.mode & 0o077n)) fail('backup_private_parent_required');
       const path = join(scratch, 'native'); live.check(); verified.checkCurrent();
       await nativeApproval.check();
-      const result = await runImportProcess(options.fg, nativeArgs('verify', options.input, path, statement, options.verificationInstance, live, nativeApproval), live);
-      nativeReceipt = repositoryBackupReceipt(result, 'verify', statement, options.verificationInstance, false, nativeApproval.expected);
+      const result = await runImportProcess(options.fg, nativeArgs('verify', options.input, path, statement, options.verificationInstance,
+        live, nativeApproval, false, options.lfsArchive, lfs), live);
+      nativeReceipt = repositoryBackupReceipt(result, 'verify', statement, options.verificationInstance, false, nativeApproval.expected, lfs);
       await absent(path);
       const current = await lstat(scratch, { bigint: true });
       if (!current.isDirectory() || !same(current, identity)) fail('backup_scratch_changed');
       await rmdir(scratch); scratch = null;
     } finally { await directory.close(); }
     await progress('preflight_verified'); verified.checkCurrent();
+    await checkLfsArtifact(options, lfs, live); verified.checkCurrent();
     if (options.operation === 'verify') { state = 'complete'; return { type: 'approved_repository_backup_verify', state: 'complete', authentication,
       native: nativeReceipt, signed_identity_matched_native: true, archive_bytes_authenticated: true, destination_changed: false }; }
     if (options.resume) await checkRecord(options.approvalRecord, record, live);
@@ -170,6 +225,7 @@ export async function runApprovedRepositoryBackup(raw) {
     await checkRecord(options.approvalRecord, record, live);
     const preflight = nativeReceipt;
     await progress('restore_starting'); await checkRecord(options.approvalRecord, record, live); verified.checkCurrent();
+    await checkLfsArtifact(options, lfs, live); verified.checkCurrent();
     await nativeApproval.check();
     state = 'restore_attempted_unknown';
     // Native restore independently rechecks the signed digest before directory
@@ -177,9 +233,10 @@ export async function runApprovedRepositoryBackup(raw) {
     // never authorizes changed bytes. Only the owned approval and public-key
     // snapshots are passed; no signing/private key enters the native process.
     const result = await runImportProcess(options.fg, nativeArgs('restore', options.input, options.destination, statement,
-      options.destinationInstance, live, nativeApproval, options.resume), live);
-    nativeReceipt = repositoryBackupReceipt(result, 'restore', statement, options.destinationInstance, options.resume, nativeApproval.expected);
+      options.destinationInstance, live, nativeApproval, options.resume, options.lfsArchive, lfs), live);
+    nativeReceipt = repositoryBackupReceipt(result, 'restore', statement, options.destinationInstance, options.resume, nativeApproval.expected, lfs);
     if (['objects', 'references', 'payload_bytes'].some(k => String(nativeReceipt[k]) !== String(preflight[k]))) fail('backup_restore_preflight_mismatch');
+    if (lfs && ['sha256', 'bytes', 'objects', 'payload_bytes'].some(k => nativeReceipt.lfs_companion[k] !== preflight.lfs_companion[k])) fail('backup_restore_preflight_mismatch');
     state = 'complete';
     // Confirmed native publication wins over cancellation/expiry at completion.
     // Native signed mode checks approval again before authority publication.

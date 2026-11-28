@@ -190,8 +190,11 @@ If signed approval options are supplied, the existing approval authenticates the
 **source archive only**. LFS is independently pinned and bound to the native Git
 pointers; this does not extend that signature to the companion or create a
 signed pair. The optional companion is available on the direct `export`,
-`verify` and `restore` commands, not checkpoint selection, replication or other
-backup commands. Existing source-only flows retain their scope.
+`verify` and `restore` native commands, not native checkpoint selection,
+replication or attestation. The JavaScript operator export/sign and approved
+verify/restore commands also carry the explicit companion, including its restart
+binding; see [paired LFS backup recovery](PAIRED_LFS_BACKUP_RECOVERY.md).
+Existing source-only flows retain their scope.
 
 This custody lane requires a Unix host and shares the original operation
 deadline. `--max-archive-bytes` bounds each archive independently, including the
