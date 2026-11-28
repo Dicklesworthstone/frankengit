@@ -24,7 +24,7 @@ const DEFAULT_OUT: &str = "proofs/fg041/generated";
 fn usage() -> ExitCode {
     eprintln!("usage: fgit-proof-bridge-gen <generate|check> [goldens-dir] [out-dir]");
     eprintln!(
-        "       fgit-proof-bridge-gen dpor [--with-ref-conflict] [competing-cas.fgtrace] > Vectors.lean"
+        "       fgit-proof-bridge-gen dpor [--disjoint-only] [competing-cas.fgtrace] > Vectors.lean"
     );
     eprintln!("  goldens-dir defaults to {DEFAULT_GOLDENS}");
     eprintln!("  out-dir     defaults to {DEFAULT_OUT}");
@@ -38,7 +38,7 @@ fn main() -> ExitCode {
         return usage();
     };
     if command == "dpor" {
-        let with_ref_conflict = args.next_if(|arg| arg == "--with-ref-conflict").is_some();
+        let disjoint_only = args.next_if(|arg| arg == "--disjoint-only").is_some();
         let path = args
             .next()
             .map(PathBuf::from)
@@ -52,10 +52,10 @@ fn main() -> ExitCode {
                 fgit_reference::trace::decode(&bytes).map_err(|e| format!("invalid trace: {e:?}"))
             })
             .and_then(|seed| {
-                if with_ref_conflict {
-                    race::explore_with_ref_conflict(&seed, race::BUDGET)
-                } else {
+                if disjoint_only {
                     race::explore(&seed, race::BUDGET)
+                } else {
+                    race::explore_with_ref_conflict(&seed, race::BUDGET)
                 }
             })
             .and_then(|traces| {

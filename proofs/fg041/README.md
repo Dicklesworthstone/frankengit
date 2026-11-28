@@ -25,7 +25,9 @@ and that the generation, total decisions and committed subset match each recorde
 Run `./scripts/verify.sh proof` for the corpus, schedule, false-theorem and
 registry-demotion checks together. Run `bash proofs/fg041/check.sh --dpor`
 to check the corpus and four freshly scheduled histories. The compatibility
-entry point `check_dpor.sh` runs the same checks. The concurrency lab schedules
+entry point `check_dpor.sh` runs the same checks. The bridge's `dpor` command
+emits both scenarios by default. Use `dpor --disjoint-only [competing-cas.fgtrace]`
+to explore only the supplied history. The concurrency lab schedules
 the two staged batches in `cas_loss_retry.fgtrace` at their common predecessor
 and repeats both winner orders with both writers targeting the same absent ref.
 The losing CAS preserves the winning head and roots. The bridge reprepares the
