@@ -59,6 +59,11 @@ fn missing_race_incomplete_search_and_corrupt_recorded_observation_refuse() {
     assert!(explore(&original, ExplorationBudget::new(1, 32)).is_err());
     original.steps[0].observed = ObservedOutcome::CasWon;
     assert!(explore(&original, BUDGET).is_err());
+    assert!(
+        explore_with_ref_conflict(&original, BUDGET)
+            .unwrap_err()
+            .contains("seed diverged")
+    );
 }
 
 #[test]
@@ -119,30 +124,19 @@ fn reprepare_uses_the_actual_losing_seal_and_both_distinct_refs_survive() {
 
 #[test]
 fn an_occupied_original_target_refuses_the_loser_in_each_order() {
-    use fgit_reference::harness::IdentityMint;
-    use fgit_reference::intent::{Intent, RefIntent};
-    use fgit_types::{DecisionOutcome, RefusalCode};
-    let source = seed("cas_loss_retry.fgtrace");
-    let mut recorder = TraceRecorder::new(source.genesis);
-    let digest = IdentityMint::new(20261125).digest();
-    for step in source.steps {
-        let mut input = step.input;
-        let request = match &mut input {
-            ModelInput::Seal(s) => Some(&mut s.request),
-            ModelInput::Prepare(p) => Some(&mut p.request),
-            _ => None,
-        };
-        if let Some(request) = request
-            && let Intent::Ref(RefIntent::Update { name, .. }) =
-                &mut request.statements[0].intents[0]
-            && name.as_bytes() == b"refs/heads/other"
-        {
-            *name = fgit_types::refs::RefName::try_new(b"refs/heads/main").unwrap();
-            request.canonical_request_digest = digest;
-        }
-        recorder.apply(input).unwrap();
-    }
-    let conflict = recorder.finish();
+    let original = seed("cas_loss_retry.fgtrace");
+    let conflict = same_ref_seed(&original).unwrap();
+    let traces = explore_with_ref_conflict(&original, BUDGET).unwrap();
+    let names: Vec<_> = traces.iter().map(|trace| trace.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "dpor_first_wins",
+            "dpor_second_wins",
+            "dpor_conflict_first_wins",
+            "dpor_conflict_second_wins",
+        ]
+    );
     let source_decisions = replay(&conflict).unwrap().state.decisions().to_vec();
     let [a, b] = source_decisions.as_slice() else {
         panic!("two original writers")

@@ -48,7 +48,7 @@ PRF_REPO=$(cd "$PRF_DIR/../../../.." && pwd)
 fge_init fg041-proof-lane
 fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg041c-proof-refinement-wuy
-fge_context scope 'ordered-residue model, registered reference vectors and two DPOR head-publication schedules'
+fge_context scope 'ordered-residue model, registered reference vectors and both winner orders for distinct and shared refs'
 
 # Resolve tools on the caller host before handing them temporary local paths.
 prf_have_pinned_lean=0
@@ -344,7 +344,7 @@ else
   bash "$PRF_CHECK" --dpor >"$prf_dpor_log" 2>&1 || prf_dpor_exit=$?
   fge_field dpor_replay_exit "$prf_dpor_exit"
   fge_assert_eq fg041-dpor-refinement 0 "$prf_dpor_exit" \
-    'the kernel replays the reference model for both orders of the competing head updates'
+    'the kernel replays both winner orders for each ref scenario'
 
   prf_missing_exit=0
   FGIT_PROOF_BRIDGE_BIN="$FGE_ARTIFACT_DIR/missing-bridge" bash "$PRF_CHECK" --dpor \

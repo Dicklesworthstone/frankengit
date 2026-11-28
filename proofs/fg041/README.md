@@ -24,16 +24,20 @@ and that the generation, total decisions and committed subset match each recorde
 
 Run `./scripts/verify.sh proof` for the corpus, schedule, false-theorem and
 registry-demotion checks together. Run `bash proofs/fg041/check.sh --dpor`
-to check the corpus and two freshly scheduled publications. The compatibility
-entry point `check_dpor.sh` runs the same checks. The concurrency lab schedules the two staged batches in
-`cas_loss_retry.fgtrace` at their common predecessor. Exactly one update must
-win and the losing CAS must preserve the winning head and roots. In both
-orders the bridge reprepares the original losing request on that head and
-publishes its revalidated outcome. The kernel checks that each writer wins
-the first CAS once and that the other sealed writer commits its distinct ref
-in the next generation, as required by the two disjoint requests in this fixture. The reference histories
-and this race cover a bounded model. Production storage and native crash
-recovery have separate verification lanes.
+to check the corpus and four freshly scheduled histories. The compatibility
+entry point `check_dpor.sh` runs the same checks. The bridge's `dpor` command
+emits both scenarios by default. Use `dpor --disjoint-only [competing-cas.fgtrace]`
+to explore only the supplied history. The concurrency lab schedules
+the two staged batches in `cas_loss_retry.fgtrace` at their common predecessor
+and repeats both winner orders with both writers targeting the same absent ref.
+The losing CAS preserves the winning head and roots. The bridge reprepares the
+original losing request on that head and publishes its revalidated outcome.
+With distinct refs the retry commits the other ref. With a shared ref the Rust
+bridge checks the exact expected-old mismatch, and the kernel checks that the retry advances
+the decision sequence without advancing the repository sequence and that there are no ref or forge
+effects. The kernel also checks that each writer wins once in each scenario.
+These histories cover a bounded reference model. Production storage and native
+crash recovery have separate verification lanes.
 
 The script refuses a missing or mismatched `leanprover/lean4:v4.32.0`
 toolchain, never asks `elan` to install one, rejects `sorry`/`admit` in the
