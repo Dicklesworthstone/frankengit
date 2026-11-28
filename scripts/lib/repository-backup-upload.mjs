@@ -1,14 +1,16 @@
 // Trusted-local conditional HTTPS publication, NOT canonical repository storage.
 // Explicit GET/PUT capabilities; original signed bytes; archive before approval.
 import { Agent, request } from 'node:https';
-import { open, lstat } from 'node:fs/promises';
+import { open, lstat, realpath } from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { resolve } from 'node:path';
+import { resolve, isAbsolute } from 'node:path';
 import { createHash, X509Certificate } from 'node:crypto';
 import { BACKUP_LIMITS, backupError, backupLifetime, backupPath, exact, readBackupControl,
   hashRepositoryBackup } from './repository-backup-io.mjs';
-import { backupPolicy, verifyRepositoryBackupApproval } from './repository-backup-approval.mjs';
+import { backupDecimal, backupPolicy, verifyRepositoryBackupApproval } from './repository-backup-approval.mjs';
 import { repositoryBackupReplicationCheckpoint } from './repository-backup-replication.mjs';
+import { runApprovedRepositoryBackup } from './repository-backup-native.mjs';
+import { backupLfsSha256, checkBackupLfsArtifact } from './repository-backup-lfs.mjs';
 
 const CHUNK = 65536;
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -21,35 +23,52 @@ function endpoint(value) {
   if (url.protocol !== 'https:' || !url.hostname || url.username || url.password || url.hash) fail('backup_upload_url');
   return url;
 }
-// One parameter-only URL contract shared by direct and durable-job publication.
-export function repositoryBackupUploadTarget(raw) {
-  if (!exact(raw, ['archive', 'approval'])) fail('backup_upload_target');
+// The default grammar remains the source-only v1 durable-job contract. Only a
+// caller explicitly opting into a native-verified pair may name a third object.
+export function repositoryBackupUploadTarget(raw, includeLfs = false) {
+  if (typeof includeLfs !== 'boolean') fail('backup_upload_target');
+  const kinds = includeLfs ? ['archive', 'lfs', 'approval'] : ['archive', 'approval'];
+  if (!exact(raw, kinds)) fail('backup_upload_target');
   const target = {}; let textBytes = 0;
-  for (const kind of ['archive', 'approval']) {
+  const identities = new Set();
+  for (const kind of kinds) {
     if (!exact(raw[kind], ['get', 'put'])) fail('backup_upload_target');
     const get = endpoint(raw[kind].get), put = endpoint(raw[kind].put);
     // Signed query strings may differ by method, but the logical object may not.
     if (get.origin !== put.origin || get.pathname !== put.pathname) fail('backup_upload_target_mismatch');
+    const identity = get.origin + get.pathname;
+    if (identities.has(identity)) fail('backup_upload_target_mismatch');
+    identities.add(identity);
     textBytes += Buffer.byteLength(get.href) + Buffer.byteLength(put.href);
     target[kind] = Object.freeze({ get: get.href, put: put.href });
   }
-  if (textBytes > 32768 || new URL(target.archive.get).origin + new URL(target.archive.get).pathname
-    === new URL(target.approval.get).origin + new URL(target.approval.get).pathname) fail('backup_upload_target_mismatch');
+  if (textBytes > 32768) fail('backup_upload_target_mismatch');
   return Object.freeze(target);
 }
 export function repositoryBackupUploadOptions(raw) {
   const allowed = ['input', 'approval', 'trustKey', 'policy', 'target', 'caFile', 'checkpoint',
-    'maximumBytes', 'maximumTotalBytes', 'timeoutMs', 'signal', 'now', 'onProgress'];
+    'maximumBytes', 'maximumTotalBytes', 'timeoutMs', 'signal', 'now', 'onProgress',
+    'lfsArchive', 'expectedLfsSha256', 'fg', 'verificationInstance', 'trustedLocal'];
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some(k => !allowed.includes(k))) fail('backup_upload_options');
-  const target = repositoryBackupUploadTarget(raw.target);
+  if ((raw.lfsArchive !== undefined) !== (raw.expectedLfsSha256 !== undefined)) fail('backup_lfs_pair_required');
+  let paired;
+  if (raw.lfsArchive !== undefined) {
+    if (raw.trustedLocal !== true) fail('backup_explicit_local_operation_required');
+    const fg = backupPath(raw.fg);
+    if (!isAbsolute(fg)) fail('backup_absolute_fg_required');
+    paired = { lfsArchive: resolve(backupPath(raw.lfsArchive)), expectedLfsSha256: backupLfsSha256(raw.expectedLfsSha256),
+      fg, verificationInstance: backupDecimal(raw.verificationInstance, 9223372036854775807n), trustedLocal: true };
+  } else if (['fg', 'verificationInstance', 'trustedLocal'].some(k => raw[k] !== undefined)) fail('backup_lfs_pair_required');
+  const target = repositoryBackupUploadTarget(raw.target, Boolean(paired));
   const paths = Object.fromEntries(['input', 'approval', 'trustKey'].map(k => [k, resolve(backupPath(raw[k]))]));
   if (raw.caFile !== undefined) paths.caFile = resolve(backupPath(raw.caFile));
   for (const path of Object.values(paths)) backupPath(path);
+  if (paired && [paired.fg, ...Object.values(paths)].includes(paired.lfsArchive)) fail('backup_lfs_separate_path_required');
   const live = backupLifetime({ maximumBytes: raw.maximumBytes, timeoutMs: raw.timeoutMs, signal: raw.signal,
     now: raw.now, onProgress: raw.onProgress });
-  const maximumTotalBytes = raw.maximumTotalBytes ?? 3 * live.maximumBytes;
-  if (!Number.isSafeInteger(maximumTotalBytes) || maximumTotalBytes < 1 || maximumTotalBytes > 3 * BACKUP_LIMITS.maximumArchiveBytes) fail('backup_upload_budget');
-  return Object.freeze({ ...paths, target: Object.freeze(target), policy: backupPolicy(raw.policy),
+  const multiplier = paired ? 6 : 3, maximumTotalBytes = raw.maximumTotalBytes ?? multiplier * live.maximumBytes;
+  if (!Number.isSafeInteger(maximumTotalBytes) || maximumTotalBytes < 1 || maximumTotalBytes > multiplier * BACKUP_LIMITS.maximumArchiveBytes) fail('backup_upload_budget');
+  return Object.freeze({ ...paths, ...paired, target: Object.freeze(target), policy: backupPolicy(raw.policy),
     checkpoint: repositoryBackupReplicationCheckpoint(raw.checkpoint), maximumBytes: live.maximumBytes,
     maximumTotalBytes, timeoutMs: raw.timeoutMs, signal: live.signal, now: raw.now, onProgress: live.onProgress });
 }
@@ -187,14 +206,16 @@ async function exchange(url, method, expected, produce, ctx, payload) {
 export async function uploadRepositoryBackup(raw) {
   const options = repositoryBackupUploadOptions(raw);
   const live = backupLifetime({ maximumBytes: options.maximumBytes, timeoutMs: options.timeoutMs, signal: options.signal, now: options.now });
-  let approved, file, baseline, completed, problem, state = 'not_started', checkpoint;
+  let approved, file, baseline, lfsFile, lfsBaseline, lfsArtifact, native, completed, problem, state = 'not_started', checkpoint;
   let total = 0, sent = 0, received = 0, local = 0, requests = 0;
   const target = Object.freeze(Object.fromEntries(Object.entries(options.target).map(([kind, pair]) =>
     [kind, Object.freeze({ get_sha256: hash(pair.get), put_sha256: hash(pair.put) })])));
   const gate = () => { live.check(); approved?.checkCurrent(); };
   const streaming = () => Object.freeze({ total_payload_bytes: String(total), local_bytes_read: String(local),
     upload_source_bytes_read: String(sent), network_bytes_received: String(received), requests,
-    maximum_chunk_bytes: CHUNK, total_payload_budget: String(options.maximumTotalBytes) });
+    maximum_chunk_bytes: CHUNK, total_payload_budget: String(options.maximumTotalBytes),
+    ...(options.lfsArchive ? { byte_budget_scope: 'local_authentication_and_https_transfer', native_preflight_metered: false,
+      native_preflight_maximum_archive_bytes: String(live.maximumBytes) } : {}) });
   const charge = (count, kind) => {
     if (count > options.maximumTotalBytes - total) fail('backup_upload_budget');
     total += count; if (kind === 'sent') sent += count; else if (kind === 'received') received += count; else local += count;
@@ -203,6 +224,10 @@ export async function uploadRepositoryBackup(raw) {
   async function unchanged() {
     const current = await file.stat({ bigint: true }), named = await lstat(options.input, { bigint: true });
     if (!named.isFile() || !same(baseline, current) || !same(current, named)) fail('backup_upload_source_changed');
+    if (lfsFile) {
+      const current = await lfsFile.stat({ bigint: true }), named = await lstat(options.lfsArchive, { bigint: true });
+      if (!named.isFile() || !same(lfsBaseline, current) || !same(current, named)) fail('backup_upload_lfs_changed');
+    }
   }
   try {
     const control = { ...live, onProgress: () => {} };
@@ -213,9 +238,7 @@ export async function uploadRepositoryBackup(raw) {
     checkpoint = Object.freeze({ approval_sha256: hash(envelope), trusted_key_id: approved.authentication.trusted_key_id });
     if (options.checkpoint && JSON.stringify(options.checkpoint) !== JSON.stringify(checkpoint)) fail('backup_upload_checkpoint_mismatch');
     const artifact = approved.authentication.statement.artifact;
-    // Conservative fresh-publication reserve before ANY remote request. Controls
-    // and bounded status bodies are separate from archive payload accounting.
-    if (3 * Number(artifact.bytes) > options.maximumTotalBytes) fail('backup_upload_budget');
+    if (!options.lfsArchive && 3 * Number(artifact.bytes) > options.maximumTotalBytes) fail('backup_upload_budget');
     let ca;
     if (options.caFile) {
       ca = await readBackupControl(options.caFile, BACKUP_LIMITS.envelopeBytes, control);
@@ -224,12 +247,47 @@ export async function uploadRepositoryBackup(raw) {
     file = await open(options.input, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     baseline = await file.stat({ bigint: true });
     if (!baseline.isFile() || baseline.size !== BigInt(artifact.bytes)) fail('backup_upload_source_size');
+    if (options.lfsArchive) {
+      lfsFile = await open(options.lfsArchive, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      lfsBaseline = await lfsFile.stat({ bigint: true });
+      if (!lfsBaseline.isFile() || lfsBaseline.size < 1n || lfsBaseline.size > BigInt(live.maximumBytes)) fail('backup_lfs_archive_size_or_type');
+      lfsArtifact = Object.freeze({ sha256: options.expectedLfsSha256, bytes: String(lfsBaseline.size) });
+      // Include the TLS control as well as native inputs. Physical identities
+      // catch hard links and aliases through symlinked parent directories.
+      for (const path of [options.input, options.fg, options.approval, options.trustKey, options.caFile].filter(Boolean)) {
+        gate(); const stat = await lstat(await realpath(path), { bigint: true });
+        if (stat.dev === lfsBaseline.dev && stat.ino === lfsBaseline.ino) fail('backup_lfs_separate_path_required');
+      }
+    }
+    // Conservative fresh-publication reserve before native work or ANY remote
+    // request. Native archive/graph validation has its own bounds; these are the
+    // actual JS local-hash, upload-source and remote-readback payload bytes only.
+    if (3 * (Number(artifact.bytes) + Number(lfsArtifact?.bytes ?? 0)) > options.maximumTotalBytes) fail('backup_upload_budget');
     let previous = 0;
     const source = await hashRepositoryBackup(options.input, { ...live, onProgress(event) { charge(event.bytes_read - previous, 'local'); previous = event.bytes_read; } });
     await unchanged(); gate();
     if (source.sha256 !== artifact.sha256 || source.bytes !== artifact.bytes) fail('backup_upload_source_digest');
+    if (lfsArtifact) {
+      previous = 0;
+      const actual = await hashRepositoryBackup(options.lfsArchive, { ...live,
+        onProgress(event) { charge(event.bytes_read - previous, 'local'); previous = event.bytes_read; } });
+      checkBackupLfsArtifact(lfsArtifact, actual); await unchanged(); gate();
+    }
     state = 'source_verified'; await progress('source_verified'); await unchanged();
-    const ctx = { live, gate, ca, charge, request() { if (++requests > 6) fail('backup_upload_request_limit'); } };
+    if (lfsArtifact) {
+      // The exact signed source authenticates its LFS pointers. The operator's
+      // independent companion digest narrows that native relationship; DSSE v1
+      // remains unchanged and does not directly sign the companion archive.
+      state = 'native_preflight';
+      const verified = await runApprovedRepositoryBackup({ operation: 'verify', fg: options.fg, input: options.input,
+        approval: options.approval, trustKey: options.trustKey, policy: options.policy, checkpoint,
+        lfsArchive: options.lfsArchive, expectedLfsSha256: options.expectedLfsSha256,
+        verificationInstance: options.verificationInstance, trustedLocal: true,
+        maximumBytes: live.maximumBytes, timeoutMs: live.remaining(), signal: live.signal });
+      native = verified.native; checkBackupLfsArtifact(lfsArtifact, native.lfs_companion);
+      await unchanged(); gate(); state = 'native_verified'; await progress('native_verified'); await unchanged();
+    }
+    const ctx = { live, gate, ca, charge, request() { if (++requests > (lfsArtifact ? 11 : 6)) fail('backup_upload_request_limit'); } };
     const approvalExpected = { bytes: String(envelope.length), sha256: checkpoint.approval_sha256 };
     const get = (kind, expected, payload) => exchange(options.target[kind].get, 'GET', expected, null, ctx, payload);
     const put = (kind, expected, produce) => exchange(options.target[kind].put, 'PUT', expected, produce, ctx, false);
@@ -237,52 +295,74 @@ export async function uploadRepositoryBackup(raw) {
     // missing dependencies under an already-visible approval.
     const oldApproval = await get('approval', approvalExpected, false);
     const oldArchive = await get('archive', artifact, true);
-    let archiveDisposition = 'reused', approvalDisposition = 'reused';
-    if (oldApproval.status === 200 && oldArchive.status === 404) fail('backup_upload_missing_dependency');
-    if (oldArchive.status === 404) {
-      state = 'archive_put_unknown'; await progress('archive_put_started'); await unchanged();
-      const result = await put('archive', artifact, async (write, sendingGate) => {
-        const buffer = Buffer.alloc(CHUNK), digest = createHash('sha256'); let offset = 0;
-        try {
-          while (offset < Number(artifact.bytes)) {
-            sendingGate(); const { bytesRead } = await file.read(buffer, 0, Math.min(CHUNK, Number(artifact.bytes) - offset), offset);
-            if (!bytesRead) fail('backup_upload_source_changed');
-            charge(bytesRead, 'sent'); digest.update(buffer.subarray(0, bytesRead));
-            await write(buffer.subarray(0, bytesRead)); offset += bytesRead;
-          }
-          if ((await file.read(buffer, 0, 1, offset)).bytesRead) fail('backup_upload_source_changed');
-          await unchanged(); sendingGate();
-          if (digest.digest('hex') !== artifact.sha256) fail('backup_upload_source_digest');
-        } finally { buffer.fill(0); }
-      });
-      archiveDisposition = result.status === 412 ? 'concurrent_exact' : 'created';
-      if ((await get('archive', artifact, true)).status !== 200) fail('backup_upload_missing_readback');
+    const oldLfs = lfsArtifact ? await get('lfs', lfsArtifact, true) : undefined;
+    let approvalDisposition = 'reused';
+    if (oldApproval.status === 200 && (oldArchive.status === 404 || oldLfs?.status === 404)) fail('backup_upload_missing_dependency');
+    async function publishBody(kind, expected, sourceFile, prior) {
+      let disposition = 'reused';
+      if (prior.status === 404) {
+        state = kind + '_put_unknown'; await progress(kind + '_put_started'); await unchanged();
+        // A root observed after the initial snapshot is not permission to
+        // repair its missing dependency. Recheck after observers and immediately
+        // before each paired body PUT. This is an observation boundary, not a
+        // transactional guarantee against a change after the GET response.
+        if (lfsArtifact && (await get('approval', approvalExpected, false)).status === 200) fail('backup_upload_missing_dependency');
+        const result = await put(kind, expected, async (write, sendingGate) => {
+          const buffer = Buffer.alloc(CHUNK), digest = createHash('sha256'); let offset = 0;
+          try {
+            while (offset < Number(expected.bytes)) {
+              sendingGate(); const { bytesRead } = await sourceFile.read(buffer, 0, Math.min(CHUNK, Number(expected.bytes) - offset), offset);
+              if (!bytesRead) fail('backup_upload_source_changed');
+              charge(bytesRead, 'sent'); digest.update(buffer.subarray(0, bytesRead));
+              await write(buffer.subarray(0, bytesRead)); offset += bytesRead;
+            }
+            if ((await sourceFile.read(buffer, 0, 1, offset)).bytesRead) fail('backup_upload_source_changed');
+            await unchanged(); sendingGate();
+            if (digest.digest('hex') !== expected.sha256) fail('backup_upload_source_digest');
+          } finally { buffer.fill(0); }
+        });
+        disposition = result.status === 412 ? 'concurrent_exact' : 'created';
+        if ((await get(kind, expected, true)).status !== 200) fail('backup_upload_missing_readback');
+      }
+      state = kind + '_verified'; await progress(kind + '_verified');
+      if (lfsArtifact) await unchanged();
+      return disposition;
     }
-    state = 'archive_verified'; await progress('archive_verified');
+    const archiveDisposition = await publishBody('archive', artifact, file, oldArchive);
+    const lfsDisposition = lfsArtifact ? await publishBody('lfs', lfsArtifact, lfsFile, oldLfs) : undefined;
     if (oldApproval.status === 404) {
       state = 'approval_put_unknown'; await progress('approval_put_started');
+      if (lfsArtifact) await unchanged();
       const result = await put('approval', approvalExpected, async write => { await write(envelope); });
       approvalDisposition = result.status === 412 ? 'concurrent_exact' : 'created';
     }
     // Recheck an existing approval too: a preflight observation cannot vouch
     // for a root substituted while its dependency was being verified.
     if ((await get('approval', approvalExpected, false)).status !== 200) fail('backup_upload_missing_readback');
+    if (lfsArtifact) await unchanged();
     // Exact readback is the completion boundary. Do not reinterpret a later
     // cancellation or descriptor/output failure as proof of non-publication.
     state = 'complete';
     completed = Object.freeze({ type: 'repository_backup_upload', schema_version: 1, state, checkpoint, target,
       artifact, authentication: approved.authentication, streaming: streaming(),
-      disposition: Object.freeze({ archive: archiveDisposition, approval: approvalDisposition }),
+      disposition: Object.freeze({ archive: archiveDisposition, approval: approvalDisposition,
+        ...(lfsArtifact ? { lfs: lfsDisposition } : {}) }),
       conditional_put_requested: true, remote_readback_verified: true,
       archive_verified_before_approval_put: true, existing_approval_verified: oldApproval.status === 200,
-      native_content_verified: false, remote_physical_durability_verified: false,
-      failure_domain_independence_verified: false, newest_checkpoint_verified: false });
+      native_content_verified: Boolean(native), remote_physical_durability_verified: false,
+      failure_domain_independence_verified: false, newest_checkpoint_verified: false,
+      ...(lfsArtifact ? { lfs_companion: native.lfs_companion, lfs_companion_signed: false, native,
+        lfs_payloads_verified: true, lfs_readback_verified: true,
+        lfs_verified_before_approval_put: oldApproval.status === 404,
+        lfs_verified_before_acknowledgement: true } : {}) });
     return completed;
   } catch (caught) {
     problem = caught instanceof Error ? caught : backupError('backup_upload_observer_failed');
+    if (lfsArtifact) problem.lfs_artifact = lfsArtifact;
     problem.publication_state = state; problem.checkpoint = checkpoint ?? null; problem.target = target; problem.streaming = streaming(); throw problem;
   } finally {
-    try { await file?.close(); } catch (error) {
+    const closed = await Promise.allSettled([file?.close(), lfsFile?.close()]);
+    if (closed.some(result => result.status === 'rejected')) {
       if (problem) problem.cleanup_error = 'backup_upload_close_failed';
       else { const failure = backupError('backup_upload_close_failed'); failure.completed_result = completed; failure.publication_state = state; throw failure; }
     }

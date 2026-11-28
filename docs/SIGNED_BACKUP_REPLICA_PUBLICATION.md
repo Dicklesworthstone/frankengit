@@ -99,8 +99,10 @@ The publisher never recursively removes native verification state or another
 invocation's temporary files. Existing conflicting or corrupted outputs require
 explicit operator handling; retry does not overwrite them.
 
-This extension is limited to the direct local replica publisher. HTTPS
-upload/download, replenishment, scrub and sealed jobs still use their source-only
+This operation publishes to a local directory. For an offsite pair, the separate
+[direct HTTPS publisher](SIGNED_BACKUP_HTTPS_PUBLICATION.md) performs combined
+native preflight and checks both remote bodies before a fresh approval. HTTPS
+acquisition, replenishment, scrub and sealed jobs still use their source-only
 contracts; passing them a source candidate does not carry or validate its LFS
 companion. Complete capsule recovery, other external artifacts and global
 checkpoint currentness remain outside this operation.

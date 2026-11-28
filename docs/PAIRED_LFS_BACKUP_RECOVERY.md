@@ -122,8 +122,10 @@ Restore does not activate HTTP serving or change routing. It is not complete
 Repository Capsule recovery, highest-checkpoint discovery or a measured site
 loss drill. The [local replica publisher](SIGNED_BACKUP_REPLICA_PUBLICATION.md#optional-verified-lfs-companion)
 can natively verify and copy both archives to another private directory, retaining
-the unchanged source approval and companion recovery pins. Source-only job and
-HTTPS transfer commands retain their existing scope and do not automatically
+the unchanged source approval and companion recovery pins. [Direct HTTPS
+publication](SIGNED_BACKUP_HTTPS_PUBLICATION.md) also supports the explicit pair,
+with both remote bodies read back before a fresh approval. HTTPS acquisition and
+source-only job commands retain their existing scope and do not automatically
 carry the companion.
 
 ## Focused validation
