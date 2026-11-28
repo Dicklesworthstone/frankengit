@@ -48,7 +48,7 @@ PRF_REPO=$(cd "$PRF_DIR/../../../.." && pwd)
 fge_init fg041-proof-lane
 fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg041c-proof-refinement-wuy
-fge_context scope 'ordered-residue model, registered reference vectors and two DPOR head-publication schedules'
+fge_context scope 'ordered-residue model, registered reference vectors and both winner orders for distinct and shared refs'
 
 # Resolve tools on the caller host before handing them temporary local paths.
 prf_have_pinned_lean=0
