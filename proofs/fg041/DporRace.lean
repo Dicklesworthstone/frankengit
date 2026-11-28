@@ -1,5 +1,7 @@
 import Vectors
 
+set_option autoImplicit false
+
 namespace FrankenGit.Proof.DporRace
 
 open FgitBridge
@@ -74,8 +76,8 @@ example :
     (sealedWritersAndWinner false (replaceRetry trace_dpor_first_wins 0 false)).isNone := by decide
 
 example :
-    (sealedWritersAndWinner true (replaceRetry trace_dpor_conflict_first_wins 1 true)).isNone &&
-    (sealedWritersAndWinner true (replaceRetry trace_dpor_conflict_first_wins 0 false)).isNone := by decide
+    (sealedWritersAndWinner true (replaceRetry trace_dpor_conflict_first_wins 0 true)).isNone &&
+    (sealedWritersAndWinner true (replaceRetry trace_dpor_conflict_first_wins 1 false)).isNone := by decide
 
 theorem both_sealed_writers_win_once :
     coversBothWinners false [trace_dpor_first_wins, trace_dpor_second_wins] = true ∧
