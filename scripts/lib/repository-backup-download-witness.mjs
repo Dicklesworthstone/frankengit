@@ -15,20 +15,25 @@ const fail = code => { throw backupError(code); };
  * acquisition behavior. With one, retain authenticated observations before time,
  * archive-size, network or output checks. Hold its lease through socket drain and
  * publication cleanup; do not perform a new cancellation gate after completion.
- * sourceFile is an optional local capability-file path used ONLY for separation.
+ * sourceFile/lfsSourceFile are optional local capability-file paths used ONLY
+ * for separation. Their URLs are never recorded by the witness.
  */
 export async function downloadRepositoryBackupWithWitness(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) fail('backup_invalid_download_options');
-  const { witness: requested, sourceFile, ...rest } = raw;
+  const { witness: requested, sourceFile, lfsSourceFile, ...rest } = raw;
   const options = repositoryBackupDownloadOptions(rest);
-  const owned = { ...options, sources: options.sources.map(source => source.url) };
+  if (lfsSourceFile !== undefined && !options.lfsSources) fail('backup_lfs_pair_required');
+  const owned = { ...options, sources: options.sources.map(source => source.url),
+    ...(options.lfsSources ? { lfsSources: options.lfsSources.map(source => source.url) } : {}) };
   if (requested === undefined) {
     if (sourceFile !== undefined) backupPath(sourceFile);
+    if (lfsSourceFile !== undefined) backupPath(lfsSourceFile);
     return downloadRepositoryBackup(owned);
   }
   const directory = resolve(backupPath(requested)); backupPath(directory);
-  const paths = [options.approval, options.trustKey, options.destination, options.caFile,
-    sourceFile === undefined ? undefined : resolve(backupPath(sourceFile))].filter(path => path !== undefined);
+  const paths = [options.approval, options.trustKey, options.destination, options.caFile, options.fg,
+    sourceFile === undefined ? undefined : resolve(backupPath(sourceFile)),
+    lfsSourceFile === undefined ? undefined : resolve(backupPath(lfsSourceFile))].filter(path => path !== undefined);
   if (paths.some(path => overlap(directory, path))) fail('backup_witness_separate_path_required');
   const live = backupLifetime({ maximumBytes: options.maximumBytes, timeoutMs: options.timeoutMs,
     signal: options.signal, now: options.now });

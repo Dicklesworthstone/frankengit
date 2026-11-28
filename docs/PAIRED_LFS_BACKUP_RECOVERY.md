@@ -124,9 +124,11 @@ loss drill. The [local replica publisher](SIGNED_BACKUP_REPLICA_PUBLICATION.md#o
 can natively verify and copy both archives to another private directory, retaining
 the unchanged source approval and companion recovery pins. [Direct HTTPS
 publication](SIGNED_BACKUP_HTTPS_PUBLICATION.md) also supports the explicit pair,
-with both remote bodies read back before a fresh approval. HTTPS acquisition and
-source-only job commands retain their existing scope and do not automatically
-carry the companion.
+with both remote bodies read back before a fresh approval. [Direct HTTPS
+acquisition](SIGNED_BACKUP_HTTPS_ACQUISITION.md) retrieves both independently
+pinned bodies and verifies their exact source/LFS relationship before local
+publication. Sealed jobs, replenishment and scrub retain their source-only
+contracts and do not automatically carry or validate the companion.
 
 ## Focused validation
 

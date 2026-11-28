@@ -49,6 +49,9 @@ async function killedAt(t, f, phase) {
     const opts = JSON.parse(process.argv[1]);
     await replicateRepositoryBackup({ ...opts, onProgress: async event => {
       if (event.phase === ${JSON.stringify(phase)}) {
+        // An unresolved top-level await does not keep Node alive. Hold the IPC
+        // channel so only the parent's actual SIGKILL ends this crash boundary.
+        process.channel.ref();
         process.send({ phase: event.phase }); await new Promise(() => {});
       }
     }});`;

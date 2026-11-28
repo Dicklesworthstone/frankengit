@@ -101,11 +101,13 @@ explicit operator handling; retry does not overwrite them.
 
 This operation publishes to a local directory. For an offsite pair, the separate
 [direct HTTPS publisher](SIGNED_BACKUP_HTTPS_PUBLICATION.md) performs combined
-native preflight and checks both remote bodies before a fresh approval. HTTPS
-acquisition, replenishment, scrub and sealed jobs still use their source-only
-contracts; passing them a source candidate does not carry or validate its LFS
-companion. Complete capsule recovery, other external artifacts and global
-checkpoint currentness remain outside this operation.
+native preflight and checks both remote bodies before a fresh approval. [Direct
+HTTPS acquisition](SIGNED_BACKUP_HTTPS_ACQUISITION.md) downloads both pinned
+bodies and uses this paired publisher to verify and publish them locally.
+Replenishment, scrub and sealed jobs still use their source-only contracts;
+passing them a source candidate does not carry or validate its LFS companion.
+Complete capsule recovery, other external artifacts and global checkpoint
+currentness remain outside this operation.
 
 The dedicated `scripts/tests/repository-backup-replication-lfs.test.mjs` suite
 uses real Ed25519 signatures, files and subprocesses, with an explicitly labelled
